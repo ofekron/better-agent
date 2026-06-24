@@ -1,0 +1,61 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.provider-config-sync",
+  "name": "Provider Config Sync",
+  "version": "0.1.0",
+  "description": "Provider capability picker, config sync UI, and provider-config-sync MCP gates.",
+  "surfaces": [
+    "backend_feature",
+    "runtime_mcp",
+    "frontend_feature"
+  ],
+  "entrypoints": {
+    "backend": "backend/routes.py",
+    "frontend": "",
+    "page": {
+      "label": "Provider Config Sync",
+      "open": {
+        "type": "navigate",
+        "path": "/provider-config-sync"
+      }
+    },
+    "mcp": [
+      {
+        "name": "better-agent-provider-config-sync",
+        "replaces_builtin": "provider-config-sync",
+        "args": [],
+        "env": {},
+        "user_facing": true,
+        "bare_allowed": false,
+        "requires_backend_auth": true,
+        "python": "mcp/server.py"
+      }
+    ],
+    "provider_capabilities": []
+  },
+  "permissions": {
+    "session_state": true,
+    "internal_loopback": true,
+    "filesystem": true,
+    "provider_config": true,
+    "backend_routes": true
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "backend/routes.py",
+        "better-agent-extension.json",
+        "mcp/server.py"
+      ],
+      "python_modules": [
+        "mcp.server"
+      ]
+    }
+  }
+}

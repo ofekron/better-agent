@@ -1,0 +1,26 @@
+{
+  "header": {
+    "extract_output_text_module": "event_shape",
+    "version": 1
+  },
+  "jsonl": {
+    "events_jsonl_count": 14,
+    "events_jsonl_data_sha256_list": "2baf3f7f65b8d83857e787de74f0b7361ecbf82f706a15b8916272795569b57c"
+  },
+  "render": {
+    "bcfile_substring_in_data": false,
+    "content_length": 806,
+    "content_sha256": "78edff0b3f21bcfafd294a004645de7f35c90561bc1c3456a5d6fd38baeb7420",
+    "events_by_type": {
+      "agent_message:assistant": 5,
+      "agent_message:attachment": 2,
+      "agent_message:user": 3
+    },
+    "events_count": 10,
+    "events_data_sha256_list": "2e905dfd94406a614c09b74196f3d99dcdb967bcca41d078df578813df5e8453",
+    "events_tuple_sha256": "59d591c234e4cad08960cbb9f40bc72b5266c7ac172e5111fef33c4591d52aea",
+    "events_uuid_list_sha256": "5516e63b327a9f1c4bca2809abe69b9d1027adc0a642b8d45388d2450928f522",
+    "has_manager_scope": false,
+    "msg_content_sha256": "78edff0b3f21bcfafd294a004645de7f35c90561bc1c3456a5d6fd38baeb7420"
+  }
+}

@@ -1,0 +1,262 @@
+/**
+ * Data-driven rendering for extension UI hooks (manifest-declared
+ * `entrypoints.quick_button` and `entrypoints.page`). Replaces per-extension
+ * hardcoded buttons (ASK toolbar button, project-structure sidebar icon) with
+ * a single path driven by `/api/extensions/ui-hooks`.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { API } from "src/api";
+import { eventBus } from "src/lib/eventBus";
+import { trackPromise } from "src/progress/store";
+import Icon, { ICON_NAMES, type IconName } from "./Icon";
+import { ExtensionModuleSlot } from "./ExtensionSlots";
+
+export interface HookAction {
+  type: "navigate" | "ensure" | "module";
+  path?: string;
+  endpoint?: string;
+  path_template?: string;
+  id_field?: string;
+  include_cwd?: boolean;
+  module_url?: string;
+}
+
+export interface QuickButtonHook {
+  extension_id: string;
+  extension_name: string;
+  label: string;
+  icon?: string;
+  action: HookAction;
+}
+
+export interface PageHook {
+  extension_id: string;
+  extension_name: string;
+  id: string;
+  label: string;
+  icon?: string;
+  open: HookAction;
+  badge?: { endpoint: string };
+}
+
+export interface UiHooks {
+  quick_buttons: QuickButtonHook[];
+  pages: PageHook[];
+}
+
+interface UiHooksPayload {
+  hooks?: UiHooks;
+}
+
+export interface HookActionContext {
+  navigate: (path: string) => void;
+  cwd: string;
+  openAsk?: () => void;
+  askSessionPath?: string;
+}
+
+function isKnownIcon(name: unknown): name is IconName {
+  return typeof name === "string" && (ICON_NAMES as readonly string[]).includes(name);
+}
+
+/** Execute a navigate/ensure action. `module` actions are rendered inline by
+ *  the caller (ExtensionModuleSlot), never run imperatively. */
+export async function runHookAction(action: HookAction, ctx: HookActionContext): Promise<void> {
+  if (action.type === "navigate" && action.path) {
+    ctx.navigate(action.path);
+    return;
+  }
+  if (action.type === "ensure" && action.endpoint && action.path_template) {
+    try {
+      const res = await fetch(`${API}${action.endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action.include_cwd ? { cwd: ctx.cwd } : {}),
+      });
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      if (!res.ok || data.error) {
+        window.alert(data?.detail || data?.error || `${action.endpoint} failed: ${res.status}`);
+        return;
+      }
+      const idField = action.id_field || "session_id";
+      const idValue = data[idField] != null ? String(data[idField]) : "";
+      const path = action.path_template.replace(
+        `{${idField}}`,
+        idValue ? encodeURIComponent(idValue) : "",
+      );
+      ctx.navigate(path);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    }
+  }
+}
+
+export function useExtensionUiHooks(): UiHooks {
+  const [hooks, setHooks] = useState<UiHooks>({ quick_buttons: [], pages: [] });
+
+  const refresh = useCallback(async () => {
+    const { promise } = trackPromise("extensions:ui-hooks", async () => {
+      const res = await fetch(`${API}/api/extensions/ui-hooks`, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as UiHooksPayload;
+    });
+    try {
+      const payload = await promise;
+      const h = payload.hooks || { quick_buttons: [], pages: [] };
+      setHooks({ quick_buttons: h.quick_buttons || [], pages: h.pages || [] });
+    } catch {
+      setHooks({ quick_buttons: [], pages: [] });
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    return eventBus.subscribe("extensions_changed", () => {
+      void refresh();
+    });
+  }, [refresh]);
+
+  return hooks;
+}
+
+const BADGE_POLL_MS = 20_000;
+
+/** Polls each page's badge endpoint (GET → {count}) and returns the latest
+ *  number keyed by `${extension_id}:${page_id}`. */
+export function useExtensionPageBadges(pages: PageHook[]): Record<string, number> {
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const keyed = useMemo(
+    () => pages.filter((p) => p.badge?.endpoint).map((p) => ({ key: `${p.extension_id}:${p.id}`, endpoint: p.badge!.endpoint })),
+    [pages],
+  );
+
+  useEffect(() => {
+    if (!keyed.length) {
+      setCounts({});
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      const entries = await Promise.all(
+        keyed.map(async (item) => {
+          try {
+            const res = await fetch(`${API}${item.endpoint}`, { credentials: "include" });
+            if (!res.ok) return null;
+            const data = await res.json();
+            const n = typeof data.count === "number" ? data.count : Number(data.count);
+            return [item.key, Number.isFinite(n) ? n : 0] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const next: Record<string, number> = {};
+      for (const entry of entries) if (entry) next[entry[0]] = entry[1];
+      setCounts(next);
+    };
+    void poll();
+    const timer = window.setInterval(poll, BADGE_POLL_MS);
+    const offChanged = eventBus.subscribe("extensions_changed", () => void poll());
+    const offUpdates = eventBus.subscribe("project_updates_changed", () => void poll());
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      offChanged();
+      offUpdates();
+    };
+  }, [keyed]);
+
+  return counts;
+}
+
+function HookGlyph({ icon, label, size }: { icon?: string; label: string; size: number }) {
+  if (isKnownIcon(icon)) return <Icon name={icon} size={size} />;
+  return <span className="extension-hook-glyph">{label.slice(0, 1).toUpperCase()}</span>;
+}
+
+interface QuickButtonProps {
+  context: HookActionContext;
+  className?: string;
+  variant: "toolbar" | "topbar";
+}
+
+/** Renders every active extension's quick button in the session toolbar. */
+export function ExtensionQuickButtons({ context, className = "", variant }: QuickButtonProps) {
+  const { quick_buttons } = useExtensionUiHooks();
+  const cls = ["extension-quick-buttons", `extension-quick-buttons--${variant}`, className]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <span className={cls}>
+      {quick_buttons.map((qb) => {
+        const moduleUrl = qb.action.type === "module" ? qb.action.module_url : "";
+        if (moduleUrl) {
+          return (
+            <ExtensionModuleSlot
+              key={`${qb.extension_id}:quick-button`}
+              module={{
+                extension_id: qb.extension_id,
+                extension_name: qb.extension_name,
+                slot: "quick-button",
+                id: "quick-button",
+                label: qb.label,
+                kind: "module",
+                module_url: moduleUrl,
+              }}
+              className={`extension-module-slot--${variant} extension-quick-button--module`}
+              context={{ ...context, variant }}
+            />
+          );
+        }
+        return (
+          <button
+            key={`${qb.extension_id}:quick-button`}
+            type="button"
+            className={`extension-quick-button extension-quick-button--${variant}`}
+            title={qb.label}
+            aria-label={qb.label}
+            onClick={() => void runHookAction(qb.action, context)}
+          >
+            <HookGlyph icon={qb.icon} label={qb.label} size={15} />
+            {variant === "toolbar" && <span className="extension-quick-button-label">{qb.label}</span>}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
+
+interface PageIconsProps {
+  context: HookActionContext;
+}
+
+/** Renders every active extension's page icon (with optional number badge) in
+ *  the sidebar header. */
+export function ExtensionPageIcons({ context }: PageIconsProps) {
+  const { pages } = useExtensionUiHooks();
+  const badges = useExtensionPageBadges(pages);
+  return (
+    <>
+      {pages.map((page) => {
+        const count = badges[`${page.extension_id}:${page.id}`] ?? 0;
+        const title = count > 0 ? `${page.label} (${count})` : page.label;
+        return (
+          <button
+            key={`${page.extension_id}:${page.id}`}
+            type="button"
+            className="setup-btn extension-page-icon"
+            title={title}
+            aria-label={title}
+            style={count > 0 ? { position: "relative" } : undefined}
+            onClick={() => void runHookAction(page.open, context)}
+          >
+            <HookGlyph icon={page.icon} label={page.label} size={15} />
+            {count > 0 && <span className="extension-page-icon-badge">{count}</span>}
+          </button>
+        );
+      })}
+    </>
+  );
+}

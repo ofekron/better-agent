@@ -1,0 +1,35 @@
+{
+  "kind": "better-agent-extension",
+  "id": "better-agent.harness-for-better-agent",
+  "name": "Harness Instructions",
+  "version": "0.1.0",
+  "description": "Visible Better Agent harness behavior instructions for provider runs.",
+  "surfaces": [
+    "instructions"
+  ],
+  "entrypoints": {
+    "instructions": [
+      {
+        "name": "better-agent-harness-behavior",
+        "path": "instructions/harness_behavior.md",
+        "level": "global"
+      }
+    ]
+  },
+  "permissions": {},
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json",
+        "instructions/harness_behavior.md"
+      ],
+      "python_modules": []
+    }
+  }
+}

@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-user-input-")
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import main  # noqa: E402
+import session_store  # noqa: E402
+import user_input_store  # noqa: E402
+from scripts.auth_test_helpers import authenticate_client  # noqa: E402
+
+PASS = "\x1b[32mPASS\x1b[0m"
+FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _new_session() -> str:
+    return session_store.create_session(
+        name="user-input",
+        model="m",
+        cwd="/tmp",
+        orchestration_mode="native",
+    )["id"]
+
+
+def test_store_persists_pending_request() -> bool:
+    sid = _new_session()
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "choice", "header": "Pick", "question": "Which?", "options": []}],
+        timeout_seconds=60,
+    )
+    pending = user_input_store.pending_for_session(sid)
+    return len(pending) == 1 and pending[0]["request_id"] == req["request_id"]
+
+
+def test_internal_request_waits_until_browser_resolves(client: TestClient) -> bool:
+    sid = _new_session()
+    token = main.coordinator.internal_token
+    result_holder: dict = {}
+
+    def post_request() -> None:
+        result_holder["response"] = client.post(
+            "/api/internal/user-input/request",
+            headers={"X-Internal-Token": token},
+            json={
+                "app_session_id": sid,
+                "questions": [{
+                    "id": "decision",
+                    "header": "Decision",
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes", "description": "Continue"}],
+                }],
+                "timeout_seconds": 5,
+            },
+        )
+
+    t = threading.Thread(target=post_request)
+    t.start()
+    request_id = ""
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        pending = user_input_store.pending_for_session(sid)
+        if pending:
+            request_id = pending[0]["request_id"]
+            break
+        time.sleep(0.02)
+    if not request_id:
+        return False
+    resolve = client.post(
+        f"/api/user-input/{request_id}/resolve",
+        json={"app_session_id": sid, "answers": {"decision": "Yes"}},
+    )
+    t.join(timeout=3)
+    if t.is_alive() or resolve.status_code != 200:
+        return False
+    response = result_holder.get("response")
+    if response is None or response.status_code != 200:
+        return False
+    data = response.json()
+    return data.get("success") is True and data.get("answers") == {"decision": "Yes"}
+
+
+def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
+    sid = _new_session()
+    res = client.post(
+        "/api/internal/user-input/request",
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+        json={"app_session_id": sid, "questions": []},
+    )
+    data = res.json()
+    return res.status_code == 200 and data.get("success") is False
+
+
+def run() -> int:
+    client = TestClient(main.app)
+    authenticate_client(client)
+    tests = [
+        ("store persists pending request", lambda: test_store_persists_pending_request()),
+        ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
+        ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
+    ]
+    failures: list[str] = []
+    for name, fn in tests:
+        try:
+            ok = bool(fn())
+        except Exception as exc:
+            ok = False
+            print(f"  {name} raised: {exc}")
+        print(f"{PASS if ok else FAIL} {name}")
+        if not ok:
+            failures.append(name)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(run())
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)

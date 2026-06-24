@@ -1,0 +1,44 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.todos",
+  "name": "Todos",
+  "version": "0.1.0",
+  "description": "Extracts provider todo/task tool events into session todo state.",
+  "surfaces": [
+    "backend_feature",
+    "frontend_feature"
+  ],
+  "entrypoints": {
+    "backend": "backend/routes.py",
+    "hooks": {
+      "session_event": "/session-event"
+    }
+  },
+  "permissions": {
+    "backend_routes": true,
+    "internal_loopback": true,
+    "reads_session_fields": [
+      "current_todos",
+      "current_tasks"
+    ],
+    "mutates_session_fields": [
+      "current_todos",
+      "current_tasks"
+    ]
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "backend/routes.py",
+        "better-agent-extension.json"
+      ],
+      "python_modules": []
+    }
+  }
+}

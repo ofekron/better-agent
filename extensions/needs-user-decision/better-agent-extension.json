@@ -1,0 +1,52 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.needs-user-decision",
+  "name": "Needs user decision",
+  "version": "0.1.0",
+  "description": "Highlights agent output that needs the user's attention or decision, and marks the session until the user views it.",
+  "surfaces": [
+    "instructions"
+  ],
+  "entrypoints": {
+    "instructions": [
+      {
+        "name": "needs-user-decision",
+        "path": "instructions/needs_user_decision.md",
+        "level": "global"
+      }
+    ],
+    "applied_config": {
+      "tag_rules": [
+        {
+          "tag": "NEEDS_USER_DECISION",
+          "strip_wrapper": true,
+          "style": {
+            "bold": true,
+            "font_scale": 1.3
+          },
+          "marker": {
+            "color": "#ff8c00",
+            "tooltip": "Needs your decision"
+          },
+          "clear_on": "view"
+        }
+      ]
+    }
+  },
+  "permissions": {},
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json",
+        "instructions/needs_user_decision.md"
+      ],
+      "python_modules": []
+    }
+  }
+}

@@ -1,0 +1,122 @@
+.share-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: env(safe-area-inset-top) 12px 12px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  color: var(--text, #e6e6e6);
+  background: var(--bg, #1a1a2e);
+}
+
+.share-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px;
+  position: sticky;
+  top: 0;
+  background: inherit;
+  z-index: 1;
+}
+
+.share-picker-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.share-picker-cancel {
+  background: none;
+  border: none;
+  color: var(--accent, #8a8aff);
+  font-size: 0.95rem;
+  padding: 8px 10px;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.share-picker-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 4px 12px;
+}
+
+.share-picker-thumbs img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border, #33334d);
+}
+
+.share-picker-section {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 16px;
+}
+
+.share-picker-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  padding: 6px 4px;
+}
+
+.share-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: start;
+  background: var(--surface, #22223a);
+  border: 1px solid var(--border, #33334d);
+  border-radius: 10px;
+  color: inherit;
+  padding: 14px 12px;
+  margin-bottom: 6px;
+  font-size: 0.95rem;
+  min-height: 52px;
+  cursor: pointer;
+}
+
+.share-picker-row:active {
+  background: var(--surface-active, #2c2c4a);
+}
+
+.share-picker-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-picker-row-chevron {
+  opacity: 0.5;
+  font-size: 1.2rem;
+}
+
+.share-picker-back {
+  background: none;
+  border: none;
+  color: var(--accent, #8a8aff);
+  font-size: 0.95rem;
+  padding: 10px 4px;
+  text-align: start;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.share-picker-empty {
+  opacity: 0.6;
+  padding: 12px 4px;
+  font-size: 0.9rem;
+}

@@ -1,0 +1,2414 @@
+"""Unified detached per-run executable.
+
+Spawned by `ClaudeProvider.start_run` as a subprocess with
+`start_new_session=True`. Handles exactly one claude CLI run (native or
+manager mode) via `claude_agent_sdk.ClaudeSDKClient`. Claude CLI itself
+(spawned by the SDK) writes its own session jsonl at
+`~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, and that file is
+the source of truth — the backend tails it directly. This runner's only
+job on the data path is to (a) spawn the SDK, (b) keep it alive until
+the turn completes, (c) write a tiny `state.json` so the backend knows
+where claude's jsonl lives and can tail it, and (d) write
+`complete.json` when done.
+
+Life of a run:
+  1. Backend creates `~/.better-claude/runs/<run_id>/` and writes
+     `input.json` with all inputs.
+  2. Backend spawns `python runner.py --run-dir <path>` detached
+     (start_new_session=True, stdin=DEVNULL, stdout/stderr → log files).
+  3. This script writes `pid` (its own pid), reads `input.json`, builds
+     `ClaudeAgentOptions` (with an in-process delegate MCP server for
+     manager mode), connects the SDK, and calls `client.query(prompt)`.
+  4. On `SystemMessage(subtype="init")`, captures the claude session_id,
+     computes `jsonl_path`, and writes `state.json` atomically. The
+     backend polls `state.json` to start its FileTailer.
+  5. Iterates `client.receive_response()` until `ResultMessage` arrives
+     (or cancel sentinel triggers `client.interrupt()`).
+  6. Writes `complete.json` with success/error/session_id/token_usage
+     and sets `state.json.complete = true`. Exits.
+
+Cancel sentinel: backend writes an empty file `run_dir/cancel` to
+request cancel. A background asyncio task polls for it every ~150ms and
+calls `client.interrupt()` on sight.
+"""
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import shutil
+import sys
+import time
+import http.client
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+import extension_store
+from env_compat import get_env
+from orchestration_tool_descriptions import (
+    ASK_DESCRIPTION as _ASK_DESCRIPTION,
+    CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
+    CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
+    CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
+    DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+)
+
+# internal_token mtime-cache. The in-process MCP server callbacks
+# capture `internal_token` in a closure at spawn time — risky once a
+# runner outlives a token rotation (e.g. a long babysitter linger):
+# captured closures would keep using the stale value and start 403-ing.
+#
+# `_load_internal_token()` re-reads `ba_home()/internal_token` per
+# MCP call but caches on mtime so steady-state cost is one stat() per
+# call, not one read(). Closures fall back to their captured value if
+# the file read fails (e.g. unset BETTER_CLAUDE_HOME, fs error).
+_token_cache: dict = {"token": None, "mtime": 0.0}
+
+
+def _load_internal_token() -> Optional[str]:
+    try:
+        from paths import ba_home as _ba_home
+        path = _ba_home() / "internal_token"
+        st = path.stat()
+        if _token_cache["mtime"] != st.st_mtime:
+            _token_cache["token"] = path.read_text(encoding="utf-8").strip()
+            _token_cache["mtime"] = st.st_mtime
+        return _token_cache["token"]
+    except OSError:
+        return None
+    except Exception:
+        return None
+from i18n import t
+from continuation import normalize_context_overflow_error
+from provider_run_config import write_skill_tree
+from reasoning_effort import claude_sdk_effort
+from runtime_skills import (
+    CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
+    materialize_runtime_skills,
+)
+
+
+def _resolve_claude_cli() -> Optional[str]:
+    candidates = [
+        Path.home() / ".local/bin/claude",
+        Path("/usr/local/bin/claude"),
+        Path.home() / ".npm-global/bin/claude",
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return str(p)
+    return shutil.which("claude")
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    CLIConnectionError,
+    CLINotFoundError,
+    ClaudeSDKClient,
+    ProcessError,
+    ResultMessage,
+    SystemMessage,
+    create_sdk_mcp_server,
+    tool,
+)
+
+from paths import encode_cwd
+from prompt_templates import render_prompt
+
+logger = logging.getLogger(__name__)
+
+
+def _materialize_claude_skill_plugin(
+    run_dir: Path,
+    cwd: str,
+    provider_run_config: dict,
+    *,
+    bare_config: bool,
+) -> Optional[dict[str, str]]:
+    if bare_config:
+        return None
+
+    plugin_dir = run_dir / "claude-runtime-skills-plugin"
+    skills_root = plugin_dir / "skills"
+    count = materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
+
+    configured_skills = provider_run_config.get("skills") or {}
+    if configured_skills:
+        write_skill_tree(skills_root, configured_skills)
+        count += len(configured_skills)
+
+    if count == 0:
+        return None
+
+    manifest_dir = plugin_dir / ".claude-plugin"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "plugin.json").write_text(
+        json.dumps({
+            "name": CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
+            "description": "Run-local Better Agent skills for this turn.",
+        }, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {"type": "local", "path": str(plugin_dir)}
+
+
+# ============================================================================
+# Create-worker tool schema & description
+# ============================================================================
+_CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "worker_description": {
+            "type": "string",
+            "description": (
+                "Short (3-8 word) description of what this worker handles. "
+                "Becomes the new Better Agent session's name, user-editable at approval time."
+            ),
+        },
+        "justification": {
+            "type": "string",
+            "description": (
+                "1-3 sentences "
+                "explaining why none of the existing <known_workers> fit "
+                "and a fresh worker is needed. Shown to the user verbatim "
+                "in the approval card."
+            ),
+        },
+        "orchestration_mode": {
+            "type": "string",
+            "enum": ["team", "native"],
+            "description": (
+                "Orchestration "
+                "mode for the new worker Better Agent session. 'native' = a plain "
+                "claude session (does work directly, simplest). 'team' "
+                "= a sub-coordinator that can itself delegate to workers "
+                "(rarely needed). User can override at approval time."
+            ),
+        },
+        "node_id": {
+            "type": ["string", "null"],
+            "description": (
+                "OPTIONAL: which worker-node should host this worker. "
+                "Defaults to the session's node_id (= 'primary' for "
+                "single-machine deployments). Set this only when "
+                "targeting a different machine than the session's "
+                "default — available node_ids appear in <known_workers>."
+            ),
+        },
+    },
+    "required": ["worker_description", "justification", "orchestration_mode"],
+}
+
+_MSSG_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_session_id": {
+            "type": "string",
+            "description": "Better Agent session_id of the team member to message.",
+        },
+        "message": {
+            "type": "string",
+            "description": "Message to enqueue for the target session.",
+        },
+    },
+    "required": ["target_session_id", "message"],
+}
+
+_DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "task": {
+            "type": "string",
+            "description": "The task to hand off. Routed automatically unless target_session_id is set.",
+        },
+        "target_session_id": {
+            "type": ["string", "null"],
+            "description": (
+                "OPTIONAL — set ONLY to bypass auto-routing and send to a "
+                "specific session. Omit to let the router pick (search or create)."
+            ),
+        },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for a newly-created target session. Defaults to the creating session's provider.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for a newly-created target session. Defaults to the creating session's model.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for a newly-created target session. Defaults to the creating session's effort.",
+        },
+        "sub_session": {
+            "type": "boolean",
+            "description": "OPTIONAL — default true. If false, auto-created targets are standalone native sessions instead of hidden sub-sessions.",
+        },
+    },
+    "required": ["task"],
+}
+
+_CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Name / short description for the new session.",
+        },
+        "orchestration_mode": {
+            "type": "string",
+            "enum": ["native", "team"],
+            "description": (
+                "'native' (default) = a plain session that does work directly. "
+                "'team' = a sub-coordinator for complex tasks that need their "
+                "own delegation loop."
+            ),
+        },
+        "node_id": {
+            "type": "string",
+            "description": "Optional node to host the session (default: primary).",
+        },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for the new session. Defaults to the creating session's provider.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for the new session. Defaults to the creating session's model.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for the new session. Defaults to the creating session's effort.",
+        },
+    },
+    "required": ["name"],
+}
+
+
+_CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "description": {
+            "type": "string",
+            "description": "Optional short label for the hidden sub-session.",
+        },
+        "node_id": {
+            "type": ["string", "null"],
+            "description": "Optional node to host the sub-session.",
+        },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for the sub-session. Defaults to the creating session's provider.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for the sub-session. Defaults to the creating session's model.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for the sub-session. Defaults to the creating session's effort.",
+        },
+    },
+    "required": [],
+}
+
+
+_ASK_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_session_id": {
+            "type": "string",
+            "description": (
+                "Better Agent session_id of the team member to message. In "
+                "fork mode this is the session to branch from."
+            ),
+        },
+        "message": {
+            "type": "string",
+            "description": "Message / full task instructions for the session.",
+        },
+        "run_mode": {
+            "type": "string",
+            "enum": ["direct", "fork"],
+            "description": (
+                "'direct' (default) runs the requested session. 'fork' "
+                "branches an existing session for isolated review/check work; "
+                "do not use fork for brand-new sessions."
+            ),
+        },
+        "worker_description": {
+            "type": "string",
+            "description": (
+                "Optional short label for the session in run_mode='fork'."
+            ),
+        },
+        "worker_registry_cwd": {
+            "type": ["string", "null"],
+            "description": (
+                "For fork: copy the worker's registry_cwd exactly when the "
+                "worker is registered under a different project cwd."
+            ),
+        },
+        "ephemeral": {
+            "type": "boolean",
+            "description": (
+                "Only for run_mode='fork': use a fresh temporary fork and "
+                "delete its Better Agent session after the call."
+            ),
+        },
+    },
+    "required": ["target_session_id", "message"],
+}
+
+
+_DISABLEABLE_BUILTIN_TOOLS = frozenset({
+    "ask",
+    "create_session",
+    "create_sub_session",
+    "delegate_task",
+    "mssg",
+})
+
+
+def _disabled_builtin_tools(inputs: dict) -> set[str]:
+    raw = inputs.get("disabled_builtin_tools")
+    if not isinstance(raw, list):
+        return set()
+    return {
+        str(item).strip()
+        for item in raw
+        if str(item or "").strip() in _DISABLEABLE_BUILTIN_TOOLS
+    }
+
+
+# HTTP timeout for the delegate loopback. Long because the manager may
+# request a fresh worker that requires user approval, and the user may
+# walk away — 24h gives the runner room to wait without prematurely
+# returning is_error to the model.
+_DELEGATE_HTTP_TIMEOUT = 24 * 60 * 60  # 24h in seconds
+
+
+# ============================================================================
+# Open-file-panel tool schema & description (active session, any mode)
+# ============================================================================
+_OPEN_FILE_PANEL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["panel", "inline"],
+            "description": (
+                "'inline' = embed an editable, scrollable view of the "
+                "file directly inside THIS message, initially scrolled "
+                "to the chosen lines (use this to point the user at "
+                "specific code in context). 'panel' = open the file as "
+                "a tab in the user's side file-panel area (use this for "
+                "files the user should keep around / switch between)."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "description": (
+                "Absolute path (or path relative to the session cwd) of "
+                "the file to open."
+            ),
+        },
+        "start_line": {
+            "type": "integer",
+            "description": "1-based first line to scroll into view.",
+        },
+        "end_line": {
+            "type": "integer",
+            "description": "1-based last line of the focused range.",
+        },
+        "selected_start": {
+            "type": "integer",
+            "description": "1-based first line to highlight as selected.",
+        },
+        "selected_end": {
+            "type": "integer",
+            "description": "1-based last line of the selected range.",
+        },
+    },
+    "required": ["mode", "path"],
+}
+
+_OPEN_FILE_PANEL_DESCRIPTION = (
+    "Show the user a specific location in a file — this is a "
+    "communication tool, not a file opener. Use it when you want to "
+    "draw the user's attention to code you're discussing, a bug you "
+    "found, or a change you made. Pick `mode`: 'inline' embeds an "
+    "editable/scrollable file view inside this message (best for "
+    "pointing at specific code you're discussing right now); 'panel' "
+    "opens it as a tab in the side file-panel area (best for files the "
+    "user should keep around or compare). Optionally pass "
+    "start_line/end_line to control the initial scroll + (inline) "
+    "initial size, and selected_start/selected_end to highlight a "
+    "range. Returns immediately; it does not block."
+)
+
+
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "header": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                },
+                "required": ["id", "header", "question"],
+            },
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "description": "Optional wait timeout, 1-86400 seconds. Default 86400.",
+        },
+    },
+    "required": ["questions"],
+}
+
+_REQUEST_USER_INPUT_DESCRIPTION = (
+    "Ask the user a bounded question and wait for their answer. Use this "
+    "only when you cannot continue safely without user input. Pass one to "
+    "three questions. Each question can include up to three suggested "
+    "options; if no option fits, the user can answer in free text. Returns "
+    "a map of question id to answer string."
+)
+
+_START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file_path": {"type": "string"},
+        "line": {"type": "integer"},
+        "title": {"type": "string"},
+    },
+    "required": ["file_path", "line"],
+}
+
+_START_FILE_DISCUSSION_DESCRIPTION = (
+    "Start an inline discussion attached to a specific line in a file "
+    "currently open in file edit mode. Use this only when you want the "
+    "conversation to happen beside that line instead of in the main chat."
+)
+
+
+# Short — opening a panel is a fast state mutation, not a long job.
+_OPEN_FILE_PANEL_HTTP_TIMEOUT = 60
+
+
+# ============================================================================
+# Atomic state.json writes
+# ============================================================================
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON to `path` atomically (tmp + rename) to prevent readers
+    from observing a half-written file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# ============================================================================
+# Delegate tool builder (manager mode only)
+# ============================================================================
+def _tool_success_result(result: dict) -> dict:
+    """Common @tool success-return: JSON-pretty-printed payload as text
+    content. Dicts are errors only when they explicitly carry an error
+    or `success: false`; tool-specific success payloads are not required
+    to include a `success` field."""
+    is_error = False
+    if isinstance(result, dict):
+        is_error = bool(result.get("error")) or result.get("success") is False
+    return {
+        "content": [
+            {"type": "text", "text": json.dumps(result, ensure_ascii=False, separators=(",", ":"))},
+        ],
+        "is_error": is_error,
+    }
+
+
+def _tool_error_response(prefix: str, exc: BaseException) -> dict:
+    """Common @tool error-return for tools whose error messages are
+    plain f-strings (NOT i18n). Dispatches on `exc` type:
+      - HTTPError: log warning, message includes status + body preview
+      - URLError:  log warning, message includes reason
+      - other:     log.exception (uses live sys.exc_info from caller's
+                   except block), message is "<prefix> error: <exc>"
+
+    INVARIANT: must be called FROM WITHIN an `except` block so the
+    `logger.exception` fallback sees the live traceback. Delegate uses
+    i18n strings and does NOT use this helper — keep it untouched.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        msg = f"{prefix} HTTP {exc.code}: {exc.reason} {body}"
+        logger.warning(msg)
+    elif isinstance(exc, urllib.error.URLError):
+        msg = f"{prefix} connection error: {exc.reason}"
+        logger.warning(msg)
+    else:
+        logger.exception("%s tool handler failed", prefix)
+        msg = f"{prefix} error: {exc}"
+    return {
+        "content": [{"type": "text", "text": msg}],
+        "is_error": True,
+    }
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Check if an exception is a transient network error that warrants retry."""
+    if isinstance(exc, CLINotFoundError):
+        return False
+    # CLIConnectionError and ProcessError (CLI exit) should NOT be retried
+    # infinitely in the runner's loop. Bubbling them up to the
+    # orchestrator allows for proper UI feedback ('Retrying in Ns...')
+    # via the orchestrator's transient retry loop.
+    if isinstance(exc, (CLIConnectionError, ProcessError)):
+        return False
+    if isinstance(exc, (ConnectionError, OSError, TimeoutError)):
+        return True
+    return False
+
+
+def _post_loopback_sync(
+    payload: dict,
+    *,
+    backend_url: str,
+    internal_token: str,
+    url_path: str,
+    timeout: float,
+    non_json_t_key: str,
+    log_prefix: str,
+    backoff_cap: float,
+    recover: Optional[Callable[[], Optional[dict]]] = None,
+) -> dict:
+    """Shared retry loop for the runner's loopback POSTs into the
+    backend (delegate, open-file-panel). Retries on
+    transient connection loss with exponential backoff. HTTPError
+    responses are terminal and re-raised. If `recover` returns a dict
+    after a connection loss, that durable result is returned instead of
+    retrying. `log_prefix` is interpolated into the retry warning.
+    `non_json_t_key` is the i18n key for the "response body did not
+    parse" RuntimeError each tool uses.
+
+    INVARIANT: matches the inlined retry loop each `_post_*_sync`
+    previously implemented — same headers, same JSON envelope, same
+    deadline/backoff math, same exception classification.
+    """
+    import time
+    body = json.dumps(payload).encode("utf-8")
+    deadline = time.monotonic() + timeout
+    backoff = 1.0
+    tried_live_token_after_forbidden = False
+
+    def _request_once(token: str) -> dict:
+        req = urllib.request.Request(
+            url=backend_url.rstrip("/") + url_path,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": token,
+            },
+        )
+        remaining = max(1.0, deadline - time.monotonic())
+        with urllib.request.urlopen(req, timeout=remaining) as resp:
+            raw = resp.read()
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            raise RuntimeError(
+                t(non_json_t_key, e=str(e), raw=repr(raw[:200]))
+            )
+
+    while True:
+        try:
+            return _request_once(internal_token)
+        except urllib.error.HTTPError as e:
+            live_token = _load_internal_token()
+            if (
+                e.code == 403
+                and live_token
+                and live_token != internal_token
+                and not tried_live_token_after_forbidden
+            ):
+                tried_live_token_after_forbidden = True
+                try:
+                    return _request_once(live_token)
+                except urllib.error.HTTPError:
+                    raise e
+            raise
+        except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
+            recovered = recover() if recover is not None else None
+            if recovered is not None:
+                return recovered
+            if time.monotonic() >= deadline:
+                raise
+            reason = getattr(e, "reason", e)
+            logger.warning(
+                "%s URLError (%s); retrying in %.1fs",
+                log_prefix, reason, backoff,
+            )
+            time.sleep(min(backoff, max(0.5, deadline - time.monotonic())))
+            backoff = min(backoff * 2, backoff_cap)
+
+
+def _byte_size_if_exists(path: Optional[str]) -> int:
+    if not path:
+        return 0
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _recover_ask_result(ask_id: str) -> Optional[dict]:
+    """Restart re-attach for the `ask` tool: if the target turn already
+    completed and its result was persisted to ask_status_store (shared disk),
+    return it so the runner's URLError-retry resolves without re-POSTing.
+    Mirrors `_recover_delegate_result`.
+    """
+    try:
+        import ask_status_store
+        status = ask_status_store.read_status(ask_id)
+    except Exception:
+        logger.exception("ask status recovery read failed")
+        return None
+    if not status:
+        return None
+    result = status.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _recover_delegate_result(client_delegation_id: str) -> Optional[dict]:
+    try:
+        import delegation_status_store
+        status = delegation_status_store.read_status(client_delegation_id)
+    except Exception:
+        logger.exception("delegate status recovery read failed")
+        return None
+    if not status:
+        return None
+
+    result = status.get("result")
+    if isinstance(result, dict):
+        return result
+
+    run_dir = status.get("provider_run_dir")
+    if not run_dir:
+        return None
+    try:
+        from runs_dir import read_best_complete
+        complete = read_best_complete(Path(run_dir))
+    except Exception:
+        logger.exception("delegate run complete recovery failed")
+        return None
+    if not complete:
+        return None
+
+    jsonl_path = status.get("jsonl_path")
+    total_bytes_now = _byte_size_if_exists(jsonl_path)
+    return {
+        "success": bool(complete.get("success")),
+        "error": complete.get("error"),
+        "worker_session_id": status.get("worker_agent_session_id"),
+        "worker_description": status.get("worker_description") or "",
+        "fork_agent_sid": status.get("fork_agent_sid") or complete.get("session_id"),
+        "run_mode": status.get("run_mode") or "fork",
+        "jsonl_path": jsonl_path,
+        "new_byte_offset": int(status.get("new_byte_offset") or 1),
+        "total_bytes_now": total_bytes_now,
+        "token_usage": complete.get("token_usage"),
+    }
+
+
+def _build_create_worker_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+    model: Optional[str],
+    cwd: str,
+):
+    def _post_create_worker_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/create-worker",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="create-worker POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("create_worker", _CREATE_WORKER_DESCRIPTION, _CREATE_WORKER_INPUT_SCHEMA)
+    async def create_worker(args: dict[str, Any]) -> dict[str, Any]:
+        worker_description = args.get("worker_description") or ""
+        justification = args.get("justification") or ""
+        orchestration_mode = args.get("orchestration_mode") or ""
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        if not worker_description or not justification or not orchestration_mode:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "worker_description, justification and orchestration_mode are required",
+                }],
+                "is_error": True,
+            }
+        import uuid as _uuid
+        payload = {
+            "app_session_id": app_session_id,
+            "worker_description": worker_description,
+            "justification": justification,
+            "orchestration_mode": orchestration_mode,
+            "cwd": cwd,
+            "client_request_id": f"cw_{_uuid.uuid4().hex[:10]}",
+            "node_id": node_id,
+        }
+        try:
+            result = await asyncio.to_thread(_post_create_worker_sync, payload)
+        except Exception as e:
+            return _tool_error_response("create_worker", e)
+        return _tool_success_result(result)
+
+    return create_worker
+
+
+# ============================================================================
+# mssg tool builder (team session messaging)
+# ============================================================================
+def _build_mssg_tool(
+    *,
+    sender_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_mssg_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/mssg",
+            timeout=30,
+            non_json_t_key="runner.mssg_non_json",
+            log_prefix="mssg POST",
+            backoff_cap=5.0,
+        )
+
+    @tool("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA)
+    async def mssg(args: dict[str, Any]) -> dict[str, Any]:
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not target_session_id or not message:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "target_session_id and message are required",
+                }],
+                "is_error": True,
+            }
+        payload = {
+            "sender_session_id": sender_session_id,
+            "target_session_id": target_session_id,
+            "message": message,
+        }
+        try:
+            result = await asyncio.to_thread(_post_mssg_sync, payload)
+        except Exception as e:
+            return _tool_error_response("mssg", e)
+        return _tool_success_result(result)
+
+    return mssg
+
+
+def _build_delegate_task_tool(
+    *,
+    sender_session_id: str,
+    cwd: str,
+    model: Optional[str],
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_delegate_task_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/delegate-task",
+            timeout=_DELEGATE_HTTP_TIMEOUT,  # approval modes can block long
+            non_json_t_key="runner.mssg_non_json",
+            log_prefix="delegate_task POST",
+            backoff_cap=5.0,
+        )
+
+    @tool("delegate_task", _DELEGATE_TASK_DESCRIPTION, _DELEGATE_TASK_INPUT_SCHEMA)
+    async def delegate_task(args: dict[str, Any]) -> dict[str, Any]:
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return {
+                "content": [{"type": "text", "text": "task is required"}],
+                "is_error": True,
+            }
+        target = args.get("target_session_id")
+        if target in ("", "null"):
+            target = None
+        payload = {
+            "sender_session_id": sender_session_id,
+            "task": task,
+            "target_session_id": target,
+            "cwd": cwd,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "sub_session": args.get("sub_session") is not False,
+        }
+        try:
+            result = await asyncio.to_thread(_post_delegate_task_sync, payload)
+        except Exception as e:
+            return _tool_error_response("delegate_task", e)
+        return _tool_success_result(result)
+
+    return delegate_task
+
+
+def _build_create_session_tool(
+    *,
+    sender_session_id: str,
+    cwd: str,
+    model: Optional[str],
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_create_session_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/create-session",
+            timeout=30,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="create-session POST",
+            backoff_cap=5.0,
+        )
+
+    @tool("create_session", _CREATE_SESSION_DESCRIPTION, _CREATE_SESSION_INPUT_SCHEMA)
+    async def create_session(args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return {
+                "content": [{"type": "text", "text": "name is required"}],
+                "is_error": True,
+            }
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        payload = {
+            "sender_session_id": sender_session_id,
+            "name": name,
+            "cwd": cwd,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "orchestration_mode": args.get("orchestration_mode") or "native",
+            "node_id": node_id,
+        }
+        try:
+            result = await asyncio.to_thread(_post_create_session_sync, payload)
+        except Exception as e:
+            return _tool_error_response("create_session", e)
+        return _tool_success_result(result)
+
+    return create_session
+
+
+def _build_create_sub_session_tool(
+    *,
+    sender_session_id: str,
+    cwd: str,
+    model: Optional[str],
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_create_sub_session_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/create-sub-session",
+            timeout=30,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="create-sub-session POST",
+            backoff_cap=5.0,
+        )
+
+    @tool("create_sub_session", _CREATE_SUB_SESSION_DESCRIPTION, _CREATE_SUB_SESSION_INPUT_SCHEMA)
+    async def create_sub_session(args: dict[str, Any]) -> dict[str, Any]:
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        payload = {
+            "sender_session_id": sender_session_id,
+            "description": str(args.get("description") or "").strip(),
+            "cwd": cwd,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "node_id": node_id,
+        }
+        try:
+            result = await asyncio.to_thread(_post_create_sub_session_sync, payload)
+        except Exception as e:
+            return _tool_error_response("create_sub_session", e)
+        return _tool_success_result(result)
+
+    return create_sub_session
+
+
+def _build_ask_tool(
+    *,
+    sender_session_id: str,
+    app_session_id: str,
+    model: Optional[str],
+    cwd: str,
+    backend_url: str,
+    internal_token: str,
+):
+    @tool("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA)
+    async def ask(args: dict[str, Any]) -> dict[str, Any]:
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
+        if not target_session_id or not message:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "target_session_id and message are required",
+                }],
+                "is_error": True,
+            }
+        if run_mode not in ("direct", "fork"):
+            return {
+                "content": [{"type": "text", "text": "run_mode must be 'direct' or 'fork'"}],
+                "is_error": True,
+            }
+        ephemeral = bool(args.get("ephemeral"))
+        if ephemeral and run_mode != "fork":
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "ephemeral is only valid for run_mode='fork'",
+                }],
+                "is_error": True,
+            }
+
+        if run_mode == "fork":
+            # Fork reuses the delegation engine (per-(caller, session) branch +
+            # structured jsonl-offset outcome). ask is the model-facing name;
+            # the fork execution path stays single-source in run_delegation.
+            worker_description = str(args.get("worker_description") or "").strip()
+            worker_registry_cwd = args.get("worker_registry_cwd")
+            if worker_registry_cwd in ("", "null"):
+                worker_registry_cwd = None
+            import uuid as _duuid
+            client_delegation_id = f"del_{_duuid.uuid4().hex[:10]}"
+            payload = {
+                "app_session_id": app_session_id,
+                "instructions": message,
+                "worker_session_id": target_session_id,
+                "worker_description": worker_description,
+                "model": model,
+                "cwd": cwd,
+                "client_delegation_id": client_delegation_id,
+                "run_mode": "fork",
+                "worker_registry_cwd": worker_registry_cwd,
+                "ephemeral": ephemeral,
+            }
+
+            def _post_fork_sync() -> dict:
+                return _post_loopback_sync(
+                    payload,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                    url_path="/api/internal/ask-fork",
+                    timeout=_DELEGATE_HTTP_TIMEOUT,
+                    non_json_t_key="runner.delegate_non_json",
+                    log_prefix="ask(fork) POST",
+                    backoff_cap=60.0,
+                    recover=lambda: _recover_delegate_result(client_delegation_id),
+                )
+
+            try:
+                result = await asyncio.to_thread(_post_fork_sync)
+            except Exception as e:
+                return _tool_error_response("ask", e)
+            return _tool_success_result(result)
+
+        # direct: team message on the target's real session, wait for reply.
+        import uuid as _uuid
+        ask_id = f"ask_{_uuid.uuid4().hex[:10]}"
+        payload = {
+            "sender_session_id": sender_session_id,
+            "target_session_id": target_session_id,
+            "message": message,
+            "ask_id": ask_id,
+        }
+
+        def _post_ask_sync() -> dict:
+            return _post_loopback_sync(
+                payload,
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/ask",
+                timeout=_DELEGATE_HTTP_TIMEOUT,
+                non_json_t_key="runner.mssg_non_json",
+                log_prefix="ask POST",
+                backoff_cap=60.0,
+                recover=lambda: _recover_ask_result(ask_id),
+            )
+
+        try:
+            result = await asyncio.to_thread(_post_ask_sync)
+        except Exception as e:
+            return _tool_error_response("ask", e)
+        return _tool_success_result(result)
+
+    return ask
+
+
+# ============================================================================
+# Open-file-panel tool builder (active session, any orchestration mode)
+# ============================================================================
+def _build_open_file_panel_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    """Build an in-process SDK MCP tool that opens a file in the user's
+    UI. POSTs to /api/internal/open-file-panel. Mirrors the browser-test
+    tool's loopback pattern but is fast (no long block)."""
+
+    def _post_open_file_panel_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/open-file-panel",
+            timeout=_OPEN_FILE_PANEL_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_file_panel_non_json",
+            log_prefix="open-file-panel POST",
+            backoff_cap=10.0,
+        )
+
+    @tool("open_file_panel", _OPEN_FILE_PANEL_DESCRIPTION, _OPEN_FILE_PANEL_INPUT_SCHEMA)
+    async def open_file_panel(args: dict[str, Any]) -> dict[str, Any]:
+        mode = args.get("mode") or ""
+        path = (args.get("path") or "").strip()
+        if mode not in ("panel", "inline") or not path:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "`mode` (panel|inline) and `path` are required",
+                }],
+                "is_error": True,
+            }
+
+        payload = {
+            "app_session_id": app_session_id,
+            "mode": mode,
+            "path": path,
+            "start_line": args.get("start_line"),
+            "end_line": args.get("end_line"),
+            "selected_start": args.get("selected_start"),
+            "selected_end": args.get("selected_end"),
+        }
+
+        try:
+            result = await asyncio.to_thread(_post_open_file_panel_sync, payload)
+        except Exception as e:
+            return _tool_error_response("open-file-panel", e)
+        return _tool_success_result(result)
+
+    return open_file_panel
+
+
+def _build_request_user_input_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_request_user_input_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/user-input/request",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_file_panel_non_json",
+            log_prefix="request-user-input POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("request_user_input", _REQUEST_USER_INPUT_DESCRIPTION, _REQUEST_USER_INPUT_SCHEMA)
+    async def request_user_input(args: dict[str, Any]) -> dict[str, Any]:
+        questions = args.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return {
+                "content": [{"type": "text", "text": "`questions` must be a non-empty array"}],
+                "is_error": True,
+            }
+        payload = {
+            "app_session_id": app_session_id,
+            "questions": questions,
+            "timeout_seconds": args.get("timeout_seconds"),
+        }
+        try:
+            result = await asyncio.to_thread(_post_request_user_input_sync, payload)
+        except Exception as e:
+            return _tool_error_response("request-user-input", e)
+        return _tool_success_result(result)
+
+    return request_user_input
+
+
+def _build_start_file_discussion_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_start_file_discussion_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/file-editor/start-discussion",
+            timeout=_OPEN_FILE_PANEL_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_file_panel_non_json",
+            log_prefix="start-file-discussion POST",
+            backoff_cap=10.0,
+        )
+
+    @tool("start_file_discussion", _START_FILE_DISCUSSION_DESCRIPTION, _START_FILE_DISCUSSION_INPUT_SCHEMA)
+    async def start_file_discussion(args: dict[str, Any]) -> dict[str, Any]:
+        file_path = (args.get("file_path") or "").strip()
+        line = args.get("line")
+        if not file_path or not isinstance(line, int) or line < 1:
+            return {
+                "content": [{"type": "text", "text": "`file_path` and `line >= 1` are required"}],
+                "is_error": True,
+            }
+        try:
+            result = await asyncio.to_thread(_post_start_file_discussion_sync, {
+                "app_session_id": app_session_id,
+                "file_path": file_path,
+                "line": line,
+                "title": args.get("title") or "",
+            })
+        except Exception as e:
+            return _tool_error_response("start-file-discussion", e)
+        return _tool_success_result(result)
+
+    return start_file_discussion
+
+
+# ============================================================================
+# Session picker tool. `propose_sessions` stamps the inline session picker
+# (`ask_result`) on the CALLING session's in-flight assistant message via
+# /api/internal/ask-propose. The Ask flow stamps it directly server-side
+# (session_search.propose_sessions); this MCP tool is the agent-facing
+# wrapper for any native session, registered on the session-bridge server.
+# ============================================================================
+# Mirrors session_search.ASK_SINGLETON_ID. Local literal (not an import) so
+# the runner subprocess doesn't drag session_search's import graph.
+_ASK_SINGLETON_ID = "virtual:ofek-dev.ask:ask"
+
+_PROPOSE_SESSIONS_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "session_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Session ids to offer in the picker (parent dir "
+                           "names of the matched events.jsonl), most relevant "
+                           "first (≤5). Empty if nothing is relevant.",
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "One sentence on why these match.",
+        },
+    },
+    "required": ["session_ids"],
+}
+_PROPOSE_SESSIONS_DESCRIPTION = (
+    "Present the chosen sessions to the user as an inline picker in this "
+    "session. Call after `search_sessions` when you want the user to pick a "
+    "target. Pass an empty list for 'create new'."
+)
+
+
+def _build_propose_sessions_tool(
+    *, app_session_id: str, backend_url: str, internal_token: str,
+):
+    """The `propose_sessions` MCP tool — stamps the picker on the calling
+    session's in-flight assistant message."""
+
+    @tool(
+        "propose_sessions",
+        _PROPOSE_SESSIONS_DESCRIPTION,
+        _PROPOSE_SESSIONS_INPUT_SCHEMA,
+    )
+    async def propose_sessions(args: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "caller_sid": app_session_id,
+            "session_ids": args.get("session_ids") or [],
+            "reasoning": args.get("reasoning") or "",
+        }
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                payload,
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/ask-propose",
+                timeout=10.0,
+                non_json_t_key="runner.open_file_panel_non_json",
+                log_prefix="ask POST /api/internal/ask-propose",
+                backoff_cap=10.0,
+            )
+        except Exception as e:
+            return _tool_error_response("ask-propose", e)
+        return _tool_success_result(result)
+
+    return propose_sessions
+
+
+# ============================================================================
+# Usage aggregation
+# ============================================================================
+def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
+    out: dict[str, int] = {}
+    for d in ((a or {}), (b or {})):
+        for k, v in (d or {}).items():
+            if isinstance(v, (int, float)):
+                out[k] = int(out.get(k, 0)) + int(v)
+    return out
+
+
+def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
+    return normalize_context_overflow_error(stop_reason)
+
+
+# ============================================================================
+# Runner lifecycle primitives — heartbeat + babysitter linger
+# ============================================================================
+
+
+async def _heartbeat_writer(
+    run_dir: Path,
+    current_turn_holder: list,
+    shutdown_event: asyncio.Event,
+    *,
+    interval_s: float = 5.0,
+) -> None:
+    """Refresh `runs/<run_id>/runner_alive` every interval.
+
+    The file payload includes `current_turn_id` (None when idle between
+    turns) so backend recovery can distinguish "runner intentionally idle
+    waiting for next prompt" from "runner crashed mid-turn." Stops on
+    `shutdown_event.set()`. Errors are logged but never propagate.
+    """
+    from runs_dir import atomic_write_json, runner_alive_path
+
+    alive_path = runner_alive_path(run_dir)
+    while not shutdown_event.is_set():
+        try:
+            atomic_write_json(alive_path, {
+                "pid": os.getpid(),
+                "current_turn_id": current_turn_holder[0],
+                "timestamp": datetime.now().isoformat(),
+            })
+        except Exception:
+            logger.exception("heartbeat write failed")
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=interval_s,
+            )
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _linger_for_background_work(
+    run_dir: Path,
+    log: logging.Logger,
+    *,
+    poll_interval_s: float = 2.0,
+) -> None:
+    """Babysitter: stay alive while detached background work
+    (run_in_background shells, Monitor watchers) is still running.
+
+    Called AFTER the run-level complete.json is on disk — the turn is
+    over from the backend's perspective and new prompts spawn fresh
+    --resume instances. The SDK client is still connected, so the CLI
+    (and therefore its background shells, which die with it) survives.
+    With the timer tools disallowed and stdin silent, nothing can start
+    a turn on this instance, so the fresh instance is the only writer
+    to the session jsonl (lifecycle tests T16/T17).
+
+    On the FIRST busy poll it touches the `run_dir/lingering` sentinel —
+    the backend publishes `run.lingering` off that file, so a normal
+    turn whose runner merely takes a second to shut down never flashes
+    a "background work running" UI state.
+
+    Exits when the background work ends, or sweeps it and exits when
+    the run-level cancel sentinel appears (the user's stop/kill lever).
+    """
+    from proc_control import process_control
+    pc = process_control()
+    cancel_path = run_dir / "cancel"
+    lingering = False
+    consecutive_failures = 0
+    while True:
+        if cancel_path.exists():
+            # Idempotent: a turn cancelled mid-flight already swept in
+            # _run_one_turn; a cancel that raced turn end (or arrived
+            # during the linger) sweeps here.
+            try:
+                swept = pc.kill_detached_descendant_groups(
+                    os.getpid(),
+                )
+                log.info(
+                    "babysitter: cancel sentinel — swept %d detached "
+                    "group(s), exiting", swept,
+                )
+            except Exception:
+                logger.exception("babysitter cancel sweep failed")
+            return
+        try:
+            busy = await asyncio.to_thread(
+                pc.has_detached_descendants,
+                os.getpid(), frozenset(),
+            )
+            consecutive_failures = 0
+        except Exception:
+            # Fail toward staying alive: exiting kills the CLI and every
+            # background shell with it. Only give up after sustained
+            # failure of the signal itself.
+            consecutive_failures += 1
+            logger.exception(
+                "babysitter signal check failed (%d/5)", consecutive_failures,
+            )
+            if consecutive_failures >= 5:
+                log.warning("babysitter: signal check broken — exiting")
+                return
+            await asyncio.sleep(poll_interval_s)
+            continue
+        if not busy:
+            if lingering:
+                log.info("babysitter: background work ended — exiting")
+            return
+        if not lingering:
+            lingering = True
+            try:
+                (run_dir / "lingering").touch()
+            except OSError:
+                logger.exception("babysitter: lingering sentinel write failed")
+            log.info("babysitter: detached background work alive — lingering")
+        await asyncio.sleep(poll_interval_s)
+
+
+# ============================================================================
+# Per-turn helper — drives ONE turn on an already-connected SDK client
+# ============================================================================
+async def _drain_until_result(
+    resp_iter, log: logging.Logger, timeout_s: float = 15.0,
+) -> bool:
+    """Settle barrier after an interrupt.
+
+    `client.interrupt()` only awaits the CLI's control-response ACK — the
+    CLI is still winding the interrupted turn down and will emit its tail
+    (tool aborts) plus a terminating ``ResultMessage``. Consume and DISCARD
+    those so the client is fully settled before the runner proceeds to
+    its completion path. Skipping this leaves the interrupted turn's tail
+    unread in the stream.
+
+    Bounded by ``timeout_s`` so a CLI that never terminates can't hang the
+    runner. Returns True if the stream settled (ResultMessage or natural
+    end), False on timeout.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            log.warning(
+                "interrupt settle drain timed out after %.1fs", timeout_s,
+            )
+            return False
+        try:
+            msg = await asyncio.wait_for(
+                resp_iter.__anext__(), timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "interrupt settle drain timed out after %.1fs", timeout_s,
+            )
+            return False
+        except StopAsyncIteration:
+            return True
+        if isinstance(msg, ResultMessage):
+            return True
+
+
+async def _run_one_turn(
+    *,
+    client: ClaudeSDKClient,
+    prompt: str,
+    images: list,
+    files: list,
+    run_dir: Path,
+    turn_id: str,
+    pre_query_byte_offset: int,
+    state: dict,
+    state_path: Path,
+    cwd: str,
+    claude_config_dir: Path,
+    log: logging.Logger,
+    cancel_path: Optional[Path] = None,
+) -> dict:
+    """Execute one turn against an already-connected `ClaudeSDKClient`.
+
+    Side-effects:
+    - Writes `runs/<run_id>/turns/<turn_id>/start.json` BEFORE the query
+      so crash recovery can identify the in-flight turn.
+    - Writes `runs/<run_id>/turns/<turn_id>/complete.json` at turn end —
+      `runs_dir.read_best_complete` salvages it when the runner dies in
+      the window before the run-level complete.json lands.
+    - Mutates the caller's `state` dict (sid discovery → state.session_id
+      / state.jsonl_path) and writes the run-level `state.json` on
+      discovery.
+
+    Watches `run_dir/cancel` (run-level sentinel).
+
+    Does NOT manage `client.connect()` / `client.disconnect()` — caller
+    owns the SDK client lifecycle.
+    """
+    from runs_dir import atomic_write_json, turn_dir
+
+    turn_d = turn_dir(run_dir, turn_id)
+    try:
+        turn_d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("failed to mkdir turn dir %s", turn_d)
+
+    # Per-turn start.json — recovery key. pre_query_byte_offset is the
+    # jsonl-baseline this turn started against.
+    start_payload = {
+        "turn_id": turn_id,
+        "pre_query_byte_offset": pre_query_byte_offset,
+        "started_at": datetime.now().isoformat(),
+    }
+    try:
+        atomic_write_json(turn_d / "start.json", start_payload)
+    except Exception:
+        logger.exception("failed to write turn start.json")
+
+    discovered_sid: Optional[str] = None
+    total_usage: dict = {}
+    success = False
+    error: Optional[str] = None
+    cancelled = False
+    sdk_output_parts: list[str] = []
+    context_window: Optional[int] = None
+    last_stop_reason: Optional[str] = None
+    # Tool names the model called this turn — surfaced in complete.json
+    # for the UI/telemetry. (Reap is decided by live background processes,
+    # not tool names.)
+    used_tools: set[str] = set()
+
+    # Cancel sentinel watcher: polls for `cancel_path` every ~150ms
+    # and calls client.interrupt() on sight. Default = run-level
+    # `run_dir/cancel` (today's behavior). Persistent `_main_loop`
+    # passes `turn_dir(run_dir, turn_id)/cancel` per turn so cancel is
+    # turn-scoped — cancelling turn N does NOT abort turn N+1.
+    cancel_seen = asyncio.Event()
+    if cancel_path is None:
+        cancel_path = run_dir / "cancel"
+
+    # `cancelled` mutated by the watcher coroutine via list-cell (avoids
+    # `nonlocal` since the helper is at module scope, not nested).
+    cancelled_cell = [False]
+
+    async def _cancel_watcher() -> None:
+        while not cancel_seen.is_set():
+            if cancel_path.exists():
+                cancelled_cell[0] = True
+                log.info("cancel sentinel seen, calling client.interrupt()")
+                try:
+                    await client.interrupt()
+                except Exception:
+                    logger.exception("client.interrupt() failed")
+                cancel_seen.set()
+                return
+            try:
+                await asyncio.wait_for(cancel_seen.wait(), timeout=0.15)
+            except asyncio.TimeoutError:
+                pass
+
+    watcher_task: Optional[asyncio.Task] = None
+
+    try:
+        # Inject file contents into the prompt for non-image attachments.
+        if files:
+            file_sections: list[str] = []
+            for f in files:
+                try:
+                    raw = base64.b64decode(f.get("data", ""))
+                    name = f.get("name", "unknown")
+                except Exception:
+                    log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                    file_sections.append(
+                        f"<file name=\"{name}\">\n{text}\n</file>"
+                    )
+                except UnicodeDecodeError:
+                    file_sections.append(
+                        f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
+                    )
+            file_preamble = "\n\n".join(file_sections)
+            prompt = f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+
+        if images:
+            content: list[dict] = []
+            for img in images:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img["media_type"],
+                        "data": img["data"],
+                    },
+                })
+            # Image-only messages: skip the text item so the model
+            # doesn't see a synthetic placeholder.
+            if prompt:
+                content.append({"type": "text", "text": prompt})
+
+            async def _multimodal_msg():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": content},
+                    "parent_tool_use_id": None,
+                }
+
+            await client.query(_multimodal_msg())
+        else:
+            await client.query(prompt)
+
+        watcher_task = asyncio.create_task(_cancel_watcher())
+
+        resp_iter = client.receive_response()
+        while True:
+            try:
+                msg = await resp_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            if cancelled_cell[0]:
+                # Interrupt landed. Don't process this turn's tail — but DO
+                # drain it to the terminating ResultMessage so the client
+                # is fully settled before the completion path runs. See
+                # _drain_until_result.
+                if not isinstance(msg, ResultMessage):
+                    await _drain_until_result(resp_iter, log)
+                break
+
+            if isinstance(msg, SystemMessage):
+                data = msg.data or {}
+                if data.get("subtype") == "init":
+                    sid = data.get("session_id")
+                    if sid and sid != discovered_sid:
+                        discovered_sid = sid
+                        state["session_id"] = sid
+                        state["jsonl_path"] = str(
+                            claude_config_dir / "projects"
+                            / encode_cwd(cwd) / f"{sid}.jsonl"
+                        )
+                        try:
+                            _atomic_write_json(state_path, state)
+                            log.info("state.json written: session_id=%s", sid)
+                        except Exception:
+                            logger.exception("failed to write state.json")
+
+            elif isinstance(msg, AssistantMessage):
+                # Capture assistant text as fallback for when the CLI
+                # doesn't write a session jsonl (e.g. API credentials).
+                # ALSO record tool names (surfaced in complete.json).
+                for block in (msg.content or []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t_ = block.get("text")
+                        if isinstance(t_, str) and t_:
+                            sdk_output_parts.append(t_)
+                    elif hasattr(block, "text") and block.text:
+                        sdk_output_parts.append(block.text)
+                    # Tool-use block — record tool name for lazy decision.
+                    btype = (
+                        block.get("type") if isinstance(block, dict)
+                        else type(block).__name__
+                    )
+                    if btype == "ToolUseBlock" or btype == "tool_use":
+                        tname = (
+                            block.get("name") if isinstance(block, dict)
+                            else getattr(block, "name", None)
+                        )
+                        if tname:
+                            used_tools.add(tname)
+                usage = getattr(msg, "usage", None)
+                if usage:
+                    total_usage = _sum_usage(total_usage, usage)
+                # API-level error surfaced by the SDK on the assistant
+                # message (e.g. `rate_limit`, `auth`, etc.). Capture it
+                # NOW — Z.AI's `ResultMessage.subtype` mislabels these
+                # as "success" despite `is_error=True`, so we'd lose the
+                # real classification if we waited for the result frame.
+                msg_error = getattr(msg, "error", None)
+                if msg_error and not error:
+                    error = str(msg_error)
+                sr = getattr(msg, "stop_reason", None)
+                if sr:
+                    last_stop_reason = sr
+
+            elif isinstance(msg, ResultMessage):
+                success = not msg.is_error
+                rsr = getattr(msg, "stop_reason", None)
+                if rsr:
+                    last_stop_reason = rsr
+                if msg.is_error and not error:
+                    error = msg.subtype or "error"
+                if msg.result and not sdk_output_parts:
+                    sdk_output_parts.append(msg.result)
+                # Z.AI returns subtype="unknown" for timeouts — the real
+                # error text is in the result string. Reclassify so the
+                # orchestrator's transient-error retry can match it.
+                if error and error in ("unknown", "error") and msg.result:
+                    rl = msg.result.lower()
+                    if "timed out" in rl or "timeout" in rl:
+                        error = "timeout"
+                usage = getattr(msg, "usage", None)
+                if usage:
+                    total_usage = _sum_usage(total_usage, usage)
+                # Extract context window from model usage metadata.
+                # model_usage is {"model_name": {contextWindow, ...}, ...}
+                mu = getattr(msg, "model_usage", None)
+                if mu:
+                    for model_info in (mu.values() if isinstance(mu, dict) else []):
+                        cw = model_info.get("contextWindow") if isinstance(model_info, dict) else None
+                        if cw:
+                            context_window = cw
+                            break
+                break
+
+    except asyncio.CancelledError:
+        cancelled_cell[0] = True
+        error = t("runner.cancelled")
+    except Exception as e:
+        if _is_network_error(e):
+            raise
+        logger.exception("SDK run failed")
+        error = f"{type(e).__name__}: {e}"
+    finally:
+        cancel_seen.set()
+        if watcher_task and not watcher_task.done():
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+    cancelled = cancelled_cell[0]
+    if cancelled and not error:
+        error = t("runner.cancelled")
+
+    overflow_error = _context_overflow_error(last_stop_reason)
+    if overflow_error:
+        success = False
+        if not error:
+            error = overflow_error
+
+    # Bounded-graceful turn-stop: when the cancel sentinel fired, sweep
+    # any setsid'd `run_in_background` shells the CLI spawned under us
+    # before this turn ends. The backend's old `cancel_run` killpg
+    # tower included this sweep; under the soft path the runner owns
+    # it (CLI + same-pgroup descendants are skipped — pgroup match).
+    # Runs ONCE after `_drain_until_result` returns; CLI close happens
+    # later via SDK `disconnect()` and is pid-targeted.
+    if cancelled:
+        try:
+            from proc_control import process_control
+            swept = process_control().kill_detached_descendant_groups(
+                os.getpid(),
+            )
+            if swept:
+                log.info("runner bg-sweep: signalled %d detached group(s)", swept)
+        except Exception:
+            logger.exception("runner bg-sweep failed")
+
+    final_success = success and not cancelled and not error
+
+    # Per-turn complete.json — written alongside the run-level one (the
+    # caller writes that); `runs_dir.read_best_complete` salvages it when
+    # the runner dies before the run-level write lands.
+    turn_complete_payload = {
+        "success": final_success,
+        "session_id": discovered_sid,
+        "error": error,
+        "token_usage": total_usage or None,
+        "context_window": context_window,
+        "finished_at": datetime.now().isoformat(),
+        "sdk_output": " ".join(sdk_output_parts).strip() or None,
+        "turn_id": turn_id,
+        "used_tools": sorted(used_tools),
+    }
+    try:
+        atomic_write_json(turn_d / "complete.json", turn_complete_payload)
+    except Exception:
+        logger.exception("failed to write turn complete.json")
+
+    return {
+        "success": success,
+        "cancelled": cancelled,
+        "error": error,
+        "discovered_sid": discovered_sid,
+        "total_usage": total_usage,
+        "context_window": context_window,
+        "sdk_output_parts": sdk_output_parts,
+        "final_success": final_success,
+        "used_tools": used_tools,
+    }
+
+
+# ============================================================================
+# Main async runner
+# ============================================================================
+async def _run(run_dir: Path, inputs: dict) -> int:
+    log = logging.getLogger("runner")
+
+    mode = inputs.get("mode")
+    if mode not in ("native", "manager"):
+        _fail(run_dir, t("runner.invalid_mode", mode=mode))
+        return 1
+
+    # working_mode tags ephemeral sessions (e.g. "search_worker"). Used to
+    # keep workers OFF the session-bridge tools so a worker can't recurse
+    # via `search_sessions`.
+    working_mode = inputs.get("working_mode")
+
+    prompt = inputs.get("prompt") or ""
+    images = inputs.get("images") or []
+    files = inputs.get("files") or []
+    cwd = inputs.get("cwd")
+    if (not prompt and not images and not files) or not cwd:
+        _fail(run_dir, t("runner.missing_fields"))
+        return 1
+
+    model = inputs.get("model")
+    reasoning_effort = claude_sdk_effort(inputs.get("reasoning_effort"))
+    session_id = inputs.get("session_id")
+    if session_id == "null":
+        session_id = None
+    disallowed_tools = inputs.get("disallowed_tools") or [
+        "AskUserQuestion",
+        "EnterPlanMode",
+        "ExitPlanMode",
+    ]
+    # Fail closed: the backend strips the CLI's in-process timer tools
+    # (replaced by its durable scheduler). A claude with live timer
+    # tools could start a turn while this runner lingers for background
+    # work, racing a fresh --resume instance on the shared session
+    # jsonl. If the backend didn't strip them, refuse to spawn.
+    from runs_dir import TIMER_TOOLS as _TIMER_TOOLS
+    _missing_timer_strips = [
+        name for name in _TIMER_TOOLS if name not in disallowed_tools
+    ]
+    if _missing_timer_strips:
+        _fail(
+            run_dir,
+            "input.json disallowed_tools is missing timer tools "
+            f"{_missing_timer_strips} — refusing to spawn",
+        )
+        return 1
+    # `is None` (not `or`): an explicit empty list means "load NO setting
+    # sources" (bare / supervised isolation). `or` would collapse [] back to
+    # the default and silently re-enable user/project CLAUDE.md + settings.
+    _ss = inputs.get("setting_sources")
+    setting_sources = ["user", "project", "local"] if _ss is None else _ss
+
+    # Resolve the Claude config directory (respects CLAUDE_CONFIG_DIR env).
+    _cfg_dir_raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    _claude_config_dir = (
+        Path(os.path.expandvars(_cfg_dir_raw))
+        if _cfg_dir_raw
+        else Path.home() / ".claude"
+    )
+
+    # Build MCP server config
+    mcp_servers: dict = {}
+    app_session_id = inputs.get("app_session_id")
+    backend_url = inputs.get("backend_url")
+    internal_token = inputs.get("internal_token")
+    disabled_builtin_tools = _disabled_builtin_tools(inputs)
+    mssg_sender_session_id = (
+        inputs.get("mssg_sender_session_id") or app_session_id
+    )
+
+    team_orchestration_enabled = extension_store.is_extension_runtime_ready(
+        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    )
+
+    if mssg_sender_session_id and backend_url and internal_token:
+        communicate_tools = []
+        if "mssg" not in disabled_builtin_tools:
+            communicate_tools.append(_build_mssg_tool(
+                sender_session_id=str(mssg_sender_session_id),
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "ask" not in disabled_builtin_tools:
+            communicate_tools.append(_build_ask_tool(
+                sender_session_id=str(mssg_sender_session_id),
+                app_session_id=app_session_id or "",
+                model=model,
+                cwd=cwd,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if communicate_tools:
+            communicate_server = create_sdk_mcp_server(
+                name="communicate",
+                version="1.0.0",
+                tools=communicate_tools,
+            )
+            mcp_servers["communicate"] = communicate_server
+
+    # Generic handoff tools — available to ALL sessions (team AND native), not
+    # just team. delegate (detached off-topic handoff) + create_session (spin
+    # up a fresh standalone session to hand work off to). Gated only on loopback
+    # credentials; the sender is the calling session itself.
+    if app_session_id and backend_url and internal_token:
+        handoff_tools = []
+        if "delegate_task" not in disabled_builtin_tools:
+            handoff_tools.append(_build_delegate_task_tool(
+                sender_session_id=str(app_session_id),
+                cwd=cwd,
+                model=model,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "create_session" not in disabled_builtin_tools:
+            handoff_tools.append(_build_create_session_tool(
+                sender_session_id=str(app_session_id),
+                cwd=cwd,
+                model=model,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "create_sub_session" not in disabled_builtin_tools:
+            handoff_tools.append(_build_create_sub_session_tool(
+                sender_session_id=str(app_session_id),
+                cwd=cwd,
+                model=model,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if handoff_tools:
+            handoff_server = create_sdk_mcp_server(
+                name="handoff",
+                version="1.0.0",
+                tools=handoff_tools,
+            )
+            mcp_servers["handoff"] = handoff_server
+
+    if mode == "manager" and team_orchestration_enabled:
+        if not app_session_id or not backend_url or not internal_token:
+            _fail(
+                run_dir,
+                t("runner.manager_mode_missing_fields"),
+            )
+            return 1
+        # create_worker is its own MCP server (team managers only). ask(
+        # run_mode="fork") — in the `communicate` server above — is the
+        # delegation surface; its fork engine lives behind /api/internal/ask-fork.
+        create_worker_tool = _build_create_worker_tool(
+            app_session_id=app_session_id,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            model=model,
+            cwd=cwd,
+        )
+        sdk_server = create_sdk_mcp_server(
+            name="create-worker",
+            version="1.0.0",
+            tools=[create_worker_tool],
+        )
+        mcp_servers["create-worker"] = sdk_server
+
+    # Open-file-panel tool — enabled ONLY for genuine user-facing
+    # top-level turns (manager OR native). Worker delegations and
+    # supervisor/verdict turns never set this flag, so the agent can
+    # only point the user at code from a turn the user actually
+    # initiated. Mode-agnostic, like browser-test.
+    open_file_panel_enabled = inputs.get("open_file_panel_enabled", False)
+    file_editing_mode = inputs.get("working_mode") == "file_editing"
+    # Bare (TestApe-isolated) sessions are headless: they get NONE of the
+    # user-facing extras (open-file-panel, cross-session bridge, durable
+    # scheduler). They DO get the credential broker — a bare device worker
+    # needs it to fetch login secrets — wired off the bare signal instead
+    # of the user-facing one.
+    _bare = bool(inputs.get("bare_config", False))
+    _user_facing_extras = open_file_panel_enabled and not _bare
+    _cred_enabled = open_file_panel_enabled or _bare
+
+    if (_user_facing_extras or _cred_enabled) and not backend_url:
+        backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
+    if _user_facing_extras:
+        if not internal_token:
+            _fail(run_dir, "open-file-panel requires internal_token but none provided")
+            return 1
+        ofp_tool = _build_open_file_panel_tool(
+            app_session_id=app_session_id or "",
+            backend_url=backend_url,
+            internal_token=internal_token,
+        )
+        request_user_input_tool = _build_request_user_input_tool(
+            app_session_id=app_session_id or "",
+            backend_url=backend_url,
+            internal_token=internal_token,
+        )
+        tools = [ofp_tool, request_user_input_tool]
+        if file_editing_mode:
+            tools.append(_build_start_file_discussion_tool(
+                app_session_id=app_session_id or "",
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        ofp_server = create_sdk_mcp_server(
+            name="open-file-panel",
+            version="1.0.0",
+            tools=tools,
+        )
+        mcp_servers["open-file-panel"] = ofp_server
+
+    # NOTE: the Ask container (ASK_SINGLETON_ID) runs NO claude turns of its
+    # own — its search turns are orchestrated server-side by
+    # `session_search.search()` (which spawns an ephemeral search worker).
+    # So it gets no ask MCP tools here.
+
+    for _extension_mcp_name, _extension_mcp_config in extension_store.runtime_mcp_server_configs(
+        inputs,
+        user_facing=bool(_user_facing_extras and app_session_id),
+        bare=_bare,
+    ).items():
+        mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+    for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
+        inputs,
+        user_facing=bool(_user_facing_extras and app_session_id),
+        bare=_bare,
+    ).items():
+        if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
+            mcp_servers[_extension_mcp_name] = _extension_mcp_config
+            continue
+        mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+
+    fork = bool(inputs.get("fork", False))
+
+    _runner_options: dict = {}
+
+    def _append_system_prompt(text: str) -> None:
+        existing = (_runner_options.get("system_prompt") or {}).get("append", "")
+        merged = f"{existing}\n\n{text}" if existing else text
+        _runner_options["system_prompt"] = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": merged,
+        }
+
+    def _capability_prompt() -> str:
+        blocks = []
+        for item in inputs.get("capability_contexts") or []:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            name = str(item.get("name") or "Capability")
+            category = str(item.get("category") or "capability")
+            blocks.append(
+                f"## {name} ({category})\n\n{content.strip()}"
+            )
+        if not blocks:
+            return ""
+        return render_prompt(
+            "runner/capability_context.md",
+            {"blocks": "\n\n".join(blocks)},
+        )
+
+    capability_prompt = _capability_prompt()
+    if capability_prompt:
+        _append_system_prompt(capability_prompt)
+
+    extra_args = {"exclude-dynamic-system-prompt-sections": None}
+    if _bare:
+        extra_args["bare"] = None
+        extra_args["disable-slash-commands"] = None
+
+    provider_run_config = inputs.get("provider_run_config") or {}
+    skill_plugin = _materialize_claude_skill_plugin(
+        run_dir,
+        cwd,
+        provider_run_config,
+        bare_config=_bare,
+    )
+    plugins = [skill_plugin] if skill_plugin else []
+
+    options = ClaudeAgentOptions(
+        mcp_servers=mcp_servers,
+        permission_mode="bypassPermissions",
+        cwd=cwd,
+        model=model,
+        effort=reasoning_effort,
+        resume=session_id if session_id else None,
+        fork_session=fork,
+        setting_sources=setting_sources,
+        disallowed_tools=disallowed_tools,
+        enable_file_checkpointing=True,
+        cli_path=_resolve_claude_cli(),
+        extra_args=extra_args,
+        plugins=plugins,
+        **_runner_options,
+    )
+
+    # Compute pre_query_byte_offset: for resumes, snapshot current jsonl size
+    # BEFORE we send the query so the backend tailer can slice at the right
+    # offset (otherwise it would re-emit turn N-1's events under turn N's
+    # assistant message — verified duplication bug).
+    #
+    # Forks are treated as fresh sessions from the tailer's POV: claude
+    # writes the forked conversation to a BRAND-NEW sid's jsonl, so there
+    # are no pre-existing lines to skip and no early-resume state.json to
+    # write. We fall through to the system.init code path below.
+    pre_query_byte_offset = 0
+    pre_query_jsonl_inode: Optional[int] = None
+    resume_jsonl: Optional[Path] = None
+    if session_id and not fork:
+        resume_jsonl = (
+            _claude_config_dir / "projects"
+            / encode_cwd(cwd) / f"{session_id}.jsonl"
+        )
+        try:
+            if resume_jsonl.exists():
+                # Phase-1 stage-5 hardening: FD_CLOEXEC so bg shell
+                # children spawned later do NOT inherit this read FD
+                # to the user's jsonl (contains conversation history).
+                _fd = os.open(
+                    str(resume_jsonl), os.O_RDONLY | os.O_CLOEXEC,
+                )
+                with os.fdopen(_fd, "rb") as rf:
+                    rf.seek(0, os.SEEK_END)
+                    pre_query_byte_offset = rf.tell()
+                    pre_query_jsonl_inode = os.fstat(rf.fileno()).st_ino
+        except OSError:
+            pre_query_byte_offset = 0
+
+    state: dict = {
+        "run_id": run_dir.name,
+        "mode": mode,
+        "runner_pid": os.getpid(),
+        "app_session_id": inputs.get("app_session_id"),
+        "started_at": datetime.now().isoformat(),
+        "session_id": None,
+        "jsonl_path": None,
+        "pre_query_byte_offset": pre_query_byte_offset,
+        "pre_query_jsonl_inode": pre_query_jsonl_inode,
+        "complete": False,
+    }
+    state_path = run_dir / "state.json"
+
+    # On resume, write state.json EARLY (before connecting) so the backend
+    # bootstrap can start tailing immediately without waiting for the SDK
+    # to emit system.init.
+    if session_id and resume_jsonl is not None:
+        state["session_id"] = session_id
+        state["jsonl_path"] = str(resume_jsonl)
+        try:
+            _atomic_write_json(state_path, state)
+            log.info(
+                "state.json written early for resume: session_id=%s pre_query_byte_offset=%d",
+                session_id, pre_query_byte_offset,
+            )
+        except Exception:
+            logger.exception("failed to write early state.json")
+
+    client = ClaudeSDKClient(options=options)
+
+    # Heartbeat: refreshes runner_alive every 5s so the backend's
+    # _watch_complete can detect a stuck runner (SDK hang, zombie)
+    # vs a healthy one (long tool call, streaming). The heartbeat
+    # stops if the event loop is blocked (stuck SDK receive_response).
+    _heartbeat_shutdown = asyncio.Event()
+    _heartbeat_task = asyncio.create_task(
+        _heartbeat_writer(run_dir, [None], _heartbeat_shutdown),
+        name="runner-heartbeat",
+    )
+
+    # Network retry: infinite reconnect on transient failures.
+    _retry_backoff = 2.0
+    _cancel_path = run_dir / "cancel"
+
+    async def _retry_sleep(seconds: float) -> None:
+        """Sleep with cancel sentinel check every 0.5s."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if _cancel_path.exists():
+                raise asyncio.CancelledError()
+            await asyncio.sleep(min(0.5, deadline - time.monotonic()))
+
+    while True:
+        try:
+            await client.connect()
+        except Exception as e:
+            if not _is_network_error(e):
+                raise
+            log.warning(
+                "connect() network error, retry %.1fs: %s", _retry_backoff, e,
+            )
+            await _retry_sleep(_retry_backoff)
+            _retry_backoff = min(_retry_backoff * 2, 60.0)
+            client = ClaudeSDKClient(options=options)
+            continue
+
+        try:
+            turn_result = await _run_one_turn(
+                client=client,
+                prompt=prompt,
+                images=images,
+                files=inputs.get("files", []) or [],
+                run_dir=run_dir,
+                turn_id=run_dir.name,
+                pre_query_byte_offset=pre_query_byte_offset,
+                state=state,
+                state_path=state_path,
+                cwd=cwd,
+                claude_config_dir=_claude_config_dir,
+                log=log,
+            )
+        except Exception as e:
+            if not _is_network_error(e):
+                try:
+                    await client.disconnect()
+                except Exception:
+                    logger.exception("client.disconnect() failed")
+                raise
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            # Resume discovered session on retry
+            if state.get("session_id"):
+                options.resume = state["session_id"]
+                _rj = (
+                    _claude_config_dir / "projects"
+                    / encode_cwd(cwd) / f"{state['session_id']}.jsonl"
+                )
+                try:
+                    if _rj.exists():
+                        _fd = os.open(str(_rj), os.O_RDONLY | os.O_CLOEXEC)
+                        with os.fdopen(_fd, "rb") as _rf:
+                            _rf.seek(0, os.SEEK_END)
+                            pre_query_byte_offset = _rf.tell()
+                            pre_query_jsonl_inode = os.fstat(_rf.fileno()).st_ino
+                except OSError:
+                    pass
+            log.warning(
+                "turn network error, retry %.1fs: %s", _retry_backoff, e,
+            )
+            await _retry_sleep(_retry_backoff)
+            _retry_backoff = min(_retry_backoff * 2, 60.0)
+            client = ClaudeSDKClient(options=options)
+            continue
+
+        # Success — reset backoff for future transient errors.
+        # NOTE: no disconnect here — the client stays connected so the
+        # CLI (and its background shells) survive the babysitter linger
+        # below; disconnect happens after the linger ends.
+        _retry_backoff = 2.0
+        break
+
+    # `discovered_sid` falls back to `state.session_id` when the turn
+    # didn't discover one (e.g. raised pre-discovery on a retry) — the
+    # run-level complete.json must still record the sid state.json has.
+    discovered_sid = turn_result["discovered_sid"] or state.get("session_id")
+    total_usage = turn_result["total_usage"]
+    error = turn_result["error"]
+    cancelled = turn_result["cancelled"]
+    sdk_output_parts = turn_result["sdk_output_parts"]
+    final_success = turn_result["final_success"]
+    context_window = turn_result.get("context_window")
+
+    # Write complete.json (run-level — the backend's _watch_complete
+    # finalizes the turn off this file while the babysitter lingers).
+    complete = {
+        "success": final_success,
+        "session_id": discovered_sid,
+        "error": error,
+        "token_usage": total_usage or None,
+        "context_window": context_window,
+        "finished_at": datetime.now().isoformat(),
+        "sdk_output": " ".join(sdk_output_parts).strip() or None,
+    }
+    try:
+        # Atomic: the backend's _watch_complete fires on this file's
+        # APPEARANCE (possibly mid-write under plain write_text) — a torn
+        # read would silently fall back to the per-turn payload.
+        from runs_dir import atomic_write_json as _awj
+        _awj(run_dir / "complete.json", complete)
+    except Exception:
+        logger.exception("failed to write complete.json")
+
+    # Finalize state.json
+    state["complete"] = True
+    state["finished_at"] = complete["finished_at"]
+    if discovered_sid and not state.get("session_id"):
+        state["session_id"] = discovered_sid
+    try:
+        _atomic_write_json(state_path, state)
+    except Exception:
+        logger.exception("failed to finalize state.json")
+
+    # Babysitter linger: complete.json is durable (the backend finalized
+    # the turn off it; new prompts spawn fresh --resume instances), but
+    # the CLI stays connected and alive while detached background work
+    # (run_in_background shells, Monitor watchers) is still running.
+    # The heartbeat keeps refreshing runner_alive throughout so the
+    # backend can tell a live babysitter from a dead orphan.
+    await _linger_for_background_work(run_dir, log)
+
+    try:
+        await client.disconnect()
+    except Exception:
+        logger.exception("client.disconnect() failed")
+
+    # Linger over and CLI closed → stop the heartbeat, THEN remove the
+    # `runner_alive` sentinel. Stopping BEFORE the unlink prevents a final
+    # heartbeat tick from re-creating the file after we delete it. The
+    # sentinel thus outlives the completion artifact the watchdog waits
+    # for, closing the kill-race at the source.
+    _heartbeat_shutdown.set()
+    _heartbeat_task.cancel()
+    try:
+        await _heartbeat_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    try:
+        from runs_dir import runner_alive_path as _rap
+        _rap(run_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    log.info(
+        "runner done success=%s session_id=%s error=%s",
+        final_success, discovered_sid, error,
+    )
+    return 0 if final_success else 1
+
+
+def _fail(run_dir: Path, error: str) -> None:
+    """Write an error complete.json for fatal pre-run failures."""
+    logger.error("runner fatal: %s", error)
+    payload = {
+        "success": False,
+        "session_id": None,
+        "error": error,
+        "token_usage": None,
+        "finished_at": datetime.now().isoformat(),
+    }
+    try:
+        from runs_dir import atomic_write_json as _awj
+        _awj(run_dir / "complete.json", payload)
+    except Exception:
+        logger.exception("failed to write error complete.json")
+
+
+def main(run_dir: Path) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[runner %(process)d] %(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    log = logging.getLogger("runner")
+    log.info("runner starting for run_dir=%s", run_dir)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    try:
+        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        _fail(run_dir, t("runner.failed_read_input", e=str(e)))
+        return 1
+
+    try:
+        return asyncio.run(_run(run_dir, inputs))
+    except Exception as e:
+        logger.exception("runner top-level failure")
+        # Exception path: `_run` raised before reaching its success-path
+        # sentinel cleanup, so `runner_alive` may linger. `_fail` makes
+        # the error complete.json durable first; THEN remove the sentinel
+        # (same ordering invariant as the success path — sentinel removed
+        # only once a complete.json exists). asyncio.run has already
+        # cancelled the heartbeat task at loop teardown, so no tick can
+        # re-create the file here.
+        _fail(run_dir, f"{type(e).__name__}: {e}")
+        try:
+            from runs_dir import runner_alive_path as _rap
+            _rap(run_dir).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-dir", required=True, type=Path)
+    args = parser.parse_args()
+    sys.exit(main(args.run_dir))

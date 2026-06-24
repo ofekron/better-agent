@@ -1,0 +1,149 @@
+"""The public entry point: run one provisioned-session fork.
+
+`run(spec, query, ctx)` resolves config, ensures a clean primed base +
+caller, dispatches one fork carrying only the per-call instructions, and
+returns the extracted reply text plus the spec-parsed value.
+
+`run_sync` is the sync wrapper for out-of-process callers (e.g. the
+requirement-analysis pipeline) — it drives the coroutine on a private loop
+in a worker thread so it works whether or not the caller already has a loop.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
+from queue import SimpleQueue
+from typing import Any
+
+import perf
+from provisioning.config import ProvisionedConfig, resolve_config
+from provisioning.dispatch import dispatch, extract_fork_text
+from provisioning.lifecycle import ensure_caller, ensure_session
+from provisioning.spec import ProvisionedSessionSpec
+
+_LIFECYCLE_LOCKS: dict[tuple[str, str, str, str, str], threading.Lock] = {}
+_LIFECYCLE_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass
+class ProvisionedResult:
+    text: str            # raw fork reply text
+    value: Any           # spec.parse_result(text, ctx)
+    config: ProvisionedConfig
+    base_session_id: str
+    caller_session_id: str
+    dispatch_result: dict
+
+
+async def run(
+    spec: ProvisionedSessionSpec,
+    query: str,
+    ctx: dict | None = None,
+    *,
+    model: str | None = None,
+) -> ProvisionedResult:
+    """Provision-and-fork `query` through `spec`. Raises on dispatch failure
+    (after spec.retries). Parse-level failures are the spec's to express in
+    `value` (e.g. a `{error: ...}` payload)."""
+    ctx = dict(ctx or {})
+    with perf.timed(f"provisioning.{spec.key}.resolve_config"):
+        cfg = resolve_config(spec, model=model)
+    ctx.setdefault("worker_description", cfg.worker_description)
+    with _acquired_lifecycle_lock(spec, cfg):
+        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
+            base_session_id = ensure_session(spec, cfg)
+        with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
+            caller_session_id = ensure_caller(spec, cfg)
+
+    with perf.timed(f"provisioning.{spec.key}.build_prompts"):
+        instructions = spec.build_instructions(query, ctx)
+        provision_prompt = spec.build_provision_prompt(ctx)
+    with perf.timed(f"provisioning.{spec.key}.dispatch"):
+        result = await dispatch(
+            spec, cfg,
+            base_session_id=base_session_id,
+            caller_session_id=caller_session_id,
+            instructions=instructions,
+            provision_prompt=provision_prompt,
+        )
+    if not result.get("success"):
+        raise RuntimeError(
+            str(result.get("error") or f"{spec.key} provisioned dispatch failed")
+        )
+    with perf.timed(f"provisioning.{spec.key}.extract_fork_text"):
+        text = extract_fork_text(result)
+    with perf.timed(f"provisioning.{spec.key}.parse_result"):
+        value = spec.parse_result(text, ctx)
+    return ProvisionedResult(
+        text=text,
+        value=value,
+        config=cfg,
+        base_session_id=base_session_id,
+        caller_session_id=caller_session_id,
+        dispatch_result=result,
+    )
+
+
+def _lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> threading.Lock:
+    key = (spec.key, cfg.cwd, cfg.provider_id, cfg.model, cfg.node_id)
+    with _LIFECYCLE_LOCKS_GUARD:
+        lock = _LIFECYCLE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LIFECYCLE_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _acquired_lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig):
+    lock = _lifecycle_lock(spec, cfg)
+    timeout = max(0.0, float(spec.provision_timeout))
+    acquired = lock.acquire(timeout=timeout)
+    if not acquired:
+        raise TimeoutError(
+            f"{spec.key} provisioned lifecycle lock timed out after {timeout:g}s"
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _sync_timeout_seconds(spec: ProvisionedSessionSpec) -> float:
+    backoff = sum(float(delay) for delay in spec.retry_backoff[: max(0, spec.retry_attempts - 1)])
+    return max(0.0, float(spec.provision_timeout) * max(1, spec.retry_attempts) + backoff + 0.5)
+
+
+def run_sync(
+    spec: ProvisionedSessionSpec,
+    query: str,
+    ctx: dict | None = None,
+    *,
+    model: str | None = None,
+) -> ProvisionedResult:
+    """Sync entry point — runs `run(...)` on a private loop in a worker
+    thread, so callers without an event loop (or already inside one) both work."""
+    results: SimpleQueue[tuple[str, Any]] = SimpleQueue()
+
+    def _target() -> None:
+        try:
+            results.put(("value", asyncio.run(run(spec, query, ctx, model=model))))
+        except BaseException as exc:  # noqa: BLE001 — re-raised on join
+            results.put(("error", exc))
+
+    t = threading.Thread(target=_target, name=f"provisioning-{spec.key}")
+    t.daemon = True
+    t.start()
+    timeout = _sync_timeout_seconds(spec)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not results.empty():
+            kind, value = results.get()
+            if kind == "error":
+                raise value
+            return value
+        t.join(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+    raise TimeoutError(f"{spec.key} provisioned run timed out after {timeout:g}s")

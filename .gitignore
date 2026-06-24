@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Generated local build inputs / test artifacts
+frontend/src/serverCandidates.generated.ts
+frontend/releases/
+marketing/better-agent/downloads/
+frontend/src/styles/*.bak
+*.bc-sync-backup
+test-results/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude local
+.claude/settings.local.json
+.claude/worktrees/
+/.mcp.json
+/$HOME/
+
+# User-prompt mirror + sync-hook state (private; auto-derivable)
+/user_prompts.jsonl
+/.claude/hooks/sync_user_prompts.log
+/.claude/hooks/.sync_user_prompts.state.json
+/.claude/hooks/.sync_user_prompts.state.tmp
+
+# Private Better Agent monorepo; separate nested git repo.
+/better-agent-private/
+# Local Better Agent project state; auto-derived per checkout.
+/.better-claude/
+/.better-agent/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+
+# --- Public release exclusions (managed by sync-public-release.sh) ---
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/CLAUDE.md.bc-sync-backup.sha256
+/GEMINI.md.bc-sync-backup.sha256
+/.venv
+/.agents/
+/.claude/
+/.gemini/
+/.githooks/
+/marketing/
+/skills-lock.json
+/main.py
+/PUBLICATION_CHECKLIST.md
+/PROMPT_remove_persistent_runner.md
+/SPEC_DIVERGENCES.md
+/todo-ios.md

@@ -1,0 +1,461 @@
+"""Global worker registry + per-pair fork mapping.
+
+A "worker" is a Better Agent session that has been registered as
+delegate-able. Multiple Better Agent sessions across projects share this registry.
+The registry holds:
+
+  1. `workers` — which Better Agent sessions are delegate-able, what
+     their orchestration mode is, and which agent_sid the manager forks
+     off. Each record carries the worker session's cwd for filtering and
+     execution. Description is intentionally NOT stored — the Better Agent session's
+     `name` is the source of truth (looked up lazily on read).
+
+  2. `forks` — the per-(caller Better Agent session, target Better Agent session)
+     fork session id. Each delegate fork is now a full Better Agent session (kind
+     `kind="delegate_fork"`) embedded in the target's session tree —
+     `forks[a_agent_session_id][b_agent_session_id].fork_agent_session_id` resolves through
+     `session_manager.get(...)` to a record carrying its own
+     `agent_sid`, `orchestration_mode`, `forked_from_agent_sid`
+     (= target's agent_sid at fork time, used for invalidation), and
+     `parent_line_count_at_fork`. Subsequent delegations from A to B
+     load that Better Agent session, validate the snapshots, and resume its
+     agent_sid; if invalid, the fork Better Agent session is deleted and a
+     fresh one minted.
+
+Storage: one JSON file at ~/.better-claude/workers/global.json with shape:
+
+    {
+        "version": 7,
+        "workers": [
+            {
+                "agent_session_id": str,
+                "cwd": str,
+                "orchestration_mode": "manager" | "native",
+                "agent_sid": str,           # what we fork off
+                "created_at": iso,
+                "last_active": iso,
+                "delegation_count": int,
+                "token_usage": {...},
+            },
+            ...
+        ],
+        "forks": {
+            "<caller_agent_session_id>": {
+                "<worker_agent_session_id>": {
+                    "fork_agent_session_id": str,
+                    "created_at": iso,
+                    "last_used": iso,
+                },
+                ...
+            },
+            ...
+        }
+    }
+
+There is no migration from prior schemas — any file that doesn't match
+the v7 shape is treated as a hard error. Wipe ~/.better-claude/workers/
+manually if you have stale state.
+"""
+
+import json
+import logging
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from json_store import write_json
+from session_manager import manager as _sm
+import perf
+
+logger = logging.getLogger(__name__)
+
+from paths import ba_home
+
+_lock = threading.RLock()
+
+
+def _lock_for(_cwd: str = "") -> threading.Lock:
+    return _lock
+
+
+def _workers_dir() -> Path:
+    return ba_home() / "workers"
+
+
+SCHEMA_VERSION = 7
+
+
+def _now() -> str:
+    return datetime.now().isoformat()
+
+
+def _path() -> Path:
+    return _workers_dir() / "global.json"
+
+
+def _empty() -> dict:
+    return {"version": SCHEMA_VERSION, "workers": [], "forks": {}}
+
+
+def _read(cwd: str = "") -> dict:
+    """Load the global registry. Returns an empty registry on
+    malformed/legacy/missing files (after a loud log) so a single
+    corrupt file doesn't break callers like list_sessions that walk
+    every cwd."""
+    path = _path()
+    if not path.exists():
+        return _empty()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error(
+            "worker_store: failed to read %s (%s) — returning empty registry. "
+            "Delete the file to start fresh.",
+            path, e,
+        )
+        return _empty()
+    if not isinstance(raw, dict):
+        logger.error(
+            "worker_store: unexpected shape at %s (got %r) — returning "
+            "empty registry. Delete the file to start fresh.",
+            path, type(raw).__name__,
+        )
+        return _empty()
+
+    if raw.get("version") != SCHEMA_VERSION:
+        logger.error(
+            "worker_store: unexpected version at %s (expected %s, got %r) "
+            "— returning empty registry. Delete the file to start fresh.",
+            path, SCHEMA_VERSION, raw.get("version"),
+        )
+        return _empty()
+    raw.setdefault("workers", [])
+    raw.setdefault("forks", {})
+    return raw
+
+
+def _write(_cwd: str, registry: dict) -> None:
+    write_json(_path(), registry)
+    # Worker mutations contribute to session-summary `worker_count`, so
+    # the summary index MUST refresh from the global roster.
+    from session_store import _refresh_all_worker_summaries
+    _refresh_all_worker_summaries()
+
+
+# ============================================================================
+# Worker records
+# ============================================================================
+
+def list_workers(cwd: str) -> list[dict]:
+    """Worker records, sorted by last_active desc.
+
+    Returns the raw on-disk records — does NOT inject Better Agent session names
+    (callers that need names should resolve via session_store).
+    """
+    with _lock_for():
+        workers = list(_read().get("workers", []))
+    if cwd:
+        workers = [w for w in workers if w.get("cwd") == cwd]
+    workers.sort(key=lambda w: w.get("last_active", ""), reverse=True)
+    return workers
+
+
+def get_worker(cwd: str, agent_session_id: str) -> Optional[dict]:
+    with _lock_for():
+        for w in _read().get("workers", []):
+            if w.get("agent_session_id") == agent_session_id:
+                return w
+    return None
+
+
+def list_worker_projection(cwd: str, limit: int = 20) -> list[dict]:
+    """Compact projection for `<known_workers>` prompt injection.
+
+    Resolves each worker's `description` from the Better Agent session's `name`
+    A worker whose Better Agent session was deleted out from under us is skipped
+    so the manager doesn't see references to dead sessions.
+    """
+    out: list[dict] = []
+    for w in list_workers(""):
+        agent_session_id = w.get("agent_session_id")
+        if not agent_session_id:
+            continue
+        bc = _sm.get(agent_session_id)
+        if not bc:
+            continue
+        out.append({
+            "agent_session_id": agent_session_id,
+            "registry_cwd": w.get("cwd") or bc.get("cwd") or cwd,
+            "cwd": w.get("cwd") or bc.get("cwd") or "",
+            "description": bc.get("name") or "(untitled)",
+            "orchestration_mode": w.get("orchestration_mode"),
+            "node_id": w.get("node_id") or "primary",
+            "last_active": w.get("last_active", ""),
+            "delegation_count": w.get("delegation_count", 0),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+@perf.timed_fn("store.worker.upsert")
+def upsert_worker(
+    cwd: str,
+    agent_session_id: str,
+    orchestration_mode: str,
+    agent_sid: Optional[str],
+    node_id: str = "primary",
+) -> dict:
+    if orchestration_mode == "manager":
+        orchestration_mode = "team"
+    if orchestration_mode not in ("team", "native"):
+        raise ValueError(f"invalid orchestration_mode: {orchestration_mode!r}")
+    if not agent_session_id:
+        raise ValueError("agent_session_id is required")
+
+    with _lock_for():
+        registry = _read()
+        now = _now()
+        for w in registry["workers"]:
+            if w.get("agent_session_id") == agent_session_id:
+                w["cwd"] = cwd
+                w["orchestration_mode"] = orchestration_mode
+                w["agent_sid"] = agent_sid
+                w["node_id"] = node_id
+                _write(cwd, registry)
+                return w
+        record = {
+            "agent_session_id": agent_session_id,
+            "cwd": cwd,
+            "orchestration_mode": orchestration_mode,
+            "agent_sid": agent_sid,
+            "node_id": node_id,
+            "created_at": now,
+            "last_active": now,
+            "delegation_count": 0,
+            "token_usage": {},
+        }
+        registry["workers"].append(record)
+        _write(cwd, registry)
+        return record
+
+
+@perf.timed_fn("store.worker.touch")
+def touch_worker(
+    cwd: str,
+    agent_session_id: str,
+    token_usage: Optional[dict] = None,
+) -> Optional[dict]:
+    with _lock_for():
+        registry = _read()
+        for w in registry["workers"]:
+            if w.get("agent_session_id") == agent_session_id:
+                w["last_active"] = _now()
+                w["delegation_count"] = int(w.get("delegation_count", 0)) + 1
+                if token_usage:
+                    prev = w.get("token_usage") or {}
+                    merged = dict(prev)
+                    for k, v in token_usage.items():
+                        if isinstance(v, (int, float)):
+                            merged[k] = int(prev.get(k, 0)) + int(v)
+                    w["token_usage"] = merged
+                _write(cwd, registry)
+                return w
+        return None
+
+
+def remove_worker(cwd: str, agent_session_id: str) -> bool:
+    with _lock_for():
+        registry = _read()
+        before = len(registry["workers"])
+        registry["workers"] = [
+            w for w in registry["workers"] if w.get("agent_session_id") != agent_session_id
+        ]
+        if len(registry["workers"]) == before:
+            return False
+        forks = registry.get("forks") or {}
+        for caller_sid, by_worker in list(forks.items()):
+            by_worker.pop(agent_session_id, None)
+            if not by_worker:
+                forks.pop(caller_sid, None)
+        registry["forks"] = forks
+        _write(cwd, registry)
+        return True
+
+
+def remove_worker_everywhere(agent_session_id: str) -> int:
+    """Drop `agent_session_id` from the global registry.
+
+    Used when a Better Agent session is deleted by the user. Also clears any
+    forks pointing at it (as caller OR as worker). Returns count of
+    records touched.
+    """
+    with _lock_for():
+        raw = _read()
+        changed = False
+        before = len(raw.get("workers", []))
+        raw["workers"] = [
+            w for w in raw.get("workers", [])
+            if w.get("agent_session_id") != agent_session_id
+        ]
+        if len(raw["workers"]) != before:
+            changed = True
+        forks = raw.get("forks") or {}
+        if agent_session_id in forks:
+            forks.pop(agent_session_id, None)
+            changed = True
+        for caller_sid, by_worker in list(forks.items()):
+            if agent_session_id in by_worker:
+                by_worker.pop(agent_session_id, None)
+                changed = True
+                if not by_worker:
+                    forks.pop(caller_sid, None)
+        raw["forks"] = forks
+        if changed:
+            _write("", raw)
+            return 1
+    return 0
+
+
+# ============================================================================
+# Per-pair fork mapping
+# ============================================================================
+
+def get_fork_record(
+    cwd: str,
+    caller_agent_session_id: str,
+    worker_agent_session_id: str,
+) -> Optional[dict]:
+    with _lock_for():
+        rec = (
+            _read()
+            .get("forks", {})
+            .get(caller_agent_session_id, {})
+            .get(worker_agent_session_id)
+        )
+        return rec if isinstance(rec, dict) else None
+
+
+def get_fork(
+    cwd: str,
+    caller_agent_session_id: str,
+    worker_agent_session_id: str,
+) -> Optional[str]:
+    """Return just the fork_agent_session_id for this pair (convenience)."""
+    rec = get_fork_record(cwd, caller_agent_session_id, worker_agent_session_id)
+    return rec.get("fork_agent_session_id") if rec else None
+
+
+def set_fork(
+    cwd: str,
+    caller_agent_session_id: str,
+    worker_agent_session_id: str,
+    fork_agent_session_id: str,
+) -> None:
+    if not (caller_agent_session_id and worker_agent_session_id and fork_agent_session_id):
+        raise ValueError("set_fork: caller/worker/fork_bc ids all required")
+    with _lock_for():
+        registry = _read()
+        forks = registry.setdefault("forks", {})
+        by_worker = forks.setdefault(caller_agent_session_id, {})
+        now = _now()
+        by_worker[worker_agent_session_id] = {
+            "fork_agent_session_id": fork_agent_session_id,
+            "created_at": now,
+            "last_used": now,
+        }
+        _write(cwd, registry)
+
+
+def touch_fork(
+    cwd: str,
+    caller_agent_session_id: str,
+    worker_agent_session_id: str,
+) -> None:
+    with _lock_for():
+        registry = _read()
+        rec = (
+            registry.get("forks", {})
+            .get(caller_agent_session_id, {})
+            .get(worker_agent_session_id)
+        )
+        if isinstance(rec, dict):
+            rec["last_used"] = _now()
+            _write(cwd, registry)
+
+
+def clear_fork(
+    cwd: str,
+    caller_agent_session_id: str,
+    worker_agent_session_id: str,
+) -> bool:
+    with _lock_for():
+        registry = _read()
+        forks = registry.get("forks") or {}
+        by_worker = forks.get(caller_agent_session_id)
+        if not by_worker or worker_agent_session_id not in by_worker:
+            return False
+        by_worker.pop(worker_agent_session_id, None)
+        if not by_worker:
+            forks.pop(caller_agent_session_id, None)
+        registry["forks"] = forks
+        _write(cwd, registry)
+        return True
+
+
+def clear_forks_for_worker_everywhere(worker_agent_session_id: str) -> list[str]:
+    """Drop every fork pointing at `worker_agent_session_id`.
+
+    Used when the worker Better Agent session is rewound (its agent_sid lineage
+    moves under the fork) or deleted. Returns the list of cleared
+    `fork_agent_session_id`s — the caller is responsible for deleting
+    those Better Agent sessions via session_manager.delete (kept here as
+    storage-only to avoid a circular import with session_manager).
+    """
+    cleared: list[str] = []
+    with _lock_for():
+        raw = _read()
+        forks = raw.get("forks") or {}
+        changed = False
+        for caller_sid, by_worker in list(forks.items()):
+            if worker_agent_session_id in by_worker:
+                rec = by_worker.pop(worker_agent_session_id, None)
+                if isinstance(rec, dict):
+                    fbsid = rec.get("fork_agent_session_id")
+                    if fbsid:
+                        cleared.append(fbsid)
+                changed = True
+                if not by_worker:
+                    forks.pop(caller_sid, None)
+        if changed:
+            raw["forks"] = forks
+            _write("", raw)
+    if cleared:
+        from session_store import _refresh_all_worker_summaries
+        _refresh_all_worker_summaries()
+    return cleared
+
+
+def clear_forks_for_caller_everywhere(caller_agent_session_id: str) -> list[str]:
+    """Drop every fork made by `caller_agent_session_id`. Used when the
+    caller Better Agent session is deleted. Returns the list of cleared
+    `fork_agent_session_id`s — the caller deletes those Better Agent sessions."""
+    cleared: list[str] = []
+    with _lock_for():
+        raw = _read()
+        forks = raw.get("forks") or {}
+        by_worker = forks.get(caller_agent_session_id)
+        if by_worker:
+            for rec in by_worker.values():
+                if isinstance(rec, dict):
+                    fbsid = rec.get("fork_agent_session_id")
+                    if fbsid:
+                        cleared.append(fbsid)
+            forks.pop(caller_agent_session_id, None)
+            raw["forks"] = forks
+            _write("", raw)
+    if cleared:
+        from session_store import _refresh_all_worker_summaries
+        _refresh_all_worker_summaries()
+    return cleared

@@ -1,0 +1,126 @@
+Better Agent Source-Available Non-Commercial License
+
+Version 1.0
+
+Copyright (c) 2026 Ofek Ron. All rights reserved.
+
+This license grants limited rights to use, copy, modify, and distribute the
+Better Agent source code for non-commercial purposes only, subject to the terms
+below. Any rights not expressly granted are reserved by Ofek Ron.
+
+1. Definitions
+
+"Better Agent" means the software, source code, documentation, and related
+materials in this repository.
+
+"Licensor" means Ofek Ron.
+
+"You" means any individual or legal entity exercising rights under this license.
+
+"Non-Commercial Use" means use that is not primarily intended for, directed
+toward, or resulting in commercial advantage, monetary compensation, paid
+services, revenue generation, or business operations.
+
+"Commercial Use" includes selling, licensing, sublicensing, hosting, offering,
+monetizing, or operating Better Agent or a derivative work as part of a paid
+product, paid service, commercial internal tool, consulting deliverable,
+software-as-a-service, marketplace, app store, extension store, plugin store,
+or other commercial offering.
+
+"Marketplace" means any service, product, registry, store, catalog,
+distribution channel, subscription service, entitlement service, or signature
+service for Better Agent extensions, plugins, skills, apps, integrations,
+packages, or other add-ons.
+
+2. Non-Commercial Grant
+
+Subject to this license, You may use, copy, modify, and distribute Better Agent
+for Non-Commercial Use only.
+
+You may publish non-commercial forks, submit changes upstream, and use Better
+Agent for personal, educational, research, evaluation, and hobby purposes.
+
+3. Commercial Rights Reserved
+
+Commercial Use is not permitted without prior written permission from Licensor.
+
+Without limiting the above, You may not, without prior written permission from
+Licensor:
+
+a. sell, rent, lease, sublicense, or otherwise monetize Better Agent or a
+   derivative work;
+b. provide hosted access to Better Agent or a derivative work as a paid or
+   revenue-generating service;
+c. use Better Agent or a derivative work to provide paid services, consulting,
+   managed services, or business operations;
+d. distribute Better Agent or a derivative work through a paid app store,
+   marketplace, package marketplace, or commercial distribution channel;
+e. operate, promote, or monetize a Marketplace for Better Agent or compatible
+   extensions, plugins, skills, apps, integrations, packages, or add-ons; or
+f. issue, sell, verify, or represent official Better Agent marketplace
+   signatures, subscriptions, entitlements, product IDs, or commercial
+   extension credentials.
+
+Licensor reserves the exclusive right to operate, authorize, license, or
+commercialize any official or commercial Marketplace for Better Agent.
+
+4. Marketplace and Compatibility Claims
+
+You may not state or imply that any Marketplace, extension, plugin, skill, app,
+integration, package, add-on, subscription, entitlement, or signature service is
+official, approved, endorsed, verified, or commercially authorized by Licensor
+unless Licensor gives prior written permission.
+
+You may not use Better Agent marketplace keys, signatures, entitlement systems,
+product IDs, service names, marks, or branding except as expressly permitted in
+writing by Licensor.
+
+5. Trademarks
+
+This license does not grant rights to use the names "Better Agent", "ofekdev",
+or any related names, logos, marks, or branding except as necessary to describe
+an unmodified copy of Better Agent or to make truthful nominative references.
+
+6. Notices
+
+You must preserve this license and all copyright, license, and attribution
+notices in copies or substantial portions of Better Agent.
+
+Modified versions must clearly indicate that they have been modified and must
+not be represented as the official Better Agent project unless Licensor gives
+prior written permission.
+
+7. Third-Party Components
+
+Third-party dependencies and components included with or used by Better Agent
+remain subject to their own licenses. This license does not change those
+third-party license terms.
+
+8. No Warranty
+
+BETTER AGENT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL
+LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+WITH BETTER AGENT OR THE USE OF OR OTHER DEALINGS IN BETTER AGENT.
+
+Better Agent can execute commands, access files, persist session data, interact
+with extensions, route work to worker nodes, and affect real development
+environments. You are solely responsible for how You install, configure, expose,
+modify, distribute, and use Better Agent, including reviewing tool calls,
+protecting credentials, backing up data, securing network access, and validating
+agent output before relying on it.
+
+9. Termination
+
+Your rights under this license terminate automatically if You violate this
+license. Upon termination, You must stop using, copying, modifying,
+distributing, hosting, or otherwise exploiting Better Agent and derivative
+works.
+
+10. Commercial Licensing
+
+For commercial use, marketplace rights, commercial distribution, hosted
+offerings, paid services, or any use not clearly permitted by this license,
+contact Ofek Ron for a separate written license.

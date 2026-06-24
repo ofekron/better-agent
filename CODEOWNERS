@@ -1,0 +1,31 @@
+# Security-sensitive ownership. Update before public visibility if maintainers change.
+
+/backend/auth.py @ofekron
+/backend/auth_routes.py @ofekron
+/backend/auth_secrets.py @ofekron
+/backend/browser_trust.py @ofekron
+/backend/config_store.py @ofekron
+/backend/credential_broker/ @ofekron
+/backend/extension_api.py @ofekron
+/backend/extension_backend_host.py @ofekron
+/backend/extension_backend_loader.py @ofekron
+/backend/extension_store.py @ofekron
+/backend/file_browser.py @ofekron
+/backend/main.py @ofekron
+/backend/marketplace_*.py @ofekron
+/backend/node_*.py @ofekron
+/backend/orchestrator.py @ofekron
+/backend/orchs/ @ofekron
+/backend/provider*.py @ofekron
+/backend/runner.py @ofekron
+/backend/paths.py @ofekron
+/desktop/ @ofekron
+/extensions/ @ofekron
+/run.sh @ofekron
+/run_node.sh @ofekron
+/SECURITY.md @ofekron
+/LICENSE @ofekron
+/TRADEMARKS @ofekron
+/NOTICE @ofekron
+/.gitlab-ci.yml @ofekron
+

@@ -1,0 +1,58 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.session-bridge",
+  "name": "Session Bridge",
+  "version": "0.1.0",
+  "description": "User-facing cross-session operations: search sessions, delegate a prompt to its own session, propose sessions, and recall prior transcript.",
+  "surfaces": [
+    "backend_feature",
+    "runtime_mcp",
+    "frontend_feature"
+  ],
+  "entrypoints": {
+    "backend": "backend/routes.py",
+    "mcp": [
+      {
+        "name": "better-agent-session-bridge",
+        "python": "mcp/server.py",
+        "args": [],
+        "env": {},
+        "user_facing": true,
+        "bare_allowed": false,
+        "requires_backend_auth": true,
+        "predicate": {
+          "equals": {
+            "mode": "native"
+          },
+          "not_equals": {
+            "app_session_id": "ask-singleton",
+            "working_mode": "search_worker"
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {
+    "backend_routes": true,
+    "session_state": true,
+    "internal_loopback": true
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "backend/routes.py",
+        "better-agent-extension.json",
+        "mcp/server.py"
+      ],
+      "python_modules": [
+        "mcp.server"
+      ]
+    }
+  }
+}

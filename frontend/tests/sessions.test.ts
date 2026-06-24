@@ -1,0 +1,698 @@
+import { describe, it, expect } from "vitest";
+import { fireEvent } from "@testing-library/react";
+import { renderApp } from "./harness";
+import { makeSession, makeUserMsg } from "./fixtures";
+
+async function waitForSend(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  prompt: string,
+) {
+  for (let i = 0; i < 10; i++) {
+    const sent = h.outbound.find(
+      (frame) => frame.type === "send_message" && frame.prompt === prompt,
+    );
+    if (sent) return sent;
+    await h.flush();
+  }
+  return undefined;
+}
+
+async function waitForSelector(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  selector: string,
+) {
+  for (let i = 0; i < 10; i++) {
+    const el = h.$(selector);
+    if (el) return el;
+    await h.flush();
+  }
+  return null;
+}
+
+async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
+  await h.clickByText(/^(\+ New|session\.newButton)$/);
+}
+
+describe("sessions CRUD + subscribe lifecycle", () => {
+  it("clicking '+ New' creates a session via REST and selects it", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    const post = h.restCalls.find(
+      (c) => c.method === "POST" && c.path === "/api/sessions",
+    );
+    expect(post).toBeDefined();
+    const view = h.toJSON();
+    expect(view.sidebar.sessions).toHaveLength(1);
+    expect(view.sidebar.sessions[0].active).toBe(true);
+    h.unmount();
+  });
+
+  it("selects a new session through route sync instead of createSession side effects", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    const detailGetIndex = h.restCalls.findIndex(
+      (c) => c.method === "GET" && c.path === "/api/sessions/sess-1",
+    );
+    const subscribeIndex = h.outbound.findIndex(
+      (frame) =>
+        frame.type === "subscribe" &&
+        frame.app_session_id === "sess-1",
+    );
+
+    expect(window.location.pathname).toBe("/s/sess-1");
+    expect(detailGetIndex).toBeGreaterThan(-1);
+    expect(subscribeIndex).toBeGreaterThan(-1);
+    expect(h.toJSON().sidebar.sessions[0].active).toBe(true);
+    h.unmount();
+  });
+
+  it("keeps a newly created session open when active filters exclude it from the sidebar", async () => {
+    const existing = makeSession({
+      id: "existing",
+      name: "Existing match",
+      cwd: "/tmp/project",
+    });
+    const h = await renderApp({
+      seed: {
+        sessions: [existing],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+
+    const search = h.$(".session-search input") as HTMLInputElement;
+    expect(search).not.toBeNull();
+    fireEvent.change(search, { target: { value: "Existing" } });
+    await h.flush();
+
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    expect(window.location.pathname).toBe("/s/sess-2");
+    expect(h.restCalls).toContainEqual(
+      expect.objectContaining({ method: "GET", path: "/api/sessions/sess-2" }),
+    );
+    expect(h.toJSON().chat.title).toContain("New Session");
+    expect(h.toJSON().sidebar.sessions.map((session) => session.id)).toEqual(["existing"]);
+    h.unmount();
+  });
+
+  it("applies an auto-title rename to a freshly created open session", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    h.emit({
+      type: "session_renamed",
+      data: { session_id: "sess-1", name: "AI titled session" },
+    });
+    await h.flush();
+
+    expect(h.toJSON().sidebar.sessions[0].name).toContain("AI titled session");
+    expect(h.toJSON().chat.title).toContain("AI titled session");
+    h.unmount();
+  });
+
+  it("creates a session through REST when WebSocket is disconnected but HTTP is online", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.dropConnection();
+    await h.flush();
+
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(1);
+    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    h.unmount();
+  });
+
+  it("queues a new session with its prompt offline, then creates and sends it on reconnect", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.dropConnection();
+    h.backend.setOffline(true);
+    await h.flush();
+    await clickNewSession(h);
+
+    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    expect(prompt).not.toBeNull();
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "remember to implement offline sessions");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.flush();
+    await h.click(".modal-footer .btn-primary");
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(1);
+    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
+    expect(h.toJSON().chat.messages).toContainEqual(
+      expect.objectContaining({ status: "offline" }),
+    );
+    expect(h.toJSON().chat.messages[0].text).toContain(
+      "remember to implement offline sessions",
+    );
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    await h.flush();
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(2);
+    expect(h.outbound).toContainEqual(
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "remember to implement offline sessions",
+      }),
+    );
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+
+    const sent = h.outbound.find(
+      (frame) =>
+        frame.type === "send_message" &&
+        frame.prompt === "remember to implement offline sessions",
+    );
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: sent!.app_session_id,
+        user_message: makeUserMsg({
+          content: "remember to implement offline sessions",
+          client_id: sent!.client_id as string,
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    h.unmount();
+  });
+
+  it("pressing Enter in the new-session initial prompt creates and sends", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+
+    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "create and send from enter");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    prompt.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    await h.flush();
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(1);
+    expect(
+      h.restCalls.find((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toEqual(expect.objectContaining({
+      credentials: "include",
+      body: expect.objectContaining({ cwd: "/tmp/project" }),
+    }));
+    expect(await waitForSend(h, "create and send from enter")).toEqual(
+      expect.objectContaining({ type: "send_message" }),
+    );
+    h.unmount();
+  });
+
+  it("sends new-session initial prompt attachments with the first message", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+
+    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "read this attachment");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const input = h.$('[data-testid="new-session-attachment-input"]') as HTMLInputElement;
+    const file = new File(["hello"], "note.txt", { type: "text/plain" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(await waitForSelector(h, ".file-preview-item")).not.toBeNull();
+
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    expect(await waitForSend(h, "read this attachment")).toEqual(
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "read this attachment",
+        files: [expect.objectContaining({
+          name: "note.txt",
+          data: "aGVsbG8=",
+          media_type: "text/plain",
+        })],
+      }),
+    );
+    h.unmount();
+  });
+
+  it("renders selected file attachment on the optimistic user bubble", async () => {
+    const session = makeSession({ id: "s-attach", messages: [] });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    const prompt = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "read the attached file");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const inputs = h.$$('input[type="file"]') as HTMLInputElement[];
+    const fileInput = inputs.find((input) => !input.getAttribute("accept"))!;
+    const file = new File(["hello"], "local-note.txt", { type: "text/plain" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    expect(await waitForSelector(h, ".file-preview-item")).not.toBeNull();
+
+    await h.click('[data-testid="send-btn"]');
+
+    expect(h.$('[data-testid="user-message"] .message-file-name')?.textContent).toBe("local-note.txt");
+    expect(h.$('[data-testid="user-message"] .message-file-size')?.textContent).toBe("5 B");
+    h.unmount();
+  });
+
+  it("queues a new session when REST fails before the WebSocket reports offline", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+
+    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "queue during disconnect race");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.flush();
+
+    h.backend.setOffline(true);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
+    expect(h.toJSON().chat.messages).toContainEqual(
+      expect.objectContaining({
+        status: "sending",
+        text: expect.stringContaining("queue during disconnect race"),
+      }),
+    );
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+    h.unmount();
+  });
+
+  it("creates an empty session offline, then queues a prompt in it before sync", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.dropConnection();
+    h.backend.setOffline(true);
+    await h.flush();
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+      expect.objectContaining({ type: "create_session", prompt: "" }),
+    ]);
+
+    await h.typeAndSend("prompt after empty offline session");
+    expect(
+      h.outbound.filter((frame) => frame.type === "send_message"),
+    ).toHaveLength(0);
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+      expect.objectContaining({ type: "create_session", prompt: "" }),
+      expect.objectContaining({
+        prompt: "prompt after empty offline session",
+        sendMode: "queue",
+      }),
+    ]);
+
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    await h.flush();
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(2);
+    expect(h.outbound).toContainEqual(
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "prompt after empty offline session",
+      }),
+    );
+    h.unmount();
+  });
+
+  it("queues a new session when create returns a retryable backend failure", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.backend.failNextWithStatus(503, "/api/sessions", true);
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+      expect.objectContaining({ type: "create_session" }),
+    ]);
+    h.unmount();
+  });
+
+  it("creates from the modal with default cwd before projects load", async () => {
+    const session = makeSession({ id: "s1", cwd: "/tmp/cached-project" });
+    localStorage.setItem("better-agent-selected-project", "/tmp/cached-project");
+    const h = await renderApp({ seed: { sessions: [session], projects: [] } });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(
+      h.restCalls.find((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toEqual(expect.objectContaining({
+      body: expect.objectContaining({ cwd: "/tmp/cached-project" }),
+    }));
+    h.unmount();
+  });
+
+  it("removes a durable queued prompt when the ack arrives through replay", async () => {
+    const session = makeSession({
+      id: "s1",
+      messages: [
+        makeUserMsg({
+          content: "replayed durable prompt",
+          client_id: "offline-client-1",
+        }),
+      ],
+    });
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([{
+      sessionId: "s1",
+      clientId: "offline-client-1",
+      prompt: "replayed durable prompt",
+      model: session.model,
+      cwd: session.cwd,
+      sendMode: "interrupt",
+    }]));
+
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+    await h.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    h.unmount();
+  });
+
+  it("persists an online prompt locally until backend acknowledgement", async () => {
+    const session = makeSession({ id: "s1" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+    await h.typeAndSend("durable before ack");
+
+    const queue = JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]");
+    expect(queue).toEqual([
+      expect.objectContaining({
+        sessionId: "s1",
+        prompt: "durable before ack",
+        sendMode: "queue",
+      }),
+    ]);
+    expect(
+      h.outbound.filter(
+        (frame) => frame.type === "send_message" && frame.prompt === "durable before ack",
+      ),
+    ).toHaveLength(1);
+
+    const sent = h.outbound.find(
+      (frame) => frame.type === "send_message" && frame.prompt === "durable before ack",
+    );
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: "s1",
+        user_message: makeUserMsg({
+          content: "durable before ack",
+          client_id: sent!.client_id as string,
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    h.unmount();
+  });
+
+  it("removes a durable prompt when the backend accepts it into the queue", async () => {
+    const session = makeSession({ id: "s1" });
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([{
+      sessionId: "s1",
+      clientId: "queued-client-1",
+      prompt: "accepted into queue",
+      model: session.model,
+      cwd: session.cwd,
+      sendMode: "queue",
+    }]));
+
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+    h.emit({
+      type: "user_message_queued",
+      data: {
+        app_session_id: "s1",
+        lifecycle_msg_id: "life-queued-client-1",
+        client_id: "queued-client-1",
+        kind: "queued_behind",
+      },
+    });
+    await h.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    h.unmount();
+  });
+
+  it("clicking the row's × deletes the session and removes it from the sidebar", async () => {
+    const a = makeSession({ id: "a" });
+    const b = makeSession({ id: "b", name: "session b" });
+    const h = await renderApp({ seed: { sessions: [a, b] } });
+    await h.deleteSession("a");
+
+    expect(
+      h.restCalls.find((c) => c.method === "DELETE" && c.path === "/api/sessions/a"),
+    ).toBeDefined();
+    expect(h.toJSON().sidebar.sessions.map((s) => s.id)).toEqual(["b"]);
+    h.unmount();
+  });
+
+  it("inline rename PUTs /api/sessions/:id/rename and updates the sidebar", async () => {
+    const session = makeSession({ name: "old name" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.renameSession(session.id, "shiny new name");
+
+    expect(
+      h.restCalls.find(
+        (c) => c.method === "PUT" && c.path === `/api/sessions/${session.id}/rename`,
+      ),
+    ).toBeDefined();
+    expect(h.toJSON().sidebar.sessions[0].name).toContain("shiny new name");
+    h.unmount();
+  });
+
+  it("Fork button POSTs /fork_and_send with the typed prompt once a claude_sid exists", async () => {
+    const session = makeSession({
+      id: "parent",
+      manager_claude_session_id: "claude-sid-1",
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    // Type a prompt — Fork is gated on draft.trim() being non-empty.
+    const ta = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    // Set the value via React's input event so the controlled draft updates.
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(ta, "explore alternative");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.flush();
+    await h.clickByText(/^Fork$/);
+
+    expect(
+      h.restCalls.find(
+        (c) => c.method === "POST" && c.path === `/api/sessions/parent/fork_and_send`,
+      ),
+    ).toBeDefined();
+    h.unmount();
+  });
+
+  it("Fork button is disabled before any turn (no claude_sid)", async () => {
+    const session = makeSession({ manager_claude_session_id: null });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    const fork = Array.from(h.$$("button")).find((b) => b.textContent === "Fork");
+    expect(fork).toBeDefined();
+    // Disabled by canFork=false (claude_sid missing) regardless of draft.
+    expect((fork as HTMLButtonElement).disabled).toBe(true);
+    h.unmount();
+  });
+
+  it("subscribing on session select sends a subscribe frame", async () => {
+    const session = makeSession();
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    expect(h.outbound).toContainEqual(
+      expect.objectContaining({ type: "subscribe", app_session_id: session.id }),
+    );
+    h.unmount();
+  });
+
+  it("switching sessions sends unsubscribe(prev) + subscribe(next)", async () => {
+    const a = makeSession({ id: "a", name: "A" });
+    const b = makeSession({ id: "b", name: "B" });
+    const h = await renderApp({ seed: { sessions: [a, b] } });
+
+    await h.selectSession("a");
+    await h.selectSession("b");
+
+    const types = h.outbound.map((f) => `${f.type}:${f.app_session_id ?? ""}`);
+    // unsubscribe for "a" must precede subscribe for "b"
+    const idxUnsubA = types.indexOf("unsubscribe:a");
+    const idxSubB = types.indexOf("subscribe:b");
+    expect(idxUnsubA).toBeGreaterThanOrEqual(0);
+    expect(idxSubB).toBeGreaterThan(idxUnsubA);
+    h.unmount();
+  });
+
+  it("session switch clears optimistic pendingMessages from the chat view", async () => {
+    const a = makeSession({ id: "a" });
+    const b = makeSession({ id: "b", name: "B" });
+    const h = await renderApp({ seed: { sessions: [a, b] } });
+    await h.selectSession("a");
+    await h.typeAndSend("queued on A");
+
+    // The pending bubble is on screen for A.
+    expect(
+      h.toJSON().chat.messages.some((m) => m.status === "sending"),
+    ).toBe(true);
+
+    await h.selectSession("b");
+    // Switching away clears pending.
+    expect(h.toJSON().chat.messages.some((m) => m.status === "sending")).toBe(false);
+    h.unmount();
+  });
+});

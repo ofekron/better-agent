@@ -1,0 +1,786 @@
+import type {
+  CredentialConsent,
+  PendingApproval,
+  Project,
+  Provider,
+  Session,
+  Trace,
+  WorkerInfo,
+} from "../../src/types";
+import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
+
+export interface BackendState {
+  sessions: Session[];
+  projects: Project[];
+  workers: WorkerInfo[];
+  approvals: PendingApproval[];
+  credentials: CredentialConsent[];
+  traces: Record<string, Trace>;
+  models: { id: string; name: string }[];
+  providers: Provider[];
+  default_provider_id: string | null;
+  config: Record<string, unknown>;
+  capabilitySources: unknown[];
+  projectSuggestion: ProjectSuggestion | null;
+  /** Mocked file content keyed by absolute path. FileEditor polls
+   * GET /api/file?path=... while the prompt-engineering overlay is up;
+   * tests can pre-seed paths or watch them get fetched. */
+  files: Record<string, string>;
+}
+
+export interface RestCall {
+  method: string;
+  path: string;
+  query: Record<string, string>;
+  body: unknown;
+  credentials?: RequestCredentials;
+}
+
+const ORIGIN = "http://localhost:8000";
+
+function splitFilter(value: string | undefined): Set<string> {
+  if (!value) return new Set();
+  return new Set(value.split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+function sessionMatchesListQuery(s: Session, query: Record<string, string>): boolean {
+  if (query.show_archived !== "true" && s.archived) return false;
+  if (query.project_path && s.cwd !== query.project_path) return false;
+  if (query.folder_id && (s.folder_id ?? "") !== query.folder_id) return false;
+  const tagIds = splitFilter(query.tag_ids);
+  if (tagIds.size > 0) {
+    const have = new Set([
+      ...(s.session_tags ?? []).map((tag) => tag.id),
+      ...(s.requirement_tags ?? []).map((tag) => `req:${tag.kind}:${tag.id}`),
+    ]);
+    for (const id of tagIds) {
+      if (!have.has(id)) return false;
+    }
+  }
+  const providerIds = splitFilter(query.provider_ids);
+  if (providerIds.size > 0 && !providerIds.has(s.provider_id ?? "")) return false;
+  const modelIds = splitFilter(query.model_ids);
+  if (modelIds.size > 0 && !modelIds.has(s.model ?? "")) return false;
+  const modes = splitFilter(query.modes);
+  if (modes.size > 0 && !modes.has(s.orchestration_mode ?? "team")) return false;
+  if (query.file_edit_mode === "true" && s.working_mode !== "file_editing") return false;
+  if (query.file_edit_mode === "false" && s.working_mode === "file_editing") return false;
+  const search = (query.search ?? "").trim().toLowerCase();
+  if (search) {
+    const fields = [s.name, s.cwd, s.model, s.provider_id, s.orchestration_mode];
+    if (!fields.some((field) => field?.toLowerCase().includes(search))) return false;
+  }
+  return true;
+}
+
+function emptyState(): BackendState {
+  return {
+    sessions: [],
+    projects: [],
+    workers: [],
+    approvals: [],
+    credentials: [],
+    traces: {},
+    models: [
+      { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+      { id: "claude-opus-4-7", name: "Opus 4.7" },
+      { id: "claude-opus-4-8", name: "Opus 4.8" },
+      { id: "claude-fable-5", name: "Fable 5" },
+    ],
+    providers: [{
+      id: "codex",
+      name: "Codex",
+      kind: "codex",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      custom_models: [],
+      default_model: "claude-sonnet-4-6",
+      reasoning_effort_options: [],
+      default_reasoning_effort: "",
+      has_api_key: true,
+      supports_fork: true,
+      supports_manager_mode: true,
+      supports_rewind: true,
+      supports_steering: true,
+      supports_native_subagents: false,
+      supports_reasoning_effort: false,
+    }],
+    default_provider_id: "codex",
+    config: { default_model: "claude-sonnet-4-6" },
+    capabilitySources: [],
+    projectSuggestion: null,
+    files: {},
+  };
+}
+
+export class MockBackend {
+  state: BackendState = emptyState();
+  calls: RestCall[] = [];
+  lastRefreshRequestId: string | null = null;
+  restartPostFailure: "before-accept" | "after-accept" | null = null;
+  offline = false;
+  transientStatus: number | null = null;
+  transientStatusPath: string | null = null;
+  transientOfflineAfter = false;
+  /** Backend-side draft_input_seq per session id. Mirrors the real
+   * backend's stale-PATCH guard. Lives outside the Session type
+   * because the frontend never reads the seq. */
+  draftSeqs: Map<string, number> = new Map();
+  private originalFetch: typeof fetch | undefined;
+
+  seed(partial: Partial<BackendState>): void {
+    this.state = { ...this.state, ...partial };
+  }
+
+  reset(): void {
+    this.state = emptyState();
+    this.calls = [];
+    this.lastRefreshRequestId = null;
+    this.restartPostFailure = null;
+    this.draftSeqs = new Map();
+    this.offline = false;
+    this.transientStatus = null;
+    this.transientStatusPath = null;
+    this.transientOfflineAfter = false;
+  }
+
+  setOffline(offline: boolean): void {
+    this.offline = offline;
+  }
+
+  failNextWithStatus(
+    status: number,
+    path: string = "/api/sessions",
+    offlineAfter: boolean = false,
+  ): void {
+    this.transientStatus = status;
+    this.transientStatusPath = path;
+    this.transientOfflineAfter = offlineAfter;
+  }
+
+  failRestartPost(position: "before-accept" | "after-accept"): void {
+    this.restartPostFailure = position;
+  }
+
+  install(): void {
+    this.originalFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+      this.handle(input, init)) as typeof fetch;
+  }
+
+  uninstall(): void {
+    if (this.originalFetch) globalThis.fetch = this.originalFetch;
+    this.originalFetch = undefined;
+  }
+
+  private async handle(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const u = new URL(url, ORIGIN);
+    const path = u.pathname;
+    const query: Record<string, string> = {};
+    u.searchParams.forEach((v, k) => {
+      query[k] = v;
+    });
+    let body: unknown = undefined;
+    if (init?.body && typeof init.body === "string") {
+      try {
+        body = JSON.parse(init.body);
+      } catch {
+        body = init.body;
+      }
+    }
+    this.calls.push({ method, path, query, body, credentials: init?.credentials });
+
+    if (this.offline) {
+      throw new TypeError("Failed to fetch");
+    }
+
+    if (this.transientStatus !== null && this.transientStatusPath === path) {
+      const status = this.transientStatus;
+      this.transientStatus = null;
+      this.transientStatusPath = null;
+      if (this.transientOfflineAfter) {
+        this.transientOfflineAfter = false;
+        this.offline = true;
+      }
+      return jsonResponse({ detail: `HTTP ${status}` }, status);
+    }
+
+    const out = this.route(method, path, query, body);
+    return jsonResponse(out);
+  }
+
+  private route(
+    method: string,
+    path: string,
+    query: Record<string, string>,
+    body: unknown,
+  ): unknown {
+    if (method === "POST" && path === "/api/admin/restart") {
+      const b = body as { request_id?: string };
+      if (this.restartPostFailure === "before-accept") {
+        this.restartPostFailure = null;
+        throw new TypeError("Failed to fetch");
+      }
+      this.lastRefreshRequestId = b.request_id ?? null;
+      if (this.restartPostFailure === "after-accept") {
+        this.restartPostFailure = null;
+        throw new TypeError("Failed to fetch");
+      }
+      return { status: "rebuilding", request_id: this.lastRefreshRequestId };
+    }
+    const restartStatusMatch = path.match(/^\/api\/admin\/restart-status\/([^/]+)$/);
+    if (method === "GET" && restartStatusMatch) {
+      const requestId = decodeURIComponent(restartStatusMatch[1]);
+      const accepted = this.lastRefreshRequestId === requestId;
+      return {
+        request_id: requestId,
+        accepted,
+        refresh_result: accepted
+          ? {
+              request_id: requestId,
+              status: "succeeded",
+              completed_at: new Date().toISOString(),
+              error: null,
+            }
+          : null,
+      };
+    }
+    if (method === "GET" && path === "/api/build-info") {
+      return {
+        git_hash: "test-hash",
+        refresh_result: this.lastRefreshRequestId
+          ? {
+              request_id: this.lastRefreshRequestId,
+              status: "succeeded",
+              completed_at: new Date().toISOString(),
+              error: null,
+            }
+          : null,
+      };
+    }
+    // ---- Sessions ----
+    if (method === "GET" && path === "/api/sessions") {
+      // First pass: bucket every eng session by parent so non-eng rows
+      // can carry a `pending_eng_session_id` for the resume badge.
+      const engByParent = new Map<string, string>();
+      for (const s of this.state.sessions) {
+        const meta = s as Session & {
+          is_prompt_engineering?: boolean;
+          prompt_eng_meta?: { parent_session_id?: string };
+        };
+        if (meta.is_prompt_engineering && meta.prompt_eng_meta?.parent_session_id) {
+          engByParent.set(meta.prompt_eng_meta.parent_session_id, s.id);
+        }
+      }
+      // Second pass: filter eng sessions out of the sidebar and stamp
+      // each remaining row with its pending_eng_session_id (if any).
+      const offset = Number.parseInt(query.offset ?? "0", 10);
+      const limit = Number.parseInt(query.limit ?? String(this.state.sessions.length), 10);
+      const sessions = this.state.sessions
+          .filter(
+            (s) => !(s as Session & { is_prompt_engineering?: boolean })
+              .is_prompt_engineering,
+          )
+          .filter((s) => sessionMatchesListQuery(s, query))
+          .map((s) => ({
+            ...s,
+            pending_eng_session_id: engByParent.get(s.id) ?? null,
+          }))
+          .sort((a, b) => {
+            const pinnedDelta = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+            if (pinnedDelta) return pinnedDelta;
+            return Date.parse(b.updated_at || "") - Date.parse(a.updated_at || "");
+          });
+      const page = sessions.slice(offset, offset + limit);
+      return {
+        sessions: page,
+        offset,
+        limit,
+        total: sessions.length,
+        has_more: offset + limit < sessions.length,
+      };
+    }
+    // ---- File (used by FileEditor's poll) ----
+    if (method === "GET" && path === "/api/file") {
+      const p = query.path;
+      const content = p && this.state.files[p];
+      return { content: content ?? "", language: "markdown" };
+    }
+    if (method === "POST" && path === "/api/file") {
+      const b = body as { path?: string; content?: string };
+      if (!b.path) return notFound();
+      this.state.files[b.path] = b.content ?? "";
+      return { ok: true };
+    }
+    if (
+      method === "GET" &&
+      (path === "/api/provider-config-sync/capability-picker" ||
+        path === "/api/provider-config-sync/capability-picker")
+    ) {
+      return { sources: this.state.capabilitySources };
+    }
+    if (method === "POST" && path === "/api/sessions") {
+      const b = body as Partial<Session> & { client_session_id?: string };
+      const existing = b.client_session_id
+        ? this.state.sessions.find((s) => s.id === b.client_session_id)
+        : undefined;
+      if (existing) return existing;
+      const s: Session = {
+        id: b.client_session_id || `sess-${this.state.sessions.length + 1}`,
+        name: b.name || "New Session",
+        model: b.model || "claude-sonnet-4-6",
+        cwd: b.cwd || "",
+        orchestration_mode: b.orchestration_mode || "manager",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        messages: [],
+      };
+      this.state.sessions.unshift(s);
+      return s;
+    }
+    const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/.*)?$/);
+    if (sessionMatch) {
+      const id = decodeURIComponent(sessionMatch[1]);
+      const sub = sessionMatch[2] ?? "";
+      const session = this.state.sessions.find((s) => s.id === id);
+      if (sub === "" && method === "GET") {
+        // Backend returns the ROOT tree containing `id` (works for
+        // either a root or an embedded fork id). Walk every root
+        // looking for the id; when found, return that root.
+        for (const r of this.state.sessions) {
+          if (findNodeInTree(r, id)) return r;
+        }
+        return session ?? notFound();
+      }
+      if (sub === "" && method === "DELETE") {
+        // Cascade-delete: drop any prompt-engineering session whose
+        // parent is this id, and tear down its temp file. Mirrors the
+        // real backend's cleanup loop in main.py.
+        const cascadedEng: string[] = [];
+        for (const s of this.state.sessions) {
+          const meta = s as Session & {
+            is_prompt_engineering?: boolean;
+            prompt_eng_meta?: {
+              parent_session_id?: string;
+              temp_file_path?: string;
+            };
+          };
+          if (
+            meta.is_prompt_engineering &&
+            meta.prompt_eng_meta?.parent_session_id === id
+          ) {
+            cascadedEng.push(s.id);
+            if (meta.prompt_eng_meta.temp_file_path) {
+              delete this.state.files[meta.prompt_eng_meta.temp_file_path];
+            }
+          }
+        }
+        this.state.sessions = this.state.sessions.filter(
+          (s) => s.id !== id && !cascadedEng.includes(s.id),
+        );
+        return { ok: true };
+      }
+      if (sub === "/fork" && method === "POST") {
+        if (!session) return notFound();
+        const child: Session = {
+          ...session,
+          id: `${session.id}-fork-${this.state.sessions.length}`,
+          name: (body as { name?: string })?.name || `${session.name} (fork)`,
+          parent_session_id: session.id,
+          fork_point_seq: (session.messages?.length ?? 1) - 1,
+          fork_closed: false,
+          forks: [],
+          messages: [],
+        };
+        // Embed under the parent like the real backend does (schema v2).
+        session.forks = [...(session.forks ?? []), child];
+        return child;
+      }
+      if (sub === "/fork_and_send" && method === "POST") {
+        if (!session) return notFound();
+        const b = body as { prompt?: string };
+        if (!b.prompt || !b.prompt.trim()) {
+          return { error: "prompt is required" };
+        }
+        const child: Session = {
+          ...session,
+          id: `${session.id}-fork-${this.state.sessions.length}`,
+          name: `${session.name} (fork)`,
+          parent_session_id: session.id,
+          fork_point_seq: (session.messages?.length ?? 1) - 1,
+          fork_closed: false,
+          forks: [],
+          messages: [],
+        };
+        session.forks = [...(session.forks ?? []), child];
+        return { child, fork_point_seq: child.fork_point_seq };
+      }
+      if (sub === "/close_fork" && method === "POST") {
+        if (!session) return notFound();
+        const node = findNodeInTree(session, id);
+        if (node) node.fork_closed = true;
+        // Walk every root looking for a fork by id (the close_fork
+        // request comes in with the FORK id as the path param).
+        for (const r of this.state.sessions) {
+          const target = findNodeInTree(r, id);
+          if (target) target.fork_closed = true;
+        }
+        return { id, fork_closed: true };
+      }
+      if (sub === "/reopen_fork" && method === "POST") {
+        for (const r of this.state.sessions) {
+          const target = findNodeInTree(r, id);
+          if (target) target.fork_closed = false;
+        }
+        return { id, fork_closed: false };
+      }
+      if (sub === "/rename" && method === "PUT") {
+        if (session) session.name = (body as { name: string }).name;
+        return { ok: true };
+      }
+      if (sub === "/selectors" && method === "PATCH") {
+        if (session) {
+          const b = body as Partial<Session>;
+          if (b.model) session.model = b.model;
+          if (b.cwd) session.cwd = b.cwd;
+          if (b.orchestration_mode)
+            session.orchestration_mode = b.orchestration_mode;
+        }
+        return { ok: true };
+      }
+      if (sub === "/rewind" && method === "POST") return { ok: true };
+      if (sub === "/tags" && method === "POST") return { ok: true };
+      if (sub === "/tags" && method === "DELETE") return { ok: true };
+      if (sub.startsWith("/tags/") && method === "DELETE") return { ok: true };
+      if (sub === "/notes" && method === "POST") {
+        if (!session) return notFound();
+        const b = body as { text?: string };
+        session.notes = [
+          ...(session.notes ?? []),
+          {
+            id: `note-${(session.notes ?? []).length + 1}`,
+            text: b.text ?? "",
+            created_at: new Date().toISOString(),
+          },
+        ];
+        return { notes: session.notes };
+      }
+      if (sub.startsWith("/notes/") && method === "DELETE") {
+        if (!session) return notFound();
+        const noteId = decodeURIComponent(sub.slice("/notes/".length));
+        session.notes = (session.notes ?? []).filter((note) => note.id !== noteId);
+        return { notes: session.notes };
+      }
+      if (sub.startsWith("/notes/") && method === "PATCH") {
+        if (!session) return notFound();
+        const noteId = decodeURIComponent(sub.slice("/notes/".length));
+        const b = body as { text?: string };
+        session.notes = (session.notes ?? []).map((note) =>
+          note.id === noteId ? { ...note, text: b.text ?? "" } : note,
+        );
+        return { notes: session.notes };
+      }
+      // ---- Prompt-engineering ----
+      if (sub === "/prompt-engineer" && method === "POST") {
+        if (!session) return notFound();
+        const b = body as { draft?: string; mode?: "fork" | "new" };
+        const draft = b.draft ?? "";
+        const mode = b.mode === "fork" ? "fork" : "new";
+        // Idempotent: if a live eng session already exists for this
+        // parent, return it without touching the temp file. Mirrors the
+        // real backend's single-eng-per-parent invariant.
+        const existing = this.state.sessions.find(
+          (s) => {
+            const meta = (s as Session & {
+              is_prompt_engineering?: boolean;
+              prompt_eng_meta?: { parent_session_id?: string };
+            });
+            return (
+              meta.is_prompt_engineering &&
+              meta.prompt_eng_meta?.parent_session_id === session.id
+            );
+          },
+        );
+        if (existing) {
+          const meta = (existing as Session & {
+            prompt_eng_meta?: {
+              temp_file_path?: string;
+              original_content?: string;
+            };
+          }).prompt_eng_meta;
+          return {
+            eng_session_id: existing.id,
+            temp_file_path: meta?.temp_file_path ?? "",
+            original_content: meta?.original_content ?? "",
+            session: existing,
+            resumed: true,
+          };
+        }
+        const engId = `eng-${this.state.sessions.length + 1}`;
+        const tempPath = `/tmp/prompt-eng/${engId}/prompt.md`;
+        const eng = {
+          id: engId,
+          name: mode === "fork"
+            ? `⚙ Engineer — ${session.name}`
+            : "⚙ Engineer — fresh",
+          model: session.model,
+          cwd: session.cwd,
+          orchestration_mode: session.orchestration_mode,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          messages: [],
+          is_prompt_engineering: true,
+          prompt_eng_meta: {
+            parent_session_id: session.id,
+            temp_file_path: tempPath,
+            original_content: draft,
+          },
+        } as unknown as Session;
+        this.state.sessions.unshift(eng);
+        this.state.files[tempPath] = draft;
+        return {
+          eng_session_id: engId,
+          temp_file_path: tempPath,
+          original_content: draft,
+          session: eng,
+          resumed: false,
+        };
+      }
+      if (sub === "/prompt-engineer" && method === "GET") {
+        // Resume-path lookup: live eng session whose parent is `id`.
+        if (!session) return notFound();
+        const eng = this.state.sessions.find((s) => {
+          const meta = (s as Session & {
+            is_prompt_engineering?: boolean;
+            prompt_eng_meta?: { parent_session_id?: string };
+          });
+          return (
+            meta.is_prompt_engineering &&
+            meta.prompt_eng_meta?.parent_session_id === id
+          );
+        });
+        if (!eng) return notFound();
+        const meta = (eng as Session & {
+          prompt_eng_meta?: {
+            temp_file_path?: string;
+            original_content?: string;
+          };
+        }).prompt_eng_meta;
+        return {
+          eng_session_id: eng.id,
+          temp_file_path: meta?.temp_file_path ?? "",
+          original_content: meta?.original_content ?? "",
+          session: eng,
+          resumed: true,
+        };
+      }
+      if (sub === "/prompt-engineer" && method === "DELETE") {
+        if (!session) return notFound();
+        const meta = (
+          session as Session & {
+            prompt_eng_meta?: { temp_file_path?: string };
+          }
+        ).prompt_eng_meta;
+        if (meta?.temp_file_path) {
+          delete this.state.files[meta.temp_file_path];
+        }
+        this.state.sessions = this.state.sessions.filter((s) => s.id !== id);
+        return { deleted: true };
+      }
+      if (sub === "/prompt-eng-comment" && method === "POST") {
+        if (!session) return notFound();
+        return { submitted: true };
+      }
+      if (sub === "/prompt-eng-result" && method === "GET") {
+        if (!session) return notFound();
+        const meta = (
+          session as Session & {
+            prompt_eng_meta?: {
+              temp_file_path?: string;
+              parent_session_id?: string;
+              original_content?: string;
+            };
+          }
+        ).prompt_eng_meta;
+        const path = meta?.temp_file_path;
+        return {
+          content: (path && this.state.files[path]) ?? "",
+          parent_session_id: meta?.parent_session_id ?? null,
+          original_content: meta?.original_content ?? "",
+        };
+      }
+      if (sub === "/draft" && method === "PATCH") {
+        if (!session) return notFound();
+        const b = body as {
+          draft_input?: string;
+          client_seq?: number;
+          client_id?: string;
+        };
+        const stored = this.draftSeqs.get(id) ?? 0;
+        if (typeof b.client_seq !== "number" || b.client_seq <= stored) {
+          return {
+            rejected: true,
+            draft_input: session.draft_input ?? "",
+            draft_input_seq: stored,
+          };
+        }
+        session.draft_input = b.draft_input ?? "";
+        this.draftSeqs.set(id, b.client_seq);
+        return {
+          draft_input: session.draft_input,
+          draft_input_seq: b.client_seq,
+        };
+      }
+    }
+    // ---- Projects ----
+    if (method === "GET" && path === "/api/projects") {
+      return { projects: this.state.projects };
+    }
+    if (method === "POST" && path === "/api/projects") {
+      const p = body as { path: string };
+      const proj: Project = {
+        path: p.path,
+        name: p.path.split("/").pop() || p.path,
+        created_at: new Date().toISOString(),
+        last_used: new Date().toISOString(),
+      };
+      this.state.projects.push(proj);
+      return proj;
+    }
+    if (method === "POST" && path === "/api/projects/touch") {
+      return { ok: true };
+    }
+    if (method === "DELETE" && path === "/api/projects") {
+      this.state.projects = this.state.projects.filter(
+        (p) => p.path !== query.path,
+      );
+      return { ok: true };
+    }
+    // ---- Workers ----
+    if (method === "GET" && path === "/api/workers") {
+      return {
+        workers: this.state.workers.filter(() => true),
+      };
+    }
+    if (method === "POST" && path === "/api/workers") return { ok: true };
+    if (method === "POST" && path === "/api/workers/from_session")
+      return { ok: true };
+    const workerMatch = path.match(/^\/api\/workers\/([^/]+)(\/.*)?$/);
+    if (workerMatch) {
+      if (method === "DELETE") return { ok: true };
+      if (workerMatch[2] === "/reset_forks" && method === "POST")
+        return { ok: true };
+    }
+    // ---- Approvals ----
+    if (method === "GET" && path === "/api/pending_approvals") {
+      return {
+        approvals: this.state.approvals.filter(
+          (a) => !query.cwd || a.cwd === query.cwd,
+        ),
+      };
+    }
+    const approveMatch = path.match(/^\/api\/pending_approvals\/([^/]+)\/(approve|deny)$/);
+    if (approveMatch && method === "POST") {
+      const id = decodeURIComponent(approveMatch[1]);
+      const ap = this.state.approvals.find((a) => a.delegation_id === id);
+      if (ap) ap.status = approveMatch[2] === "approve" ? "approved" : "denied";
+      return { ok: true };
+    }
+    // ---- Credential consents ----
+    if (method === "GET" && path === "/api/credentials/pending") {
+      return {
+        consents: this.state.credentials.filter(
+          (c) =>
+            c.status === "pending" &&
+            (!query.app_session_id || c.app_session_id === query.app_session_id),
+        ),
+      };
+    }
+    const credMatch = path.match(
+      /^\/api\/credentials\/([^/]+)\/(approve|deny|revoke)$/,
+    );
+    if (credMatch && method === "POST") {
+      const id = decodeURIComponent(credMatch[1]);
+      const c = this.state.credentials.find((x) => x.consent_id === id);
+      if (c) {
+        c.status =
+          credMatch[2] === "approve"
+            ? "approved"
+            : credMatch[2] === "deny"
+              ? "denied"
+              : "revoked";
+      }
+      return { status: "ok" };
+    }
+    // ---- File / trace / config / models ----
+    if (method === "POST" && path === "/api/file-before-edit") {
+      return { before_content: "", after_content: "" };
+    }
+    if (method === "GET" && path === "/api/models") {
+      return { models: this.state.models };
+    }
+    if (method === "GET" && path === "/api/providers") {
+      return {
+        default_provider_id: this.state.default_provider_id,
+        providers: this.state.providers,
+      };
+    }
+    if (method === "GET" && path === "/api/config") return this.state.config;
+    if (method === "POST" && path === "/api/config") return { ok: true };
+    const traceMatch = path.match(/^\/api\/traces\/([^/]+)$/);
+    if (traceMatch && method === "GET") {
+      return this.state.traces[traceMatch[1]] ?? notFound();
+    }
+
+    // ---- Auth ----
+    if (method === "GET" && path === "/api/auth/me") {
+      return { username: "test-user" };
+    }
+    if (method === "GET" && path === "/api/auth/needs_setup") {
+      return { needs_setup: false };
+    }
+    if (method === "POST" && path === "/api/auth/logout") return { ok: true };
+
+    if (method === "POST" && /^\/api\/sessions\/[^/]+\/project-suggestion$/.test(path))
+      return { suggestion: this.state.projectSuggestion };
+
+    throw new Error(`MockBackend: unhandled ${method} ${path}`);
+  }
+}
+
+function jsonResponse(data: unknown, status: number = 200): Response {
+  if (data && typeof data === "object" && (data as { __notFound?: true }).__notFound) {
+    return new Response(JSON.stringify({ error: "not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return new Response(JSON.stringify(data ?? null), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function findNodeInTree(root: Session, id: string): Session | null {
+  if (root.id === id) return root;
+  for (const f of root.forks ?? []) {
+    const hit = findNodeInTree(f, id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function notFound(): { __notFound: true } {
+  return { __notFound: true };
+}

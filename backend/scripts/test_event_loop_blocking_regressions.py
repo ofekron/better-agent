@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).parents[1]
+
+
+def test_hook_runner_loads_config_off_loop() -> None:
+    source = (ROOT / "hook_runner.py").read_text(encoding="utf-8")
+    assert "hooks = await asyncio.to_thread(hook_store.list_hooks)" in source
+    assert "hooks = hook_store.list_hooks()" not in source
+
+
+def test_ownership_projection_uses_dedicated_executor() -> None:
+    source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
+    assert "_OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"ownership-projection\"" in source
+    assert "run_in_executor(\n            _OWNERSHIP_PROJECTION_EXECUTOR" in source
+    assert "asyncio.to_thread(\n            session_manager.apply_journal_ownership_resolution" not in source
+
+
+def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n            event_journal_reader.read_events" in source
+    assert "cursor = await asyncio.to_thread(event_journal_reader.cursor" in source
+    assert "events, _, _ = event_journal_reader.read_events(" not in source
+    assert "cursor = event_journal_reader.cursor(" not in source
+
+
+def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source
+    assert "sess = session_manager.get_lite(self.app_session_id)" not in source
+
+
+def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n                    strategy.ingest_orphan" in source
+    assert "\n                strategy.ingest_orphan(" not in source
+
+
+def test_wire_tailer_subscribe_resolves_root_off_loop() -> None:
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    subscribe_start = source.index("async def _subscribe_to_wire_tailer(")
+    subscribe_end = source.index("    def _publish_native_demand(", subscribe_start)
+    subscribe_source = source[subscribe_start:subscribe_end]
+    assert "root_id = await asyncio.to_thread(\n            session_manager._root_id_for" in subscribe_source
+    assert "root_id = session_manager._root_id_for(app_session_id)" not in subscribe_source
+    assert "root_id=root_id" in subscribe_source
+
+
+def test_native_demand_publish_does_not_leak_coroutine_without_loop() -> None:
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    publish_start = source.index("    def _publish_native_demand(")
+    publish_end = source.index("    def _unsubscribe_from_wire_tailer(", publish_start)
+    publish_source = source[publish_start:publish_end]
+    assert "loop = asyncio.get_running_loop()" in publish_source
+    assert "except RuntimeError:\n            return" in publish_source
+    assert "asyncio.create_task(\n                bus.publish(" not in publish_source
+    assert "loop.create_task(\n            bus.publish(" in publish_source
+
+
+def test_wire_tailer_unsubscribe_uses_cached_subscriber_root() -> None:
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    unsubscribe_start = source.index("    def _unsubscribe_from_wire_tailer(")
+    unsubscribe_end = source.index("    def _maybe_stop_wire_tailer(", unsubscribe_start)
+    unsubscribe_source = source[unsubscribe_start:unsubscribe_end]
+    maybe_start = source.index("    def _maybe_stop_wire_tailer(")
+    maybe_end = source.index("    async def _await_tailer_stop(", maybe_start)
+    maybe_source = source[maybe_start:maybe_end]
+    assert "root_ids.add(sub.root_id)" in unsubscribe_source
+    assert "session_manager._root_id_for" not in unsubscribe_source
+    assert "def _maybe_stop_wire_tailer(self, root_id: str, app_session_id: str)" in maybe_source
+    assert "session_manager._root_id_for" not in maybe_source
+
+
+def test_root_session_write_does_not_resolve_root_id() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    write_start = source.index("def write_session_full(")
+    write_end = source.index("def delete_session(", write_start)
+    write_source = source[write_start:write_end]
+    assert 'path = _sessions_dir() / f"{root[\'id\']}.json"' in write_source
+    assert "_session_path(root[\"id\"])" not in write_source
+    assert "_resolve_root_id(root" not in write_source
+
+
+def test_session_first_prompt_search_uses_summary_index() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    summary_start = source.index("def _build_summary_for_root(")
+    summary_end = source.index("def set_requirement_tags_projection(", summary_start)
+    summary_source = source[summary_start:summary_end]
+    search_start = source.index("def _metadata_search_scores(")
+    search_end = source.index("def grep_session_scores(", search_start)
+    search_source = source[search_start:search_end]
+    assert '"first_prompt": _first_user_prompt(root)' in summary_source
+    assert 'score = _match_count(summary.get("first_prompt"), query_lower)' in search_source
+    assert "json.loads(path.read_text" not in search_source
+    assert "_migrate_session(" not in search_source
+
+
+def test_session_content_search_aggregates_in_sqlite() -> None:
+    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    search_start = source.index("def search(")
+    search_end = source.index("def has_indexed_rows(", search_start)
+    search_source = source[search_start:search_end]
+    candidate_start = source.index("def _candidate_scores(")
+    candidate_end = source.index("def _match_literal(", candidate_start)
+    candidate_source = source[candidate_start:candidate_end]
+    assert "_candidate_scores(conn, q, limit)" in search_source
+    assert "COUNT(*) AS score" in candidate_source
+    assert "GROUP BY session_id ORDER BY score DESC LIMIT ?" in candidate_source
+    assert "SELECT session_id, text" not in candidate_source
+    assert "lower().count" not in search_source
+
+
+def test_session_content_search_uses_readonly_connection_without_writer_lock() -> None:
+    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    search_start = source.index("def search(")
+    search_end = source.index("def has_indexed_rows(", search_start)
+    search_source = source[search_start:search_end]
+    connect_start = source.index("def _connect_readonly(")
+    connect_end = source.index("def _configure_connection(", connect_start)
+    connect_source = source[connect_start:connect_end]
+    config_start = source.index("def _configure_connection(")
+    config_end = source.index("def _event_text(", config_start)
+    config_source = source[config_start:config_end]
+    assert "conn = _connect_readonly()" in search_source
+    assert "with _lock:" not in search_source
+    assert "_connect()" not in search_source
+    assert "_configure_connection(conn)" in connect_source
+    assert "PRAGMA cache_size=-200000" in config_source
+    assert "PRAGMA temp_store=MEMORY" in config_source
+    assert "PRAGMA mmap_size=268435456" in config_source
+
+
+def test_session_search_delete_is_queued_projection_work() -> None:
+    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    delete_start = source.index("def delete_session(")
+    delete_end = source.index("def search(", delete_start)
+    delete_source = source[delete_start:delete_end]
+    worker_start = source.index("def _worker_main(")
+    worker_end = source.index("def _apply_rows(", worker_start)
+    worker_source = source[worker_start:worker_end]
+    apply_start = source.index("def _apply_rows(")
+    apply_end = source.index("def _drain_pending(", apply_start)
+    apply_source = source[apply_start:apply_end]
+    assert "_queue.put((session_id, None))" in delete_source
+    assert "with _lock:" not in delete_source
+    assert "DELETE FROM session_event_fts" in apply_source
+
+
+def test_event_journal_rejects_late_writes_after_close() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    assert "self._closed = False" in source
+    assert "self._closed = True" in source
+    assert 'raise EventJournalWriteError("event journal writer is closed")' in source
+    assert "_apply_rows(batch)" in worker_source
+
+
+def test_extension_plain_load_is_read_only() -> None:
+    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
+    load_start = source.index("def _load()")
+    load_end = source.index("def _save(", load_start)
+    load_source = source[load_start:load_end]
+    assert "_read_store_unlocked()" in load_source
+    assert "_load_with_changes()" not in load_source
+
+
+def test_recovery_dispatch_skips_reconciled_runs_before_owner_read() -> None:
+    source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    start = source.index("def recover_all_in_flight(")
+    end = len(source)
+    recover_source = source[start:end]
+    marker_idx = recover_source.index('marker_path = child / "reconciled.marker"')
+    backend_state_idx = recover_source.index('bs_path = child / "backend_state.json"')
+    assert marker_idx < backend_state_idx
+    assert "marker_matches_current(" in recover_source[marker_idx:backend_state_idx]
+
+
+def test_session_fork_index_refresh_is_root_scoped() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def _index_tree(")
+    end = source.index("def _index_set(", start)
+    index_source = source[start:end]
+    assert "_root_forks.get(rid" in index_source
+    assert "_fork_index.items()" not in index_source
+    assert "_reconcile_loaded_store" not in index_source
+    assert "_root_index_signatures.get(rid) == file_signature" in index_source
+    assert index_source.index("_root_index_signatures.get(rid)") < index_source.index("for fork in _walk_forks(root)")
+
+    get_start = source.index("def get_root_tree(")
+    get_end = source.index("def _strip_volatile_from_tree(", get_start)
+    get_source = source[get_start:get_end]
+    assert "file_signature = _session_file_signature(path)" in get_source
+    assert "_index_tree(root, file_signature=file_signature)" in get_source
+    assert "if session_id != root_id:" in get_source
+    assert get_source.index("if session_id != root_id:") < get_source.index("_index_tree(root, file_signature=file_signature)")
+
+
+def test_session_organization_reads_are_cached() -> None:
+    source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
+    assert "_cache_signature" in source
+    assert "_cache_data" in source
+    assert "def _load_shared()" in source
+    load_start = source.index("def _load()")
+    load_end = source.index("def _save(", load_start)
+    load_source = source[load_start:load_end]
+    assert "return copy.deepcopy(data)" in load_source
+    shared_start = source.index("def _load_shared()")
+    shared_end = source.index("def _load()", shared_start)
+    shared_source = source[shared_start:shared_end]
+    assert "_cache_signature == signature" in shared_source
+    assert "return _cache_data" in shared_source
+    enrich_start = source.index("def enrich_session_summaries(")
+    enrich_end = source.index("def create_folder(", enrich_start)
+    enrich_source = source[enrich_start:enrich_end]
+    assert "data = _load_shared()" in enrich_source
+    assert "_assignment(" not in enrich_source
+
+
+def test_jsonl_cursor_persistence_uses_dedicated_executor() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    assert "_CURSOR_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"jsonl-cursor\"" in source
+    assert "await loop.run_in_executor(\n                _CURSOR_EXECUTOR" in source
+    assert "self.on_cursor_advance(self.processed_offset)" not in source
+
+
+def test_event_ingester_indexes_search_outside_root_lock() -> None:
+    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert "session_search_index" not in source
+
+
+def test_private_extension_reconcile_skips_current_smoked_install() -> None:
+    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
+    private_start = source.index("def _ensure_private_extensions(")
+    private_end = source.index("def is_builtin_feature_enabled(", private_start)
+    private_source = source[private_start:private_end]
+    assert 'source.get("type") == "better_agent_local"' in private_source
+    assert 'source.get("commit_sha") == commit_sha' in private_source
+    assert 'not source.get("error")' in private_source
+    assert "_record_has_required_runtime_paths(record)" in private_source
+    assert "_record_runtime_ready(record)" not in private_source
+    assert "continue\n        installed = _install_private_package_snapshot" in private_source
+
+
+def test_frontend_entrypoints_do_not_run_smoke_subprocesses() -> None:
+    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
+    ready_start = source.index("def _record_runtime_ready(")
+    ready_end = source.index("def _record_has_required_runtime_paths(", ready_start)
+    ready_source = source[ready_start:ready_end]
+    frontend_start = source.index("def frontend_entrypoints(")
+    frontend_end = source.index("def resolve_frontend_asset(", frontend_start)
+    frontend_source = source[frontend_start:frontend_end]
+    assert "_record_smoke_test_current(record)" in ready_source
+    assert "_record_smoke_test_passes(record)" not in ready_source
+    assert "_run_extension_smoke_test(" not in ready_source
+    assert "_run_python_module_smoke(" not in ready_source
+    assert "_record_runtime_ready(record)" in frontend_source
+    assert "_run_extension_smoke_test(" not in frontend_source
+
+
+def test_startup_reenqueue_reads_sessions_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
+
+
+def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "startup-unread-warm" not in source
+    assert "_warm_unread_counts" not in source
+
+
+def test_startup_defers_requirement_and_project_match_warmers() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "startup-requirements-prewarm" not in startup_source
+    assert "run_requirements_prewarm" not in startup_source
+    assert "project-match-warm" not in startup_source
+    assert "_ensure_project_match_warm_task()" in source
+
+
+def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    local_start = source.index("def _local_session_summaries_for_sidebar()")
+    local_end = source.index("def _root_session_file_path(", local_start)
+    local_source = source[local_start:local_end]
+    assert "enrich_session_summaries(" not in local_source
+    assert "enrich_session_summary(" not in local_source
+    assert "session_store._ensure_summary_index(blocking=True)" not in local_source
+
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    build_start = store_source.index("def _build_summary_for_root(")
+    build_end = store_source.index("def set_requirement_tags_projection(", build_start)
+    build_source = store_source[build_start:build_end]
+    assert "enrich_session_summary(summary)" in build_source
+
+
+def test_sidebar_decoration_uses_bulk_cached_state() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = main_source.index("def _decorate_local_sidebar_sessions(")
+    end = main_source.index("def _local_sessions_for_sidebar(", start)
+    decorate_source = main_source[start:end]
+    assert "cached_state_snapshot()" in decorate_source
+    assert "unread_counts_snapshot()" in decorate_source
+    assert "is_running_cached(" not in decorate_source
+    assert "monitoring_state_cached(" not in decorate_source
+
+    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    assert "def cached_state_snapshot(" in turn_source
+
+
+def test_sidebar_file_paths_use_cached_sessions_dir() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _root_sessions_dir_path(" in source
+    start = source.index("def _decorate_local_sidebar_sessions(")
+    end = source.index("def _local_sessions_for_sidebar(", start)
+    decorate_source = source[start:end]
+    assert "sessions_dir = _root_sessions_dir_path()" in decorate_source
+    assert '"file_path": f"{sessions_dir}/{sid}.json"' in decorate_source
+    assert "ba_home()" not in decorate_source
+    assert "_root_session_file_path(sid)" not in decorate_source
+
+
+def test_session_list_uses_sorted_summary_cache() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_summary_sorted_cache_version" in source
+    assert "_summary_sorted_cache" in source
+    start = source.index("def list_sessions()")
+    end = source.index("def iter_all_sessions()", start)
+    list_source = source[start:end]
+    assert "_summary_sorted_cache_version != _summary_index_version" in list_source
+    assert "sorted(\n                _summary_index.values()" in list_source
+    assert "requirement_tags.get(summary.get(\"id\", \"\"), [])" in list_source
+
+
+def test_session_list_does_not_prewarm_snapshots() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_schedule_session_snapshot_prewarm" not in source
+    assert "sessions.snapshot_prewarm" not in source
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "get_root_tree_stubbed" not in route_source
+    assert "get_root_tree_paginated" not in route_source
+
+
+def test_sidebar_summary_omits_worker_refs() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def _build_summary_for_root(")
+    end = source.index("def set_requirement_tags_projection(", start)
+    build_source = source[start:end]
+    assert "\"worker_count\"" in build_source
+    assert "\"workers\"" not in build_source
+    assert "def _sanitize_summary(" in source
+    assert "summary, cleaned = _sanitize_summary(summary)" in source
+
+
+def test_startup_session_search_rebuild_skips_persisted_index() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "session_search_index.has_indexed_rows()" in startup_source
+    assert "_rebuild_session_search_index_if_empty" in startup_source
+
+
+def test_startup_recovery_defers_cold_runs() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    recover_start = source.index("async def _recover_in_flight_task()")
+    recover_end = source.index("async def _housekeeping_task()", recover_start)
+    recover_source = source[recover_start:recover_end]
+    assert "live = [r for r in recovered if bool(r.get(\"alive\"))]" in recover_source
+    assert "cold = [r for r in recovered if not bool(r.get(\"alive\"))]" in recover_source
+    assert "_delayed_recovered_run_integration(cold)" in recover_source
+
+
+def test_startup_recovery_gate_opens_before_live_integration() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    recover_start = source.index("async def _recover_in_flight_task()")
+    recover_end = source.index("async def _housekeeping_task()", recover_start)
+    recover_source = source[recover_start:recover_end]
+    assert recover_source.index("startup_recovery_gate.mark_recovery_done()") < recover_source.index(
+        "await integrate_recovered_runs(coordinator, live)"
+    )
+
+
+def test_hydration_uses_local_projection_not_extension_backend() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    hydrate_start = source.index("    def _derive_current_todos_from_events_jsonl(")
+    hydrate_end = source.index("    def _cached(", hydrate_start)
+    hydrate_source = source[hydrate_start:hydrate_end]
+    assert "session_local_projection.project_event_fields(" in hydrate_source
+    assert "session_event_extensions" not in hydrate_source
+    assert "extension_backend_loader" not in hydrate_source
+
+
+def test_session_event_extension_callbacks_are_worker_only() -> None:
+    source = (ROOT / "session_event_extensions.py").read_text(encoding="utf-8")
+    project_start = source.index("def project_event(")
+    project_end = source.index("def _apply_builtin_event(", project_start)
+    project_source = source[project_start:project_end]
+    apply_start = source.index("def apply_event(")
+    apply_end = source.index("def _apply_event_locked(", apply_start)
+    apply_source = source[apply_start:apply_end]
+    worker_start = source.index("def _run_extension_hook_job(")
+    worker_end = source.index("def _run_builtin_todos_job(", worker_start)
+    worker_source = source[worker_start:worker_end]
+    assert "invoke_extension_backend_sync" not in project_source
+    assert "invoke_extension_backend_sync" not in apply_source
+    assert "invoke_extension_backend_sync" in worker_source
+
+
+def test_session_event_apply_event_uses_cached_hook_snapshot() -> None:
+    source = (ROOT / "session_event_extensions.py").read_text(encoding="utf-8")
+    apply_start = source.index("def apply_event(")
+    apply_end = source.index("def _apply_event_locked(", apply_start)
+    apply_source = source[apply_start:apply_end]
+    assert "hook_snapshot_nonblocking()" in apply_source
+    assert "hook_snapshot()" not in apply_source
+    assert "session_event_hook_specs()" not in apply_source
+    assert "_builtin_todos_enabled()" not in apply_source
+
+
+def test_requirement_tag_refresh_is_off_startup_loop() -> None:
+    subscribers_source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
+    refresh_start = subscribers_source.index("async def _refresh_requirement_tags(")
+    refresh_end = subscribers_source.index("async def _apply_requirement_tags_projection(", refresh_start)
+    refresh_source = subscribers_source[refresh_start:refresh_end]
+    assert "await asyncio.to_thread(_refresh_requirement_tags_sync)" in refresh_source
+    assert "ModuleNotFoundError" in refresh_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = main_source.index("async def on_startup()")
+    startup_end = main_source.index("async def on_shutdown()", startup_start)
+    startup_source = main_source[startup_start:startup_end]
+    assert 'name="requirement-tags-startup-refresh"' not in startup_source
+    assert 'type="requirement_tags.refresh_requested"' not in startup_source
+    assert 'await event_bus.publish(BusEvent(\\n            type="requirement_tags.refresh_requested"' not in startup_source
+    assert "ModuleNotFoundError" in startup_source
+
+
+def test_machine_nodes_readiness_check_is_off_startup_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "async def _start_node_offset_loop_if_ready()" in startup_source
+    assert "await asyncio.to_thread(\n                extension_store.is_extension_runtime_ready" in startup_source
+    assert 'name="node-offset-flush-startup"' in startup_source
+
+
+def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = source.index('@app.get("/api/sessions")')
+    route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
+    route_source = source[route_start:route_end]
+    assert "_builtin_extension_enabled(\n                extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in route_source
+    assert "_builtin_extension_runtime_ready_fast" not in route_source
+    assert "_builtin_extension_runtime_ready(" not in route_source
+
+
+def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
+    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
+    finalize_start = source.index("async def _finalize_when_done(")
+    finalize_end = source.index("# ============================================================================", finalize_start)
+    finalize_source = source[finalize_start:finalize_end]
+    assert "await asyncio.to_thread(\n            _recovery_target_snapshot" in finalize_source
+    assert "await asyncio.to_thread(\n                    session_manager.set_msg_recovering" in finalize_source
+    assert "session_manager.get(persist_sid)" not in finalize_source
+    assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
+
+
+def test_run_recovery_summarizes_repeated_skip_logs() -> None:
+    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
+    assert "class _RecoveryLogSummary:" in source
+    assert "summary.record_skip(\"missing target_message_id\", run_id)" in source
+    assert "summary.record_not_marked(reason, run_id)" in source
+    assert "summary.emit()" in source
+    assert "integrate_recovered_runs: skip %s (missing target_message_id)" in source
+    assert "integrate_recovered_runs: skipped %d run(s): %s%s" in source
+
+
+if __name__ == "__main__":
+    test_hook_runner_loads_config_off_loop()
+    test_ownership_projection_uses_dedicated_executor()
+    test_wire_tailer_gap_fill_reads_journal_off_loop()
+    test_jsonl_dispatch_reads_session_lite_off_loop()
+    test_jsonl_dispatch_ingests_orphans_off_loop()
+    test_wire_tailer_subscribe_resolves_root_off_loop()
+    test_native_demand_publish_does_not_leak_coroutine_without_loop()
+    test_wire_tailer_unsubscribe_uses_cached_subscriber_root()
+    test_root_session_write_does_not_resolve_root_id()
+    test_session_first_prompt_search_uses_summary_index()
+    test_session_content_search_aggregates_in_sqlite()
+    test_session_search_delete_is_queued_projection_work()
+    test_extension_plain_load_is_read_only()
+    test_jsonl_cursor_persistence_uses_dedicated_executor()
+    test_event_ingester_indexes_search_outside_root_lock()
+    test_private_extension_reconcile_skips_current_smoked_install()
+    test_frontend_entrypoints_do_not_run_smoke_subprocesses()
+    test_startup_reenqueue_reads_sessions_off_loop()
+    test_startup_does_not_warm_unread_by_hydrating_sessions()
+    test_startup_defers_requirement_and_project_match_warmers()
+    test_sidebar_organization_enrichment_stays_in_summary_index()
+    test_sidebar_decoration_uses_bulk_cached_state()
+    test_sidebar_file_paths_use_cached_sessions_dir()
+    test_session_list_uses_sorted_summary_cache()
+    test_session_list_does_not_prewarm_snapshots()
+    test_sidebar_summary_omits_worker_refs()
+    test_startup_session_search_rebuild_skips_persisted_index()
+    test_startup_recovery_defers_cold_runs()
+    test_startup_recovery_gate_opens_before_live_integration()
+    test_recovery_dispatch_skips_reconciled_runs_before_owner_read()
+    test_session_fork_index_refresh_is_root_scoped()
+    test_session_organization_reads_are_cached()
+    test_hydration_uses_local_projection_not_extension_backend()
+    test_session_event_extension_callbacks_are_worker_only()
+    test_session_event_apply_event_uses_cached_hook_snapshot()
+    test_requirement_tag_refresh_is_off_startup_loop()
+    test_machine_nodes_readiness_check_is_off_startup_loop()
+    test_sessions_route_does_not_runtime_check_machine_nodes()
+    test_run_recovery_finalize_session_manager_calls_are_off_loop()
+    test_run_recovery_summarizes_repeated_skip_logs()
+    print("PASS event loop blocking regressions")

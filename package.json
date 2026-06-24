@@ -1,0 +1,10 @@
+{
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "prepare": "git config core.hooksPath .githooks"
+  },
+  "dependencies": {
+    "@capacitor/app": "^8.1.0",
+    "framer-motion": "^12.40.0"
+  }
+}

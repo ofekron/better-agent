@@ -1,0 +1,509 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionList } from "../src/components/SessionList";
+import type { Provider, Session } from "../src/types";
+import { makeSession } from "./fixtures";
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+const providers: Provider[] = [
+  {
+    id: "codex",
+    name: "Codex",
+    kind: "codex",
+    mode: "subscription",
+    base_url: "",
+    config_dir: "",
+    custom_models: [],
+    default_model: "gpt-5-codex",
+    reasoning_effort_options: [],
+    default_reasoning_effort: "",
+    has_api_key: false,
+    supports_fork: true,
+    supports_manager_mode: false,
+    supports_rewind: true,
+    supports_steering: true,
+    supports_native_subagents: true,
+    supports_reasoning_effort: true,
+    capability_overrides: {},
+  },
+  {
+    id: "claude",
+    name: "Claude",
+    kind: "claude",
+    mode: "subscription",
+    base_url: "",
+    config_dir: "",
+    custom_models: [],
+    default_model: "claude-sonnet-4-6",
+    reasoning_effort_options: [],
+    default_reasoning_effort: "",
+    has_api_key: false,
+    supports_fork: true,
+    supports_manager_mode: true,
+    supports_rewind: true,
+    supports_steering: false,
+    supports_native_subagents: false,
+    supports_reasoning_effort: false,
+    capability_overrides: {},
+  },
+];
+
+function renderList(
+  sessions: Session[],
+  props: Partial<ComponentProps<typeof SessionList>> = {},
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => new Promise<Response>(() => {})),
+  );
+  return render(
+    <SessionList
+      sessions={sessions}
+      providers={providers}
+      onSelect={() => {}}
+      onDelete={() => {}}
+      onRename={() => {}}
+      onPin={() => {}}
+      onUnpinOthers={() => {}}
+      onArchive={() => {}}
+      onWorkerEligible={() => {}}
+      onDetails={() => {}}
+      {...props}
+    />,
+  );
+}
+
+function visibleSessionNames(): string[] {
+  return screen
+    .getAllByTestId("session-item")
+    .map((item) => item.querySelector(".session-item-name")?.textContent?.trim() ?? "");
+}
+
+describe("SessionList advanced filters", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("unpins a specific pinned session from the row button", () => {
+    const onPin = vi.fn();
+    renderList(
+      [makeSession({ id: "pinned", name: "Pinned", pinned: true })],
+      { onPin },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.unpinTitle" }));
+
+    expect(onPin).toHaveBeenCalledWith("pinned", false);
+  });
+
+  it("sends provider, model, and mode chips to backend filters", async () => {
+    const onBackendFiltersChange = vi.fn();
+    renderList(
+      [
+        makeSession({
+          id: "codex-codex-model",
+          name: "Codex target",
+          provider_id: "codex",
+          model: "gpt-5-codex",
+          orchestration_mode: "native",
+        }),
+        makeSession({
+          id: "codex-other-model",
+          name: "Codex other",
+          provider_id: "codex",
+          model: "gpt-5",
+          orchestration_mode: "native",
+        }),
+        makeSession({
+          id: "claude-team",
+          name: "Claude team",
+          provider_id: "claude",
+          model: "claude-sonnet-4-6",
+          orchestration_mode: "team",
+        }),
+      ],
+      { onBackendFiltersChange },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "gpt-5-codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "session.native" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          providerIds: ["codex"],
+          modelIds: ["gpt-5-codex"],
+          modes: ["native"],
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.clearFilters" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          providerIds: [],
+          modelIds: [],
+          modes: [],
+        }),
+      ),
+    );
+  });
+
+  it("sends file edit mode choices to backend filters", async () => {
+    const onBackendFiltersChange = vi.fn();
+    renderList(
+      [
+        makeSession({ id: "normal", name: "Normal" }),
+        makeSession({
+          id: "file-edit",
+          name: "File edit",
+          working_mode: "file_editing",
+        }),
+      ],
+      { onBackendFiltersChange },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    fireEvent.click(screen.getByRole("button", { name: "session.fileEditMode.yes" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "yes" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.fileEditMode.no" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "no" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.clearFilters" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "any" }),
+      ),
+    );
+  });
+
+  it("requests another page when scrolled near the bottom", () => {
+    const onLoadMore = vi.fn();
+    const { container } = renderList(
+      [makeSession({ id: "s1", name: "One", cwd: "/tmp/project" })],
+      { hasMore: true, loadingMore: false, onLoadMore },
+    );
+    const list = container.querySelector(".session-list-items") as HTMLDivElement;
+    Object.defineProperties(list, {
+      scrollHeight: { value: 1000, configurable: true },
+      scrollTop: { value: 850, configurable: true },
+      clientHeight: { value: 100, configurable: true },
+    });
+
+    fireEvent.scroll(list);
+
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps selected sessions in backend recency order", () => {
+    renderList(
+      [
+        makeSession({
+          id: "newer",
+          name: "Newer",
+          updated_at: "2026-06-16T00:00:00Z",
+        }),
+        makeSession({
+          id: "selected-old",
+          name: "Selected old",
+          updated_at: "2026-05-29T00:00:00Z",
+        }),
+      ],
+      { currentSessionId: "selected-old" },
+    );
+
+    expect(visibleSessionNames()).toEqual(["Newer", "Selected old"]);
+  });
+
+  it("does not show search loading for plain list refresh", () => {
+    renderList(
+      [makeSession({ id: "s1", name: "One", cwd: "/tmp/project" })],
+      { searching: true },
+    );
+
+    expect(screen.queryByText("session.searching")).toBeNull();
+  });
+
+  it("shows search loading for typed session search", () => {
+    renderList(
+      [makeSession({ id: "s1", name: "Needle", cwd: "/tmp/project" })],
+      { searching: true },
+    );
+
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "session.searchPlaceholder" }),
+      { target: { value: "needle" } },
+    );
+
+    expect(screen.getByText("session.searching")).toBeTruthy();
+  });
+
+  it("renders folderized sessions before unfiled sessions", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/session-organization")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                schema_version: 1,
+                folders: [
+                  {
+                    id: "folder-parent",
+                    project_id: "/tmp/project",
+                    parent_folder_id: null,
+                    name: "Parent",
+                    order: 0,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                  {
+                    id: "folder-child",
+                    project_id: "/tmp/project",
+                    parent_folder_id: "folder-parent",
+                    name: "Child",
+                    order: 0,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                tags: [],
+                assignments: {},
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    render(
+      <SessionList
+        sessions={[
+          makeSession({
+            id: "unfiled",
+            name: "Unfiled session",
+            cwd: "/tmp/project",
+          }),
+          makeSession({
+            id: "foldered",
+            name: "Foldered session",
+            cwd: "/tmp/project",
+            folder_id: "folder-child",
+          }),
+        ]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onDetails={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("Parent")).toBeTruthy());
+    expect(screen.getByText("Child")).toBeTruthy();
+    expect(screen.getByText("session.unfiled")).toBeTruthy();
+    expect(visibleSessionNames()).toEqual(["Foldered session", "Unfiled session"]);
+  });
+
+  it("omits the unfiled heading when no folders exist", () => {
+    renderList([makeSession({ id: "plain", name: "Plain" })]);
+
+    expect(screen.queryByText("session.unfiled")).toBeNull();
+    expect(visibleSessionNames()).toEqual(["Plain"]);
+  });
+
+  it("sends missing-provider filters to the backend", async () => {
+    const onBackendFiltersChange = vi.fn();
+    renderList(
+      [
+        makeSession({
+          id: "missing-provider-target",
+          name: "Missing provider target",
+          provider_id: "deleted-provider",
+          model: "orphan-model",
+          orchestration_mode: "native",
+        }),
+        makeSession({
+          id: "known-provider-target",
+          name: "Known provider target",
+          provider_id: "codex",
+          model: "gpt-5-codex",
+          orchestration_mode: "native",
+        }),
+      ],
+      { onBackendFiltersChange },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    fireEvent.click(screen.getByRole("button", { name: "deleted-provider" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ providerIds: ["deleted-provider"] }),
+      ),
+    );
+  });
+
+  it("applies a folder assignment from the PATCH ack before parent refresh", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/session-organization")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                schema_version: 1,
+                folders: [
+                  {
+                    id: "folder-client",
+                    project_id: "/tmp/project",
+                    parent_folder_id: null,
+                    name: "Client",
+                    order: 0,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                tags: [],
+                assignments: {},
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url.includes("/api/sessions/alpha/organization") && init?.method === "PATCH") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session_id: "alpha",
+                organization: { folder_id: "folder-client", tag_ids: [] },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    render(
+      <SessionList
+        sessions={[
+          makeSession({ id: "alpha", name: "Alpha", cwd: "/tmp/project" }),
+          makeSession({ id: "beta", name: "Beta", cwd: "/tmp/project" }),
+        ]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onDetails={() => {}}
+      />,
+    );
+
+    const alphaRow = screen
+      .getAllByTestId("session-item")
+      .find((item) => item.querySelector(".session-item-name")?.textContent?.trim() === "Alpha");
+    expect(alphaRow).toBeTruthy();
+    fireEvent.click(within(alphaRow as HTMLElement).getByRole("button", { name: "session.folder" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Client" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Client" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Client" }).length).toBeGreaterThan(0));
+    const folderFilterChip = screen
+      .getAllByRole("button", { name: "Client" })
+      .find((button) => button.classList.contains("session-tag-toggle"));
+    expect(folderFilterChip).toBeTruthy();
+    fireEvent.click(folderFilterChip as HTMLElement);
+
+    expect(screen.getByText("Alpha")).toBeTruthy();
+    expect(screen.getByText("Beta")).toBeTruthy();
+  });
+
+  it("shows the AI search action only while search is expanded", () => {
+    renderList(
+      [
+        makeSession({
+          id: "search-target",
+          name: "Search target",
+        }),
+      ],
+      {
+        onAiSearch: vi.fn(async () => ({
+          session_ids: [],
+          reasoning: "",
+          error: null,
+        })),
+      },
+    );
+
+    expect(screen.queryByTitle("session.aiSearchRun")).toBeNull();
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "session.searchPlaceholder" }));
+    expect(screen.getByTitle("session.aiSearchRun")).toBeTruthy();
+
+    fireEvent.blur(screen.getByRole("textbox", { name: "session.searchPlaceholder" }));
+    expect(screen.queryByTitle("session.aiSearchRun")).toBeNull();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "session.searchPlaceholder" }), {
+      target: { value: "target" },
+    });
+    expect(screen.getByTitle("session.aiSearchRun")).toBeTruthy();
+  });
+
+  it("shows a loading indicator while backend search is refreshing", () => {
+    renderList(
+      [makeSession({ id: "search-target", name: "Search target" })],
+      { searching: true },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "session.searchPlaceholder" }), {
+      target: { value: "target" },
+    });
+
+    expect(screen.getByText("session.searching")).toBeTruthy();
+  });
+});

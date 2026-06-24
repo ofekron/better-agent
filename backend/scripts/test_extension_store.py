@@ -1,0 +1,4205 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import base64
+import hashlib
+import tarfile
+import tempfile
+from pathlib import Path
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-extensions-home-")
+_TMP_OS_HOME = tempfile.mkdtemp(prefix="bc-test-extensions-os-home-")
+os.environ["HOME"] = _TMP_OS_HOME
+_TRUSTED_TEST_ROOT = Path(tempfile.mkdtemp(prefix="bc-test-trusted-extension-root-"))
+os.environ["BETTER_AGENT_TRUSTED_EXTENSION_FILE_ROOTS"] = str(_TRUSTED_TEST_ROOT)
+os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = str(_TRUSTED_TEST_ROOT)
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+import extension_store  # noqa: E402
+import extension_backend_loader  # noqa: E402
+
+
+def _module_from_python_path(rel_path: str) -> str:
+    path = Path(rel_path).with_suffix("")
+    parts = list(path.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _default_protocol(entrypoints: dict | None = None) -> dict:
+    modules = set()
+    entrypoints = entrypoints or {}
+    backend_module = entrypoints.get("backend_module")
+    if backend_module:
+        modules.add(backend_module)
+    for item in entrypoints.get("mcp") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("module"):
+            modules.add(item["module"])
+        if item.get("python"):
+            modules.add(_module_from_python_path(item["python"]))
+    return {
+        "version": 1,
+        "smoke_test": {
+            "required_paths": ["better-agent-extension.json"],
+            "python_modules": sorted(modules),
+        },
+    }
+
+
+def _validate_manifest(raw: dict) -> dict:
+    value = dict(raw)
+    value.setdefault("protocol", _default_protocol(value.get("entrypoints")))
+    return extension_store.validate_manifest(value)
+
+
+def _configure_internal_llm_defaults(*tasks: str) -> None:
+    import config_store
+
+    providers = config_store.list_providers()["providers"]
+    provider = providers[0]
+    assignments = config_store.get_internal_llm_assignments()
+    for task in tasks:
+        assignments[task] = {
+            "provider_id": provider["id"],
+            "model": provider["default_model"],
+            "reasoning_effort": provider.get("default_reasoning_effort") or "",
+        }
+    config_store.set_internal_llm_assignments(assignments)
+
+
+def _seed_required_marketplace_package() -> None:
+    package = _TRUSTED_TEST_ROOT / "extensions" / "marketplace"
+    (package / "backend").mkdir(parents=True, exist_ok=True)
+    (package / "ui").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_store.MARKETPLACE_EXTENSION_ID,
+        "name": "Marketplace",
+        "version": "1.0.0",
+        "description": "Required marketplace",
+        "surfaces": ["backend_feature", "frontend_feature"],
+        "entrypoints": {
+            "backend": "backend/routes.py",
+            "frontend": "ui/index.html",
+            "mcp": [],
+            "instructions": [],
+        },
+        "permissions": {"backend_routes": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "backend" / "routes.py").write_text(
+        "from fastapi import APIRouter\n\n"
+        "def create_router(context):\n"
+        "    return APIRouter()\n",
+        encoding="utf-8",
+    )
+    (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+
+
+def _seed_public_harness_instructions_package() -> None:
+    package = _TRUSTED_TEST_ROOT / "extensions" / "harness-instructions"
+    (package / "instructions").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID,
+        "name": "Harness Instructions",
+        "version": "1.0.0",
+        "description": "Visible Better Agent harness behavior instructions.",
+        "surfaces": ["instructions"],
+        "entrypoints": {
+            "instructions": [
+                {
+                    "name": "better-agent-harness-behavior",
+                    "path": "instructions/harness_behavior.md",
+                    "level": "global",
+                }
+            ],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": [
+                    "better-agent-extension.json",
+                    "instructions/harness_behavior.md",
+                ],
+                "python_modules": [],
+            },
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "instructions" / "harness_behavior.md").write_text(
+        "Better Agent requires a parent-session reply after subagent work. "
+        "If you call spawn_agent, multi_agent_v1.spawn_agent, or any other "
+        "native subagent tool, then after every wait_agent result you must "
+        "write your own final assistant message to the user.\n\n"
+        "Better Agent groups action/tool blocks under the assistant text that "
+        "immediately precedes them.\n",
+        encoding="utf-8",
+    )
+
+
+_seed_required_marketplace_package()
+_seed_public_harness_instructions_package()
+
+
+def _write_private_extension_package(
+    extension_id: str,
+    extension_path: str,
+    manifest: dict,
+    files: dict[str, str] | None = None,
+) -> Path:
+    package = _TRUSTED_TEST_ROOT / extension_path
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True)
+    full_manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": manifest.get("name") or extension_id,
+        "version": manifest.get("version") or "1.0.0",
+        "description": manifest.get("description") or extension_id,
+        "surfaces": manifest.get("surfaces") or [],
+        "entrypoints": manifest.get("entrypoints") or {},
+        "permissions": manifest.get("permissions") or {},
+        "protocol": manifest.get("protocol") or _default_protocol(manifest.get("entrypoints") or {}),
+        "marketplace": manifest.get("marketplace") or {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(full_manifest), encoding="utf-8")
+    for rel_path, content in (files or {}).items():
+        target = package / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return package
+
+
+def _private_monorepo_test_work(prefix: str = "bc-test-extension-repo-") -> Path:
+    root = _TRUSTED_TEST_ROOT / ".test-repos"
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout.strip()
+
+
+def _make_repo(root: Path, extension_id: str = "ofek.requirements") -> tuple[Path, str]:
+    repo = root / "extension-repo"
+    package = repo / "extensions" / "requirements"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": "Requirements",
+        "version": "1.0.0",
+        "description": "Requirement analysis extension",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {
+            "session_state": True,
+            "spawn_runs": True,
+            "provider_config": True,
+        },
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions/requirements/better-agent-extension.json")
+    _git(repo, "commit", "-m", "add requirements extension")
+    commit = _git(repo, "rev-parse", "HEAD")
+    return repo, commit
+
+
+def _make_instructions_repo(root: Path, extension_id: str = "ofek.instructions") -> tuple[Path, str]:
+    """Extension shipping a global-level instruction section (for block-lifecycle tests)."""
+    repo = root / "instructions-repo"
+    package = repo / "extensions" / "instructions"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": "Instructions",
+        "version": "1.0.0",
+        "description": "Instruction-section extension",
+        "surfaces": ["instructions"],
+        "entrypoints": {
+            "instructions": [
+                {"name": "rules", "path": "instructions/rules.md", "level": "global"},
+                {"name": "projrules", "path": "instructions/projrules.md", "level": "project"},
+            ],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "instructions").mkdir()
+    (package / "instructions" / "rules.md").write_text("Requirement analysis capability\n", encoding="utf-8")
+    (package / "instructions" / "projrules.md").write_text("Project-scoped rules\n", encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions")
+    _git(repo, "commit", "-m", "add instructions extension")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _make_runtime_repo(root: Path) -> tuple[Path, str]:
+    repo = root / "private-runtime-extensions"
+    package = repo / "extensions" / "scheduler"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.scheduler",
+        "name": "Scheduler",
+        "version": "1.0.0",
+        "description": "Runtime MCP extension",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "ofek-scheduler",
+                    "python": "mcp/server.py",
+                    "env": {"OF_EXTENSION_TEST": "1"},
+                    "user_facing": True,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {
+            "internal_loopback": True,
+        },
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions/scheduler/better-agent-extension.json", "extensions/scheduler/mcp/server.py")
+    _git(repo, "commit", "-m", "add scheduler runtime extension")
+    commit = _git(repo, "rev-parse", "HEAD")
+    return repo, commit
+
+
+def test_extension_package_installs_preserving_requirements_and_exposes_runtime_mcp() -> None:
+    """A runtime-MCP extension installs from a package dir, preserves its
+    declared python_requirements, and is exposed via runtime_mcp_server_configs
+    with its own venv on PATH. Uses a self-contained fixture so it does not
+    depend on any extension living inside this repo (extensions live in the
+    private extensions repo)."""
+    os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
+    package = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-ext-")) / "synthetic-runtime-mcp"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.synthetic-runtime-mcp",
+        "name": "Synthetic runtime MCP",
+        "version": "0.1.0",
+        "description": "Fixture exercising package install + runtime MCP exposure.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "synthetic",
+                    "python": "mcp/server.py",
+                    "user_facing": True,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+            "instructions": [],
+            "python_requirements": ["some-runtime-dep[mcp]"],
+        },
+        "permissions": {"internal_loopback": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
+
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "synthetic-runtime-mcp",
+            "ref": "",
+            "commit_sha": "synthetic-test",
+        },
+        persist=True,
+    )
+    if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
+        raise AssertionError("python_requirements declaration was not preserved")
+    extension_store.set_harness_delivery_mode("ofek.synthetic-runtime-mcp", "runtime")
+    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]) / ".venv")
+    venv_bin.mkdir(parents=True)
+    _configure_internal_llm_defaults("default_session")
+
+    config = extension_store.runtime_mcp_server_configs(
+        {
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "token",
+            "app_session_id": "session-1",
+            "cwd": "/tmp/project",
+            "model": "model",
+        },
+        user_facing=True,
+        bare=False,
+    )
+    server = config.get("synthetic")
+    if not server:
+        raise AssertionError("runtime MCP server was not exposed")
+    args = server.get("args") or []
+    if len(args) != 1 or not str(args[0]).endswith("mcp/server.py"):
+        raise AssertionError(f"unexpected MCP args: {args!r}")
+    env = server.get("env") or {}
+    if env.get("BETTER_CLAUDE_EXTENSION_ID") != "ofek.synthetic-runtime-mcp":
+        raise AssertionError("runtime MCP config missing extension id")
+    if str(venv_bin) not in str(env.get("PATH") or "").split(os.pathsep):
+        raise AssertionError("runtime MCP config does not prefer the extension venv")
+
+
+def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
+    import builtin_mcp_config
+
+    stale = extension_store._load()
+    package = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-")) / "headroom-like"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.concurrent-headroom",
+        "name": "Concurrent Headroom",
+        "version": "0.1.0",
+        "description": "Marketplace-style MCP extension fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "headroom",
+                    "python": "mcp/server.py",
+                    "user_facing": True,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('headroom')\n", encoding="utf-8")
+
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/headroom.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "concurrent-headroom",
+            "artifact_sha256": "0" * 64,
+            "artifact_url": "https://example.test/headroom.tar.gz",
+        },
+        persist=True,
+    )
+    if extension_store.get_extension("ofek.concurrent-headroom") is None:
+        raise AssertionError("fixture extension did not install")
+
+    stale["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["updated_at"] = "stale-writer"
+    extension_store._save(stale)
+
+    if extension_store.get_extension("ofek.concurrent-headroom") is None:
+        raise AssertionError("stale registry save dropped an installed marketplace extension")
+
+    config = builtin_mcp_config.with_builtin_mcp_servers(
+        {
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "token",
+            "app_session_id": "session-1",
+            "cwd": "/tmp/project",
+            "model": "model",
+            "bare_config": False,
+            "open_file_panel_enabled": True,
+            "disabled_builtin_extensions": [],
+        },
+        {},
+    )
+    if "headroom" not in config["mcp_servers"]:
+        raise AssertionError("preserved marketplace MCP extension was not exposed")
+
+
+def test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-uninstall-ext-")) / "uninstall-race"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.concurrent-uninstall",
+        "name": "Concurrent Uninstall",
+        "version": "0.1.0",
+        "description": "Uninstall race fixture.",
+        "surfaces": [],
+        "entrypoints": {},
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/uninstall.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "concurrent-uninstall",
+            "artifact_sha256": "1" * 64,
+            "artifact_url": "https://example.test/uninstall.tar.gz",
+        },
+        persist=True,
+    )
+    stale = extension_store._load()
+    extension_store.uninstall("ofek.concurrent-uninstall")
+    stale["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["updated_at"] = "stale-writer"
+    extension_store._save(stale)
+    if extension_store.get_extension("ofek.concurrent-uninstall") is not None:
+        raise AssertionError("stale registry save resurrected an uninstalled extension")
+
+
+def test_extension_store_rehydrate_skips_tombstoned_installed_snapshot() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-tombstoned-rehydrate-ext-")) / "tombstoned"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.tombstoned-rehydrate",
+        "name": "Tombstoned Rehydrate",
+        "version": "0.1.0",
+        "description": "Tombstoned rehydrate fixture.",
+        "surfaces": [],
+        "entrypoints": {},
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/tombstoned.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "tombstoned-rehydrate",
+            "artifact_sha256": "2" * 64,
+            "artifact_url": "https://example.test/tombstoned.tar.gz",
+        },
+        persist=True,
+    )
+    data = extension_store._load()
+    data["extensions"].pop("ofek.tombstoned-rehydrate", None)
+    extension_store._save(data, deleted_extension_ids={"ofek.tombstoned-rehydrate"})
+    if extension_store.get_extension("ofek.tombstoned-rehydrate") is not None:
+        raise AssertionError("rehydration restored a tombstoned installed snapshot")
+
+
+def test_extension_store_rehydrates_installed_requirements_snapshot() -> None:
+    # ofek-dev.requirements is a dissolved builtin: it must register purely from
+    # its installed artifact snapshot, not from a managed-id repo path. Regression
+    # for the managed-id skip in _rehydrate_installed_extension_records that left
+    # it stranded (installed but never registered, so its get-requirements MCP
+    # never injected). The snapshot is written directly so no registry record
+    # exists beforehand — rehydration is the only path that can create it.
+    ext_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    install_root = extension_store._install_root()
+    # Clean slate: the suite shares one temp home, so drop any requirements
+    # registry record and installed snapshot left by earlier tests, otherwise
+    # rehydration is skipped and a stale record masks the regression.
+    with extension_store._store_lock():
+        data = extension_store._read_store_unlocked()
+        data["extensions"].pop(ext_id, None)
+        extension_store._write_store_unlocked(data)
+    existing_snapshot_root = install_root / ext_id
+    if existing_snapshot_root.exists():
+        shutil.rmtree(existing_snapshot_root)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+        "name": "Requirements",
+        "version": "0.1.0",
+        "description": "Requirements rehydrate fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "better-agent-requirements",
+                    "replaces_builtin": "get-requirements",
+                    "python": "mcp/server.py",
+                    "args": [],
+                    "env": {},
+                    "user_facing": True,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {"internal_loopback": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
+        },
+        "marketplace": {},
+    }
+    snapshot = (
+        extension_store._install_root()
+        / extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+        / "versions"
+        / "requirements-rehydrate"
+    )
+    (snapshot / "mcp").mkdir(parents=True)
+    (snapshot / "mcp" / "server.py").write_text("# stub mcp server\n", encoding="utf-8")
+    (snapshot / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    record = extension_store.get_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if record is None:
+        raise AssertionError("installed requirements snapshot was not rehydrated into the registry")
+    if record.get("enabled") is not True:
+        raise AssertionError("rehydrated requirements snapshot is not enabled")
+    if record.get("source", {}).get("type") != "artifact":
+        raise AssertionError("rehydrated requirements snapshot has unexpected source type")
+
+
+def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy() -> None:
+    import runtime_skills
+
+    package = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-skill-ext-")) / "synthetic-skill"
+    (package / "skills" / "synthetic-skill").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.synthetic-skill",
+        "name": "Synthetic skill",
+        "version": "0.1.0",
+        "description": "Fixture exercising extension skill delivery.",
+        "surfaces": ["skills"],
+        "entrypoints": {
+            "skills": [{"name": "synthetic-skill", "path": "skills/synthetic-skill"}],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "skills" / "synthetic-skill" / "SKILL.md").write_text(
+        "---\nname: synthetic-skill\ndescription: From package\n---\n",
+        encoding="utf-8",
+    )
+
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "synthetic-skill",
+            "ref": "",
+            "commit_sha": "synthetic-skill-test",
+        },
+        persist=True,
+    )
+
+    native_skill = Path.home() / ".agents" / "skills" / "synthetic-skill"
+    skill_md = native_skill / "SKILL.md"
+    if not skill_md.exists():
+        raise AssertionError("extension skill was not installed into native skill root")
+    skill_md.write_text("---\nname: synthetic-skill\ndescription: User edit\n---\n", encoding="utf-8")
+    extension_store.reconcile_runtime_skills()
+    if "User edit" not in skill_md.read_text(encoding="utf-8"):
+        raise AssertionError("native extension skill reconcile clobbered user edits")
+
+    mode = extension_store.set_harness_delivery_mode("ofek.synthetic-skill", "runtime")
+    if mode != "runtime":
+        raise AssertionError(mode)
+    if native_skill.exists():
+        raise AssertionError("runtime mode left the native skill copy installed")
+    contexts = runtime_skills.runtime_skill_contexts(str(package))
+    content = "\n".join(str(ctx.get("content") or "") for ctx in contexts)
+    if "synthetic-skill" not in content or "From package" not in content:
+        raise AssertionError("runtime mode did not inject the extension skill per turn")
+
+    extension_store.set_harness_delivery_mode("ofek.synthetic-skill", "native")
+    if not skill_md.exists():
+        raise AssertionError("native mode did not reinstall the extension skill")
+
+
+def _make_team_definition_repo(root: Path) -> tuple[Path, str]:
+    repo = root / "private-team-extensions"
+    package = repo / "extensions" / "testape"
+    (package / "teams").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.testape",
+        "name": "Testape",
+        "version": "1.0.0",
+        "description": "Team definitions",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {
+            "team_definitions": [
+                {
+                    "name": "testape-ui-expert",
+                    "path": "teams/ui-expert.json",
+                }
+            ],
+        },
+        "permissions": {"session_state": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    definition = {
+        "schema_version": 1,
+        "name": "testape-ui-expert",
+        "manager": {"id": "coordinator"},
+        "catalog": {"workers": []},
+        "profiles": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "teams" / "ui-expert.json").write_text(json.dumps(definition), encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions/testape/better-agent-extension.json", "extensions/testape/teams/ui-expert.json")
+    _git(repo, "commit", "-m", "add testape team definition")
+    commit = _git(repo, "rev-parse", "HEAD")
+    return repo, commit
+
+
+def test_manifest_validation_rejects_unknown_permissions() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek-dev.bad",
+                "name": "Bad",
+                "version": "1.0.0",
+                "permissions": {"shell_escape": True},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "unknown keys" not in str(exc):
+            raise
+    else:
+        raise AssertionError("unknown permission was accepted")
+
+
+def test_manifest_rejects_string_only_mcp_entrypoints() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek-dev.backend",
+                "name": "Backend",
+                "version": "1.0.0",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {"mcp": ["scheduler"]},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "must declare" not in str(exc):
+            raise
+    else:
+        raise AssertionError("string-only MCP entrypoint was accepted")
+
+
+def test_manifest_rejects_reserved_mcp_server_names() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.shadow",
+                "name": "Shadow",
+                "version": "1.0.0",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {
+                    "mcp": [
+                        {
+                            "name": "communicate",
+                            "python": "mcp/server.py",
+                        }
+                    ]
+                },
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "reserved" not in str(exc):
+            raise
+    else:
+        raise AssertionError("reserved MCP server name was accepted")
+
+
+def test_manifest_allows_matching_builtin_mcp_replacement() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+            "name": "Project Structure",
+            "version": "1.0.0",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "better-agent-project-updates",
+                        "replaces_builtin": "project-updates",
+                        "python": "mcp/server.py",
+                    }
+                ]
+            },
+        }
+    )
+    mcp = manifest["entrypoints"]["mcp"][0]
+    if mcp["replaces_builtin"] != "project-updates":
+        raise AssertionError(mcp)
+
+
+def test_manifest_allows_requirements_builtin_mcp_replacement() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            "name": "Requirements",
+            "version": "1.0.0",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "better-agent-requirements",
+                        "replaces_builtin": "get-requirements",
+                        "python": "mcp/server.py",
+                    }
+                ]
+            },
+        }
+    )
+    mcp = manifest["entrypoints"]["mcp"][0]
+    if mcp["replaces_builtin"] != "get-requirements":
+        raise AssertionError(mcp)
+
+
+def test_manifest_allows_coordination_builtin_mcp_replacement() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
+            "name": "Coordination",
+            "version": "1.0.0",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "ofek-dev-coordination",
+                        "replaces_builtin": "better-agent-coordination",
+                        "python": "mcp/server.py",
+                    }
+                ]
+            },
+        }
+    )
+    mcp = manifest["entrypoints"]["mcp"][0]
+    if mcp["replaces_builtin"] != "better-agent-coordination":
+        raise AssertionError(mcp)
+
+
+def test_manifest_validates_managed_run_env_permission() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.managed-run",
+            "name": "Managed Run",
+            "version": "1.0.0",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {"mcp": [{"name": "managed-run", "python": "mcp/server.py"}]},
+            "permissions": {"spawn_runs": True, "managed_run_env": ["BU_CDP_URL"]},
+        }
+    )
+    if manifest["permissions"]["managed_run_env"] != ["BU_CDP_URL"]:
+        raise AssertionError(manifest["permissions"])
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.bad-env",
+                "name": "Bad Env",
+                "version": "1.0.0",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {"mcp": [{"name": "managed-run", "python": "mcp/server.py"}]},
+                "permissions": {"managed_run_env": ["bad-key"]},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "managed_run_env" not in str(exc):
+            raise
+    else:
+        raise AssertionError("invalid managed_run_env key was accepted")
+
+
+def test_manifest_accepts_remote_services_with_network_permission() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.remote",
+            "name": "Remote",
+            "version": "1.0.0",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "remote_services": [
+                    {
+                        "name": "planner",
+                        "base_url": "https://api.example.test/v1/",
+                        "purpose": "Runs proprietary planning logic outside the local package.",
+                    }
+                ],
+            },
+            "permissions": {"network": True},
+        }
+    )
+    services = manifest["entrypoints"]["remote_services"]
+    if services != [
+        {
+            "name": "planner",
+            "base_url": "https://api.example.test/v1",
+            "purpose": "Runs proprietary planning logic outside the local package.",
+        }
+    ]:
+        raise AssertionError(services)
+
+
+def test_manifest_rejects_remote_services_without_network_permission() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.remote",
+                "name": "Remote",
+                "version": "1.0.0",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {
+                    "remote_services": [
+                        {
+                            "name": "planner",
+                            "base_url": "https://api.example.test",
+                            "purpose": "Runs proprietary planning logic.",
+                        }
+                    ],
+                },
+                "permissions": {},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "permissions.network=true" not in str(exc):
+            raise
+        return
+    raise AssertionError("remote services were accepted without network permission")
+
+
+def test_manifest_rejects_unsafe_remote_service_urls() -> None:
+    for base_url in (
+        "http://api.example.test",
+        "https://user:pass@api.example.test",
+        "https://api.example.test/path?token=secret",
+        "https://api.example.test/path#fragment",
+    ):
+        try:
+            _validate_manifest(
+                {
+                    "kind": "better-agent-extension",
+                    "id": "ofek.remote",
+                    "name": "Remote",
+                    "version": "1.0.0",
+                    "surfaces": ["runtime_mcp"],
+                    "entrypoints": {
+                        "remote_services": [
+                            {
+                                "name": "planner",
+                                "base_url": base_url,
+                                "purpose": "Runs proprietary planning logic.",
+                            }
+                        ],
+                    },
+                    "permissions": {"network": True},
+                }
+            )
+        except extension_store.ExtensionError:
+            continue
+        raise AssertionError(f"unsafe remote service URL accepted: {base_url}")
+
+
+def test_manifest_accepts_backend_module_entrypoint() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.compiled-backend",
+            "name": "Compiled Backend",
+            "version": "1.0.0",
+            "surfaces": ["backend_feature"],
+            "entrypoints": {"backend_module": "compiled_backend.routes"},
+            "permissions": {"backend_routes": True},
+        }
+    )
+    if manifest["entrypoints"]["backend_module"] != "compiled_backend.routes":
+        raise AssertionError(manifest["entrypoints"])
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.bad-backend",
+                "name": "Bad Backend",
+                "version": "1.0.0",
+                "surfaces": ["backend_feature"],
+                "entrypoints": {
+                    "backend": "backend/routes.py",
+                    "backend_module": "compiled_backend.routes",
+                },
+                "permissions": {"backend_routes": True},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "either backend or backend_module" not in str(exc):
+            raise
+    else:
+        raise AssertionError("backend and backend_module were accepted together")
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.bad-module",
+                "name": "Bad Module",
+                "version": "1.0.0",
+                "surfaces": ["backend_feature"],
+                "entrypoints": {"backend_module": "../bad"},
+                "permissions": {"backend_routes": True},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "backend_module" not in str(exc):
+            raise
+        return
+    raise AssertionError("invalid backend_module was accepted")
+
+
+def test_installed_extension_config_exposes_remote_services() -> None:
+    package = _write_private_extension_package(
+        "ofek.remote-config",
+        "extensions/remote-config",
+        {
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "remote_services": [
+                    {
+                        "name": "planner",
+                        "base_url": "https://api.example.test/v1",
+                        "purpose": "Runs proprietary planning logic outside the local package.",
+                    }
+                ],
+            },
+            "permissions": {"network": True},
+        },
+    )
+    try:
+        record = extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "artifact",
+                "repo_url": "https://example.test/remote.tar.gz",
+                "extension_path": "",
+                "ref": "",
+                "commit_sha": "remote-config",
+                "artifact_sha256": "0" * 64,
+                "artifact_url": "https://example.test/remote.tar.gz",
+            },
+            persist=True,
+        )
+        if record["manifest"]["entrypoints"]["remote_services"][0]["name"] != "planner":
+            raise AssertionError(record)
+        cfg = extension_store.extension_config("ofek.remote-config")
+        if cfg["remote_services"] != record["manifest"]["entrypoints"]["remote_services"]:
+            raise AssertionError(cfg["remote_services"])
+    finally:
+        try:
+            extension_store.uninstall("ofek.remote-config")
+        except Exception:
+            pass
+
+
+def test_manifest_rejects_mismatched_builtin_mcp_replacement() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.shadow",
+                "name": "Shadow",
+                "version": "1.0.0",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {
+                    "mcp": [
+                        {
+                            "name": "shadow-project-updates",
+                            "replaces_builtin": "project-updates",
+                            "python": "mcp/server.py",
+                        }
+                    ]
+                },
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "not allowed" not in str(exc):
+            raise
+    else:
+        raise AssertionError("mismatched builtin MCP replacement was accepted")
+
+
+def test_manifest_rejects_root_level_frontend_entrypoint() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.frontend",
+                "name": "Frontend",
+                "version": "1.0.0",
+                "surfaces": ["frontend_feature"],
+                "entrypoints": {"frontend": "index.js"},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "dedicated asset directory" not in str(exc):
+            raise
+    else:
+        raise AssertionError("root-level frontend entrypoint was accepted")
+
+
+def test_manifest_rejects_missing_team_definition_file() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo = work / "repo"
+        package = repo / "extensions" / "testape"
+        package.mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.testape",
+            "name": "Testape",
+            "version": "1.0.0",
+            "surfaces": ["backend_feature"],
+            "entrypoints": {
+                "team_definitions": [
+                    {
+                        "name": "testape-ui-expert",
+                        "path": "teams/missing.json",
+                    }
+                ]
+            },
+            "protocol": {
+                "version": 1,
+                "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+            },
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "test@example.test")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "add", "extensions/testape/better-agent-extension.json")
+        _git(repo, "commit", "-m", "add broken testape extension")
+        try:
+            extension_store.install_from_repo(
+                repo_url=repo.as_uri(),
+                extension_path="extensions/testape",
+            )
+        except extension_store.ExtensionError as exc:
+            if "team definition file not found" not in str(exc):
+                raise
+            return
+        raise AssertionError("missing team definition was accepted")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_installed_extension_exports_team_definition_sources() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo, _commit = _make_team_definition_repo(work)
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/testape",
+        )
+        sources = extension_store.team_definition_sources()
+        source = next(item for item in sources if item["source_id"] == "extension:ofek.testape:testape-ui-expert")
+        if source["definition"]["manager"]["id"] != "coordinator":
+            raise AssertionError(source)
+        if source["extension_name"] != "Testape":
+            raise AssertionError(source)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_install_from_private_monorepo_path_and_toggle() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo, commit = _make_repo(work)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        if record["manifest"]["id"] != "ofek.requirements":
+            raise AssertionError(record)
+        if record["source"]["commit_sha"] != commit:
+            raise AssertionError(record["source"])
+        if record["entitlement"]["status"] != "not_required":
+            raise AssertionError(record["entitlement"])
+        install_path = Path(record["source"]["install_path"])
+        if not (install_path / "better-agent-extension.json").exists():
+            raise AssertionError("installed manifest missing")
+        disabled = extension_store.set_enabled("ofek.requirements", False)
+        if disabled["enabled"] is not False:
+            raise AssertionError("extension did not disable")
+        items = extension_store.list_extensions()
+        req_items = [item for item in items if item["manifest"]["id"] == "ofek.requirements"]
+        if len(req_items) != 1:
+            raise AssertionError(items)
+        extension_store.uninstall("ofek.requirements")
+        if extension_store.get_extension("ofek.requirements") is not None:
+            raise AssertionError("extension still listed after uninstall")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_package_install_rejects_symlink_entries() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo, _commit = _make_repo(work, extension_id="ofek.linked")
+        package = repo / "extensions" / "requirements"
+        os.symlink("better-agent-extension.json", package / "manifest-link.json")
+        _git(repo, "add", "extensions/requirements/manifest-link.json")
+        _git(repo, "commit", "-m", "add linked package file")
+        try:
+            extension_store.install_from_repo(
+                repo_url=repo.as_uri(),
+                extension_path="extensions/requirements",
+            )
+        except extension_store.ExtensionError as exc:
+            if "must not contain links" not in str(exc):
+                raise
+            return
+        raise AssertionError("extension package symlink was accepted")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _make_dep_repo(root: Path, extension_id: str, dependencies: list[str]) -> tuple[Path, str]:
+    repo = root / f"repo-{extension_id}"
+    package = repo / "extensions" / "pkg"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "permissions": {},
+        "dependencies": dependencies,
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions/pkg/better-agent-extension.json")
+    _git(repo, "commit", "-m", f"add {extension_id}")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def test_manifest_dependencies_accepted_and_deduped() -> None:
+    manifest = _validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek-dev.feature",
+        "name": "Feature",
+        "version": "1.0.0",
+        "dependencies": ["ofek-dev.base", "ofek-dev.base", "other.dep"],
+    })
+    if manifest["dependencies"] != ["ofek-dev.base", "other.dep"]:
+        raise AssertionError(manifest["dependencies"])
+
+
+def test_manifest_dependencies_reject_self_and_bad_id() -> None:
+    try:
+        _validate_manifest({
+            "kind": "better-agent-extension",
+            "id": "ofek-dev.feature",
+            "name": "Feature",
+            "version": "1.0.0",
+            "dependencies": ["ofek-dev.feature"],
+        })
+    except extension_store.ExtensionError as exc:
+        if "itself" not in str(exc):
+            raise
+    else:
+        raise AssertionError("self-dependency was accepted")
+    try:
+        _validate_manifest({
+            "kind": "better-agent-extension",
+            "id": "ofek-dev.feature",
+            "name": "Feature",
+            "version": "1.0.0",
+            "dependencies": ["Bad ID With Spaces"],
+        })
+    except extension_store.ExtensionError as exc:
+        if "valid extension id" not in str(exc):
+            raise
+    else:
+        raise AssertionError("invalid dependency id was accepted")
+
+
+def test_manifest_accepts_extension_protocol_smoke_test() -> None:
+    defaulted = extension_store.validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek.missing-protocol",
+        "name": "Missing Protocol",
+        "version": "1.0.0",
+    })
+    if defaulted["protocol"]["smoke_test"]["required_paths"] != ["better-agent-extension.json"]:
+        raise AssertionError(defaulted["protocol"])
+    python_defaulted = extension_store.validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek.missing-python-protocol",
+        "name": "Missing Python Protocol",
+        "version": "1.0.0",
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "ofek-python",
+                    "python": "mcp/server.py",
+                }
+            ],
+        },
+    })
+    if python_defaulted["protocol"]["smoke_test"]["python_modules"] != ["mcp.server"]:
+        raise AssertionError(python_defaulted["protocol"])
+
+    manifest = _validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek.protocol",
+        "name": "Protocol",
+        "version": "1.0.0",
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json", "mcp/server.py"],
+                "python_modules": ["mcp.server"],
+            },
+        },
+    })
+    smoke = manifest["protocol"]["smoke_test"]
+    if smoke["required_paths"] != ["better-agent-extension.json", "mcp/server.py"]:
+        raise AssertionError(smoke)
+    if smoke["python_modules"] != ["mcp.server"]:
+        raise AssertionError(smoke)
+    try:
+        _validate_manifest({
+            "kind": "better-agent-extension",
+            "id": "ofek.bad-protocol",
+            "name": "Bad Protocol",
+            "version": "1.0.0",
+            "protocol": {"version": 2},
+        })
+    except extension_store.ExtensionError as exc:
+        if "protocol.version" not in str(exc):
+            raise
+    else:
+        raise AssertionError("invalid protocol version was accepted")
+
+
+def test_install_smoke_test_rejects_missing_protocol_files() -> None:
+    package = _write_private_extension_package(
+        "ofek.protocol-missing",
+        "extensions/protocol-missing",
+        {
+            "surfaces": [],
+            "protocol": {
+                "version": 1,
+                "smoke_test": {"required_paths": ["missing.txt"], "python_modules": []},
+            },
+        },
+    )
+    try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "artifact",
+                "repo_url": "https://example.test/protocol.tar.gz",
+                "extension_path": "",
+                "ref": "",
+                "commit_sha": "protocol-missing",
+            },
+            persist=False,
+        )
+    except extension_store.ExtensionError as exc:
+        if "protocol.smoke_test.required_paths" not in str(exc):
+            raise
+        return
+    raise AssertionError("install accepted a package that failed protocol smoke")
+
+
+def test_install_smoke_test_rejects_bad_python_module_import() -> None:
+    package = _write_private_extension_package(
+        "ofek.protocol-bad-import",
+        "extensions/protocol-bad-import",
+        {
+            "surfaces": [],
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": ["better-agent-extension.json"],
+                    "python_modules": ["bad_extension"],
+                },
+            },
+        },
+        {"bad_extension.py": 'raise RuntimeError("bad import smoke")\n'},
+    )
+    try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "artifact",
+                "repo_url": "https://example.test/protocol.tar.gz",
+                "extension_path": "",
+                "ref": "",
+                "commit_sha": "protocol-bad-import",
+            },
+            persist=False,
+        )
+    except extension_store.ExtensionError as exc:
+        if "protocol.smoke_test.python_modules failed" not in str(exc):
+            raise
+        return
+    raise AssertionError("install accepted a package with a failing python smoke import")
+
+
+def test_runtime_ready_requires_protocol_smoke_to_pass() -> None:
+    package = _write_private_extension_package(
+        "ofek.protocol-ready",
+        "extensions/protocol-ready",
+        {
+            "surfaces": [],
+            "protocol": {
+                "version": 1,
+                "smoke_test": {"required_paths": ["marker.txt"], "python_modules": []},
+            },
+        },
+        {"marker.txt": "ok"},
+    )
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/protocol.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "protocol-ready",
+        },
+        persist=True,
+    )
+    try:
+        if record["smoke_test"]["status"] != "passed":
+            raise AssertionError(record["smoke_test"])
+        if not extension_store.is_extension_runtime_ready("ofek.protocol-ready"):
+            raise AssertionError("runtime-ready extension failed protocol smoke")
+        Path(record["source"]["install_path"], "marker.txt").unlink()
+        if extension_store.is_extension_runtime_ready("ofek.protocol-ready"):
+            raise AssertionError("runtime-ready extension ignored failing protocol smoke")
+    finally:
+        extension_store.uninstall("ofek.protocol-ready")
+
+
+def test_runtime_ready_accepts_persisted_manifest_without_protocol() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-no-protocol-ready-")) / "legacy"
+    package.mkdir(parents=True)
+    try:
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.no-protocol-ready",
+            "name": "No Protocol Ready",
+            "version": "1.0.0",
+            "description": "Legacy persisted fixture.",
+            "surfaces": [],
+            "entrypoints": {},
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        data = extension_store._load()
+        data["extensions"]["ofek.no-protocol-ready"] = {
+            "manifest": manifest,
+            "enabled": True,
+            "installed_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "instructions_enabled": {},
+            "permission_grants": {},
+            "source": {"type": "artifact", "install_path": str(package)},
+            "entitlement": {"status": "not_required"},
+        }
+        extension_store._save(data)
+        if not extension_store.is_extension_runtime_ready("ofek.no-protocol-ready"):
+            raise AssertionError("runtime readiness rejected a persisted manifest with default protocol")
+    finally:
+        try:
+            extension_store.uninstall("ofek.no-protocol-ready")
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(package.parent, ignore_errors=True)
+
+
+def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
+    import config_store
+
+    old_assignments = config_store.get_internal_llm_assignments()
+    assignments = dict(old_assignments)
+    assignments.pop("default_session", None)
+    config_store.set_internal_llm_assignments(assignments)
+    loopback = _write_private_extension_package(
+        "ofek.loopback-ready",
+        "extensions/loopback-ready",
+        {
+            "surfaces": [],
+            "permissions": {"session_state": True, "internal_loopback": True},
+        },
+    )
+    spawn_runs = _write_private_extension_package(
+        "ofek.spawn-runs-gated",
+        "extensions/spawn-runs-gated",
+        {
+            "surfaces": [],
+            "permissions": {"spawn_runs": True},
+        },
+    )
+    loopback_record = extension_store._install_from_package_dir(
+        package_dir=loopback,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/loopback.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "loopback-ready",
+        },
+        persist=True,
+    )
+    spawn_record = extension_store._install_from_package_dir(
+        package_dir=spawn_runs,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/spawn.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "spawn-runs-gated",
+        },
+        persist=True,
+    )
+    try:
+        if not extension_store.is_extension_runtime_ready(loopback_record["manifest"]["id"]):
+            raise AssertionError("session_state/internal_loopback-only extension required default_session")
+        if extension_store.is_extension_runtime_ready(spawn_record["manifest"]["id"]):
+            raise AssertionError("spawn_runs extension should require default_session")
+    finally:
+        config_store.set_internal_llm_assignments(old_assignments)
+        extension_store.uninstall(loopback_record["manifest"]["id"])
+        extension_store.uninstall(spawn_record["manifest"]["id"])
+
+
+def test_set_enabled_enforces_dependencies() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, _ = _make_dep_repo(work, "ofek.base", [])
+        feat_repo, _ = _make_dep_repo(work, "ofek.feature", ["ofek.base"])
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.install_from_repo(repo_url=feat_repo.as_uri(), extension_path="extensions/pkg")
+        # Both install enabled-by-default; disable both to set up the test.
+        extension_store.set_enabled("ofek.feature", False)
+        extension_store.set_enabled("ofek.base", False)
+        # Enable the dependent while its dep is inactive -> fail closed.
+        try:
+            extension_store.set_enabled("ofek.feature", True)
+        except extension_store.ExtensionError as exc:
+            if "not active" not in str(exc):
+                raise
+        else:
+            raise AssertionError("dependent enabled without active dependency")
+        # Enable the dep, then the dependent succeeds.
+        extension_store.set_enabled("ofek.base", True)
+        enabled = extension_store.set_enabled("ofek.feature", True)
+        if enabled["enabled"] is not True:
+            raise AssertionError(enabled)
+        # Disabling the dep while the dependent is active -> fail closed.
+        try:
+            extension_store.set_enabled("ofek.base", False)
+        except extension_store.ExtensionError as exc:
+            if "depend on it" not in str(exc):
+                raise
+        else:
+            raise AssertionError("dependency disabled while dependent active")
+        # Disable the dependent first, then the dep disables cleanly.
+        extension_store.set_enabled("ofek.feature", False)
+        disabled = extension_store.set_enabled("ofek.base", False)
+        if disabled["enabled"] is not False:
+            raise AssertionError(disabled)
+    finally:
+        for eid in ("ofek.feature", "ofek.base"):
+            try:
+                extension_store.uninstall(eid)
+            except Exception:
+                pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_required_runtime_path_extensions_are_managed_builtins() -> None:
+    # An extension that gates runtime-readiness on a required path it ships
+    # (_BUILTIN_RUNTIME_REQUIRED_PATHS) can only ever satisfy that gate if the
+    # backend seeds/refreshes it from local source. That happens exclusively
+    # for ids registered as managed builtins. If such an id is absent from both
+    # registries it installs once as a stale artifact, never gets the required
+    # path, fails the runtime-ready gate, and its MCP never launches.
+    managed = set(extension_store._PRIVATE_EXTENSION_PATHS) | set(
+        extension_store._PUBLIC_EXTENSION_PATHS
+    )
+    unmanaged = [
+        eid
+        for eid in extension_store._BUILTIN_RUNTIME_REQUIRED_PATHS
+        if eid not in managed
+    ]
+    if unmanaged:
+        raise AssertionError(
+            f"required-runtime-path extensions are not managed builtins: {unmanaged}"
+        )
+    # Managed private builtins must also carry a display name.
+    missing_names = [
+        eid
+        for eid in extension_store._PRIVATE_EXTENSION_PATHS
+        if eid not in extension_store._PRIVATE_EXTENSION_NAMES
+    ]
+    if missing_names:
+        raise AssertionError(f"private builtins missing display names: {missing_names}")
+
+
+def test_install_from_signed_marketplace_artifact() -> None:
+    work = _private_monorepo_test_work()
+    old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
+    old_insecure = os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS")
+    try:
+        repo, _ = _make_repo(work, extension_id="ofek.signed")
+        package = repo / "extensions" / "requirements"
+        artifact = work / "ofek.signed.tar.gz"
+        with tarfile.open(artifact, "w:gz") as archive:
+            for path in sorted(package.rglob("*")):
+                if path.is_file():
+                    archive.add(path, arcname=path.relative_to(package).as_posix(), recursive=False)
+        artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        key = Ed25519PrivateKey.generate()
+        public_key = key.public_key().public_bytes_raw().hex()
+        signature = base64.b64encode(
+            key.sign(
+                json.dumps(
+                    {
+                        "artifact_sha256": artifact_sha256,
+                        "extension_id": "ofek.signed",
+                        "version": "1.0.0",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        ).decode("ascii")
+        os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+        os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+
+        record = extension_store.install_from_artifact(
+            artifact_url=artifact.as_uri(),
+            artifact_sha256=artifact_sha256,
+            artifact_signature=signature,
+        )
+
+        if record["manifest"]["id"] != "ofek.signed":
+            raise AssertionError(record)
+        if record["source"]["type"] != "artifact":
+            raise AssertionError(record["source"])
+    finally:
+        if old_public_key is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = old_public_key
+        if old_insecure is None:
+            os.environ.pop("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS", None)
+        else:
+            os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = old_insecure
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_install_from_marketplace_metadata_installs_artifact() -> None:
+    work = _private_monorepo_test_work()
+    old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
+    old_insecure = os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS")
+    try:
+        repo, _ = _make_repo(work, extension_id="ofek.marketplace-metadata")
+        package = repo / "extensions" / "requirements"
+        key = Ed25519PrivateKey.generate()
+        public_key = key.public_key().public_bytes_raw().hex()
+        metadata = _write_signed_artifact(
+            package,
+            work / "ofek.marketplace-metadata.tar.gz",
+            "ofek.marketplace-metadata",
+            "1.0.0",
+            key,
+        )
+        metadata["extension_id"] = "ofek.marketplace-metadata"
+        metadata["public_key"] = public_key
+        os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+        os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+
+        record = extension_store.install_from_marketplace_metadata(metadata=metadata)
+
+        if record["manifest"]["id"] != "ofek.marketplace-metadata":
+            raise AssertionError(record)
+        if record["source"]["type"] != "marketplace":
+            raise AssertionError(record["source"])
+        if extension_store.get_extension("ofek.marketplace-metadata") is None:
+            raise AssertionError("marketplace metadata install did not persist the extension")
+    finally:
+        if old_public_key is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = old_public_key
+        if old_insecure is None:
+            os.environ.pop("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS", None)
+        else:
+            os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = old_insecure
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_update_installed_extensions_updates_marketplace_metadata_record() -> None:
+    work = _private_monorepo_test_work()
+    old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
+    old_insecure = os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS")
+    try:
+        extension_id = "ofek.auto-market"
+        repo, _ = _make_repo(work, extension_id=extension_id)
+        package = repo / "extensions" / "requirements"
+        key = Ed25519PrivateKey.generate()
+        public_key = key.public_key().public_bytes_raw().hex()
+        metadata_path = work / "api" / "marketplace" / "extensions" / extension_id / "metadata"
+        metadata_path.parent.mkdir(parents=True)
+
+        metadata_v1 = _write_signed_artifact(
+            package,
+            work / "ofek.auto-market-v1.tar.gz",
+            extension_id,
+            "1.0.0",
+            key,
+        )
+        metadata_v1["extension_id"] = extension_id
+        metadata_v1["public_key"] = public_key
+        metadata_path.write_text(json.dumps(metadata_v1), encoding="utf-8")
+        os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+        os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+
+        record = extension_store.install_from_marketplace_metadata(
+            metadata_url=metadata_path.as_uri()
+        )
+        if record["source"].get("metadata_url") != metadata_path.as_uri():
+            raise AssertionError("marketplace metadata_url was not persisted")
+
+        manifest_path = package / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "2.0.0"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        metadata_v2 = _write_signed_artifact(
+            package,
+            work / "ofek.auto-market-v2.tar.gz",
+            extension_id,
+            "2.0.0",
+            key,
+        )
+        metadata_v2["extension_id"] = extension_id
+        metadata_v2["public_key"] = public_key
+        metadata_path.write_text(json.dumps(metadata_v2), encoding="utf-8")
+
+        result = extension_store.update_installed_extensions()
+
+        updated = extension_store.get_extension(extension_id)
+        row = next((item for item in result["results"] if item["extension_id"] == extension_id), None)
+        if not row or row.get("updated") is not True:
+            raise AssertionError(result)
+        if updated["manifest"]["version"] != "2.0.0":
+            raise AssertionError(updated["manifest"])
+        if updated["source"]["artifact_sha256"] != metadata_v2["artifact_sha256"]:
+            raise AssertionError(updated["source"])
+    finally:
+        try:
+            extension_store.uninstall("ofek.auto-market")
+        except extension_store.ExtensionError:
+            pass
+        if old_public_key is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = old_public_key
+        if old_insecure is None:
+            os.environ.pop("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS", None)
+        else:
+            os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = old_insecure
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_update_installed_extensions_updates_git_record_and_preserves_enabled() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo, first_commit = _make_repo(work, extension_id="ofek.auto-git")
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        if record["source"]["commit_sha"] != first_commit:
+            raise AssertionError(record["source"])
+        extension_store.set_enabled("ofek.auto-git", False)
+
+        manifest_path = repo / "extensions" / "requirements" / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "2.0.0"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(repo, "add", "extensions/requirements/better-agent-extension.json")
+        _git(repo, "commit", "-m", "update extension")
+        second_commit = _git(repo, "rev-parse", "HEAD")
+
+        result = extension_store.update_installed_extensions()
+
+        updated = extension_store.get_extension("ofek.auto-git")
+        row = next((item for item in result["results"] if item["extension_id"] == "ofek.auto-git"), None)
+        if not row or row.get("updated") is not True:
+            raise AssertionError(result)
+        if updated["manifest"]["version"] != "2.0.0":
+            raise AssertionError(updated["manifest"])
+        if updated["source"]["commit_sha"] != second_commit:
+            raise AssertionError(updated["source"])
+        if updated["enabled"] is not False:
+            raise AssertionError("disabled state was not preserved")
+    finally:
+        try:
+            extension_store.uninstall("ofek.auto-git")
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _write_signed_artifact(package: Path, artifact: Path, extension_id: str, version: str, key: Ed25519PrivateKey) -> dict[str, str]:
+    with tarfile.open(artifact, "w:gz") as archive:
+        for path in sorted(package.rglob("*")):
+            if path.is_file():
+                archive.add(path, arcname=path.relative_to(package).as_posix(), recursive=False)
+    artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    signature = base64.b64encode(
+        key.sign(
+            json.dumps(
+                {
+                    "artifact_sha256": artifact_sha256,
+                    "extension_id": extension_id,
+                    "version": version,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    ).decode("ascii")
+    return {
+        "artifact_url": artifact.as_uri(),
+        "artifact_sha256": artifact_sha256,
+        "signature": signature,
+        "version": version,
+    }
+
+
+def _marketplace_artifact_fixture(work: Path) -> tuple[Path, dict[str, str], str]:
+    package = work / "marketplace-package"
+    (package / "backend").mkdir(parents=True)
+    (package / "ui").mkdir()
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_store.MARKETPLACE_EXTENSION_ID,
+        "name": "Marketplace",
+        "version": "1.2.3",
+        "description": "Required marketplace",
+        "surfaces": ["backend_feature", "frontend_feature"],
+        "entrypoints": {
+            "backend": "backend/routes.py",
+            "frontend": "ui/index.html",
+            "mcp": [],
+            "instructions": [],
+        },
+        "permissions": {"backend_routes": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "backend" / "routes.py").write_text(
+        "from fastapi import APIRouter\n\n"
+        "def create_router(context):\n"
+        "    return APIRouter()\n",
+        encoding="utf-8",
+    )
+    (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    key = Ed25519PrivateKey.generate()
+    metadata = _write_signed_artifact(
+        package,
+        work / "marketplace.tar.gz",
+        extension_store.MARKETPLACE_EXTENSION_ID,
+        "1.2.3",
+        key,
+    )
+    public_key = key.public_key().public_bytes_raw().hex()
+    return package, metadata, public_key
+
+
+def _with_marketplace_bootstrap_env(work: Path, metadata: dict[str, str], public_key: str | None):
+    old = {
+        "BETTER_AGENT_HOME": os.environ.get("BETTER_AGENT_HOME"),
+        "BETTER_CLAUDE_HOME": os.environ.get("BETTER_CLAUDE_HOME"),
+        "BETTER_AGENT_MARKETPLACE_BASE_URL": os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL"),
+        "BETTER_AGENT_MARKETPLACE_PUBLIC_KEY": os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"),
+        "BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS": os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"),
+        "BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH": os.environ.get("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"),
+        "BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE": os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE"),
+    }
+    metadata_file = work / "api" / "marketplace" / "extensions" / extension_store.MARKETPLACE_EXTENSION_ID / "metadata"
+    metadata_file.parent.mkdir(parents=True)
+    metadata_file.write_text(json.dumps(metadata), encoding="utf-8")
+    test_home = str(work / "home")
+    os.environ["BETTER_AGENT_HOME"] = test_home
+    os.environ["BETTER_CLAUDE_HOME"] = test_home
+    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (work / "api" / "marketplace").as_uri()
+    os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+    os.environ["BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE"] = "1"
+    os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    if public_key is None:
+        os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+    else:
+        os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+    return old
+
+
+def _restore_env(old: dict[str, str | None]) -> None:
+    for key, value in old.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def test_required_marketplace_bootstraps_from_signed_artifact() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        _, metadata, public_key = _marketplace_artifact_fixture(work)
+        old = _with_marketplace_bootstrap_env(work, metadata, public_key)
+        try:
+            data = extension_store._load()
+        finally:
+            _restore_env(old)
+        record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
+        if record["source"]["type"] != "better_agent_signed":
+            raise AssertionError(record["source"])
+        if record["manifest"]["entrypoints"]["frontend"] != "ui/index.html":
+            raise AssertionError(record["manifest"])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_required_marketplace_artifact_record_upgrades_when_metadata_changes() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        _, metadata, public_key = _marketplace_artifact_fixture(work)
+        old = _with_marketplace_bootstrap_env(work, metadata, public_key)
+        try:
+            extension_store._required_artifact_update_checked.clear()  # type: ignore[attr-defined]
+            home = Path(os.environ["BETTER_CLAUDE_HOME"])
+            store_path = home / "extensions" / "extensions.json"
+            store_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_record = extension_store._placeholder_record(  # type: ignore[attr-defined]
+                extension_store.MARKETPLACE_EXTENSION_ID,
+                source_type="better_agent_signed",
+            )
+            stale_record["source"]["artifact_sha256"] = "0" * 64
+            stale_record["source"]["commit_sha"] = "0" * 64
+            store_path.write_text(
+                json.dumps({"schema_version": extension_store.STORE_SCHEMA_VERSION, "extensions": {
+                    extension_store.MARKETPLACE_EXTENSION_ID: stale_record,
+                }}),
+                encoding="utf-8",
+            )
+
+            data = extension_store._load()
+        finally:
+            _restore_env(old)
+            extension_store._required_artifact_update_checked.clear()  # type: ignore[attr-defined]
+        record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
+        if record["source"]["artifact_sha256"] != metadata["artifact_sha256"]:
+            raise AssertionError(record["source"])
+        if record["manifest"]["entrypoints"]["frontend"] != "ui/index.html":
+            raise AssertionError(record["manifest"])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_required_marketplace_unreachable_metadata_falls_back_to_visible_placeholder_error() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        _, metadata, public_key = _marketplace_artifact_fixture(work)
+        old = _with_marketplace_bootstrap_env(work, metadata, public_key)
+        os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (work / "missing" / "api" / "marketplace").as_uri()
+        try:
+            data = extension_store._load()
+        finally:
+            _restore_env(old)
+        record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
+        if record["source"]["type"] != "private_placeholder":
+            raise AssertionError(record["source"])
+        if record["manifest"]["entrypoints"]["frontend"]:
+            raise AssertionError(record["manifest"])
+        if "No such file" not in record["source"].get("error", ""):
+            raise AssertionError(record["source"])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_marketplace_downloads_use_better_agent_user_agent() -> None:
+    seen: list[tuple[str, str]] = []
+    real_urlopen = extension_store.urllib.request.urlopen
+
+    class FakeResponse:
+        def __init__(self, body: bytes):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, *args):
+            return self.body
+
+    def fake_urlopen(req, timeout):
+        seen.append((req.get_header("Accept"), req.get_header("User-agent")))
+        if req.get_header("Accept") == "application/json":
+            return FakeResponse(b'{"ok":true}')
+        return FakeResponse(b"artifact")
+
+    old_insecure = os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS")
+    os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+    extension_store.urllib.request.urlopen = fake_urlopen
+    try:
+        payload = extension_store._fetch_json("http://example.test/metadata")
+        artifact = extension_store._download_artifact("http://example.test/artifact")
+    finally:
+        extension_store.urllib.request.urlopen = real_urlopen
+        if old_insecure is None:
+            os.environ.pop("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS", None)
+        else:
+            os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = old_insecure
+    if payload != {"ok": True}:
+        raise AssertionError(payload)
+    if artifact != b"artifact":
+        raise AssertionError(artifact)
+    if seen != [
+        ("application/json", "BetterAgentMarketplace/1.0"),
+        ("application/gzip", "BetterAgentMarketplace/1.0"),
+    ]:
+        raise AssertionError(seen)
+
+
+def test_reinstall_and_state_changes_evict_persistent_backend() -> None:
+    work = _private_monorepo_test_work()
+    evicted: list[str] = []
+    original_evict = extension_backend_loader.evict_persistent_backend
+    extension_backend_loader.evict_persistent_backend = evicted.append
+    try:
+        repo, _commit = _make_repo(work, extension_id="ofek.evict")
+        extension_store.install_from_repo(repo_url=repo.as_uri(), extension_path="extensions/requirements")
+        if evicted:
+            raise AssertionError(evicted)
+        extension_store.install_from_repo(repo_url=repo.as_uri(), extension_path="extensions/requirements")
+        extension_store.set_enabled("ofek.evict", False)
+        extension_store.set_enabled("ofek.evict", True)
+        extension_store.uninstall("ofek.evict")
+    finally:
+        extension_backend_loader.evict_persistent_backend = original_evict
+        shutil.rmtree(work, ignore_errors=True)
+    if evicted != ["ofek.evict", "ofek.evict", "ofek.evict", "ofek.evict"]:
+        raise AssertionError(evicted)
+
+
+def test_rejects_path_escape() -> None:
+    try:
+        extension_store.install_from_repo(
+            repo_url="https://example.test/private.git",
+            extension_path="../escape",
+        )
+    except extension_store.ExtensionError as exc:
+        if "relative path" not in str(exc):
+            raise
+    else:
+        raise AssertionError("path escape was accepted")
+
+
+def test_rejects_embedded_repo_credentials() -> None:
+    try:
+        extension_store.install_from_repo(
+            repo_url="https://token@example.test/private.git",
+            extension_path="extensions/requirements",
+        )
+    except extension_store.ExtensionError as exc:
+        if "must not embed credentials" not in str(exc):
+            raise
+    else:
+        raise AssertionError("credential-bearing repo URL was accepted")
+
+
+def test_file_repo_is_allowed_only_under_private_repo() -> None:
+    work = _private_monorepo_test_work()
+    old_test = os.environ.pop("BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO", None)
+    try:
+        repo, _commit = _make_repo(work)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        if record["manifest"]["id"] != "ofek.requirements":
+            raise AssertionError(record)
+    finally:
+        if old_test is not None:
+            os.environ["BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO"] = old_test
+        else:
+            os.environ.pop("BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO", None)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_file_repo_rejects_paths_outside_private_extensions() -> None:
+    work = Path(tempfile.mkdtemp(prefix="bc-test-extension-repo-"))
+    old_test = os.environ.pop("BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO", None)
+    try:
+        repo, _commit = _make_repo(work)
+        try:
+            extension_store.install_from_repo(
+                repo_url=repo.as_uri(),
+                extension_path="extensions/requirements",
+            )
+        except extension_store.ExtensionError as exc:
+            if "trusted extension file root" not in str(exc):
+                raise
+        else:
+            raise AssertionError("outside file repo was accepted with dev flag")
+    finally:
+        if old_test is not None:
+            os.environ["BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO"] = old_test
+        else:
+            os.environ.pop("BETTER_CLAUDE_TEST_ALLOW_FILE_EXTENSION_REPO", None)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_subscription_extensions_fail_closed_without_entitlement_url() -> None:
+    raw = {
+        "kind": "better-agent-extension",
+        "id": "ofek-dev.paid",
+        "name": "Paid",
+        "version": "1.0.0",
+        "marketplace": {
+            "product_id": "prod_paid",
+            "subscription_required": True,
+        },
+    }
+    manifest = _validate_manifest(raw)
+    try:
+        extension_store._verify_entitlement(manifest, "token")  # type: ignore[attr-defined]
+    except extension_store.ExtensionError as exc:
+        if "entitlement_url" not in str(exc):
+            raise
+    else:
+        raise AssertionError("subscription extension without entitlement_url was accepted")
+
+
+def test_subscription_extensions_use_configured_marketplace_entitlement_url() -> None:
+    raw = {
+        "kind": "better-agent-extension",
+        "id": "ofek-dev.paid-central",
+        "name": "Paid Central",
+        "version": "1.0.0",
+        "marketplace": {
+            "product_id": "prod_paid",
+            "subscription_required": True,
+        },
+    }
+    manifest = _validate_manifest(raw)
+    old_urlopen = extension_store.urllib.request.urlopen  # type: ignore[attr-defined]
+    old_url = os.environ.get("BETTER_AGENT_MARKETPLACE_ENTITLEMENT_URL")
+    calls = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"active": true, "expires_at": "2999-01-01T00:00:00+00:00"}'
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return _Response()
+
+    os.environ["BETTER_AGENT_MARKETPLACE_ENTITLEMENT_URL"] = "https://marketplace.test/api/entitlements/verify"
+    extension_store.urllib.request.urlopen = fake_urlopen  # type: ignore[attr-defined]
+    try:
+        entitlement = extension_store._verify_entitlement(manifest, "token")  # type: ignore[attr-defined]
+    finally:
+        extension_store.urllib.request.urlopen = old_urlopen  # type: ignore[attr-defined]
+        if old_url is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_ENTITLEMENT_URL", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_ENTITLEMENT_URL"] = old_url
+
+    if entitlement["status"] != "active":
+        raise AssertionError(entitlement)
+    request, timeout = calls[0]
+    if request.full_url != "https://marketplace.test/api/entitlements/verify":
+        raise AssertionError(request.full_url)
+    if request.get_header("Authorization") != "Bearer token":
+        raise AssertionError("missing bearer token")
+    if timeout != 10:
+        raise AssertionError(timeout)
+
+
+def test_expired_entitlement_is_not_active() -> None:
+    if extension_store._entitlement_active(  # type: ignore[attr-defined]
+        {"status": "active", "expires_at": "2000-01-01T00:00:00+00:00"}
+    ):
+        raise AssertionError("expired entitlement was accepted")
+
+
+def test_builtin_feature_gate_rejects_inactive_entitlement() -> None:
+    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_id] = {
+        "manifest": {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_id,
+            "name": "Requirements",
+            "version": "1.0.0",
+            "description": "",
+            "surfaces": ["backend_feature", "runtime_mcp"],
+            "entrypoints": {
+                "backend": "",
+                "frontend": "",
+                "mcp": [],
+                "instructions": [],
+                "frontend_modules": [],
+            },
+            "permissions": {},
+            "marketplace": {
+                "product_id": "requirements.pro",
+                "subscription_required": True,
+                "entitlement_url": "https://marketplace.test/entitlements",
+            },
+        },
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/requirements",
+            "ref": "",
+            "commit_sha": "abc",
+            "install_path": str(Path(_TMP_HOME) / "installed-requirements"),
+        },
+        "entitlement": {
+            "status": "active",
+            "product_id": "requirements.pro",
+            "token_present": True,
+            "last_checked_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2000-01-01T00:00:00+00:00",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    if extension_store.is_builtin_feature_enabled(extension_id):
+        raise AssertionError("expired builtin extension entitlement enabled feature gate")
+
+
+def test_installed_extension_instructions_are_managed_blocks() -> None:
+    work = _private_monorepo_test_work()
+    import config_store
+    original_state = config_store._load_state()
+    try:
+        # Redirect the claude provider config dir into the tempdir so the managed
+        # block lands there, never in the real ~/.claude/CLAUDE.md.
+        claude_home = work / "claude-home"
+        claude_home.mkdir()
+        state = config_store._load_state()
+        state["providers"] = [
+            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
+        ]
+        state["default_provider_id"] = "test-claude"
+        config_store._save_state(state)
+
+        repo, _commit = _make_instructions_repo(work)
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/instructions",
+        )
+        ext_id = "ofek.instructions"
+        instructions_file = claude_home / "CLAUDE.md"
+
+        def has_block() -> bool:
+            return "Requirement analysis capability" in instructions_file.read_text(encoding="utf-8")
+
+        if not has_block():
+            raise AssertionError("instruction block not injected on install")
+
+        extension_store.set_instruction_enabled(ext_id, level="global", enabled=False)
+        if has_block():
+            raise AssertionError("block not removed on global disable")
+
+        extension_store.set_instruction_enabled(ext_id, level="global", enabled=True)
+        if not has_block():
+            raise AssertionError("block not restored on global enable")
+
+        extension_store.uninstall(ext_id)
+        if has_block():
+            raise AssertionError("block not removed on uninstall")
+    finally:
+        config_store._save_state(original_state)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_builtin_harness_instructions_are_visible_extension() -> None:
+    extension_store._load()
+    record = extension_store.get_extension(
+        extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
+    )
+    if not record:
+        raise AssertionError("harness instructions extension was not installed")
+    manifest = record["manifest"]
+    if "instructions" not in manifest["surfaces"]:
+        raise AssertionError("harness instructions extension does not expose instructions")
+    item = manifest["entrypoints"]["instructions"][0]
+    install_path = Path(record["source"]["install_path"])
+    content = (install_path / item["path"]).read_text(encoding="utf-8")
+    if "after every wait_agent result" not in content:
+        raise AssertionError("subagent wait instruction is not owned by harness extension")
+    if "Better Agent groups action/tool blocks" not in content:
+        raise AssertionError("action grouping instruction is not owned by harness extension")
+
+
+def test_disabled_extension_has_no_blocks_anywhere() -> None:
+    import project_store
+    import config_store
+
+    work = _private_monorepo_test_work()
+    original_state = config_store._load_state()
+    try:
+        claude_home = work / "claude-home"
+        claude_home.mkdir()
+        state = config_store._load_state()
+        state["providers"] = [
+            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
+        ]
+        state["default_provider_id"] = "test-claude"
+        config_store._save_state(state)
+
+        project_path = work / "proj"
+        project_store.add_project(str(project_path), "Proj")
+
+        repo, _commit = _make_instructions_repo(work)
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/instructions",
+        )
+        ext_id = "ofek.instructions"
+        extension_store.set_instruction_enabled(ext_id, level="project", enabled=True, project_path=str(project_path))
+
+        global_file = claude_home / "CLAUDE.md"
+        project_file = project_path / "CLAUDE.md"
+        if "Requirement analysis capability" not in global_file.read_text(encoding="utf-8"):
+            raise AssertionError("global block missing after install")
+        if "Project-scoped rules" not in project_file.read_text(encoding="utf-8"):
+            raise AssertionError("project block missing after project enable")
+
+        # Disable the whole extension -> blocks must vanish from BOTH files.
+        extension_store.set_enabled(ext_id, False)
+        global_text = global_file.read_text(encoding="utf-8")
+        project_text = project_file.read_text(encoding="utf-8")
+        if "better-agent:extension:" in global_text or "better-claude:extension:" in global_text:
+            raise AssertionError("global block survived disable")
+        if "better-agent:extension:" in project_text or "better-claude:extension:" in project_text:
+            raise AssertionError("project block survived disable")
+
+        # Re-enable -> global block returns; project block returns only after re-enabling project level.
+        extension_store.set_enabled(ext_id, True)
+        if "Requirement analysis capability" not in global_file.read_text(encoding="utf-8"):
+            raise AssertionError("global block not restored on enable")
+    finally:
+        try:
+            extension_store.uninstall(ext_id)
+        except extension_store.ExtensionError:
+            pass
+        config_store._save_state(original_state)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_reconcile_all_sweeps_orphans_and_clears_disabled() -> None:
+    import project_store
+    import config_store
+    import extension_instructions as ei
+
+    work = _private_monorepo_test_work()
+    original_state = config_store._load_state()
+    try:
+        claude_home = work / "claude-home"
+        claude_home.mkdir()
+        state = config_store._load_state()
+        state["providers"] = [
+            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
+        ]
+        state["default_provider_id"] = "test-claude"
+        config_store._save_state(state)
+        project_store.add_project(str(work / "proj"), "Proj")
+
+        global_file = claude_home / "CLAUDE.md"
+        # Orphan block for an extension that was never installed.
+        ei._pcs.apply_managed_instruction_blocks(
+            owner="extension:ghost.uninstalled",
+            sections=[("rules", "haunted instructions")],
+            scope="global",
+            project_root=None,
+            providers=config_store.list_provider_metadata(),
+        )
+        if "haunted instructions" not in global_file.read_text(encoding="utf-8"):
+            raise AssertionError("orphan block not written")
+
+        # The orphan owner is not installed -> reconcile_all must purge it.
+        # (Other installed extensions may legitimately have blocks, so assert
+        # the ghost's content is gone, not that the file has no markers.)
+        swept = extension_store.reconcile_all_instructions()
+        if swept < 1:
+            raise AssertionError("orphan block not swept")
+        if "haunted instructions" in global_file.read_text(encoding="utf-8"):
+            raise AssertionError("orphan block survived reconcile_all")
+    finally:
+        config_store._save_state(original_state)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_legacy_provider_capabilities_field_is_aliased() -> None:
+    """Extensions authored with the old provider_capabilities field/surface still work."""
+    import config_store
+
+    work = _private_monorepo_test_work()
+    original_state = config_store._load_state()
+    try:
+        claude_home = work / "claude-home"
+        claude_home.mkdir()
+        state = config_store._load_state()
+        state["providers"] = [
+            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
+        ]
+        state["default_provider_id"] = "test-claude"
+        config_store._save_state(state)
+
+        repo = work / "legacy-repo"
+        package = repo / "extensions" / "legacy"
+        package.mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.legacy",
+            "name": "Legacy",
+            "version": "1.0.0",
+            "description": "Legacy field name",
+            "surfaces": ["provider_capabilities"],
+            "entrypoints": {
+                "provider_capabilities": [{"name": "rules", "path": "capabilities/rules.md"}],
+            },
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": ["better-agent-extension.json", "capabilities/rules.md"],
+                    "python_modules": [],
+                },
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "capabilities").mkdir()
+        (package / "capabilities" / "rules.md").write_text("Legacy global rules\n", encoding="utf-8")
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "t@example.test")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "add", "extensions")
+        _git(repo, "commit", "-m", "legacy extension")
+
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/legacy",
+        )
+        instructions = record["manifest"]["entrypoints"]["instructions"]
+        if not any(i.get("name") == "rules" and i.get("level") == "global" for i in instructions):
+            raise AssertionError(f"legacy field not normalized to instructions: {instructions}")
+        if record["manifest"]["surfaces"] != ["instructions"]:
+            raise AssertionError(f"legacy surface not aliased: {record['manifest']['surfaces']}")
+        if "Legacy global rules" not in (claude_home / "CLAUDE.md").read_text(encoding="utf-8"):
+            raise AssertionError("legacy instruction content not applied as a managed block")
+        extension_store.uninstall("ofek.legacy")
+    finally:
+        config_store._save_state(original_state)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_manifest_accepts_skill_entrypoints_and_requires_skill_md() -> None:
+    package = _write_private_extension_package(
+        "ofek.skillful",
+        "extensions/skillful",
+        {
+            "surfaces": ["skills"],
+            "entrypoints": {"skills": [{"name": "get-requirements", "path": "skills/get-requirements"}]},
+        },
+        {
+            "skills/get-requirements/SKILL.md": (
+                "---\n"
+                "name: get-requirements\n"
+                "description: Requirements search.\n"
+                "---\n"
+                "Use the requirements MCP.\n"
+            )
+        },
+    )
+    manifest = _validate_manifest(
+        json.loads((package / "better-agent-extension.json").read_text(encoding="utf-8"))
+    )
+    extension_store._validate_declared_files(manifest, package)
+    if manifest["entrypoints"]["skills"][0]["path"] != "skills/get-requirements":
+        raise AssertionError("skill entrypoint path not preserved")
+
+    broken = _write_private_extension_package(
+        "ofek.broken-skill",
+        "extensions/broken-skill",
+        {
+            "surfaces": ["skills"],
+            "entrypoints": {"skills": [{"name": "missing", "path": "skills/missing"}]},
+        },
+    )
+    broken_manifest = _validate_manifest(
+        json.loads((broken / "better-agent-extension.json").read_text(encoding="utf-8"))
+    )
+    try:
+        extension_store._validate_declared_files(broken_manifest, broken)
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("missing skill SKILL.md was accepted")
+
+
+def test_extension_enable_disable_installs_runtime_skills() -> None:
+    work = _private_monorepo_test_work()
+    home = Path(tempfile.mkdtemp(prefix="bc-test-extension-skills-home-"))
+    original_home = os.environ.get("HOME")
+    repo = work / "skill-repo"
+    package = repo / "extensions" / "skillful"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.skill-runtime",
+        "name": "Skill runtime",
+        "version": "1.0.0",
+        "description": "Runtime skill extension",
+        "surfaces": ["skills"],
+        "entrypoints": {
+            "skills": [{"name": "get-requirements", "path": "skills/get-requirements"}],
+        },
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json", "skills/get-requirements/SKILL.md"],
+                "python_modules": [],
+            },
+        },
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "skills" / "get-requirements").mkdir(parents=True)
+    (package / "skills" / "get-requirements" / "SKILL.md").write_text(
+        "---\nname: get-requirements\ndescription: Requirements.\n---\nUse MCP.\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions")
+    _git(repo, "commit", "-m", "skill extension")
+    try:
+        os.environ["HOME"] = str(home)
+        target = home / ".agents" / "skills" / "get-requirements"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text(
+            "---\nname: get-requirements\ndescription: Manual.\n---\nManual copy.\n",
+            encoding="utf-8",
+        )
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/skillful",
+        )
+        installed = target / "SKILL.md"
+        if "Requirements." not in installed.read_text(encoding="utf-8"):
+            raise AssertionError("extension skill did not replace the runtime skill copy")
+        marker = target / extension_store._RUNTIME_SKILL_OWNER_FILE
+        if marker.read_text(encoding="utf-8").strip() != record["manifest"]["id"]:
+            raise AssertionError("runtime skill owner marker not written")
+        extension_store.set_enabled(record["manifest"]["id"], False)
+        if target.exists():
+            raise AssertionError("disabled extension did not remove runtime skill copy")
+    finally:
+        if original_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = original_home
+        try:
+            extension_store.uninstall("ofek.skill-runtime")
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_optional_permissions_allow_forbid() -> None:
+    """Optional perms are fail-closed off until granted; required perms always on."""
+    from pathlib import Path
+
+    work = _private_monorepo_test_work()
+    try:
+        package = work / "perm-ext"
+        package.mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.perm",
+            "name": "Perm",
+            "version": "1.0.0",
+            "description": "optional perms",
+            "surfaces": [],
+            "entrypoints": {},
+            "protocol": {
+                "version": 1,
+                "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+            },
+            "permissions": {"session_state": True, "filesystem": "optional", "network": "optional"},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        record = extension_store._install_from_package_dir(
+            package_dir=package,
+            source={"type": "local", "repo_url": "", "extension_path": "", "ref": "", "commit_sha": "local"},
+            force_enabled=False,
+            persist=True,
+        )
+        eid = "ofek.perm"
+
+        # Required perm always active; optional perms fail-closed (inactive) before grant.
+        if not extension_store.has_permission(record, "session_state"):
+            raise AssertionError("required permission not active")
+        if extension_store.has_permission(record, "filesystem"):
+            raise AssertionError("optional permission active before grant (not fail-closed)")
+        if sorted(extension_store.optional_permissions(record)) != ["filesystem", "network"]:
+            raise AssertionError(extension_store.optional_permissions(record))
+
+        # Grant filesystem -> active + in effective set.
+        extension_store.set_permission_grant(eid, "filesystem", True)
+        granted = extension_store.get_extension(eid)
+        if not extension_store.has_permission(granted, "filesystem"):
+            raise AssertionError("optional permission not active after grant")
+        if "filesystem" not in extension_store.effective_permissions(granted):
+            raise AssertionError("granted permission missing from effective set")
+
+        # Revoke -> inactive again.
+        extension_store.set_permission_grant(eid, "filesystem", False)
+        revoked = extension_store.get_extension(eid)
+        if extension_store.has_permission(revoked, "filesystem"):
+            raise AssertionError("optional permission still active after revoke")
+
+        # Granting a REQUIRED permission must be rejected.
+        try:
+            extension_store.set_permission_grant(eid, "session_state", True)
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("granting a required permission should be rejected")
+
+        # config exposes the permissions block for the panel.
+        cfg = extension_store.extension_config(eid)
+        if cfg.get("permissions", {}).get("optional") != ["filesystem", "network"]:
+            raise AssertionError("config permissions block missing optional list")
+
+        extension_store.uninstall(eid)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_command_based_mcp_server() -> None:
+    """MCP items may declare a command (stdio binary) instead of a python file."""
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.cmdmcp",
+            "name": "Cmd",
+            "version": "1.0.0",
+            "entrypoints": {"mcp": [{"name": "ccc", "command": "ccc", "args": ["mcp"]}]},
+            "permissions": {},
+            "marketplace": {},
+        }
+    )
+    item = manifest["entrypoints"]["mcp"][0]
+    if item.get("command") != "ccc" or item.get("python") != "" or item.get("module") != "" or item.get("args") != ["mcp"]:
+        raise AssertionError(item)
+
+    module_manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.modulemcp",
+            "name": "Module",
+            "version": "1.0.0",
+            "entrypoints": {"mcp": [{"name": "mod-mcp", "module": "compiled_mcp.server"}]},
+            "permissions": {},
+            "marketplace": {},
+        }
+    )
+    module_item = module_manifest["entrypoints"]["mcp"][0]
+    if module_item.get("module") != "compiled_mcp.server" or module_item.get("python") != "" or module_item.get("command") != "":
+        raise AssertionError(module_item)
+
+    # No entrypoint -> rejected; more than one entrypoint kind -> rejected.
+    for bad in (
+        [{"name": "x", "python": "", "command": ""}],
+        [{"name": "x", "python": "m.py", "command": "c"}],
+        [{"name": "x", "python": "m.py", "module": "pkg.m"}],
+        [{"name": "x", "module": "bad/module"}],
+    ):
+        try:
+            _validate_manifest(
+                {
+                    "kind": "better-agent-extension",
+                    "id": "ofek.badcmd",
+                    "name": "Bad",
+                    "version": "1.0.0",
+                    "entrypoints": {"mcp": bad},
+                    "permissions": {},
+                    "marketplace": {},
+                }
+            )
+        except extension_store.ExtensionError:
+            continue
+        raise AssertionError(f"should reject mcp item {bad}")
+
+
+def test_module_based_mcp_server_config() -> None:
+    package = _write_private_extension_package(
+        "ofek.module-mcp",
+        "extensions/module-mcp",
+        {
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "module-mcp",
+                        "module": "compiled_mcp.server",
+                        "args": ["serve"],
+                    }
+                ],
+            },
+            "permissions": {},
+        },
+        {
+            "compiled_mcp/__init__.py": "",
+            "compiled_mcp/server.py": "",
+        },
+    )
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/module-mcp.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "module-mcp",
+            "artifact_sha256": "0" * 64,
+            "artifact_url": "https://example.test/module-mcp.tar.gz",
+        },
+        persist=True,
+    )
+    try:
+        extension_store.set_harness_delivery_mode("ofek.module-mcp", "runtime")
+        configs = extension_store.runtime_mcp_server_configs(
+            {
+                "app_session_id": "s1",
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "token",
+                "cwd": str(package),
+                "model": "m",
+            },
+            user_facing=True,
+            bare=False,
+        )
+        config = configs.get("module-mcp")
+        if not config:
+            raise AssertionError(configs)
+        if config["command"] != sys.executable:
+            raise AssertionError(config)
+        if config["args"] != ["-m", "compiled_mcp.server", "serve"]:
+            raise AssertionError(config)
+        pythonpath = str(config["env"].get("PYTHONPATH") or "")
+        if str(Path(record["source"]["install_path"]).resolve()) not in pythonpath.split(os.pathsep):
+            raise AssertionError(config["env"])
+    finally:
+        try:
+            extension_store.uninstall("ofek.module-mcp")
+        except Exception:
+            pass
+
+
+def test_installed_extension_exports_runtime_mcp_server_config() -> None:
+    work = _private_monorepo_test_work("bc-test-runtime-extension-repo-")
+    try:
+        repo, _commit = _make_runtime_repo(work)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/scheduler",
+        )
+        extension_store.set_harness_delivery_mode("ofek.scheduler", "runtime")
+        _configure_internal_llm_defaults("default_session")
+        configs = extension_store.runtime_mcp_server_configs(
+            {
+                "app_session_id": "s1",
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "token",
+                "cwd": str(work),
+                "model": "m",
+            },
+            user_facing=True,
+            bare=False,
+        )
+        config = configs.get("ofek-scheduler")
+        if not config:
+            raise AssertionError(configs)
+        if config["command"] != sys.executable:
+            raise AssertionError(config)
+        if Path(config["args"][0]).resolve() != (Path(record["source"]["install_path"]) / "mcp" / "server.py").resolve():
+            raise AssertionError(config)
+        if config["env"]["BETTER_CLAUDE_EXTENSION_ID"] != "ofek.scheduler":
+            raise AssertionError(config)
+        if config["env"].get("BETTER_CLAUDE_INTERNAL_TOKEN") != "token":
+            raise AssertionError("internal_loopback runtime MCP should receive internal token")
+        if config["env"]["OF_EXTENSION_TEST"] != "1":
+            raise AssertionError(config)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-no-loopback-mcp-")) / "no-loopback"
+    try:
+        (package / "mcp").mkdir(parents=True)
+        manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.no-loopback",
+        "name": "No Loopback",
+            "version": "1.0.0",
+            "description": "Runtime MCP without internal loopback.",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "no-loopback",
+                        "python": "mcp/server.py",
+                        "user_facing": True,
+                        "bare_allowed": False,
+                        "requires_backend_auth": False,
+                    }
+                ],
+            },
+            "protocol": {
+                "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json", "mcp/server.py"],
+                "python_modules": ["mcp.server"],
+            },
+        },
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
+        record = extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "no-loopback",
+                "ref": "",
+                "commit_sha": "no-loopback",
+            },
+            persist=True,
+        )
+        extension_store.set_harness_delivery_mode("ofek.no-loopback", "runtime")
+        configs = extension_store.runtime_mcp_server_configs(
+            {
+                "app_session_id": "s1",
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "token",
+                "cwd": str(package),
+                "model": "m",
+            },
+            user_facing=True,
+            bare=False,
+        )
+        config = configs.get("no-loopback")
+        if not config:
+            raise AssertionError(configs)
+        env = config["env"]
+        if "BETTER_CLAUDE_INTERNAL_TOKEN" in env or "BETTER_AGENT_INTERNAL_TOKEN" in env:
+            raise AssertionError(f"non-internal extension received token env: {env}")
+        if env["BETTER_CLAUDE_EXTENSION_ID"] != record["manifest"]["id"]:
+            raise AssertionError(env)
+    finally:
+        shutil.rmtree(package.parent, ignore_errors=True)
+
+
+def test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config() -> None:
+    install_root = Path(tempfile.mkdtemp(prefix="bc-test-legacy-string-mcp-"))
+    try:
+        data = extension_store._load()  # type: ignore[attr-defined]
+        data["extensions"]["ofek.legacy-string-mcp"] = {
+            "manifest": {
+                "kind": extension_store.MANIFEST_KIND,
+                "id": "ofek.legacy-string-mcp",
+                "name": "Legacy string MCP",
+                "version": "1.0.0",
+                "description": "Legacy persisted record",
+                "surfaces": ["runtime_mcp"],
+                "entrypoints": {
+                    "backend": "",
+                    "frontend": "",
+                    "mcp": ["communicate"],
+                    "instructions": [],
+                    "team_definitions": [],
+                    "frontend_modules": [],
+                    "settings": [],
+                    "python_requirements": [],
+                },
+                "permissions": {},
+                "dependencies": [],
+                "marketplace": {"subscription_required": False},
+            },
+            "enabled": True,
+            "installed_at": "2026-06-21T00:00:00+00:00",
+            "updated_at": "2026-06-21T00:00:00+00:00",
+            "source": {
+                "type": "legacy",
+                "repo_url": "",
+                "extension_path": "",
+                "ref": "",
+                "commit_sha": "legacy",
+                "install_path": str(install_root),
+            },
+            "entitlement": {
+                "status": "not_required",
+                "product_id": "",
+                "token_present": False,
+                "last_checked_at": "",
+                "expires_at": "",
+            },
+        }
+        extension_store._save(data)  # type: ignore[attr-defined]
+        configs = extension_store.runtime_mcp_server_configs(
+            {
+                "app_session_id": "s1",
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "token",
+                "cwd": str(install_root),
+                "model": "m",
+            },
+            user_facing=True,
+            bare=False,
+        )
+        if "communicate" in configs:
+            raise AssertionError(configs)
+        if extension_store.extension_mcp_servers("ofek.legacy-string-mcp"):
+            raise AssertionError("reserved legacy MCP server should be hidden")
+    finally:
+        shutil.rmtree(install_root, ignore_errors=True)
+
+
+def test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record() -> None:
+    ask_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    package = _write_private_extension_package(
+        ask_id,
+        "extensions/project-structure",
+        {
+            "name": "Project Structure",
+            "surfaces": ["backend_feature"],
+            "permissions": {},
+        },
+    )
+    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(_TRUSTED_TEST_ROOT),
+            "extension_path": "extensions/project-structure",
+            "ref": "",
+            "commit_sha": "project-structure-private",
+        },
+        persist=True,
+    )
+    records = {item["manifest"]["id"]: item for item in extension_store.list_extensions()}
+    if ask_id not in records:
+        raise AssertionError("private project-structure extension missing from extension list")
+    if records[ask_id]["source"]["type"] != "better_agent_local":
+        raise AssertionError(records[ask_id]["source"])
+    if not extension_store.is_builtin_feature_enabled(ask_id):
+        raise AssertionError("private project-structure extension should default active")
+
+    disabled = extension_store.set_enabled(ask_id, False)
+    if disabled["enabled"] is not False:
+        raise AssertionError(disabled)
+    if extension_store.is_builtin_feature_enabled(ask_id):
+        raise AssertionError("disabled private project-structure extension still active")
+
+    enabled = extension_store.set_enabled(ask_id, True)
+    if enabled["enabled"] is not True:
+        raise AssertionError(enabled)
+    if not extension_store.is_builtin_feature_enabled(ask_id):
+        raise AssertionError("enabled private project-structure extension is not active")
+
+    extension_store.uninstall(ask_id)
+    if extension_store.get_extension(ask_id) is not None:
+        raise AssertionError("private extension record still exists after uninstall")
+    if extension_store.is_builtin_feature_enabled(ask_id):
+        raise AssertionError("uninstalled private project-structure extension still active")
+    try:
+        extension_store.set_enabled(ask_id, True)
+    except extension_store.ExtensionError as exc:
+        if "not installed" not in str(exc):
+            raise
+    else:
+        raise AssertionError("uninstalled private Project Structure extension was re-enabled without install")
+
+
+def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_state() -> None:
+    original_repo_root = extension_store._repo_root  # type: ignore[attr-defined]
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    work = Path(tempfile.mkdtemp(prefix="bc-test-nested-private-supervisor-"))
+    supervisor_id = extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+    try:
+        public_root = work / "better-claude"
+        public_root.mkdir(parents=True)
+        package = public_root / "better-agent-private" / "extensions" / "supervisor"
+        (package / "backend").mkdir(parents=True)
+        (package / "ui").mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": supervisor_id,
+            "name": "Supervisor",
+            "version": "1.0.0",
+            "description": "Supervisor fixture.",
+            "surfaces": ["backend_feature", "frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "backend_module": "backend.routes",
+                "frontend_modules": [
+                    {
+                        "slot": "session-action-modal",
+                        "id": "supervisor-prompt-modal",
+                        "label": "Supervisor prompt modal",
+                        "kind": "module",
+                        "module": "ui/supervisor.entry.js",
+                    },
+                ],
+            },
+            "permissions": {"backend_routes": True},
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": [
+                        "better-agent-extension.json",
+                        "ui/supervisor.entry.js",
+                    ],
+                    "python_modules": ["backend.routes"],
+                },
+            },
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "backend" / "routes.py").write_text(
+            "from fastapi import APIRouter\n\n"
+            "def create_router(context):\n"
+            "    return APIRouter()\n",
+            encoding="utf-8",
+        )
+        (package / "ui" / "supervisor.entry.js").write_text(
+            "export function mount() { return () => {}; }\n",
+            encoding="utf-8",
+        )
+        (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        extension_store._repo_root = lambda: public_root.resolve()  # type: ignore[attr-defined]
+
+        with extension_store._store_lock():  # type: ignore[attr-defined]
+            data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
+            data["extensions"].pop(supervisor_id, None)
+            data.get("deleted_extensions", {}).pop(supervisor_id, None)
+            extension_store._write_store_unlocked(data)  # type: ignore[attr-defined]
+
+        record = extension_store.get_extension(supervisor_id)
+        if record is None:
+            raise AssertionError("nested private supervisor extension was not seeded")
+        if record["source"]["type"] != "better_agent_local":
+            raise AssertionError(record["source"])
+        if Path(record["source"]["repo_url"]).resolve() != package.parents[1].resolve():
+            raise AssertionError(record["source"])
+        if record["enabled"] is not True:
+            raise AssertionError("newly seeded supervisor should default enabled")
+        if not extension_store.is_builtin_feature_enabled(supervisor_id):
+            raise AssertionError("seeded supervisor should be feature-enabled")
+
+        extension_store.set_enabled(supervisor_id, False)
+        record = extension_store.get_extension(supervisor_id)
+        if record is None or record["enabled"] is not False:
+            raise AssertionError("disabled supervisor state was not preserved")
+    finally:
+        extension_store._repo_root = original_repo_root  # type: ignore[attr-defined]
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_public_todos_extension_is_seeded_and_toggleable() -> None:
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    try:
+        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions()}
+    finally:
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+    todos_id = extension_store.BUILTIN_TODOS_EXTENSION_ID
+    record = records.get(todos_id)
+    if not record:
+        raise AssertionError("public todos extension missing from extension list")
+    if record["source"]["type"] != "better_agent_bundled":
+        raise AssertionError(record["source"])
+    if not extension_store.is_extension_runtime_ready(todos_id):
+        raise AssertionError("public todos extension should default runtime-ready")
+    permissions = record["manifest"].get("permissions") or {}
+    if permissions.get("reads_session_fields") != ["current_todos", "current_tasks"]:
+        raise AssertionError(permissions)
+    if permissions.get("mutates_session_fields") != ["current_todos", "current_tasks"]:
+        raise AssertionError(permissions)
+
+    extension_store.set_enabled(todos_id, False)
+    if extension_store.is_extension_runtime_ready(todos_id):
+        raise AssertionError("disabled todos extension should not be runtime-ready")
+    extension_store.set_enabled(todos_id, True)
+
+
+def test_public_session_bridge_backend_entrypoint_is_exposed() -> None:
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    try:
+        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions()}
+    finally:
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+    session_bridge_id = extension_store.BUILTIN_SESSION_BRIDGE_EXTENSION_ID
+    record = records.get(session_bridge_id)
+    if not record:
+        raise AssertionError("public session bridge extension missing from extension list")
+    permissions = record["manifest"].get("permissions") or {}
+    if permissions.get("backend_routes") is not True:
+        raise AssertionError(permissions)
+    spec = extension_store.backend_entrypoint_spec(session_bridge_id)
+    if not spec:
+        raise AssertionError("session bridge backend entrypoint was not exposed")
+    if spec["entrypoint_kind"] != "file" or not spec["entrypoint"].endswith("backend/routes.py"):
+        raise AssertionError(spec)
+
+
+def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
+    project_structure_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    package = _TRUSTED_TEST_ROOT / "extensions" / "project-structure"
+    if package.exists():
+        shutil.rmtree(package)
+    (package / "backend").mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": project_structure_id,
+        "name": "Project structure",
+        "version": "1.0.0",
+        "surfaces": ["backend_feature", "frontend_feature"],
+        "entrypoints": {
+            "backend_module": "backend.routes",
+            "page": {
+                "label": "Project structure",
+                "open": {
+                    "type": "ensure",
+                    "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+                    "path_template": "/s/{session_id}",
+                },
+                "badge": {
+                    "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total",
+                },
+            },
+        },
+        "permissions": {"backend_routes": True, "internal_loopback": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json"],
+                "python_modules": ["backend.routes"],
+            },
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "backend" / "routes.py").write_text(
+        "from fastapi import APIRouter\n\n"
+        "def create_router(context):\n"
+        "    return APIRouter()\n",
+        encoding="utf-8",
+    )
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+
+    spec = extension_store.backend_entrypoint_spec(project_structure_id)
+    if spec is None:
+        raise AssertionError("backend route spec should mount without internal LLM assignment")
+    if extension_store.is_extension_runtime_ready(project_structure_id):
+        raise AssertionError("full runtime readiness should still require project_structure_edit assignment")
+
+
+def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
+    import extension_registry
+
+    active = extension_registry.active_builtin_mcp_extensions(
+        {"mode": "native", "app_session_id": "s1"},
+        user_facing=True,
+        bare=False,
+    )
+    if "get-requirements" in {item.mcp_server for item in active}:
+        raise AssertionError("requirements MCP should require private extension install")
+
+    _configure_internal_llm_defaults("project_structure_edit")
+    active = extension_registry.active_builtin_mcp_extensions(
+        {"mode": "native", "app_session_id": "s1"},
+        user_facing=True,
+        bare=False,
+    )
+    if "project-updates" in {item.mcp_server for item in active}:
+        raise AssertionError("project-updates MCP should come from installed private extension")
+
+
+def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
+    import config_store
+
+    config_store.set_internal_llm_assignments({})
+
+    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    work = _private_monorepo_test_work()
+    package = work / "extensions" / "requirements"
+    package.mkdir(parents=True)
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_id] = {
+        "manifest": {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_id,
+            "name": "Requirements",
+            "version": "1.0.0",
+            "description": "",
+            "surfaces": ["backend_feature", "runtime_mcp"],
+            "entrypoints": {
+                "backend": "",
+                "frontend": "",
+                "mcp": [
+                    {
+                        "name": "better-agent-requirements",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": False,
+                        "requires_backend_auth": True,
+                    }
+                ],
+                "instructions": [],
+            },
+            "permissions": {"session_state": True, "spawn_runs": True, "internal_loopback": True},
+            "marketplace": {
+                "product_id": "requirements.pro",
+                "subscription_required": True,
+                "entitlement_url": "https://marketplace.test/entitlements",
+            },
+        },
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/requirements",
+            "ref": "",
+            "commit_sha": "requirements-private",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "active",
+            "product_id": "requirements.pro",
+            "token_present": True,
+            "last_checked_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        },
+    }
+    (package / "mcp").mkdir(parents=True)
+    (package / "mcp" / "server.py").write_text("print('requirements')\n", encoding="utf-8")
+    data["extensions"][extension_id]["manifest"] = _validate_manifest(
+        data["extensions"][extension_id]["manifest"]
+    )
+    extension_store._save(data)  # type: ignore[attr-defined]
+    extension_store.set_harness_delivery_mode(extension_id, "runtime")
+
+    configs = extension_store.runtime_mcp_server_configs(
+        {
+            "mode": "native",
+            "app_session_id": "s1",
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "secret",
+        },
+        user_facing=True,
+        bare=False,
+    )
+    if "better-agent-requirements" in configs:
+        raise AssertionError("requirements MCP active before requirement_analysis default is configured")
+
+    _configure_internal_llm_defaults("requirement_analysis")
+    configs = extension_store.runtime_mcp_server_configs(
+        {
+            "mode": "native",
+            "app_session_id": "s1",
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "secret",
+        },
+        user_facing=True,
+        bare=False,
+    )
+    if "better-agent-requirements" in configs:
+        raise AssertionError("requirements MCP active before requirement_analysis package exists")
+
+    (package / "requirement_analysis").mkdir()
+    (package / "requirement_analysis" / "__init__.py").write_text("", encoding="utf-8")
+    configs = extension_store.runtime_mcp_server_configs(
+        {
+            "mode": "native",
+            "app_session_id": "s1",
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "secret",
+        },
+        user_facing=True,
+        bare=False,
+    )
+    if "better-agent-requirements" not in configs:
+        raise AssertionError("requirements MCP inactive after requirement_analysis default is configured")
+
+
+def test_marketplace_extension_can_use_builtin_id_after_uninstall() -> None:
+    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    work = _private_monorepo_test_work()
+    try:
+        repo, commit = _make_repo(work, extension_id=extension_id)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        if record["manifest"]["id"] != extension_id:
+            raise AssertionError(record["manifest"])
+        if record["source"]["type"] != "git":
+            raise AssertionError(record["source"])
+        if record["source"]["commit_sha"] != commit:
+            raise AssertionError(record["source"])
+        if not extension_store.is_builtin_feature_enabled(extension_id):
+            raise AssertionError("marketplace-installed builtin id is not active")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record() -> None:
+    builtin_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][builtin_id] = {
+        "manifest": {
+            "kind": "better-agent-extension",
+            "id": builtin_id,
+                "name": "Stale project-structure external",
+            "version": "1.0.0",
+            "description": "",
+            "surfaces": ["instructions"],
+            "entrypoints": {
+                "backend": "",
+                "frontend": "",
+                "mcp": [],
+                "instructions": [],
+            },
+            "permissions": {},
+            "marketplace": {
+                "product_id": "",
+                "subscription_required": False,
+                "entitlement_url": "",
+            },
+        },
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/extensions.git",
+                "extension_path": "extensions/project-structure",
+            "ref": "",
+            "commit_sha": "abc",
+            "install_path": str(Path(_TMP_HOME) / "installed-ask"),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    matches = [
+        item
+        for item in extension_store.list_extensions()
+        if item["manifest"]["id"] == builtin_id
+    ]
+    if len(matches) != 1:
+        raise AssertionError(matches)
+
+
+def test_list_extensions_reports_builtin_reconciliation_once() -> None:
+    old_agent_home = os.environ["BETTER_AGENT_HOME"]
+    old_claude_home = os.environ["BETTER_CLAUDE_HOME"]
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    temp_home = tempfile.mkdtemp(prefix="bc-test-public-reconcile-")
+    try:
+        os.environ["BETTER_AGENT_HOME"] = temp_home
+        os.environ["BETTER_CLAUDE_HOME"] = temp_home
+        builtin_id = extension_store.BUILTIN_TODOS_EXTENSION_ID
+        data = extension_store._blank_store()  # type: ignore[attr-defined]
+        data["extensions"][builtin_id] = {
+            "manifest": {"id": builtin_id},
+            "enabled": False,
+            "installed_at": "old",
+            "updated_at": "old",
+            "source": {
+                "type": "better_agent_bundled",
+                "repo_url": "",
+                "extension_path": "extensions/todos",
+                "ref": "",
+                "commit_sha": "stale",
+                "install_path": str(Path(temp_home) / "missing"),
+            },
+            "entitlement": {
+                "status": "not_required",
+                "product_id": "",
+                "token_present": False,
+                "last_checked_at": "",
+                "expires_at": "",
+            },
+        }
+        extension_store._save(data)  # type: ignore[attr-defined]
+
+        records, changed = extension_store.list_extensions_with_reconciliation()
+        reconciled = next(item for item in records if item["manifest"]["id"] == builtin_id)
+        if changed is not True:
+            raise AssertionError("first list did not report reconciliation")
+        if reconciled["enabled"] is not False:
+            raise AssertionError("public builtin reconciliation did not preserve enabled state")
+
+        _records, changed_again = extension_store.list_extensions_with_reconciliation()
+        if changed_again is not False:
+            raise AssertionError("second list reported reconciliation without changes")
+    finally:
+        os.environ["BETTER_AGENT_HOME"] = old_agent_home
+        os.environ["BETTER_CLAUDE_HOME"] = old_claude_home
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
+def test_required_marketplace_extension_auto_installs_from_private_repo() -> None:
+    record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+    if record is None:
+        raise AssertionError("marketplace extension was not auto-installed")
+    if record["source"]["type"] != "better_agent_local":
+        raise AssertionError(record["source"])
+    if record["enabled"] is not True:
+        raise AssertionError("marketplace extension is not enabled")
+
+
+def test_required_marketplace_extension_is_hidden_from_public_extension_list() -> None:
+    record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+    if record is None:
+        raise AssertionError("marketplace extension was not auto-installed")
+    listed_ids = {item["manifest"]["id"] for item in extension_store.list_extensions()}
+    if extension_store.MARKETPLACE_EXTENSION_ID in listed_ids:
+        raise AssertionError("marketplace extension should not be shown as an installable extension")
+
+
+def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> None:
+    old_agent_home = os.environ["BETTER_AGENT_HOME"]
+    old_home = os.environ["BETTER_CLAUDE_HOME"]
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    old_base_url = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
+    temp_home = tempfile.mkdtemp(prefix="bc-test-obsolete-marketplace-")
+    os.environ["BETTER_AGENT_HOME"] = temp_home
+    os.environ["BETTER_CLAUDE_HOME"] = temp_home
+    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
+    store_path = Path(temp_home) / "extensions" / "extensions.json"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    obsolete_root = Path(temp_home) / "obsolete-marketplace"
+    obsolete_frontend = obsolete_root / "ui"
+    obsolete_frontend.mkdir(parents=True)
+    (obsolete_frontend / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    required_root = Path(temp_home) / "required-marketplace"
+    required_frontend = required_root / "ui"
+    required_frontend.mkdir(parents=True)
+    required_mcp = required_root / "mcp"
+    required_mcp.mkdir(parents=True)
+    (required_frontend / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (required_mcp / "server.py").write_text("print('marketplace')\n", encoding="utf-8")
+    obsolete_record = {
+        "manifest": {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": "better-agent.marketplace",
+            "name": "Marketplace",
+            "version": "0.1.0",
+            "description": "Stale marketplace",
+            "surfaces": ["frontend_feature", "backend_feature"],
+            "entrypoints": {
+                "backend": "",
+                "frontend": "ui/index.html",
+                "mcp": [],
+                "instructions": [],
+                "skills": [],
+                "team_definitions": [],
+                "frontend_modules": [
+                    {
+                        "slot": "settings",
+                        "id": "marketplace",
+                        "label": "Marketplace",
+                        "kind": "iframe",
+                        "module": "ui/index.html",
+                    }
+                ],
+            },
+            "permissions": {},
+            "marketplace": {},
+        },
+        "enabled": True,
+        "installed_at": "1970-01-01T00:00:00+00:00",
+        "updated_at": "1970-01-01T00:00:00+00:00",
+        "source": {
+            "type": "marketplace",
+            "repo_url": "https://ofek-dev.com/api/marketplace/extensions/better-agent.marketplace/artifact",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "obsolete",
+            "install_path": str(obsolete_root),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    required_record = {
+        **obsolete_record,
+        "manifest": {
+            **obsolete_record["manifest"],
+            "id": extension_store.MARKETPLACE_EXTENSION_ID,
+            "description": "Required marketplace",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "ofek-dev-marketplace",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": False,
+                        "requires_backend_auth": True,
+                    }
+                ],
+            },
+            "permissions": {"internal_loopback": True},
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": ["better-agent-extension.json", "mcp/server.py"],
+                    "python_modules": ["mcp.server"],
+                },
+            },
+        },
+        "source": {
+            **obsolete_record["source"],
+            "type": "better_agent_signed",
+            "repo_url": "https://ofek-dev.com/api/marketplace/extensions/ofek-dev.marketplace/artifact",
+            "commit_sha": "required",
+            "install_path": str(required_root),
+        },
+    }
+    store_path.write_text(
+        json.dumps(
+            {
+                "schema_version": extension_store.STORE_SCHEMA_VERSION,
+                "extensions": {
+                    "better-agent.marketplace": obsolete_record,
+                    extension_store.MARKETPLACE_EXTENSION_ID: required_record,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        data = extension_store._load()  # type: ignore[attr-defined]
+        if "better-agent.marketplace" in data["extensions"]:
+            raise AssertionError("obsolete marketplace id was not purged")
+        required = data["extensions"].get(extension_store.MARKETPLACE_EXTENSION_ID)
+        if required is None:
+            raise AssertionError("required marketplace replacement was not present")
+        if required["enabled"] is not True:
+            raise AssertionError("required marketplace replacement is not enabled")
+        persisted = json.loads(store_path.read_text(encoding="utf-8"))
+        if "better-agent.marketplace" in persisted["extensions"]:
+            raise AssertionError("obsolete marketplace id was not removed from disk")
+        listed_ids = {item["manifest"]["id"] for item in extension_store.list_extensions()}
+        if "better-agent.marketplace" in listed_ids:
+            raise AssertionError("obsolete marketplace id was still listed")
+        frontend_ids = {item["extension_id"] for item in extension_store.frontend_entrypoints()}
+        if "better-agent.marketplace" in frontend_ids:
+            raise AssertionError("obsolete marketplace id still exported frontend modules")
+        mcp_names = {
+            item["name"]
+            for item in required["manifest"]["entrypoints"]["mcp"]
+        }
+        if "ofek-dev-marketplace" not in mcp_names:
+            raise AssertionError("required marketplace MCP was not present")
+    finally:
+        os.environ["BETTER_AGENT_HOME"] = old_agent_home
+        os.environ["BETTER_CLAUDE_HOME"] = old_home
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+        if old_base_url is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_BASE_URL", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = old_base_url
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
+def test_required_marketplace_extension_installs_local_package_without_private_repo() -> None:
+    old_agent_home = os.environ["BETTER_AGENT_HOME"]
+    old_home = os.environ["BETTER_CLAUDE_HOME"]
+    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
+    old_base_url = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
+    temp_home = tempfile.mkdtemp(prefix="bc-test-marketplace-placeholder-")
+    os.environ["BETTER_AGENT_HOME"] = temp_home
+    os.environ["BETTER_CLAUDE_HOME"] = temp_home
+    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
+    try:
+        record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+        if record is None:
+            raise AssertionError("marketplace extension was not installed")
+        if record["source"]["type"] != "better_agent_local":
+            raise AssertionError(record["source"])
+        if record["enabled"] is not True:
+            raise AssertionError("marketplace extension is not enabled")
+        mcp_names = {
+            item["name"]
+            for item in record["manifest"]["entrypoints"]["mcp"]
+        }
+        if "ofek-dev-marketplace" not in mcp_names:
+            raise AssertionError("marketplace extension should expose marketplace MCP")
+    finally:
+        os.environ["BETTER_AGENT_HOME"] = old_agent_home
+        os.environ["BETTER_CLAUDE_HOME"] = old_home
+        if old_repo is not None:
+            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
+        if old_base_url is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_BASE_URL", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = old_base_url
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
+def test_required_marketplace_extension_cannot_be_disabled_or_uninstalled() -> None:
+    extension_id = extension_store.MARKETPLACE_EXTENSION_ID
+    try:
+        extension_store.set_enabled(extension_id, False)
+    except extension_store.ExtensionError as exc:
+        if "Required extension" not in str(exc):
+            raise
+    else:
+        raise AssertionError("required marketplace extension was disabled")
+    try:
+        extension_store.uninstall(extension_id)
+    except extension_store.ExtensionError as exc:
+        if "Required extension" not in str(exc):
+            raise
+    else:
+        raise AssertionError("required marketplace extension was uninstalled")
+
+
+def test_uninstall_installed_extension_removes_package_snapshot() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo, _commit = _make_repo(work)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        install_path = Path(record["source"]["install_path"])
+        if not install_path.exists():
+            raise AssertionError("installed package missing before uninstall")
+        extension_store.uninstall("ofek.requirements")
+        if install_path.exists():
+            raise AssertionError("installed package snapshot still exists after uninstall")
+        if extension_store.get_extension("ofek.requirements") is not None:
+            raise AssertionError("extension record still exists after uninstall")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_frontend_extension_exports_frontend_modules() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo = work / "module-extension-repo"
+        package = repo / "extensions" / "module"
+        (package / "ui").mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.settings-module",
+            "name": "Settings Module",
+            "version": "1.0.0",
+            "description": "Settings module extension",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "frontend_modules": [
+                    {
+                        "slot": "settings",
+                        "id": "settings",
+                        "label": "Settings Module",
+                        "module": "ui/settings.entry.js",
+                    }
+                ],
+            },
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": [
+                        "better-agent-extension.json",
+                        "ui/index.html",
+                        "ui/settings.entry.js",
+                    ],
+                    "python_modules": [],
+                },
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        (package / "ui" / "settings.entry.js").write_text(
+            "export function mount() { return () => {}; }\n",
+            encoding="utf-8",
+        )
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "test@example.test")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add module extension")
+
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/module",
+        )
+        entries = extension_store.frontend_entrypoints()
+        entry = next(item for item in entries if item["extension_id"] == "ofek.settings-module")
+        modules = entry["frontend_modules"]
+        if modules != [
+            {
+                "slot": "settings",
+                "id": "settings",
+                "label": "Settings Module",
+                "kind": "module",
+                "module": "ui/settings.entry.js",
+                "module_url": "/api/extensions/ofek.settings-module/frontend/ui/settings.entry.js",
+            }
+        ]:
+            raise AssertionError(modules)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_frontend_entrypoints_use_persisted_smoke_result() -> None:
+    work = _private_monorepo_test_work()
+    original_smoke = extension_store._run_extension_smoke_test  # type: ignore[attr-defined]
+    try:
+        repo = work / "persisted-smoke-repo"
+        package = repo / "extensions" / "persisted-smoke"
+        (package / "ui").mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.persisted-smoke",
+            "name": "Persisted Smoke",
+            "version": "1.0.0",
+            "description": "Frontend entrypoint should not rerun smoke.",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {"frontend": "ui/index.html"},
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": ["better-agent-extension.json", "ui/index.html"],
+                    "python_modules": [],
+                },
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "test@example.test")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add persisted smoke extension")
+
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/persisted-smoke",
+        )
+
+        def fail_smoke(*_args, **_kwargs):
+            raise AssertionError("frontend_entrypoints reran extension smoke")
+
+        extension_store._run_extension_smoke_test = fail_smoke  # type: ignore[attr-defined]
+        entries = extension_store.frontend_entrypoints()
+        if "ofek.persisted-smoke" not in {item["extension_id"] for item in entries}:
+            raise AssertionError(entries)
+    finally:
+        extension_store._run_extension_smoke_test = original_smoke  # type: ignore[attr-defined]
+        extension_store.uninstall("ofek.persisted-smoke")
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_manifest_rejects_frontend_module_outside_frontend_asset_directory() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.bad-module",
+                "name": "Bad Module",
+                "version": "1.0.0",
+                "description": "",
+                "surfaces": ["frontend_feature"],
+                "entrypoints": {
+                    "frontend": "ui/index.html",
+                    "frontend_modules": [
+                        {
+                            "slot": "settings",
+                            "id": "settings",
+                            "label": "Bad Module",
+                            "module": "other/settings.entry.js",
+                        }
+                    ],
+                },
+                "permissions": {},
+                "marketplace": {},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "frontend asset directory" not in str(exc):
+            raise
+        return
+    raise AssertionError("manifest with escaping frontend module path was accepted")
+
+
+def test_frontend_extension_exports_iframe_module() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        repo = work / "iframe-extension-repo"
+        package = repo / "extensions" / "iframe"
+        (package / "ui").mkdir(parents=True)
+        manifest = {
+            "kind": "better-agent-extension",
+            "id": "ofek.iframe-panel",
+            "name": "Iframe Panel",
+            "version": "1.0.0",
+            "description": "Embedded iframe panel",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "frontend_modules": [
+                    {
+                        "slot": "settings",
+                        "id": "panel",
+                        "label": "Iframe Panel",
+                        "kind": "iframe",
+                        "module": "ui/index.html",
+                    }
+                ],
+            },
+            "protocol": {
+                "version": 1,
+                "smoke_test": {
+                    "required_paths": ["better-agent-extension.json", "ui/index.html"],
+                    "python_modules": [],
+                },
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "test@example.test")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add iframe extension")
+
+        extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/iframe",
+        )
+        entries = extension_store.frontend_entrypoints()
+        entry = next(item for item in entries if item["extension_id"] == "ofek.iframe-panel")
+        modules = entry["frontend_modules"]
+        if modules != [
+            {
+                "slot": "settings",
+                "id": "panel",
+                "label": "Iframe Panel",
+                "kind": "iframe",
+                "module": "ui/index.html",
+                "module_url": "/api/extensions/ofek.iframe-panel/frontend/ui/index.html",
+            }
+        ]:
+            raise AssertionError(modules)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_manifest_rejects_invalid_frontend_module_kind() -> None:
+    try:
+        _validate_manifest(
+            {
+                "kind": "better-agent-extension",
+                "id": "ofek.bad-kind",
+                "name": "Bad Kind",
+                "version": "1.0.0",
+                "description": "",
+                "surfaces": ["frontend_feature"],
+                "entrypoints": {
+                    "frontend": "ui/index.html",
+                    "frontend_modules": [
+                        {
+                            "slot": "settings",
+                            "id": "settings",
+                            "label": "Bad Kind",
+                            "kind": "shadow-dom",
+                            "module": "ui/settings.entry.js",
+                        }
+                    ],
+                },
+                "permissions": {},
+                "marketplace": {},
+            }
+        )
+    except extension_store.ExtensionError as exc:
+        if "frontend_modules.kind" not in str(exc):
+            raise
+        return
+    raise AssertionError("manifest with unknown frontend_modules kind was accepted")
+
+
+def test_manifest_validates_mcp_predicate() -> None:
+    items = extension_store._validate_mcp_entrypoints(
+        [{
+            "name": "ext-with-predicate",
+            "python": "mcp/server.py",
+            "predicate": {
+                "equals": {"mode": "native"},
+                "not_equals": {"working_mode": "search_worker"},
+                "nonempty": ["continuation_chain"],
+            },
+        }],
+        extension_id="ofek-dev.test",
+    )
+    predicate = items[0]["predicate"]
+    assert predicate["equals"] == {"mode": "native"}
+    assert predicate["not_equals"] == {"working_mode": "search_worker"}
+    assert predicate["nonempty"] == ["continuation_chain"]
+    assert extension_store._mcp_predicate_matches(
+        predicate, {"mode": "native", "working_mode": "", "continuation_chain": ["a"]}
+    ) is True
+    assert extension_store._mcp_predicate_matches(
+        predicate, {"mode": "native", "working_mode": "search_worker", "continuation_chain": ["a"]}
+    ) is False
+    try:
+        extension_store._validate_mcp_predicate({"bogus": 1})
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("unknown predicate key was accepted")
+
+
+def test_manifest_accepts_session_event_hook_and_todos_fields() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": extension_store.BUILTIN_TODOS_EXTENSION_ID,
+            "name": "Todos",
+            "version": "1.0.0",
+            "surfaces": ["backend_feature"],
+            "entrypoints": {
+                "backend": "backend/routes.py",
+                "hooks": {"session_event": "/session-event"},
+            },
+            "permissions": {
+                "backend_routes": True,
+                "internal_loopback": True,
+                "reads_session_fields": ["current_todos", "current_tasks"],
+                "mutates_session_fields": ["current_todos", "current_tasks"],
+            },
+        }
+    )
+    if manifest["entrypoints"]["hooks"]["session_event"] != "/session-event":
+        raise AssertionError(manifest["entrypoints"]["hooks"])
+    if manifest["permissions"]["backend_routes"] is not True:
+        raise AssertionError(manifest["permissions"])
+    if manifest["permissions"]["mutates_session_fields"] != ["current_todos", "current_tasks"]:
+        raise AssertionError(manifest["permissions"])
+    if manifest["permissions"]["reads_session_fields"] != ["current_todos", "current_tasks"]:
+        raise AssertionError(manifest["permissions"])
+
+
+def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
+    old_agent_home = os.environ["BETTER_AGENT_HOME"]
+    old_claude_home = os.environ["BETTER_CLAUDE_HOME"]
+    temp_home = tempfile.mkdtemp(prefix="bc-test-v1-migrate-")
+    try:
+        os.environ["BETTER_AGENT_HOME"] = temp_home
+        os.environ["BETTER_CLAUDE_HOME"] = temp_home
+        store_path = Path(temp_home) / "extensions" / "extensions.json"
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        v1_store = {
+            "schema_version": 1,
+            "extensions": {
+                "vendor.bundled": {"source": {"type": "public_builtin"}},
+                "vendor.local": {"source": {"type": "private_local"}},
+                "vendor.signed": {"source": {"type": "required_artifact"}},
+                "vendor.market": {"source": {"type": "artifact"}},
+            },
+            "deleted_extensions": {},
+        }
+        store_path.write_text(json.dumps(v1_store), encoding="utf-8")
+
+        data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
+        if data["schema_version"] != 2:
+            raise AssertionError(data["schema_version"])
+        types = {k: v["source"]["type"] for k, v in data["extensions"].items()}
+        if types != {
+            "vendor.bundled": "better_agent_bundled",
+            "vendor.local": "better_agent_local",
+            "vendor.signed": "better_agent_signed",
+            "vendor.market": "artifact",
+        }:
+            raise AssertionError(types)
+
+        persisted = json.loads(store_path.read_text(encoding="utf-8"))
+        if persisted["schema_version"] != 2:
+            raise AssertionError("migration was not persisted to disk")
+        if persisted["extensions"]["vendor.local"]["source"]["type"] != "better_agent_local":
+            raise AssertionError(persisted["extensions"]["vendor.local"])
+    finally:
+        os.environ["BETTER_AGENT_HOME"] = old_agent_home
+        os.environ["BETTER_CLAUDE_HOME"] = old_claude_home
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        test_v1_store_migrates_source_types_to_v2_without_wipe()
+        test_manifest_validation_rejects_unknown_permissions()
+        test_manifest_validates_mcp_predicate()
+        test_manifest_accepts_session_event_hook_and_todos_fields()
+        test_manifest_accepts_extension_protocol_smoke_test()
+        test_manifest_rejects_string_only_mcp_entrypoints()
+        test_manifest_rejects_reserved_mcp_server_names()
+        test_manifest_allows_matching_builtin_mcp_replacement()
+        test_manifest_allows_requirements_builtin_mcp_replacement()
+        test_manifest_allows_coordination_builtin_mcp_replacement()
+        test_manifest_validates_managed_run_env_permission()
+        test_manifest_accepts_remote_services_with_network_permission()
+        test_manifest_rejects_remote_services_without_network_permission()
+        test_manifest_rejects_unsafe_remote_service_urls()
+        test_manifest_accepts_backend_module_entrypoint()
+        test_installed_extension_config_exposes_remote_services()
+        test_manifest_rejects_mismatched_builtin_mcp_replacement()
+        test_manifest_rejects_root_level_frontend_entrypoint()
+        test_manifest_rejects_missing_team_definition_file()
+        test_manifest_rejects_frontend_module_outside_frontend_asset_directory()
+        test_install_from_private_monorepo_path_and_toggle()
+        test_package_install_rejects_symlink_entries()
+        test_rejects_path_escape()
+        test_rejects_embedded_repo_credentials()
+        test_file_repo_is_allowed_only_under_private_repo()
+        test_file_repo_rejects_paths_outside_private_extensions()
+        test_subscription_extensions_fail_closed_without_entitlement_url()
+        test_subscription_extensions_use_configured_marketplace_entitlement_url()
+        test_reinstall_and_state_changes_evict_persistent_backend()
+        test_expired_entitlement_is_not_active()
+        test_install_from_marketplace_metadata_installs_artifact()
+        test_update_installed_extensions_updates_marketplace_metadata_record()
+        test_update_installed_extensions_updates_git_record_and_preserves_enabled()
+        test_builtin_feature_gate_rejects_inactive_entitlement()
+        test_installed_extension_instructions_are_managed_blocks()
+        test_builtin_harness_instructions_are_visible_extension()
+        test_disabled_extension_has_no_blocks_anywhere()
+        test_reconcile_all_sweeps_orphans_and_clears_disabled()
+        test_legacy_provider_capabilities_field_is_aliased()
+        test_manifest_accepts_skill_entrypoints_and_requires_skill_md()
+        test_extension_enable_disable_installs_runtime_skills()
+        test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy()
+        test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
+        test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
+        test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
+        test_extension_store_rehydrates_installed_requirements_snapshot()
+        test_install_smoke_test_rejects_bad_python_module_import()
+        test_optional_permissions_allow_forbid()
+        test_command_based_mcp_server()
+        test_module_based_mcp_server_config()
+        test_installed_extension_exports_runtime_mcp_server_config()
+        test_runtime_mcp_without_internal_loopback_does_not_receive_token()
+        test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config()
+        test_builtin_mcp_registry_respects_feature_extension_state()
+        test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record()
+        test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_state()
+        test_public_todos_extension_is_seeded_and_toggleable()
+        test_public_session_bridge_backend_entrypoint_is_exposed()
+        test_backend_entrypoint_does_not_require_internal_llm_assignment()
+        test_marketplace_extension_can_use_builtin_id_after_uninstall()
+        test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record()
+        test_list_extensions_reports_builtin_reconciliation_once()
+        test_required_marketplace_extension_auto_installs_from_private_repo()
+        test_required_marketplace_extension_is_hidden_from_public_extension_list()
+        test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
+        test_required_marketplace_artifact_record_upgrades_when_metadata_changes()
+        test_required_marketplace_extension_installs_local_package_without_private_repo()
+        test_required_marketplace_extension_cannot_be_disabled_or_uninstalled()
+        test_uninstall_installed_extension_removes_package_snapshot()
+        test_frontend_extension_exports_frontend_modules()
+        test_frontend_entrypoints_use_persisted_smoke_result()
+        test_frontend_extension_exports_iframe_module()
+        test_manifest_rejects_invalid_frontend_module_kind()
+        test_installed_extension_exports_team_definition_sources()
+        test_manifest_dependencies_accepted_and_deduped()
+        test_manifest_dependencies_reject_self_and_bad_id()
+        test_install_smoke_test_rejects_missing_protocol_files()
+        test_runtime_ready_requires_protocol_smoke_to_pass()
+        test_runtime_ready_accepts_persisted_manifest_without_protocol()
+        test_runtime_ready_only_spawn_runs_requires_default_session_llm()
+        test_set_enabled_enforces_dependencies()
+        test_required_runtime_path_extensions_are_managed_builtins()
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+        shutil.rmtree(_TMP_OS_HOME, ignore_errors=True)
+        shutil.rmtree(_TRUSTED_TEST_ROOT, ignore_errors=True)
+    print("PASS extension store")

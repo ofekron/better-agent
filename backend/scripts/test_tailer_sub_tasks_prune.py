@@ -1,0 +1,123 @@
+"""Test ClaudeJsonlTailer._prune_done_sub_tasks — completed sub-tailer
+tasks are dropped from `_sub_tasks` so the list can't grow without bound
+over a long-lived tailer (one task is spawned per
+Agent/Task subagent call). Pending tasks are kept; a crashed sub-tailer's
+exception is retrieved (no 'never retrieved' warning).
+
+Run with:
+    cd backend && .venv/bin/python scripts/test_tailer_sub_tasks_prune.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+import atexit
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import _test_home
+_BC_HOME = _test_home.isolate("bc-subtask-test-")
+atexit.register(lambda: shutil.rmtree(_BC_HOME, ignore_errors=True))
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from jsonl_tailer import ClaudeJsonlTailer  # noqa: E402
+
+PASS = "\x1b[32mPASS\x1b[0m"
+FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _make_tailer() -> ClaudeJsonlTailer:
+    return ClaudeJsonlTailer(
+        path=Path(_BC_HOME) / "x.jsonl",
+        start_offset=0,
+        dispatch=lambda ev: None,
+        on_cursor_advance=None,
+    )
+
+
+async def _scenario() -> bool:
+    t = _make_tailer()
+
+    async def ok() -> None:
+        return None
+
+    async def boom() -> None:
+        raise ValueError("sub-tailer crashed")
+
+    async def pending() -> None:
+        await asyncio.sleep(60)
+
+    d_ok = asyncio.create_task(ok())
+    d_boom = asyncio.create_task(boom())
+    p = asyncio.create_task(pending())
+    await asyncio.sleep(0.05)   # let the two finish
+
+    t._sub_tasks = [d_ok, d_boom, p]
+    t._prune_done_sub_tasks()
+    if t._sub_tasks != [p]:
+        print(f"  expected only the pending task to remain, got {t._sub_tasks}")
+        p.cancel()
+        return False
+
+    # Simulate many completed subagents across turns → must stay bounded.
+    extra = [asyncio.create_task(ok()) for _ in range(200)]
+    await asyncio.sleep(0.05)
+    t._sub_tasks = [p, *extra]
+    t._prune_done_sub_tasks()
+    if t._sub_tasks != [p]:
+        print(f"  list not bounded after 200 completed subagents: "
+              f"{len(t._sub_tasks)} retained")
+        p.cancel()
+        return False
+
+    # A cancelled task is also pruned.
+    p.cancel()
+    try:
+        await p
+    except BaseException:
+        pass
+    t._prune_done_sub_tasks()
+    if t._sub_tasks != []:
+        print("  cancelled task not pruned")
+        return False
+    return True
+
+
+def test_prune_bounds_sub_tasks() -> bool:
+    return asyncio.run(_scenario())
+
+
+TESTS = [
+    ("done sub-tailer tasks pruned; pending kept; list stays bounded",
+     test_prune_bounds_sub_tasks),
+]
+
+
+def main_run() -> int:
+    failed = 0
+    for name, fn in TESTS:
+        try:
+            ok = fn()
+        except Exception as e:
+            ok = False
+            import traceback
+            traceback.print_exc()
+            print(f"  exception: {e}")
+        print(f"{PASS if ok else FAIL}  {name}")
+        if not ok:
+            failed += 1
+    print()
+    print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
+          else f"all {len(TESTS)} tests passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main_run())

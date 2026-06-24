@@ -1,0 +1,294 @@
+import os
+import sys
+import tempfile
+import json
+import shutil
+from pathlib import Path
+
+import _test_home
+_tmp = _test_home.isolate("ba-test-")
+os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
+
+_HERE = Path(__file__).resolve().parent
+_BACKEND = _HERE.parent
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+dist_dir = _BACKEND.parent / "frontend" / "dist"
+if not dist_dir.exists():
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "index.html").write_text("<!doctype html><title>stub</title>", encoding="utf-8")
+
+import main  # noqa: E402
+import extension_store  # noqa: E402
+import config_store  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
+
+
+async def _fake_init_target_agent_session(*, bc_session, **_kwargs):
+    return f"agent-{bc_session['id']}"
+
+
+async def _fail_init_target_agent_session(**_kwargs):
+    raise AssertionError("bare worker provisioning must not run worker prep")
+
+
+async def _fake_broadcast_workers_changed(_cwd):
+    return None
+
+
+def _install_team_orchestration_extension() -> None:
+    extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    package = Path(_tmp) / "private-fixtures" / extension_id
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "description": extension_id,
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(package.parent),
+            "extension_path": package.name,
+            "ref": "",
+            "commit_sha": extension_id,
+        },
+        persist=True,
+    )
+    providers = config_store.list_providers()["providers"]
+    provider = providers[0]
+    assignments = config_store.get_internal_llm_assignments()
+    assignments["default_session"] = {
+        "provider_id": provider["id"],
+        "model": provider["default_model"],
+        "reasoning_effort": provider.get("default_reasoning_effort") or "",
+    }
+    config_store.set_internal_llm_assignments(assignments)
+
+
+def _client() -> TestClient:
+    _install_team_orchestration_extension()
+    return TestClient(main.app, client=("127.0.0.1", 50000))
+
+
+def _post_team_ui_provision(client: TestClient, payload: dict):
+    return client.post(
+        "/api/internal/workers/provision-ui",
+        json=payload,
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+
+
+def test_provision_workers_is_idempotent_by_role_key():
+    init_calls = []
+
+    async def fake_init_with_description(*, bc_session, description, **_kwargs):
+        init_calls.append({"name": bc_session["name"], "description": description})
+        return f"agent-{bc_session['id']}"
+
+    main.coordinator._init_target_agent_session = fake_init_with_description
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/project",
+        "workers": [
+            {
+                "role_key": "device-worker",
+                "description": "Device worker cached task instructions",
+                "orchestration_mode": "native",
+            },
+            {
+                "role_key": "graph-optimizer",
+                "description": "Graph optimizer cached task instructions",
+                "orchestration_mode": "manager",
+            },
+        ],
+    }
+
+    first = _post_team_ui_provision(client, payload)
+    assert first.status_code == 200, first.text
+    first_workers = first.json()["workers"]
+    assert [worker["role_key"] for worker in first_workers] == ["device-worker", "graph-optimizer"]
+    assert [worker["name"] for worker in first_workers] == ["worker:device-worker", "worker:graph-optimizer"]
+    assert init_calls == [
+        {
+            "name": "worker:device-worker",
+            "description": "Device worker cached task instructions",
+        },
+        {
+            "name": "worker:graph-optimizer",
+            "description": "Graph optimizer cached task instructions",
+        },
+    ]
+    assert [worker["registry_cwd"] for worker in first_workers] == ["/tmp/project", "/tmp/project"]
+    assert all(worker["created"] is True for worker in first_workers)
+
+    second = _post_team_ui_provision(client, payload)
+    assert second.status_code == 200, second.text
+    second_workers = second.json()["workers"]
+    assert [worker["agent_session_id"] for worker in second_workers] == [
+        worker["agent_session_id"] for worker in first_workers
+    ]
+    assert [worker["registry_cwd"] for worker in second_workers] == ["/tmp/project", "/tmp/project"]
+    assert all(worker["created"] is False for worker in second_workers)
+
+
+def test_provision_workers_allows_per_worker_cwd():
+    init_calls = []
+
+    async def fake_init_with_cwd(*, bc_session, cwd, **_kwargs):
+        init_calls.append({"name": bc_session["name"], "cwd": cwd})
+        return f"agent-{bc_session['id']}"
+
+    main.coordinator._init_target_agent_session = fake_init_with_cwd
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/default-project",
+        "workers": [
+            {"role_key": "app-worker", "orchestration_mode": "native"},
+            {"role_key": "tool-worker", "cwd": "/tmp/tooling", "orchestration_mode": "native"},
+        ],
+    }
+
+    response = _post_team_ui_provision(client, payload)
+
+    assert response.status_code == 200, response.text
+    workers = response.json()["workers"]
+    assert [worker["registry_cwd"] for worker in workers] == ["/tmp/default-project", "/tmp/tooling"]
+    assert init_calls == [
+        {"name": "worker:app-worker", "cwd": "/tmp/default-project"},
+        {"name": "worker:tool-worker", "cwd": "/tmp/tooling"},
+    ]
+
+
+def test_internal_provision_workers_requires_internal_token():
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/internal-project",
+        "workers": [{"role_key": "device-worker", "orchestration_mode": "native"}],
+    }
+
+    denied = client.post("/api/internal/workers/provision", json=payload)
+    assert denied.status_code == 403
+
+    allowed = client.post(
+        "/api/internal/workers/provision",
+        json=payload,
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert allowed.status_code == 200, allowed.text
+    worker = allowed.json()["workers"][0]
+    assert worker["role_key"] == "device-worker"
+    assert worker["registry_cwd"] == "/tmp/internal-project"
+    assert worker["created"] is True
+
+
+def test_bare_provision_workers_returns_pending_without_init_turn():
+    main.coordinator._init_target_agent_session = _fail_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/bare-project",
+        "bare_config": True,
+        "workers": [{"role_key": "testape:web-device-worker", "orchestration_mode": "native"}],
+    }
+
+    response = _post_team_ui_provision(client, payload)
+
+    assert response.status_code == 200, response.text
+    worker = response.json()["workers"][0]
+    assert worker["role_key"] == "testape:web-device-worker"
+    assert worker["agent_sid"] is None
+    assert worker["initialized"] is False
+    assert worker["created"] is True
+
+
+def test_coordinator_target_init_proxy_accepts_ws_callback():
+    async def fake_impl(_coordinator, *, ws_callback=None, provision_prompt=None, **_kwargs):
+        assert ws_callback is not None
+        assert provision_prompt == "custom provision"
+        return "agent-from-proxy"
+
+    original = main.coordinator.__class__._init_target_agent_session
+
+    async def run_check():
+        return await original(
+            main.coordinator,
+            bc_session={"id": "worker-session"},
+            model="glm-5.2",
+            cwd="/tmp/project",
+            description="worker",
+            cancel_event=main.asyncio.Event(),
+            ws_callback=lambda _event: None,
+            provision_prompt="custom provision",
+        )
+
+    import orchs.manager._approval as approval
+    old_impl = approval.init_target_agent_session
+    approval.init_target_agent_session = fake_impl
+    try:
+        result = main.asyncio.run(run_check())
+    finally:
+        approval.init_target_agent_session = old_impl
+    assert result == "agent-from-proxy"
+
+
+def test_target_init_accepts_custom_provision_prompt():
+    import orchs.manager._approval as approval
+
+    seen = {}
+    original_agent = approval.SubprocessAgent
+
+    class FakeAgent:
+        def __init__(self, *, agent_session_id, cwd):
+            seen["agent_session_id"] = agent_session_id
+            seen["cwd"] = cwd
+
+        async def init(self, _coordinator, *, prep_prompt, **_kwargs):
+            seen["prep_prompt"] = prep_prompt
+            return "agent-machine"
+
+    async def run_check():
+        return await approval.init_target_agent_session(
+            main.coordinator,
+            bc_session={"id": "machine-worker", "orchestration_mode": "native"},
+            model="glm-5.2",
+            cwd="/tmp/project",
+            description="worker:requirements:pipeline-operator",
+            cancel_event=main.asyncio.Event(),
+            provision_prompt="caller supplied provision",
+        )
+
+    approval.SubprocessAgent = FakeAgent
+    try:
+        result = main.asyncio.run(run_check())
+    finally:
+        approval.SubprocessAgent = original_agent
+
+    assert result == "agent-machine"
+    assert seen["agent_session_id"] == "machine-worker"
+    assert seen["prep_prompt"] == "caller supplied provision"
+
+
+if __name__ == "__main__":
+    test_provision_workers_is_idempotent_by_role_key()
+    test_provision_workers_allows_per_worker_cwd()
+    test_internal_provision_workers_requires_internal_token()
+    test_bare_provision_workers_returns_pending_without_init_turn()
+    test_coordinator_target_init_proxy_accepts_ws_callback()
+    test_target_init_accepts_custom_provision_prompt()
+    print("PASS: provision workers is idempotent by role key")

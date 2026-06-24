@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-log-errors-")
+
+_HERE = Path(__file__).resolve()
+_BACKEND = _HERE.parents[1]
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+PASS = "\x1b[32mPASS\x1b[0m"
+FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def check(condition: bool, message: str, failures: list[str]) -> None:
+    print(f"  {PASS if condition else FAIL} {message}")
+    if not condition:
+        failures.append(message)
+
+
+def test_session_index_skips_malformed_roots(failures: list[str]) -> None:
+    import session_store
+    from paths import ba_home
+
+    sessions = ba_home() / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "bad.json").write_text(json.dumps({"name": "missing id"}), encoding="utf-8")
+    good = {
+        "_schema_version": session_store.SCHEMA_VERSION,
+        "id": "good",
+        "name": "good",
+        "model": "gpt-5.5",
+        "cwd": "/tmp",
+        "orchestration_mode": "native",
+        "kind": "user",
+        "parent_session_id": None,
+        "forks": [{"name": "bad fork"}],
+        "messages": [],
+        "next_seq": 0,
+        "created_at": "2026-06-21T00:00:00",
+        "updated_at": "2026-06-21T00:00:00",
+        "source": "cli",
+    }
+    (sessions / "good.json").write_text(json.dumps(good), encoding="utf-8")
+    session_store._index_loaded = False
+    session_store._index_fingerprint = None
+    session_store._fork_index.clear()
+
+    try:
+        session_store._ensure_index()
+    except Exception as exc:
+        check(False, f"session index skips malformed root/fork records ({exc})", failures)
+        return
+    check(session_store._index_loaded is True, "session index loads despite malformed root/fork records", failures)
+
+
+def test_prompt_templates_use_meipass(failures: list[str]) -> None:
+    import prompt_templates
+
+    root = Path(tempfile.mkdtemp(prefix="bc-test-meipass-"))
+    old_meipass = getattr(sys, "_MEIPASS", None)
+    try:
+        prompt = root / "prompts" / "demo"
+        prompt.mkdir(parents=True)
+        (prompt / "system.md").write_text("Hello $name", encoding="utf-8")
+        sys._MEIPASS = str(root)  # type: ignore[attr-defined]
+        check(
+            prompt_templates.render_prompt("demo/system.md", {"name": "BC"}) == "Hello BC",
+            "prompt templates resolve from PyInstaller extraction root",
+            failures,
+        )
+    finally:
+        if old_meipass is None:
+            try:
+                del sys._MEIPASS  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
+        else:
+            sys._MEIPASS = old_meipass  # type: ignore[attr-defined]
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_jsonl_path_positive_cache(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+
+    def counted_glob(self: Path, pattern: str):
+        calls["glob"] += 1
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        project = claude_home / "projects" / "encoded"
+        project.mkdir(parents=True)
+        target = project / "agent-sid.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+        first = helpers.compute_jsonl_path("/tmp", "agent-sid")
+        second = helpers.compute_jsonl_path("/tmp", "agent-sid")
+        check(first == target and second == target, "jsonl helper returns cached path", failures)
+        check(calls["glob"] == 1, "jsonl helper avoids repeated provider directory glob", failures)
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_encoded_cwd_fast_path(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import encode_cwd
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-fast-"))
+    project_root = Path(tempfile.mkdtemp(prefix="bc-test-project-fast-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+
+    def counted_glob(self: Path, pattern: str):
+        calls["glob"] += 1
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        target_dir = claude_home / "projects" / encode_cwd(str(project_root))
+        target_dir.mkdir(parents=True)
+        target = target_dir / "agent-sid.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+        found = helpers.compute_jsonl_path(str(project_root), "agent-sid")
+        check(found == target, "jsonl helper resolves encoded cwd path first", failures)
+        check(calls["glob"] == 0, "jsonl helper fast path avoids provider glob", failures)
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+        shutil.rmtree(project_root, ignore_errors=True)
+
+
+def test_jsonl_read_path_uses_session_provider_config(failures: list[str]) -> None:
+    import config_store
+    import orchs.jsonl_helpers as helpers
+    from paths import encode_cwd
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-provider-"))
+    project_root = Path(tempfile.mkdtemp(prefix="bc-test-project-provider-"))
+    old_glob = helpers.Path.glob
+    old_get_provider = config_store.get_provider
+    calls = {"glob": 0}
+
+    def counted_glob(self: Path, pattern: str):
+        calls["glob"] += 1
+        return old_glob(self, pattern)
+
+    try:
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        target_dir = claude_home / "projects" / encode_cwd(str(project_root))
+        target_dir.mkdir(parents=True)
+        target = target_dir / "agent-sid.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        config_store.get_provider = lambda provider_id: {  # type: ignore[assignment]
+            "id": provider_id,
+            "config_dir": str(claude_home),
+        }
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+        found = helpers.compute_jsonl_read_path(
+            str(project_root),
+            "agent-sid",
+            session={"id": "s", "node_id": "primary", "provider_id": "provider-zai"},
+        )
+        check(found == target, "jsonl read helper uses session provider config", failures)
+        check(calls["glob"] == 0, "provider-aware jsonl fast path avoids provider glob", failures)
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        config_store.get_provider = old_get_provider  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        shutil.rmtree(claude_home, ignore_errors=True)
+        shutil.rmtree(project_root, ignore_errors=True)
+
+
+def test_jsonl_path_negative_cache(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-miss-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+
+    def counted_glob(self: Path, pattern: str):
+        calls["glob"] += 1
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+        first = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        second = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        check(first is None and second is None, "jsonl helper returns missing path consistently", failures)
+        check(calls["glob"] == 1, "jsonl helper caches missing provider path", failures)
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-index-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+
+    def counted_glob(self: Path, pattern: str):
+        calls["glob"] += 1
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+        first = helpers.compute_jsonl_path("/tmp", "missing-agent-a")
+        second = helpers.compute_jsonl_path("/tmp", "missing-agent-b")
+        check(first is None and second is None, "jsonl helper indexes multiple missing paths", failures)
+        check(calls["glob"] == 1, "jsonl helper shares provider index across missing sids", failures)
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def main() -> int:
+    failures: list[str] = []
+    try:
+        test_session_index_skips_malformed_roots(failures)
+        test_prompt_templates_use_meipass(failures)
+        test_jsonl_path_positive_cache(failures)
+        test_jsonl_path_encoded_cwd_fast_path(failures)
+        test_jsonl_read_path_uses_session_provider_config(failures)
+        test_jsonl_path_negative_cache(failures)
+        test_jsonl_path_indexes_multiple_misses(failures)
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    if failures:
+        print("FAILED:", failures)
+        return 1
+    print("all log error regressions passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

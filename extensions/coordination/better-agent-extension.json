@@ -1,0 +1,53 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.coordination",
+  "name": "Coordination",
+  "version": "0.1.0",
+  "description": "Shared coordination primitives for Better Agent sessions.",
+  "surfaces": [
+    "runtime_mcp",
+    "instructions"
+  ],
+  "entrypoints": {
+    "mcp": [
+      {
+        "name": "ofek-dev-coordination",
+        "replaces_builtin": "better-agent-coordination",
+        "python": "mcp/server.py",
+        "args": [],
+        "env": {},
+        "user_facing": true,
+        "bare_allowed": false,
+        "requires_backend_auth": true
+      }
+    ],
+    "instructions": [
+      {
+        "name": "coordination-git-ops-lock",
+        "path": "instructions/git_ops_lock.md",
+        "level": "global"
+      }
+    ]
+  },
+  "permissions": {
+    "internal_loopback": true
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json",
+        "instructions/git_ops_lock.md",
+        "mcp/server.py"
+      ],
+      "python_modules": [
+        "mcp.server"
+      ]
+    }
+  }
+}

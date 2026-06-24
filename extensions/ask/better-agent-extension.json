@@ -1,0 +1,62 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.ask",
+  "name": "Ask",
+  "version": "0.1.0",
+  "description": "Ask singleton, session search worker, and session picker surfaces.",
+  "surfaces": [
+    "backend_feature",
+    "frontend_feature"
+  ],
+  "entrypoints": {
+    "backend": "backend/routes.py",
+    "quick_button": {
+      "label": "Ask",
+      "icon": "sparkles",
+      "action": {
+        "type": "navigate",
+        "path": "/s/virtual:ofek-dev.ask:ask"
+      }
+    },
+    "frontend": "ui/index.html",
+    "frontend_modules": [
+      {
+        "slot": "ask-greeting",
+        "id": "ask-greeting",
+        "label": "Ask greeting",
+        "module": "ui/ask-view.entry.js"
+      },
+      {
+        "slot": "ask-session-picker",
+        "id": "ask-session-picker",
+        "label": "Ask session picker",
+        "module": "ui/ask-view.entry.js"
+      }
+    ],
+    "mcp": [],
+    "provider_capabilities": []
+  },
+  "permissions": {
+    "backend_routes": true,
+    "session_state": true,
+    "spawn_runs": true,
+    "internal_loopback": true
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "backend/routes.py",
+        "better-agent-extension.json",
+        "ui/ask-view.entry.js",
+        "ui/index.html"
+      ],
+      "python_modules": []
+    }
+  }
+}

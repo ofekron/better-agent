@@ -1,0 +1,477 @@
+"""Unit tests for the provisioned-session framework.
+
+Covers the deterministic pieces that don't need a live claude subprocess:
+  * `dirty_reason` — clean vs polluted base detection (size / turn-count /
+    leak-marker / api-error).
+  * `ProvisionedSessionSpec` defaults + subclass overrides; registry.
+  * `resolve_config` — app-settings fallback + env overlay + choice
+    validation + fork-capability gate.
+  * `extract_fork_text` — sdk_output path and jsonl byte-window path.
+
+Dispatch (`run`) and `ensure_session`/`ensure_caller` need a live backend +
+claude and are exercised by the integration tests, not here.
+
+Run with:
+    cd backend && .venv/bin/python scripts/test_provisioning_framework.py
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import _test_home
+_test_home.isolate("bc-test-provisioning-")
+os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+import provisioning  # noqa: E402
+import provisioning.manager as prov_manager  # noqa: E402
+from provisioning import (  # noqa: E402
+    DirtyPolicy,
+    ProvisionedConfig,
+    ProvisionedSessionSpec,
+    dirty_reason,
+    extract_fork_text,
+    register,
+    resolve_config,
+)
+
+PASS = "\x1b[32mPASS\x1b[0m"
+FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+# ── dirty_reason ──────────────────────────────────────────────────────
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_dirty_reason() -> bool:
+    policy = DirtyPolicy(
+        max_base_bytes=1000,
+        max_user_turns=1,
+        max_assistant_turns=1,
+        leak_markers=("LEAKED_QUERY_MARKER",),
+    )
+    cwd = "/tmp/proj"
+
+    # No agent_sid yet → clean (not provisioned).
+    if dirty_reason({}, policy, cwd):
+        print(f"{FAIL} dirty: no agent_sid should be clean")
+        return False
+
+    # compute_jsonl_path globs real disk; monkeypatch it to map our fake
+    # agent_sids to temp jsonl files we control.
+    import orchs.jsonl_helpers as jh
+    tmp_dir = Path(os.environ["BETTER_CLAUDE_HOME"]) / "fakejsonl"
+    paths: dict[str, Path] = {}
+
+    def _fake_compute(_cwd: str, agent_sid: str):
+        return paths.get(agent_sid)
+
+    original = jh.compute_jsonl_path
+    jh.compute_jsonl_path = _fake_compute  # type: ignore[assignment]
+    try:
+        def _seed(sid: str, rows: list[dict]) -> str:
+            p = tmp_dir / f"{sid}.jsonl"
+            _write_jsonl(p, rows)
+            paths[sid] = p
+            return sid
+
+        # Clean: one provision user-turn + one ready assistant-turn, small.
+        clean = _seed("clean-sid", [
+            {"type": "user", "message": {"content": "ready prompt"}},
+            {"type": "assistant", "message": {"content": "ready"}},
+        ])
+        if dirty_reason({"agent_session_id": clean}, policy, cwd):
+            print(f"{FAIL} dirty: clean base flagged dirty")
+            return False
+
+        # Dirty: too big.
+        big = _seed("big-sid", [{"type": "user", "message": {"content": "x" * 2000}}])
+        if not dirty_reason({"agent_session_id": big}, policy, cwd):
+            print(f"{FAIL} dirty: oversized base not flagged")
+            return False
+
+        # Dirty: a second user turn (a query leaked into the base).
+        two = _seed("two-sid", [
+            {"type": "user", "message": {"content": "provision"}},
+            {"type": "assistant", "message": {"content": "ready"}},
+            {"type": "user", "message": {"content": "second turn leaked"}},
+        ])
+        if not dirty_reason({"agent_session_id": two}, policy, cwd):
+            print(f"{FAIL} dirty: 2 user-turn base not flagged")
+            return False
+
+        # Dirty: leak marker in a user turn.
+        leak = _seed("leak-sid", [
+            {"type": "user", "message": {"content": "LEAKED_QUERY_MARKER stuff"}},
+        ])
+        if not dirty_reason({"agent_session_id": leak}, policy, cwd):
+            print(f"{FAIL} dirty: leak marker not flagged")
+            return False
+
+        # Dirty: API-error assistant turn.
+        err = _seed("err-sid", [
+            {"type": "user", "message": {"content": "provision"}},
+            {"type": "assistant", "message": {"content": "x"}, "isApiErrorMessage": True},
+        ])
+        if not dirty_reason({"agent_session_id": err}, policy, cwd):
+            print(f"{FAIL} dirty: api-error turn not flagged")
+            return False
+    finally:
+        jh.compute_jsonl_path = original  # type: ignore[assignment]
+
+    print(f"{PASS} dirty_reason: clean / size / turn-count / leak / api-error")
+    return True
+
+
+# ── spec + registry ───────────────────────────────────────────────────
+
+def test_spec_and_registry() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "unit_test_spec"
+        version = 7
+        name = "unit-test"
+        env_prefix = "UNIT_TEST"
+        task_key = "session_search_worker"
+        machine_completion = False
+        bare_config = False
+
+        def build_provision_prompt(self, ctx):
+            return "prep"
+
+    s = register(_S())
+    if s.machine_completion is not False or s.bare_config is not False:
+        print(f"{FAIL} spec: subclass override ignored")
+        return False
+    if provisioning.get("unit_test_spec") is not s:
+        print(f"{FAIL} registry: get did not return registered instance")
+        return False
+    # Defaults from the base class survive.
+    if _S().run_mode != "fork" or _S().dispatch != "http" or _S().ephemeral_forks is not True:
+        print(f"{FAIL} spec: base defaults wrong")
+        return False
+    # build_instructions default = just the query.
+    if _S().build_instructions("hello", {}) != "hello":
+        print(f"{FAIL} spec: default build_instructions not identity")
+        return False
+    print(f"{PASS} ProvisionedSessionSpec overrides + registry")
+    return True
+
+
+# ── resolve_config ────────────────────────────────────────────────────
+
+def test_resolve_config_overlay() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "cfg_test_spec"
+        env_prefix = "CFG_TEST"
+        task_key = "session_search_worker"  # resolves via app-settings
+        dispatch = "in_process"
+        default_model = "fallback-model"
+
+    # Env overlay overrides model + dispatch.
+    os.environ["CFG_TEST_MODEL"] = "overridden-model"
+    os.environ["CFG_TEST_DISPATCH"] = "http"
+    try:
+        cfg = resolve_config(_S())
+    finally:
+        del os.environ["CFG_TEST_MODEL"]
+        del os.environ["CFG_TEST_DISPATCH"]
+    if cfg.model != "overridden-model" or cfg.dispatch != "http":
+        print(f"{FAIL} resolve_config: env overlay not applied (model={cfg.model}, dispatch={cfg.dispatch})")
+        return False
+
+    # Invalid choice raises.
+    os.environ["CFG_TEST_DISPATCH"] = "bogus"
+    try:
+        resolve_config(_S())
+        print(f"{FAIL} resolve_config: bogus dispatch did not raise")
+        return False
+    except RuntimeError:
+        pass
+    finally:
+        del os.environ["CFG_TEST_DISPATCH"]
+
+    class _S2(ProvisionedSessionSpec):
+        key = "cfg_test_spec2"
+        env_prefix = "CFG_TEST2"
+        task_key = ""  # no app-settings resolution
+    try:
+        resolve_config(_S2())
+        print(f"{FAIL} resolve_config: missing model did not raise")
+        return False
+    except RuntimeError:
+        pass
+    print(f"{PASS} resolve_config: env overlay + choice validation + missing model rejection")
+    return True
+
+
+# ── extract_fork_text ─────────────────────────────────────────────────
+
+def test_extract_fork_text() -> bool:
+    # sdk_output short-circuits.
+    if extract_fork_text({"sdk_output": "  hello  "}) != "hello":
+        print(f"{FAIL} extract: sdk_output path")
+        return False
+
+    # jsonl byte window: write two assistant rows, sample the second.
+    tmp = Path(os.environ["BETTER_CLAUDE_HOME"]) / "fork.jsonl"
+    row1 = json.dumps({"type": "assistant", "message": {"content": "first"}}) + "\n"
+    row2 = json.dumps({"type": "assistant", "message": {"content": "second"}}) + "\n"
+    tmp.write_text(row1 + row2, encoding="utf-8")
+    # new_byte_offset is 1-based start; point past row1 into row2.
+    start = len(row1.encode("utf-8"))
+    text = extract_fork_text({
+        "jsonl_path": str(tmp),
+        "new_byte_offset": start + 1,
+        "total_bytes_now": len((row1 + row2).encode("utf-8")),
+    })
+    if text != "second":
+        print(f"{FAIL} extract: jsonl byte window got {text!r}")
+        return False
+    print(f"{PASS} extract_fork_text: sdk_output + jsonl byte window")
+    return True
+
+
+def test_run_serializes_lifecycle_creation() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "lifecycle_lock_test"
+        env_prefix = "LIFECYCLE_LOCK_TEST"
+        name = "worker:lifecycle-lock"
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo",
+                model="model",
+                provider_id="provider",
+                reasoning_effort="",
+                run_mode="fork",
+                dispatch="http",
+                on_no_fork="error",
+                node_id="primary",
+                backend_url="http://localhost:8000",
+                internal_token="token",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description="worker:lifecycle-lock",
+            )
+
+        def build_instructions(self, query, ctx):
+            return "instructions"
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    def fake_ensure_session(spec, cfg):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return "base"
+
+    async def fake_dispatch(*args, **kwargs):
+        return {"success": True, "sdk_output": "ok"}
+
+    try:
+        prov_manager.ensure_session = fake_ensure_session
+        prov_manager.ensure_caller = lambda spec, cfg: "caller"
+        prov_manager.dispatch = fake_dispatch
+        errors: list[BaseException] = []
+
+        def run_once():
+            try:
+                prov_manager.run_sync(_S(), "", {})
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run_once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+
+    if errors:
+        print(f"{FAIL} lifecycle lock: concurrent run failed with {errors[0]}")
+        return False
+    if max_active != 1:
+        print(f"{FAIL} lifecycle lock: ensure_session ran concurrently (max_active={max_active})")
+        return False
+    print(f"{PASS} lifecycle lock: base/caller creation serialized")
+    return True
+
+
+def test_lifecycle_lock_timeout_surfaces() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "lifecycle_timeout_test"
+        env_prefix = "LIFECYCLE_TIMEOUT_TEST"
+        name = "worker:lifecycle-timeout"
+        provision_timeout = 0.05
+        retry_attempts = 1
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo",
+                model="model",
+                provider_id="provider",
+                reasoning_effort="",
+                run_mode="fork",
+                dispatch="http",
+                on_no_fork="error",
+                node_id="primary",
+                backend_url="http://localhost:8000",
+                internal_token="token",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description="worker:lifecycle-timeout",
+            )
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+    spec = _S()
+    cfg = spec.build_config()
+    lock = prov_manager._lifecycle_lock(spec, cfg)
+    lock.acquire()
+    try:
+        started = time.monotonic()
+        try:
+            prov_manager.run_sync(spec, "", {})
+        except TimeoutError as exc:
+            elapsed = time.monotonic() - started
+            if "lifecycle lock timed out" not in str(exc):
+                print(f"{FAIL} lifecycle timeout: wrong error {exc}")
+                return False
+            if elapsed > 1.0:
+                print(f"{FAIL} lifecycle timeout: took too long ({elapsed:.3f}s)")
+                return False
+            print(f"{PASS} lifecycle lock timeout surfaces")
+            return True
+        print(f"{FAIL} lifecycle timeout: run_sync did not raise")
+        return False
+    finally:
+        lock.release()
+
+
+def test_run_sync_times_out_stuck_dispatch() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "dispatch_timeout_test"
+        env_prefix = "DISPATCH_TIMEOUT_TEST"
+        name = "worker:dispatch-timeout"
+        provision_timeout = 0.05
+        retry_attempts = 1
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo",
+                model="model",
+                provider_id="provider",
+                reasoning_effort="",
+                run_mode="fork",
+                dispatch="http",
+                on_no_fork="error",
+                node_id="primary",
+                backend_url="http://localhost:8000",
+                internal_token="token",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description="worker:dispatch-timeout",
+            )
+
+        def build_instructions(self, query, ctx):
+            return "instructions"
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+
+    async def stuck_dispatch(*args, **kwargs):
+        await asyncio.sleep(1.0)
+        return {"success": True, "sdk_output": "late"}
+
+    try:
+        prov_manager.ensure_session = lambda spec, cfg: "base"
+        prov_manager.ensure_caller = lambda spec, cfg: "caller"
+        prov_manager.dispatch = stuck_dispatch
+        started = time.monotonic()
+        try:
+            prov_manager.run_sync(_S(), "", {})
+        except TimeoutError as exc:
+            elapsed = time.monotonic() - started
+            if "provisioned run timed out" not in str(exc):
+                print(f"{FAIL} dispatch timeout: wrong error {exc}")
+                return False
+            if elapsed > 1.0:
+                print(f"{FAIL} dispatch timeout: took too long ({elapsed:.3f}s)")
+                return False
+            print(f"{PASS} dispatch timeout surfaces")
+            return True
+        print(f"{FAIL} dispatch timeout: run_sync did not raise")
+        return False
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+
+
+# ── entry point ───────────────────────────────────────────────────────
+
+def main_run() -> int:
+    tests = [
+        test_dirty_reason,
+        test_spec_and_registry,
+        test_resolve_config_overlay,
+        test_extract_fork_text,
+        test_run_serializes_lifecycle_creation,
+        test_lifecycle_lock_timeout_surfaces,
+        test_run_sync_times_out_stuck_dispatch,
+    ]
+    results = []
+    for fn in tests:
+        try:
+            results.append(fn())
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL} {fn.__name__} raised: {e}")
+            results.append(False)
+    n_pass = sum(1 for r in results if r)
+    n_total = len(results)
+    print(f"\n{n_pass}/{n_total} provisioning-framework unit tests passed")
+    shutil.rmtree(os.environ["BETTER_CLAUDE_HOME"], ignore_errors=True)
+    return 0 if n_pass == n_total else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main_run())

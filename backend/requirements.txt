@@ -1,0 +1,16 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+pexpect>=4.8.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.2
+PyYAML>=6.0.0
+keyring>=25.0.0
+argon2-cffi>=23.1.0
+itsdangerous>=2.1.2
+claude-agent-sdk>=0.1.58
+tufup>=0.10.0
+model2vec>=0.3.0
+numpy>=1.26.0
+scipy>=1.13.0
+better-agent-provider-config-sync-backend @ git+https://github.com/ofekron/provider-config-sync.git@main#subdirectory=packages/provider-config-sync-backend

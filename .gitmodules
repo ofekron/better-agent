@@ -1,0 +1,3 @@
+[submodule "provider-config-sync"]
+	path = provider-config-sync
+	url = https://github.com/ofekron/provider-config-sync.git

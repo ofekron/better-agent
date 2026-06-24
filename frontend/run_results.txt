@@ -1,0 +1,11 @@
+flow	70d76c479a3da9fccd86
+run	3205ba14-0898-47b6-bd7f-847d0082a258
+status	FAILED
+completed	True
+duration	180.04243993759155
+steps	9	unknown=9
+step	1	UNKNOWN	Command http://localhost:5173
+step	2	UNKNOWN	TextValidation "dom: [data-testid="input-textarea"]"
+step	3	UNKNOWN	TapEvent click([data-testid="input-textarea"])
+step	4	UNKNOWN	TextInput type("@")
+step	5	UNKNOWN	TextValidation "dom: .at-mention-dropdown"
