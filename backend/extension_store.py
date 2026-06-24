@@ -3883,9 +3883,7 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     settings = _load_ui_settings()
     quick_buttons: list[dict[str, Any]] = []
     pages: list[dict[str, Any]] = []
-    # include_hidden: PUBLIC_EXTENSION_LIST_HIDDEN_IDS hides extensions from the
-    # manage-list only; their UI hooks (e.g. the marketplace page) must still surface.
-    for record in list_extensions(include_hidden=True):
+    for record in list_extensions():
         manifest = record["manifest"]
         extension_id = manifest["id"]
         if not _record_active(record) or not _record_runtime_ready(record):

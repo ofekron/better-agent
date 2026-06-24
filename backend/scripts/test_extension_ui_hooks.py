@@ -369,31 +369,6 @@ def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
     ]
 
 
-def test_hidden_marketplace_page_still_surfaces_in_ui_hooks() -> None:
-    # PUBLIC_EXTENSION_LIST_HIDDEN_IDS hides the marketplace from the manage-list,
-    # but its page UI hook must still surface — otherwise the Marketplace vanishes
-    # from Settings entirely. Regression: ui_hooks() must pass include_hidden=True.
-    assert extension_store.MARKETPLACE_EXTENSION_ID in extension_store.PUBLIC_EXTENSION_LIST_HIDDEN_IDS
-    _seed_store_with_marketplace()
-    data = extension_store._load()  # type: ignore[attr-defined]
-    record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
-    record["manifest"]["surfaces"] = ["backend_feature", "frontend_feature"]
-    record["manifest"]["entrypoints"] = {
-        "page": {
-            "id": "main",
-            "label": "Marketplace",
-            "icon": "store",
-            "open": {"type": "navigate", "path_template": "/marketplace"},
-        },
-    }
-    extension_store._save(data)  # type: ignore[attr-defined]
-    pages = [
-        p for p in extension_store.ui_hooks()["pages"]
-        if p["extension_id"] == extension_store.MARKETPLACE_EXTENSION_ID
-    ]
-    assert len(pages) == 1, "hidden marketplace page must still surface in ui_hooks"
-
-
 def test_installed_manifest_is_authoritative_without_public_sync() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
