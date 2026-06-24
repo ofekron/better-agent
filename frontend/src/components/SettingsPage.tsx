@@ -1829,6 +1829,9 @@ function FirstRunWizard({
           </button>
         </div>
       </div>
+      <div className="first-run-step">
+        <NativeImportSetting />
+      </div>
       {providerConfigSyncEnabled && (
         <div className="first-run-step">
           <div className="first-run-step-copy">
