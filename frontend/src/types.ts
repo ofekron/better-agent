@@ -861,6 +861,9 @@ export interface Session {
    * the sidebar can render a badge. "import" = ingested from a native
    * provider CLI session. */
   source?: "web" | "cli" | "extension" | "import";
+  /** Derived: "user" (human-started) vs "tool" (created by Better Agent
+   * tooling — import, extension, internal fork/sub-session/delegation). */
+  initiated_by?: "user" | "tool";
   virtual?: boolean;
   extension_id?: string;
   backing_session_ids?: string[];
