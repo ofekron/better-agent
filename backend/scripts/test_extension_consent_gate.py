@@ -18,7 +18,9 @@ import extension_store as es  # noqa: E402
 def _rec(perms: dict, *, builtin: bool, consent_fp: str | None = None) -> dict:
     rec = {
         "manifest": {"id": "ext.demo", "permissions": perms},
-        "source": {"type": "builtin" if builtin else "repo"},
+        # First-party (bundled) sources are consent-exempt; third-party
+        # (repo/artifact) sources require consent. See is_first_party().
+        "source": {"type": "better_agent_bundled" if builtin else "repo"},
     }
     if consent_fp is not None:
         rec["consent"] = {"fingerprint": consent_fp, "at": "now"}
@@ -58,7 +60,7 @@ def main() -> int:
     }
     data["extensions"]["legacy.builtin"] = {
         "manifest": {"id": "legacy.builtin", "permissions": {"network": True}},
-        "source": {"type": "builtin"},
+        "source": {"type": "better_agent_bundled"},
         "enabled": True,
     }
     data["extensions"]["legacy.disabled"] = {

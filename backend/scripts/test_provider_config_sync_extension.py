@@ -37,6 +37,9 @@ def configure_review_model() -> None:
 
 def main() -> int:
     configure_review_model()
+    # Seed bundled public extensions from the repo before reading. Reads via
+    # get_extension() are pure; list_extensions_with_reconciliation is the seed path.
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     record = extension_store.get_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
     check(record is not None, "provider-config-sync extension is installed")
     assert record is not None

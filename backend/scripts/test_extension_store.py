@@ -356,7 +356,7 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
         "permissions": {"internal_loopback": True},
         "protocol": {
             "version": 1,
-            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
         },
         "marketplace": {},
     }
@@ -377,7 +377,11 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
         raise AssertionError("python_requirements declaration was not preserved")
     extension_store.set_harness_delivery_mode("ofek.synthetic-runtime-mcp", "runtime")
-    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]) / ".venv")
+    # Resolve to the canonical path: the runtime-MCP builder resolves
+    # install_root (Path(...).resolve()), so on macOS (/var -> /private/var)
+    # the PATH entry is the resolved form. Match it or the entry-level check
+    # compares unresolved vs resolved strings and fails.
+    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
     venv_bin.mkdir(parents=True)
     _configure_internal_llm_defaults("default_session")
 
@@ -557,18 +561,22 @@ def test_extension_store_rehydrate_skips_tombstoned_installed_snapshot() -> None
         raise AssertionError("rehydration restored a tombstoned installed snapshot")
 
 
-def test_extension_store_rehydrates_installed_requirements_snapshot() -> None:
-    # ofek-dev.requirements is a dissolved builtin: it must register purely from
-    # its installed artifact snapshot, not from a managed-id repo path. Regression
-    # for the managed-id skip in _rehydrate_installed_extension_records that left
-    # it stranded (installed but never registered, so its get-requirements MCP
-    # never injected). The snapshot is written directly so no registry record
-    # exists beforehand — rehydration is the only path that can create it.
-    ext_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
+    # An installed artifact snapshot (a version dir under the install root with
+    # no registry record) must be rehydrated into the registry on reconcile.
+    # Regression for _rehydrate_installed_extension_records: a snapshot left on
+    # disk (e.g. after a crash mid-install, or a dissolved extension whose
+    # managed-id package no longer exists) must register so its MCP injects.
+    # Uses a synthetic non-managed id so the managed-id skip
+    # (_managed_extension_package_exists) does not apply and rehydration is the
+    # only path that can create the record. ofek-dev.requirements can no longer
+    # exercise this: its managed package now lives in better-agent-private, so
+    # the managed-id skip correctly short-circuits rehydration for it.
+    ext_id = "ofek.rehydrate-fixture"
     install_root = extension_store._install_root()
-    # Clean slate: the suite shares one temp home, so drop any requirements
-    # registry record and installed snapshot left by earlier tests, otherwise
-    # rehydration is skipped and a stale record masks the regression.
+    # Clean slate: the suite shares one temp home, so drop any fixture registry
+    # record and installed snapshot left by earlier runs, otherwise rehydration
+    # is skipped and a stale record masks the regression.
     with extension_store._store_lock():
         data = extension_store._read_store_unlocked()
         data["extensions"].pop(ext_id, None)
@@ -578,16 +586,15 @@ def test_extension_store_rehydrates_installed_requirements_snapshot() -> None:
         shutil.rmtree(existing_snapshot_root)
     manifest = {
         "kind": extension_store.MANIFEST_KIND,
-        "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        "name": "Requirements",
+        "id": ext_id,
+        "name": "Rehydrate fixture",
         "version": "0.1.0",
-        "description": "Requirements rehydrate fixture.",
+        "description": "Installed-snapshot rehydrate fixture.",
         "surfaces": ["runtime_mcp"],
         "entrypoints": {
             "mcp": [
                 {
-                    "name": "better-agent-requirements",
-                    "replaces_builtin": "get-requirements",
+                    "name": "fixture-mcp",
                     "python": "mcp/server.py",
                     "args": [],
                     "env": {},
@@ -606,21 +613,25 @@ def test_extension_store_rehydrates_installed_requirements_snapshot() -> None:
     }
     snapshot = (
         extension_store._install_root()
-        / extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+        / ext_id
         / "versions"
-        / "requirements-rehydrate"
+        / "rehydrate-fixture"
     )
     (snapshot / "mcp").mkdir(parents=True)
     (snapshot / "mcp" / "server.py").write_text("# stub mcp server\n", encoding="utf-8")
     (snapshot / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    record = extension_store.get_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    # Reconcile (not the pure _load read) is what runs rehydration. The fixture
+    # is non-managed, so _ensure_public/private_extensions leave it alone and
+    # _rehydrate_installed_extension_records is the only path that registers it.
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    record = extension_store.get_extension(ext_id)
     if record is None:
-        raise AssertionError("installed requirements snapshot was not rehydrated into the registry")
+        raise AssertionError("installed artifact snapshot was not rehydrated into the registry")
     if record.get("enabled") is not True:
-        raise AssertionError("rehydrated requirements snapshot is not enabled")
+        raise AssertionError("rehydrated artifact snapshot is not enabled")
     if record.get("source", {}).get("type") != "artifact":
-        raise AssertionError("rehydrated requirements snapshot has unexpected source type")
+        raise AssertionError("rehydrated artifact snapshot has unexpected source type")
 
 
 def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy() -> None:
@@ -1521,10 +1532,12 @@ def test_runtime_ready_accepts_persisted_manifest_without_protocol() -> None:
 def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
     import config_store
 
-    old_assignments = config_store.get_internal_llm_assignments()
-    assignments = dict(old_assignments)
-    assignments.pop("default_session", None)
-    config_store.set_internal_llm_assignments(assignments)
+    # Internal LLM tasks resolve via inheritance from the default provider, so
+    # clearing an assignment no longer makes a task unready. The way to make a
+    # task genuinely unready is to remove providers entirely. Save/restore the
+    # full provider state around the test.
+    old_state = config_store._load_state()
+    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
     loopback = _write_private_extension_package(
         "ofek.loopback-ready",
         "extensions/loopback-ready",
@@ -1569,7 +1582,7 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
         if extension_store.is_extension_runtime_ready(spawn_record["manifest"]["id"]):
             raise AssertionError("spawn_runs extension should require default_session")
     finally:
-        config_store.set_internal_llm_assignments(old_assignments)
+        config_store._save_state(old_state)
         extension_store.uninstall(loopback_record["manifest"]["id"])
         extension_store.uninstall(spawn_record["manifest"]["id"])
 
@@ -1967,7 +1980,7 @@ def test_required_marketplace_bootstraps_from_signed_artifact() -> None:
         _, metadata, public_key = _marketplace_artifact_fixture(work)
         old = _with_marketplace_bootstrap_env(work, metadata, public_key)
         try:
-            data = extension_store._load()
+            data = extension_store._load_with_changes()[0]
         finally:
             _restore_env(old)
         record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
@@ -2002,7 +2015,7 @@ def test_required_marketplace_artifact_record_upgrades_when_metadata_changes() -
                 encoding="utf-8",
             )
 
-            data = extension_store._load()
+            data = extension_store._load_with_changes()[0]
         finally:
             _restore_env(old)
             extension_store._required_artifact_update_checked.clear()  # type: ignore[attr-defined]
@@ -2022,7 +2035,7 @@ def test_required_marketplace_unreachable_metadata_falls_back_to_visible_placeho
         old = _with_marketplace_bootstrap_env(work, metadata, public_key)
         os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (work / "missing" / "api" / "marketplace").as_uri()
         try:
-            data = extension_store._load()
+            data = extension_store._load_with_changes()[0]
         finally:
             _restore_env(old)
         record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
@@ -2347,7 +2360,9 @@ def test_installed_extension_instructions_are_managed_blocks() -> None:
 
 
 def test_builtin_harness_instructions_are_visible_extension() -> None:
-    extension_store._load()
+    # Seed bundled public extensions from the repo. _load()/get_extension() are
+    # pure reads; list_extensions_with_reconciliation is the explicit seed path.
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     record = extension_store.get_extension(
         extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
     )
@@ -2868,8 +2883,16 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
             raise AssertionError(config)
         if config["env"]["BETTER_CLAUDE_EXTENSION_ID"] != "ofek.scheduler":
             raise AssertionError(config)
-        if config["env"].get("BETTER_CLAUDE_INTERNAL_TOKEN") != "token":
-            raise AssertionError("internal_loopback runtime MCP should receive internal token")
+        # internal_loopback grants a PER-EXTENSION token (minted via
+        # extension_token_registry), never the global input token passthrough —
+        # identity is derived from this secret, not self-asserted. Both env
+        # aliases must carry it.
+        token_claude = config["env"].get("BETTER_CLAUDE_INTERNAL_TOKEN")
+        token_agent = config["env"].get("BETTER_AGENT_INTERNAL_TOKEN")
+        if not token_claude or token_claude != token_agent:
+            raise AssertionError(f"internal_loopback runtime MCP should receive a per-extension internal token: {config['env']}")
+        if token_claude == "token":
+            raise AssertionError("internal_loopback MCP must not receive the raw global input token (per-extension minting required)")
         if config["env"]["OF_EXTENSION_TEST"] != "1":
             raise AssertionError(config)
     finally:
@@ -3130,6 +3153,9 @@ def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_st
             data.get("deleted_extensions", {}).pop(supervisor_id, None)
             extension_store._write_store_unlocked(data)  # type: ignore[attr-defined]
 
+        # Seeding runs in the reconcile path (_ensure_private_extensions), not
+        # the pure _load() read that get_extension uses. Trigger it explicitly.
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
         record = extension_store.get_extension(supervisor_id)
         if record is None:
             raise AssertionError("nested private supervisor extension was not seeded")
@@ -3156,7 +3182,7 @@ def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_st
 def test_public_todos_extension_is_seeded_and_toggleable() -> None:
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
     try:
-        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions()}
+        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions_with_reconciliation(include_hidden=True)[0]}
     finally:
         if old_repo is not None:
             os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
@@ -3183,7 +3209,7 @@ def test_public_todos_extension_is_seeded_and_toggleable() -> None:
 def test_public_session_bridge_backend_entrypoint_is_exposed() -> None:
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
     try:
-        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions()}
+        records = {item["manifest"]["id"]: item for item in extension_store.list_extensions_with_reconciliation(include_hidden=True)[0]}
     finally:
         if old_repo is not None:
             os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
@@ -3202,7 +3228,22 @@ def test_public_session_bridge_backend_entrypoint_is_exposed() -> None:
 
 
 def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
+    import config_store
+
     project_structure_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    # Clear providers so the project_structure_edit LLM task is genuinely
+    # unready (tasks resolve via inheritance from the default provider, so
+    # clearing assignments alone no longer gates readiness). Restored below.
+    old_state = config_store._load_state()
+    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
+    # Reset any tombstone/record a prior test left: reconcile honors the
+    # deleted_extensions tombstone for managed private ids and would otherwise
+    # skip re-seeding project-structure, leaving the fixture uninstalled.
+    with extension_store._store_lock():
+        data = extension_store._read_store_unlocked()
+        data["extensions"].pop(project_structure_id, None)
+        (data.get("deleted_extensions") or {}).pop(project_structure_id, None)
+        extension_store._write_store_unlocked(data)
     package = _TRUSTED_TEST_ROOT / "extensions" / "project-structure"
     if package.exists():
         shutil.rmtree(package)
@@ -3246,11 +3287,14 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
     )
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
 
-    spec = extension_store.backend_entrypoint_spec(project_structure_id)
-    if spec is None:
-        raise AssertionError("backend route spec should mount without internal LLM assignment")
-    if extension_store.is_extension_runtime_ready(project_structure_id):
-        raise AssertionError("full runtime readiness should still require project_structure_edit assignment")
+    try:
+        spec = extension_store.backend_entrypoint_spec(project_structure_id)
+        if spec is None:
+            raise AssertionError("backend route spec should mount without internal LLM assignment")
+        if extension_store.is_extension_runtime_ready(project_structure_id):
+            raise AssertionError("full runtime readiness should still require project_structure_edit assignment")
+    finally:
+        config_store._save_state(old_state)
 
 
 def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
@@ -3336,6 +3380,11 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
     }
     (package / "mcp").mkdir(parents=True)
     (package / "mcp" / "server.py").write_text("print('requirements')\n", encoding="utf-8")
+    # The package dir must contain the manifest file so the smoke test (now
+    # required for runtime readiness) can validate required_paths.
+    (package / "better-agent-extension.json").write_text(
+        json.dumps(data["extensions"][extension_id]["manifest"]), encoding="utf-8"
+    )
     data["extensions"][extension_id]["manifest"] = _validate_manifest(
         data["extensions"][extension_id]["manifest"]
     )
@@ -3648,7 +3697,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
         encoding="utf-8",
     )
     try:
-        data = extension_store._load()  # type: ignore[attr-defined]
+        data = extension_store._load_with_changes()[0]  # type: ignore[attr-defined]
         if "better-agent.marketplace" in data["extensions"]:
             raise AssertionError("obsolete marketplace id was not purged")
         required = data["extensions"].get(extension_store.MARKETPLACE_EXTENSION_ID)
@@ -3693,6 +3742,10 @@ def test_required_marketplace_extension_installs_local_package_without_private_r
     os.environ["BETTER_CLAUDE_HOME"] = temp_home
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
     try:
+        # Reconcile seeds the required marketplace from the bundled local
+        # package (better_agent_local) when the private repo + remote metadata
+        # are both unavailable. get_extension() is a pure read and does not seed.
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
         record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
         if record is None:
             raise AssertionError("marketplace extension was not installed")
@@ -4161,7 +4214,7 @@ if __name__ == "__main__":
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
-        test_extension_store_rehydrates_installed_requirements_snapshot()
+        test_extension_store_rehydrates_installed_artifact_snapshot()
         test_install_smoke_test_rejects_bad_python_module_import()
         test_optional_permissions_allow_forbid()
         test_command_based_mcp_server()
