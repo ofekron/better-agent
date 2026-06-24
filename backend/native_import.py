@@ -76,13 +76,56 @@ def _provider_records(provider_ids: Optional[list[str]]) -> list[dict]:
     return [p for p in providers if p.get("id") in wanted]
 
 
+def _is_junk_cwd(cwd: str) -> bool:
+    """Temp / BA-internal working directories that aren't real projects —
+    system temp, the BA state home, and their parents. Empty (unknown)
+    cwd is NOT junk (caller decides via the project filter)."""
+    if not cwd:
+        return False
+    try:
+        p = Path(cwd).expanduser().resolve()
+    except OSError:
+        return False
+    roots = [paths.ba_home(), Path("/tmp"), Path("/private/tmp"),
+             Path("/var/folders"), Path("/private/var/folders")]
+    for r in roots:
+        try:
+            rr = r.resolve()
+        except OSError:
+            continue
+        if p == rr or rr in p.parents:
+            return True
+    return False
+
+
+def _under_projects(cwd: str, project_paths: list[str]) -> bool:
+    if not cwd:
+        return False
+    try:
+        p = Path(cwd).expanduser().resolve()
+    except OSError:
+        return False
+    for pp in project_paths:
+        try:
+            base = Path(pp).expanduser().resolve()
+        except OSError:
+            continue
+        if p == base or base in p.parents:
+            return True
+    return False
+
+
 def enumerate_native_sessions(
     provider_ids: Optional[list[str]] = None,
+    project_paths: Optional[list[str]] = None,
 ) -> list[NativeSession]:
     """List native sessions for the given providers (all if None).
 
-    Unsupported provider kinds are skipped here; the caller learns about
-    them via `unsupported_providers()`.
+    `project_paths` opts into a project filter: only sessions whose cwd is
+    under one of those project roots are returned, and junk cwds (system
+    temp, the BA state home) are excluded. None disables both (legacy
+    "import everything" behavior). Unsupported provider kinds are skipped
+    here; the caller learns about them via `unsupported_providers()`.
     """
     out: list[NativeSession] = []
     for provider in _provider_records(provider_ids):
@@ -99,6 +142,8 @@ def enumerate_native_sessions(
                 out.extend(_enumerate_gemini(pid, provider))
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
+    if project_paths is not None:
+        out = [s for s in out if _under_projects(s.cwd, project_paths) and not _is_junk_cwd(s.cwd)]
     return out
 
 
@@ -124,6 +169,28 @@ def _claude_projects_dir(provider: dict) -> Path:
     return base / "projects"
 
 
+def _first_cwd_from_jsonl(path: Path, *, max_lines: int = 40) -> str:
+    """Read the first `cwd` field from a claude session jsonl. Each line is
+    a full SDK record and most carry the working directory; we stop at the
+    first hit so huge transcripts aren't fully parsed."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for _ in range(max_lines):
+                raw = f.readline()
+                if not raw:
+                    break
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                cwd = obj.get("cwd") if isinstance(obj, dict) else None
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        pass
+    return ""
+
+
 def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
     projects = _claude_projects_dir(provider)
     out: list[NativeSession] = []
@@ -139,9 +206,7 @@ def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
             provider_kind="claude",
             native_id=jsonl_path.stem,
             jsonl_path=str(jsonl_path),
-            # encode_cwd maps both "/" and "_" to "-", so the encoded
-            # dirname is NOT reversible to the real cwd — leave blank.
-            cwd="",
+            cwd=_first_cwd_from_jsonl(jsonl_path),
             created_at=datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
         ))
     return out
@@ -772,12 +837,15 @@ def get_status() -> dict:
 def start_import(
     provider_ids: Optional[list[str]] = None,
     limit: Optional[int] = None,
+    project_paths: Optional[list[str]] = None,
 ) -> dict:
     """Start the background import. Single-flight: a second call while
     running returns the current status instead of starting a new job.
 
     `limit` caps the number of NEW sessions imported (already-imported
-    sessions are still skipped, not counted against the limit)."""
+    sessions are still skipped, not counted against the limit).
+    `project_paths` opts into the project filter (see
+    `enumerate_native_sessions`); resume ignores it and finishes all."""
     with _JOB_LOCK:
         global _JOB
         if _JOB is not None and _JOB.status == "running":
@@ -790,7 +858,7 @@ def start_import(
         status_ref = _JOB
     _persist_job(status_ref)
     thread = threading.Thread(
-        target=_run_import, args=(status_ref, provider_ids, limit),
+        target=_run_import, args=(status_ref, provider_ids, limit, project_paths),
         daemon=True, name="native-import",
     )
     thread.start()
@@ -817,9 +885,10 @@ def resume_if_interrupted() -> None:
 
 def _run_import(
     status: JobStatus, provider_ids: Optional[list[str]], limit: Optional[int],
+    project_paths: Optional[list[str]] = None,
 ) -> None:
     imported_keys = already_imported_keys()
-    sessions = enumerate_native_sessions(provider_ids)
+    sessions = enumerate_native_sessions(provider_ids, project_paths)
     status.total = len(sessions)
     _persist_job(status)
     try:

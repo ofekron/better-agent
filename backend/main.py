@@ -1135,7 +1135,10 @@ async def start_native_import(body: dict):
         raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
     import native_import
     return await asyncio.to_thread(
-        native_import.start_import, provider_ids, _parse_native_import_limit(body),
+        native_import.start_import,
+        provider_ids,
+        _parse_native_import_limit(body),
+        _parse_native_import_project_paths(body),
     )
 
 
@@ -1189,6 +1192,15 @@ def _parse_native_import_limit(body: dict):
     return limit or None
 
 
+def _parse_native_import_project_paths(body: dict) -> Optional[list[str]]:
+    raw = body.get("project_paths") if isinstance(body, dict) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="project_paths must be a list of paths or omitted")
+    return [str(p) for p in raw if isinstance(p, str) and p]
+
+
 @app.post("/api/internal/native-import")
 async def internal_start_native_import(
     body: dict,
@@ -1206,7 +1218,10 @@ async def internal_start_native_import(
     if provider_ids is not None and not isinstance(provider_ids, list):
         raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
     return await asyncio.to_thread(
-        native_import.start_import, provider_ids, _parse_native_import_limit(body),
+        native_import.start_import,
+        provider_ids,
+        _parse_native_import_limit(body),
+        _parse_native_import_project_paths(body),
     )
 
 

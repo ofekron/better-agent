@@ -1,14 +1,17 @@
 """Import REAL native sessions into the REAL Better Agent home.
 
-Prefers running the import INSIDE a live backend via the internal-token
-route (/api/internal/native-import) — that is the ONLY safe way when a
-backend is running, because a separate process writing session.json races
-the backend's in-memory cache (it re-persists and clobbers the render
-tree, leaving empty assistant bubbles). Falls back to an in-process
-standalone import only when no backend is reachable (with a warning).
+By default imports only sessions whose cwd is under a LOADED BA project
+(read from project_store — that's the "resync"), excluding junk (system
+temp, the BA state home). `--all` disables the project filter; `--projects`
+overrides the project list. cwd is recovered per session so imports land
+in the right project.
+
+Prefers running INSIDE a live backend via the internal-token route
+(/api/internal/native-import); falls back to an in-process standalone
+import (which flushes its writes before exit) when no backend is reachable.
 
 Usage:
-    cd backend && .venv/bin/python scripts/import_real_native.py [--limit N] [--port 8000]
+    cd backend && .venv/bin/python scripts/import_real_native.py [--limit N] [--projects p1,p2] [--all]
 """
 from __future__ import annotations
 
@@ -36,6 +39,15 @@ def _internal_token() -> str | None:
         return None
 
 
+def _loaded_project_paths() -> list[str]:
+    try:
+        import project_store  # noqa
+        return [p.get("path") or p.get("cwd") for p in project_store.list_projects()
+                if isinstance(p, dict) and (p.get("path") or p.get("cwd"))]
+    except Exception:
+        return []
+
+
 def _post(url: str, token: str, body: dict) -> dict | None:
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(), method="POST",
@@ -51,18 +63,18 @@ def _get(url: str, token: str) -> dict | None:
         return json.loads(r.read().decode())
 
 
-def _try_backend(port: int, limit: int, provider_ids: list[str] | None) -> bool:
-    """Drive the import through a live backend. Returns True on success."""
+def _try_backend(port: int, limit: int, provider_ids, project_paths) -> bool:
     token = _internal_token()
     base = f"http://127.0.0.1:{port}"
     if not token:
         return False
+    body = {"limit": limit}
+    if provider_ids:
+        body["provider_ids"] = provider_ids
+    if project_paths is not None:
+        body["project_paths"] = project_paths
     try:
-        status = _post(
-            f"{base}/api/internal/native-import",
-            token,
-            {"limit": limit, **({"provider_ids": provider_ids} if provider_ids else {})},
-        )
+        status = _post(f"{base}/api/internal/native-import", token, body)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError):
         return False
     print(f"backend on :{port} accepted the job — importing in-process…")
@@ -79,12 +91,12 @@ def _try_backend(port: int, limit: int, provider_ids: list[str] | None) -> bool:
     return True
 
 
-def _standalone(limit: int, provider_ids: list[str] | None) -> int:
+def _standalone(limit: int, provider_ids, project_paths) -> int:
     import native_import  # noqa
-    sessions = native_import.enumerate_native_sessions(provider_ids)
+    sessions = native_import.enumerate_native_sessions(provider_ids, project_paths)
     already = native_import.already_imported_keys()
     pending = [s for s in sessions if s.registry_key not in already]
-    print(f"enumerated {len(sessions)}; {len(pending)} not yet imported")
+    print(f"enumerated {len(sessions)} (after project filter); {len(pending)} not yet imported")
     imported = 0
     for sess in pending:
         if imported >= limit:
@@ -92,15 +104,11 @@ def _standalone(limit: int, provider_ids: list[str] | None) -> int:
         try:
             root_id = native_import.import_session(sess)
             imported += 1
-            title = (sess.title or f"{sess.provider_kind} {sess.native_id[:8]}")[:60]
-            print(f"  [{imported}/{limit}] {sess.provider_kind} {sess.native_id[:12]} root={root_id[:8]} {title}")
+            title = (sess.title or f"{sess.provider_kind} {sess.native_id[:8]}")[:50]
+            print(f"  [{imported}/{limit}] {sess.provider_kind} {sess.native_id[:12]} "
+                  f"cwd={sess.cwd[:40]:40s} {title}")
         except Exception as exc:
             print(f"  SKIP {sess.registry_key}: {exc}")
-    # `session_manager._persist_root` is an async debounced write; a
-    # short-lived process can exit before the session.json stubs land.
-    # Drain the durability barrier so the backend sees every new session
-    # on its next load. (The render tree itself is durable in events.jsonl,
-    # which the backend reconciles regardless.)
     try:
         from session_manager import manager as sm
         sm.flush_pending_persists()
@@ -114,17 +122,26 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--provider-ids", default="")
+    ap.add_argument("--projects", default="",
+                    help="comma-separated project roots to filter by; default = loaded BA projects")
+    ap.add_argument("--all", action="store_true", help="disable the project filter (import every native session)")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
     provider_ids = [p for p in args.provider_ids.split(",") if p] or None
 
-    if _try_backend(args.port, args.limit, provider_ids):
+    if args.all:
+        project_paths = None
+    elif args.projects:
+        project_paths = [p for p in args.projects.split(",") if p]
+    else:
+        project_paths = _loaded_project_paths()
+        print(f"loaded BA projects (resync): {project_paths or '(none)'}")
+
+    if _try_backend(args.port, args.limit, provider_ids, project_paths):
         return 0
 
-    print("No backend reachable on :{} (or it lacks the internal route).".format(args.port))
-    print("WARNING: standalone import while a backend IS running will race its cache")
-    print("         and produce empty assistant bubbles. Proceeding standalone…\n")
-    return _standalone(args.limit, provider_ids)
+    print("No backend reachable on :{} (or it lacks the internal route) — standalone.".format(args.port))
+    return _standalone(args.limit, provider_ids, project_paths)
 
 
 if __name__ == "__main__":

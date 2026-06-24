@@ -323,9 +323,57 @@ def test_enumerate_claude() -> None:
             os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_HOME) if old is None else old
 
 
-# --------------------------------------------------------------------------- #
-# G. codex enumeration matrix
-# --------------------------------------------------------------------------- #
+def test_claude_cwd_recovery_and_project_filter() -> None:
+    """cwd is read from the jsonl `cwd` field; the project filter keeps
+    only sessions under a loaded project and drops junk cwds."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        proj = root / "projects" / "enc"
+        proj.mkdir(parents=True)
+        # a real-project session (cwd under /work/proj)
+        (proj / "real.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": "/work/proj", "uuid": str(uuid.uuid4()),
+                        "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                        "timestamp": "2026-01-01T00:00:00Z"}) + "\n", encoding="utf-8")
+        # a junk session (cwd under /tmp)
+        (proj / "junk.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": "/tmp/bc-test-x", "uuid": str(uuid.uuid4()),
+                        "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                        "timestamp": "2026-01-01T00:00:00Z"}) + "\n", encoding="utf-8")
+        # a session with no cwd in the jsonl
+        (proj / "unknown.jsonl").write_text(
+            json.dumps({"type": "user", "uuid": str(uuid.uuid4()),
+                        "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                        "timestamp": "2026-01-01T00:00:00Z"}) + "\n", encoding="utf-8")
+
+        found = native_import._enumerate_claude("pid", {"config_dir": str(root)})
+        by_id = {s.native_id: s for s in found}
+        check(by_id["real"].cwd == "/work/proj", "claude cwd recovered from jsonl")
+        check(by_id["junk"].cwd == "/tmp/bc-test-x", "junk cwd recovered")
+        check(by_id["unknown"].cwd == "", "missing cwd stays empty")
+
+        check(native_import._is_junk_cwd("/tmp/foo"), "tmp is junk")
+        check(native_import._is_junk_cwd("/private/var/folders/x/T/y"), "var/folders is junk")
+        check(not native_import._is_junk_cwd("/work/proj"), "real project not junk")
+        check(not native_import._is_junk_cwd(""), "empty cwd not junk")
+
+        # project filter: /work/proj loaded → keep real, drop junk + unknown.
+        # Register a claude provider on the fixture dir so enumerate sees it.
+        prov = config_store.add_provider({"name": "cwdtest", "kind": "claude",
+                                          "mode": "subscription", "config_dir": str(root)})
+        try:
+            filt = native_import.enumerate_native_sessions([prov["id"]], ["/work/proj"])
+            ids = {s.native_id for s in filt}
+            check("real" in ids, "project session kept")
+            check("junk" not in ids, "junk cwd excluded")
+            check("unknown" not in ids, "unknown cwd (no project) excluded")
+        finally:
+            try:
+                config_store.delete_provider(prov["id"])
+            except Exception:
+                pass
+
+
 
 def _make_codex_db(db_path: Path, threads: list[dict], columns: str = "full") -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -927,6 +975,7 @@ def main() -> None:
     test_derive_title()
     test_codex_iso()
     test_enumerate_claude()
+    test_claude_cwd_recovery_and_project_filter()
     test_enumerate_codex()
     test_registry()
     test_ingest_claude_matrix()
