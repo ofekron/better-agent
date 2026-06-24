@@ -641,7 +641,7 @@ body {
   cursor: pointer;
 }
 
-.browser-test-toggle {
+.browser-harness-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -653,11 +653,11 @@ body {
   letter-spacing: 0.5px;
 }
 
-.browser-test-toggle input[type="checkbox"] {
+.browser-harness-toggle input[type="checkbox"] {
   cursor: pointer;
 }
 
-.browser-test-sub-toggle {
+.browser-harness-sub-toggle {
   margin-inline-start: 24px;
   font-size: calc(10px * var(--app-font-scale));
   margin-top: 3px;
@@ -7341,7 +7341,6 @@ button.run-badge-clickable:focus-visible {
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  backdrop-filter: blur(2px);
 }
 
 .modal-content {
