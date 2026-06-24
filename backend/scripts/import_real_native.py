@@ -96,6 +96,16 @@ def _standalone(limit: int, provider_ids: list[str] | None) -> int:
             print(f"  [{imported}/{limit}] {sess.provider_kind} {sess.native_id[:12]} root={root_id[:8]} {title}")
         except Exception as exc:
             print(f"  SKIP {sess.registry_key}: {exc}")
+    # `session_manager._persist_root` is an async debounced write; a
+    # short-lived process can exit before the session.json stubs land.
+    # Drain the durability barrier so the backend sees every new session
+    # on its next load. (The render tree itself is durable in events.jsonl,
+    # which the backend reconciles regardless.)
+    try:
+        from session_manager import manager as sm
+        sm.flush_pending_persists()
+    except Exception:
+        pass
     print(f"imported {imported} session(s) into {native_import.paths.ba_home()}")
     return 0
 
