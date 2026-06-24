@@ -124,6 +124,29 @@ def _stream_new_events(
     emitted["count"] = len(events)
 
 
+def _events_file_has_main_events(events_path: Path) -> bool:
+    """True if session_events.jsonl already holds a top-level agent_message
+    (a parent text turn or tool_use). Worker_start/worker_event/worker_complete
+    envelopes do not count — they route into subagent panels, not the main
+    assistant bubble. Used to decide whether the stdout fallback is needed."""
+    if not events_path.is_file():
+        return False
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "agent_message":
+            return True
+    return False
+
+
 def _load_json_object(path: Path) -> dict:
     if not path.is_file():
         return {}
@@ -490,95 +513,281 @@ def _read_agy_steps(db_path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _step_is_message_line(step: dict[str, Any]) -> bool:
+    return any(_AGY_MESSAGE_RE.match(s) for s in step["strings"])
+
+
+def _classify_parent_tool(
+    step: dict[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    """Map a parent tool-call step to (tool_id, tool_name, input_data).
+
+    Returns ("", "", {}) for non-tool steps. Handles the agy JSON shapes:
+    {"Subagents":...} (invoke_subagent), {"Message":...} (send_message),
+    {"Action": <name>, ...}, and generic payloads whose leading tokens carry
+    a valid tool name via _leading_tokens.
+    """
+    payload = step.get("json") or {}
+    strings = step["strings"]
+    if not payload or not strings:
+        return "", "", {}
+    # Prefer a real leading tool_id token; fall back to a deterministic
+    # idx-based id so streaming rebuilds produce identical tool_use ids and
+    # tool_result links stay stable across the streaming window.
+    fallback_id = f"agy-step-{step.get('idx', '?')}"
+    tool_id = ""
+    first_token = strings[0].split(" ", 1)[0].strip()
+    if first_token and _valid_tool_name(first_token):
+        tool_id = first_token
+    if "Subagents" in payload:
+        return tool_id or fallback_id, "invoke_subagent", payload
+    if "Action" in payload and isinstance(payload["Action"], str) and _valid_tool_name(payload["Action"]):
+        return tool_id or fallback_id, payload["Action"], payload
+    if "Message" in payload:
+        return tool_id or fallback_id, "send_message", payload
+    tokens = _leading_tokens(strings[0])
+    if len(tokens) > 1 and _valid_tool_name(tokens[1]):
+        return tokens[0] or tool_id or fallback_id, tokens[1], payload
+    if len(strings) > 1 and _valid_tool_name(strings[1]):
+        return strings[0] or tool_id or fallback_id, strings[1], payload
+    return "", "", {}
+
+
+def _tool_signature(tool_name: str, payload: dict[str, Any]) -> str:
+    """Stable signature for deduping the type-15 vs 127/132 duplicate pair.
+
+    The same logical tool call appears as both a type-15 (model turn) and a
+    type-127/132 step; we emit it once from whichever arrives first. Keyed on
+    tool_name + the canonical payload (NOT tool_id) so a differing leading
+    token between the duplicate pair still collapses to one emission."""
+    key = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"{tool_name}|{key}"
+
+
+def _strip_protobuf_artifacts(text: str) -> str:
+    """Clean the protobuf-ish wrappers agy puts around model prose.
+
+    A type-15 assistant string carries a trailing "2(bot-<uuid>)" bot-identifier
+    suffix that _meaningful_text rejects (its "bot-" guard). The leading
+    protobuf field-marker byte is already stripped by _strings_from_blob's
+    printable-ASCII filter, so here we only drop the trailing bot suffix."""
+    text = text.strip()
+    text = re.sub(r"\d?\(bot-[0-9a-fA-F-]+\)$", "", text)
+    return text.strip()
+
+
+class _ParentMainState:
+    """Stateful per-step builder for the parent's MAIN-thread events.
+
+    Emits user prompts, assistant text turns, and non-subagent tool_use /
+    tool_result events, one step at a time, so _agy_worker_events can
+    interleave them with worker-panel events in true step order.
+
+    Skips steps owned by the subagent worker-panel path so a logical action
+    does not double-render:
+      - `[Message] ...` lines (subagent results -> worker_event tool_result)
+      - `{"Subagents": ...}` invoke_subagent payloads (-> worker_start +
+        worker_event Agent tool_use). The subagent invocation is represented
+        on the main thread only by its worker panel, matching how Claude
+        renders a delegate.
+
+    Dedups the type-15 vs type-127/132 duplicate tool pair by signature so
+    each logical tool call emits exactly one tool_use.
+    """
+
+    def __init__(self, parent_uuid: str) -> None:
+        self.parent_uuid = parent_uuid
+        self._seen_tools: set[str] = set()
+        self._last_tool_id = ""
+        self._prompt_texts: set[str] = set()
+
+    def events_for_step(self, step: dict[str, Any]) -> list[dict[str, Any]]:
+        if step.get("step_type") == 14:
+            return self._user_prompt_events(step)
+        if _step_is_message_line(step):
+            return []
+        payload = step.get("json") or {}
+        if payload and "Subagents" in payload:
+            return []
+        tool_id, tool_name, input_data = _classify_parent_tool(step)
+        if tool_id and tool_name:
+            sig = _tool_signature(tool_name, payload)
+            if sig in self._seen_tools:
+                return []
+            self._seen_tools.add(sig)
+            self._last_tool_id = tool_id
+            return [_tool_use_event(
+                tool_id=tool_id, name=tool_name, input_data=input_data,
+                parent_uuid=self.parent_uuid,
+            )]
+        # agy wraps type-15 assistant prose in protobuf field markers and a
+        # trailing "2(bot-<uuid>)" suffix. _meaningful_text rejects strings
+        # containing "bot-", so strip the artifacts first or the turn is lost.
+        cleaned = [_strip_protobuf_artifacts(s) for s in step["strings"]]
+        text = _meaningful_text(cleaned)
+        if not text or text in self._prompt_texts:
+            return []
+        if step.get("step_type") in {7, 8, 9, 23, 101} and self._last_tool_id:
+            return [_tool_result_event(
+                tool_id=self._last_tool_id, content=text,
+                parent_uuid=self.parent_uuid,
+            )]
+        return [_agent_message(
+            role="assistant",
+            content=[{"type": "text", "text": text}],
+            parent_uuid=self.parent_uuid,
+        )]
+
+    def _user_prompt_events(self, step: dict[str, Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for text in step["strings"]:
+            if len(text) < 12 or not re.search(r"\s", text):
+                continue
+            self._prompt_texts.add(text)
+            out.append(_agent_message(
+                role="user",
+                content=[{"type": "text", "text": text}],
+                parent_uuid=self.parent_uuid,
+            ))
+        return out
+
+
+def _extract_parent_main_events(
+    db_path: Path,
+    parent_uuid: str,
+) -> list[dict[str, Any]]:
+    """Flat main-thread events for a parent conversation DB (no worker panels).
+
+    Wrapper around _ParentMainState for callers/tests that only want the
+    ordered text + tool_use stream. The live streaming path uses
+    _agy_worker_events which interleaves main + worker events in step order.
+    """
+    state = _ParentMainState(parent_uuid)
+    events: list[dict[str, Any]] = []
+    for step in _read_agy_steps(db_path):
+        events.extend(state.events_for_step(step))
+    return events
+
+
+class _ParentSubagentWalker:
+    """Stateful per-step builder for the parent's subagent worker panels.
+
+    Processes one step at a time so _agy_worker_events can interleave
+    parent-main text/tool events with worker events in true step order.
+    `pending` holds invoke_subagent declarations awaiting their first
+    [Message] result; `subagents` maps sender -> panel info once seen.
+    """
+
+    def __init__(self, parent_uuid: str) -> None:
+        self.parent_uuid = parent_uuid
+        self.subagents: dict[str, dict[str, Any]] = {}
+        self._pending: list[dict[str, Any]] = []
+
+    def events_for_step(self, step: dict[str, Any]) -> list[dict[str, Any]]:
+        payload = step.get("json") or {}
+        tool = next(
+            (name for name in ("invoke_subagent", "send_message")
+             if any(name in s for s in step["strings"])),
+            "",
+        )
+        if tool == "invoke_subagent" and step.get("step_type") == 127:
+            self._register_invoke(step, payload)
+            return []
+        out: list[dict[str, Any]] = []
+        for text in step["strings"]:
+            match = _AGY_MESSAGE_RE.match(text)
+            if not match:
+                continue
+            out.extend(self._message_line_events(match.group("sender"),
+                                                match.group("content").strip(),
+                                                match.group("timestamp")))
+        return out
+
+    def _register_invoke(self, step: dict[str, Any], payload: dict[str, Any]) -> None:
+        tool_id = f"agy-step-{step['idx']}"
+        if step["strings"]:
+            first_token = step["strings"][0].split(" ", 1)[0].strip()
+            if first_token:
+                tool_id = first_token
+        for i, item in enumerate(payload.get("Subagents") or []):
+            if not isinstance(item, dict):
+                continue
+            self._pending.append({
+                "tool_id": f"{tool_id}-{i}",
+                "prompt": str(item.get("Prompt") or ""),
+                "role": str(item.get("Role") or item.get("TypeName") or "AGY subagent"),
+                "type": str(item.get("TypeName") or "subagent"),
+            })
+
+    def _message_line_events(
+        self, sender: str, content: str, timestamp: str,
+    ) -> list[dict[str, Any]]:
+        info = self.subagents.get(sender)
+        out: list[dict[str, Any]] = []
+        if info is None:
+            info = self._pending.pop(0) if self._pending else {
+                "tool_id": f"agy-{sender}",
+                "prompt": "",
+                "role": f"AGY subagent {sender[:8]}",
+                "type": "subagent",
+            }
+            info["sender"] = sender
+            info["delegation_id"] = f"agy_subagent_{sender}"
+            self.subagents[sender] = info
+            out.append({"type": "worker_start", "data": {
+                "delegation_id": info["delegation_id"],
+                "worker_session_id": sender,
+                "worker_description": info["role"],
+                "panel_kind": "worker",
+                "started_at": timestamp,
+                "orchestration_mode": "native",
+                "is_new": False,
+                "instructions_preview": info.get("prompt") or "",
+                "run_mode": "agy_subagent",
+                "fork_agent_sid": sender,
+            }})
+            out.append({"type": "worker_event", "data": {
+                "delegation_id": info["delegation_id"],
+                "event": _tool_use_event(
+                    tool_id=info["tool_id"],
+                    name="Agent",
+                    input_data={
+                        "subagent_type": info.get("type") or "subagent",
+                        "description": info.get("role") or "AGY subagent",
+                        "prompt": info.get("prompt") or "",
+                    },
+                    parent_uuid=self.parent_uuid,
+                    timestamp=timestamp,
+                ),
+            }})
+        out.append({"type": "worker_event", "data": {
+            "delegation_id": info["delegation_id"],
+            "event": _tool_result_event(
+                tool_id=info["tool_id"],
+                content=content,
+                parent_uuid=self.parent_uuid,
+                timestamp=timestamp,
+            ),
+        }})
+        return out
+
+
 def _extract_parent_subagent_events(
     *,
     db_path: Path,
     parent_uuid: str,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Flattened parent subagent worker events (no main-thread text/tools).
+
+    Kept as a flat helper for callers that only want the worker panels; the
+    live streaming path uses _agy_worker_events which interleaves main +
+    worker events in step order via _ParentSubagentWalker.
+    """
+    walker = _ParentSubagentWalker(parent_uuid)
     events: list[dict[str, Any]] = []
-    subagents: dict[str, dict[str, Any]] = {}
-    pending: list[dict[str, Any]] = []
-
     for step in _read_agy_steps(db_path):
-        payload = step.get("json") or {}
-        tool = next(
-            (name for name in ("invoke_subagent", "send_message") if any(name in s for s in step["strings"])),
-            "",
-        )
-        if tool == "invoke_subagent" and step.get("step_type") == 127:
-            tool_id = f"agy-step-{step['idx']}"
-            if step["strings"]:
-                first_token = step["strings"][0].split(" ", 1)[0].strip()
-                if first_token:
-                    tool_id = first_token
-            for i, item in enumerate(payload.get("Subagents") or []):
-                if not isinstance(item, dict):
-                    continue
-                pending.append({
-                    "tool_id": f"{tool_id}-{i}",
-                    "prompt": str(item.get("Prompt") or ""),
-                    "role": str(item.get("Role") or item.get("TypeName") or "AGY subagent"),
-                    "type": str(item.get("TypeName") or "subagent"),
-                    "insert_at": len(events),
-                })
-            continue
-
-        for text in step["strings"]:
-            match = _AGY_MESSAGE_RE.match(text)
-            if not match:
-                continue
-            sender = match.group("sender")
-            content = match.group("content").strip()
-            timestamp = match.group("timestamp")
-            info = subagents.get(sender)
-            if info is None:
-                info = pending.pop(0) if pending else {
-                    "tool_id": f"agy-{sender}",
-                    "prompt": "",
-                    "role": f"AGY subagent {sender[:8]}",
-                    "type": "subagent",
-                    "insert_at": len(events),
-                }
-                info["sender"] = sender
-                info["delegation_id"] = f"agy_subagent_{sender}"
-                subagents[sender] = info
-                events.append({"type": "worker_start", "data": {
-                    "delegation_id": info["delegation_id"],
-                    "worker_session_id": sender,
-                    "worker_description": info["role"],
-                    "panel_kind": "worker",
-                    "started_at": timestamp,
-                    "insert_at": info.get("insert_at", len(events)),
-                    "orchestration_mode": "native",
-                    "is_new": False,
-                    "instructions_preview": info.get("prompt") or "",
-                    "run_mode": "agy_subagent",
-                    "fork_agent_sid": sender,
-                }})
-                events.append({"type": "worker_event", "data": {
-                    "delegation_id": info["delegation_id"],
-                    "event": _tool_use_event(
-                        tool_id=info["tool_id"],
-                        name="Agent",
-                        input_data={
-                            "subagent_type": info.get("type") or "subagent",
-                            "description": info.get("role") or "AGY subagent",
-                            "prompt": info.get("prompt") or "",
-                        },
-                        parent_uuid=parent_uuid,
-                        timestamp=timestamp,
-                    ),
-                }})
-            events.append({"type": "worker_event", "data": {
-                "delegation_id": info["delegation_id"],
-                "event": _tool_result_event(
-                    tool_id=info["tool_id"],
-                    content=content,
-                    parent_uuid=parent_uuid,
-                    timestamp=timestamp,
-                ),
-            }})
-    return events, subagents
+        events.extend(walker.events_for_step(step))
+    return events, walker.subagents
 
 
 def _extract_subagent_conversation_events(
@@ -710,15 +919,31 @@ def _agy_worker_events(
     conversation_id: Optional[str],
     parent_uuid: str,
 ) -> list[dict[str, Any]]:
+    """Ordered event stream for one agy parent conversation.
+
+    Emits the parent's main-thread text turns + tool_use events interleaved
+    with subagent worker_start/worker_event/worker_complete envelopes, all in
+    step-idx order, so the streaming watcher and the post-exit flush produce
+    the SAME ordered list and the render tree shows separated turns + tool
+    calls + worker panels in real order.
+    """
     if not conversation_id:
         return []
     parent_db = _conversation_db(agy_home, conversation_id)
-    parent_events, subagents = _extract_parent_subagent_events(
-        db_path=parent_db,
-        parent_uuid=parent_uuid,
-    )
-    events = list(parent_events)
-    for sender, info in subagents.items():
+    steps = _read_agy_steps(parent_db)
+    walker = _ParentSubagentWalker(parent_uuid)
+    main_state = _ParentMainState(parent_uuid)
+    events: list[dict[str, Any]] = []
+    for step in steps:
+        # Main-thread events for this step come before any worker panel
+        # events triggered by the same step (a [Message] line that both
+        # closes a parent turn and opens a subagent result).
+        events.extend(main_state.events_for_step(step))
+        events.extend(walker.events_for_step(step))
+    # Child subagent conversations and their worker_complete envelopes append
+    # after the parent walk — matching the original layout where the parent
+    # thread precedes the subagent threads.
+    for sender, info in walker.subagents.items():
         child_db = _conversation_db(agy_home, sender)
         events.extend(_extract_subagent_conversation_events(
             db_path=child_db,
@@ -733,6 +958,7 @@ def _agy_worker_events(
             "fork_agent_sid": sender,
             "run_mode": "agy_subagent",
         }})
+    return events
     return events
 
 
@@ -904,9 +1130,9 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         auth_error or stderr or f"agy CLI exited with code {proc.returncode}"
     )
     parent_uuid = state.get("session_id") or _new_uuid()
-    # Final flush: any steps added after the last stream poll, then the
-    # terminal assistant message. Re-runs _agy_worker_events in full but only
-    # writes events past the shared emit cursor, so nothing duplicates.
+    # Final flush: any steps added after the last stream poll. Re-runs
+    # _agy_worker_events in full but only writes events past the shared emit
+    # cursor, so nothing duplicates.
     _stream_new_events(
         events_path,
         agy_home=agy_home,
@@ -914,15 +1140,26 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         parent_uuid=parent_uuid,
         emitted=emitted,
     )
-    final_event = _assistant_event(
-        stdout if success else f"Error: {error}",
-        model=model,
-        parent_uuid=parent_uuid,
-    )
-    final_seed = f"{state.get('session_id') or ''}|final"
-    final_event["data"]["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, final_seed))
-    with events_path.open("a", encoding="utf-8") as events:
-        events.write(json.dumps(final_event) + "\n")
+    # If the conversation DB yielded ordered parent text/tool events, those ARE
+    # the assistant response (rendered as separated turns + tool calls). Only
+    # fall back to the single stdout block when extraction produced nothing —
+    # e.g. DB unreadable, auth-failure fast exit, or a pure-stdout run. On
+    # failure we always emit the error text so the user sees what went wrong.
+    has_main_events = _events_file_has_main_events(events_path)
+    if not success or not has_main_events:
+        # No ordered parent events to render (DB unreadable, auth-failure fast
+        # exit, pure-stdout run) OR the run failed — emit the stdout / error
+        # block as the terminal assistant message so output is never lost.
+        final_text = stdout if success else f"Error: {error}"
+        final_event = _assistant_event(
+            final_text,
+            model=model,
+            parent_uuid=parent_uuid,
+        )
+        final_seed = f"{state.get('session_id') or ''}|final"
+        final_event["data"]["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, final_seed))
+        with events_path.open("a", encoding="utf-8") as events:
+            events.write(json.dumps(final_event) + "\n")
 
     state["complete"] = True
     state["finished_at"] = datetime.now().isoformat()
