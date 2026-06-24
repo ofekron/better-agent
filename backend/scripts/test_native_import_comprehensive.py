@@ -4,9 +4,9 @@ Spans 1000+ distinct cases across every unit of the importer:
 
   A. `_is_user_prompt` truth table
   B. `_extract_text` content shapes
-  C. segmentation differential — a reference segmenter is checked
-     against `_segment_turns` over the full combinatorial space of
-     conversation shapes (block kinds × sequence length). ~1500 cases.
+  C. segmentation invariants — `_segment_turns` is checked against
+     structurally-computed invariants (NOT a self-mirror) over the full
+     combinatorial space of conversation shapes. ~2800 cases.
   D. `_derive_title` fallbacks
   E. `_codex_iso` timestamp parsing
   F. claude enumeration matrix (cwd/session/non-jsonl/empty/missing)
@@ -116,7 +116,9 @@ def sys_line() -> dict:
     return _ev({"type": "system", "message": {"role": "system", "content": "sys"}})
 
 
-# Reference classifier mirroring `_is_user_prompt`.
+# Reference classifier mirroring `_is_user_prompt`, used to derive the
+# expected boundary set INDEPENDENTLY (the invariants in section C are
+# computed from this, not from `_segment_turns` itself).
 def is_boundary(event: dict) -> bool:
     d = event.get("data") or {}
     if d.get("isSidechain") or d.get("isMeta"):
@@ -129,19 +131,6 @@ def is_boundary(event: dict) -> bool:
     if isinstance(content, list):
         return not any(isinstance(i, dict) and i.get("type") == "tool_result" for i in content)
     return False
-
-
-# Reference segmenter mirroring `_segment_turns`.
-def ref_segment(events: list[dict]) -> list[dict]:
-    turns: list[dict] = []
-    for e in events:
-        if is_boundary(e):
-            turns.append({"prompt": native_import._extract_text(e["data"]), "events": []})
-        else:
-            if not turns:
-                turns.append({"prompt": "", "events": []})
-            turns[-1]["events"].append(e)
-    return turns
 
 
 # --------------------------------------------------------------------------- #
@@ -190,32 +179,46 @@ TOKEN_FACTORIES = [u_text, u_text_str, u_toolres, u_meta, u_sidechain, a_text, a
 
 
 def test_segmentation_differential() -> None:
-    """For every sequence of block kinds (length 1..4) the real segmenter
-    must match the reference segmenter, and per-turn event counts/order
-    must be consistent with the source."""
+    """For every sequence of block kinds (length 1..4) the segmenter must
+    satisfy structural invariants computed INDEPENDENTLY from the input —
+    not compared to a mirror of itself (a mirror proves nothing). Invariants:
+
+      A. Every non-boundary event is preserved, in original order, across
+         turns (leading events attach to the first turn).
+      B. No turn is fully empty (prompt OR events).
+      C. A boundary event never appears inside any turn's events.
+      D. When ≥1 boundary exists, every turn has a non-empty prompt;
+         when 0 boundaries, exactly one turn with an empty prompt.
+    """
     seg = native_import._segment_turns
     total = 0
     for length in range(1, 5):
         for combo in itertools.product(TOKEN_FACTORIES, repeat=length):
             events = [f() for f in combo]
             got = seg(events)
-            ref = ref_segment(events)
             total += 1
-            check(len(got) == len(ref), f"turn count mismatch len={length} combo={combo}")
-            for gi, ri in zip(got, ref):
-                check(gi.prompt == ri["prompt"], f"prompt mismatch {combo}")
-                check(len(gi.events) == len(ri["events"]), f"event count mismatch {combo}")
-                # ordering preserved: same identity sequence
-                check([id(x) for x in gi.events] == [id(x) for x in ri["events"]], f"order mismatch {combo}")
-            # boundary count invariant
-            boundaries = sum(1 for e in events if is_boundary(e))
-            leading_non_boundary = 0 if (events and is_boundary(events[0])) else (
-                1 if any(not is_boundary(e) for e in events) else 0
-            )
-            check(len(got) == boundaries + leading_non_boundary, f"boundary invariant {combo}")
-    # sanity: we exercised a large space
+
+            boundary_flags = [is_boundary(e) for e in events]
+            n_boundaries = sum(boundary_flags)
+            non_boundary_events = [e for e, b in zip(events, boundary_flags) if not b]
+
+            # A. preservation + order (identity)
+            flat = [e for t in got for e in t.events]
+            check([id(x) for x in flat] == [id(x) for x in non_boundary_events],
+                  f"A events not preserved exactly/in-order: {combo}")
+            # B. no fully-empty turn
+            check(all(t.prompt or t.events for t in got), f"B empty turn: {combo}")
+            # C. no boundary leaked into events
+            boundary_ids = {id(e) for e, b in zip(events, boundary_flags) if b}
+            check(not any(id(e) in boundary_ids for t in got for e in t.events),
+                  f"C boundary leaked into events: {combo}")
+            # D. prompt-emptiness rule
+            if n_boundaries == 0:
+                check(len(got) == 1 and got[0].prompt == "", f"D no-boundary turn: {combo}")
+            else:
+                check(all(t.prompt for t in got), f"D empty prompt with boundaries: {combo}")
     check(total >= 1000, f"segmentation space too small: {total}")
-    print(f"  segmentation differential: {total} sequences")
+    print(f"  segmentation invariants: {total} sequences")
 
 
 # --------------------------------------------------------------------------- #
@@ -261,10 +264,14 @@ def _make_claude_layout(root: Path, encoded_cwds: dict[str, list[str]]) -> None:
         d = projects / cwd
         d.mkdir(parents=True, exist_ok=True)
         for sid in sids:
+            # user prompt + assistant reply so the session is importable
             (d / f"{sid}.jsonl").write_text(
                 json.dumps({"type": "user", "uuid": str(uuid.uuid4()),
-                            "message": {"role": "user", "content": [{"type": "text", "text": "x"}]},
-                            "timestamp": "2026-01-01T00:00:00Z"}) + "\n",
+                            "message": {"role": "user", "content": [{"type": "text", "text": "hello world"}]},
+                            "timestamp": "2026-01-01T00:00:00Z"}) + "\n" +
+                json.dumps({"type": "assistant", "uuid": str(uuid.uuid4()),
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi there reply"}]},
+                            "timestamp": "2026-01-01T00:00:01Z"}) + "\n",
                 encoding="utf-8",
             )
 
@@ -593,6 +600,262 @@ def test_ingest_codex() -> None:
 # K. background job + status
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# agy (antigravity) enumeration + ingest
+# --------------------------------------------------------------------------- #
+
+def _make_agy_db(db_path: Path, steps: list[tuple[int, bytes]]) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL DEFAULT 0, "
+            "status INTEGER NOT NULL DEFAULT 0, has_subtrajectory NUMERIC NOT NULL DEFAULT false, "
+            "metadata BLOB, step_payload BLOB, render_info BLOB)"
+        )
+        for i, (step_type, payload) in enumerate(steps):
+            con.execute(
+                "INSERT INTO steps (idx, step_type, step_payload) VALUES (?,?,?)",
+                (i, step_type, payload),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_enumerate_agy() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        home = Path(home)
+        convs = home / ".gemini" / "antigravity-cli" / "conversations"
+        _make_agy_db(convs / "c1.db", [(14, b"hello world prompt")])
+        _make_agy_db(convs / "c2.db", [(14, b"another prompt here")])
+        # cwd → conversation_id map (reverse-lookup gives c1 its cwd)
+        cache = home / ".gemini" / "antigravity-cli" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "last_conversations.json").write_text(json.dumps({"/work": "c1"}), encoding="utf-8")
+
+        found = native_import._enumerate_agy("pid", {"config_dir": str(home)})
+        by_id = {s.native_id: s for s in found}
+        check(set(by_id) == {"c1", "c2"}, f"agy enum ids {set(by_id)}")
+        check(by_id["c1"].provider_kind == "agy", "kind agy")
+        check(by_id["c1"].cwd == "/work", "agy cwd recovered from map")
+        check(by_id["c2"].cwd == "", "agy cwd empty when unmapped")
+        check(by_id["c1"].created_at.endswith("Z"), "agy created_at from mtime")
+        check(by_id["c1"].jsonl_path.endswith("c1.db"), "agy jsonl is the db")
+
+    # missing conversations dir → empty
+    check(native_import._enumerate_agy("pid", {"config_dir": "/nope-agy-xyz"}) == [], "agy missing dir")
+    # config_dir empty → real HOME (just ensure no crash + list form)
+    res = native_import._enumerate_agy("pid", {"config_dir": ""})
+    check(isinstance(res, list), "agy enum real home returns list")
+
+
+# --------------------------------------------------------------------------- #
+# gemini-cli enumeration + ingest
+# --------------------------------------------------------------------------- #
+
+def _make_gemini_session(path: Path, *, session_id: str,
+                         turns: list[tuple[str, str | None]],
+                         started: str = "2026-01-01T00:00:00.000Z") -> None:
+    lines = [json.dumps({"sessionId": session_id, "projectHash": "h",
+                         "startTime": started, "lastUpdated": started, "kind": "main"})]
+    for user_text, asst_text in turns:
+        lines.append(json.dumps({"id": str(uuid.uuid4()), "timestamp": started,
+                                 "type": "user", "content": [{"text": user_text}]}))
+        if asst_text is not None:
+            lines.append(json.dumps({"id": str(uuid.uuid4()), "timestamp": started,
+                                     "type": "gemini", "content": asst_text,
+                                     "thoughts": [], "tokens": {}}))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_enumerate_gemini() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        home = Path(home)
+        proj = home / ".gemini" / "tmp" / "myproj"
+        (proj).mkdir(parents=True)
+        (proj / ".project_root").write_text("/code/myproj", encoding="utf-8")
+        chats = proj / "chats"
+        _make_gemini_session(chats / "session-2026-01-01T00-00-11111111.jsonl",
+                             session_id="sess-11111111",
+                             turns=[("first prompt here", "reply")])
+        _make_gemini_session(chats / "session-2026-01-02T00-00-22222222.jsonl",
+                             session_id="sess-22222222",
+                             turns=[("second prompt here", None)])  # no assistant reply
+
+        found = native_import._enumerate_gemini("pid", {"config_dir": str(home)})
+        by_id = {s.native_id: s for s in found}
+        check(set(by_id) == {"sess-11111111", "sess-22222222"}, f"gemini enum ids {set(by_id)}")
+        s1 = by_id["sess-11111111"]
+        check(s1.provider_kind == "gemini", "kind gemini")
+        check(s1.cwd == "/code/myproj", "gemini cwd from .project_root")
+        check(s1.created_at == "2026-01-01T00:00:00.000Z", "gemini created_at from startTime")
+        check(s1.title == "first prompt here", "gemini title from first user prompt")
+
+    # missing tmp dir → empty
+    check(native_import._enumerate_gemini("pid", {"config_dir": "/nope-gem-xyz"}) == [], "gemini missing dir")
+
+
+def test_ingest_agy() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as home:
+        home = Path(home)
+        convs = home / ".gemini" / "antigravity-cli" / "conversations"
+        # one user prompt turn with a tool call + result + final text
+        _make_agy_db(convs / "agy1.db", [
+            (14, b"What is in the hosts file please explain"),
+            (9,  b'call_1 Read {"file_path":"/etc/hosts"}'),
+            (9,  b"The file contains localhost entries listed here clearly"),
+            (1,  b"The hosts file maps localhost and other hostnames locally"),
+        ])
+        sess = native_import.NativeSession(
+            provider_id="", provider_kind="agy", native_id="agy1",
+            jsonl_path=str(convs / "agy1.db"), cwd="/work", title="",
+        )
+        root_id = native_import.import_session(sess)
+        _assert_session_invariants(root_id)
+        loaded = session_manager.get(root_id)
+        msgs = loaded["messages"]
+        # one user prompt boundary → one turn (user + assistant)
+        check(len(msgs) == 2, f"agy one turn, got {len(msgs)}")
+        check(msgs[0]["content"] == "What is in the hosts file please explain", "agy prompt text")
+        # assistant carries tool_use + tool_result + text (≥3 events)
+        check(len(msgs[1]["events"]) >= 3, f"agy assistant events {len(msgs[1]['events'])}")
+        check(native_import.import_session(sess) == root_id, "agy idempotent")
+
+
+def test_ingest_gemini() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as home:
+        home = Path(home)
+        chats = home / ".gemini" / "tmp" / "proj" / "chats"
+        # multi-turn: gemini user prompts ARE turn boundaries
+        _make_gemini_session(chats / "session-x.jsonl", session_id="gem-x", turns=[
+            ("What is 2 plus 2", "It equals four."),
+            ("Thanks a lot", "You are welcome."),
+        ])
+        sess = native_import.NativeSession(
+            provider_id="", provider_kind="gemini", native_id="gem-x",
+            jsonl_path=str(chats / "session-x.jsonl"), cwd="/repo", title="",
+        )
+        root_id = native_import.import_session(sess)
+        _assert_session_invariants(root_id)
+        loaded = session_manager.get(root_id)
+        user_msgs = [m for m in loaded["messages"] if m["role"] == "user"]
+        check(len(user_msgs) == 2, f"gemini two turns, got {len(user_msgs)}")
+        check(user_msgs[0]["content"] == "What is 2 plus 2", "gemini prompt 1")
+        # assistant msgs must actually carry rendered events (regression for
+        # the uuid-less gemini events that apply_event silently dropped).
+        asst_msgs = [m for m in loaded["messages"] if m["role"] == "assistant"]
+        check(len(asst_msgs) == 2 and all(m.get("events") for m in asst_msgs),
+              "gemini assistant msgs must have rendered events")
+        check(loaded["name"].startswith("What is 2 plus 2"), "gemini title from prompt")
+        check(native_import.import_session(sess) == root_id, "gemini idempotent")
+
+        # user prompt with NO assistant reply → nothing renderable → ValueError
+        _make_gemini_session(chats / "session-lone.jsonl", session_id="gem-lone",
+                             turns=[("ignored", None)])
+        lone = native_import.NativeSession(
+            provider_id="", provider_kind="gemini", native_id="gem-lone",
+            jsonl_path=str(chats / "session-lone.jsonl"), cwd="", title="",
+        )
+        lone_raised = False
+        try:
+            native_import.import_session(lone)
+        except ValueError:
+            lone_raised = True
+        check(lone_raised, "gemini user-only (no reply) → ValueError")
+
+        # truly empty (meta only) → ValueError
+        empty_path = chats / "session-empty.jsonl"
+        empty_path.write_text(json.dumps({"sessionId": "gem-empty", "startTime": "t",
+                                          "kind": "main"}) + "\n", encoding="utf-8")
+        raised = False
+        try:
+            native_import.import_session(native_import.NativeSession(
+                provider_id="", provider_kind="gemini", native_id="gem-empty",
+                jsonl_path=str(empty_path), cwd="", title=""))
+        except ValueError:
+            raised = True
+        check(raised, "gemini empty → ValueError")
+
+
+def test_status_fallback() -> None:
+    """get_status surfaces the last persisted state when no in-memory job
+    exists (right after a restart, before resume fires), and idle when
+    nothing is persisted."""
+    native_import._JOB = None
+    _job_path = native_import._job_state_path()
+    if _job_path.exists():
+        _job_path.unlink()
+    check(native_import.get_status()["status"] == "idle", "idle with no persisted job")
+    native_import._persist_job(native_import.JobStatus(
+        status="done", imported=5, total=5, finished_at="t",
+    ))
+    s = native_import.get_status()
+    check(s["status"] == "done" and s["imported"] == 5, "get_status falls back to persisted")
+    if _job_path.exists():
+        _job_path.unlink()
+
+
+def test_restart_survival() -> None:
+    """An import interrupted by a backend restart must resume and finish.
+
+    Simulates a crash mid-import: r1/r2 already in the registry, a
+    persisted job marked "running". A fresh process (in-memory job = None)
+    calls resume_if_interrupted(), which re-runs for the provider scope —
+    the registry skips r1/r2 and imports the r3/r4 remainder with no
+    duplicates. A persisted "done" job must NOT trigger a re-resume.
+    """
+    native_import._registry_save({})
+    _job_path = native_import._job_state_path()
+    if _job_path.exists():
+        _job_path.unlink()
+    with tempfile.TemporaryDirectory() as home:
+        _make_claude_layout(Path(home), {"p": ["r1", "r2", "r3", "r4"]})
+        provider = config_store.add_provider({
+            "name": "rs", "kind": "claude", "mode": "subscription", "config_dir": home,
+        })
+        pid = provider["id"]
+        try:
+            sessions = native_import.enumerate_native_sessions([pid])
+            by_id = {s.native_id: s for s in sessions}
+            native_import.import_session(by_id["r1"])
+            native_import.import_session(by_id["r2"])
+
+            # Crash mid-import: persisted job "running", process dies.
+            native_import._persist_job(native_import.JobStatus(
+                status="running", provider_ids=[pid], started_at="t",
+            ))
+            native_import._JOB = None  # fresh process — no in-memory job
+
+            native_import.resume_if_interrupted()
+            final = _poll_done(20)
+            check(final["status"] == "done", f"resume completed, got {final['status']}")
+            check(final["imported"] == 2, f"resume imported r3/r4 remainder, got {final['imported']}")
+            check(final["skipped"] == 2, f"resume skipped pre-crash r1/r2, got {final['skipped']}")
+            check(final["failed"] == 0, "no failures on resume")
+            check(native_import.already_imported_keys() == {"claude:r1", "claude:r2", "claude:r3", "claude:r4"},
+                  "all four sessions in registry after resume")
+            persisted = native_import._load_persisted_job()
+            check(persisted and persisted["status"] == "done", "persisted final status is done")
+
+            # A "done" persisted job must not re-trigger resume.
+            native_import._JOB = None
+            before = len(session_store.list_sessions())
+            native_import.resume_if_interrupted()
+            check(len(session_store.list_sessions()) == before, "resume after done is a no-op")
+        finally:
+            try:
+                config_store.delete_provider(pid)
+            except Exception:
+                pass
+            native_import._JOB = None
+            if _job_path.exists():
+                _job_path.unlink()
+
+
 def test_job() -> None:
     import time
     native_import._registry_save({})
@@ -640,12 +903,14 @@ def _poll_done(timeout: float) -> dict:
 
 
 def test_unsupported_providers() -> None:
-    agy = config_store.add_provider({"name": "my-agy", "kind": "agy", "mode": "subscription"})
-    pid = agy["id"]
+    # claude/codex/agy/gemini are all supported; only a synthetic unknown
+    # kind is unsupported.
+    prov = config_store.add_provider({"name": "future-cli", "kind": "future-cli", "mode": "subscription"})
+    pid = prov["id"]
     try:
         unsup = native_import.unsupported_providers([pid])
-        check(len(unsup) == 1 and unsup[0]["id"] == pid, "agy unsupported (scoped)")
-        check(native_import.enumerate_native_sessions([pid]) == [], "agy not enumerated (scoped)")
+        check(len(unsup) == 1 and unsup[0]["id"] == pid, "unknown kind unsupported (scoped)")
+        check(native_import.enumerate_native_sessions([pid]) == [], "unknown kind not enumerated (scoped)")
     finally:
         try:
             config_store.delete_provider(pid)
@@ -666,7 +931,13 @@ def main() -> None:
     test_registry()
     test_ingest_claude_matrix()
     test_ingest_codex()
+    test_enumerate_agy()
+    test_enumerate_gemini()
+    test_ingest_agy()
+    test_ingest_gemini()
     test_unsupported_providers()
+    test_status_fallback()
+    test_restart_survival()
     test_job()  # last — touches config_store + background threads
     print(f"OK: native_import comprehensive — {CASES['n']} assertions passed")
     if CASES["n"] < 1000:

@@ -5849,6 +5849,14 @@ async def _recover_in_flight_task() -> None:
                 )
         # Re-enqueue persisted queued prompts after recovery is complete.
         await _re_enqueue_queued_prompts()
+        # Resume a native-session import that a restart interrupted. Spawns
+        # its own background thread; the idempotency registry makes resume
+        # duplicate-free. Best-effort — must never block startup.
+        try:
+            import native_import
+            native_import.resume_if_interrupted()
+        except Exception:
+            logger.exception("native_import: resume-on-startup failed")
     except Exception as e:
         if not gate_open:
             startup_recovery_gate.mark_recovery_failed(str(e))

@@ -1,16 +1,19 @@
 """Import native provider CLI sessions into Better Agent.
 
-Enumerates each provider's native on-disk sessions (claude projects
-jsonl, codex rollout files via its sqlite registry) and ingests each as
+Enumerates each provider's native on-disk sessions and ingests each as
 a Better Agent session by replaying its events through the same
-`apply_event` funnel recovery uses. Runs as a single-flight background
-job; progress is exposed via `get_status()` for the REST layer.
+`apply_event` funnel recovery uses:
 
-Scope: claude + codex are supported (their native storage is enumerable
-and the recovery replay functions reuse cleanly). agy/gemini native
-sessions live in per-conversation sqlite DBs with no shared normalizer
-yet — `enumerate_native_sessions` reports them as unsupported so the
-caller can surface that honestly rather than silently skipping.
+  - claude: `<config_dir>/projects/*/*.jsonl` (recovery replay funcs)
+  - codex:  `state_5.sqlite` threads table → rollout files
+  - agy:    `~/.gemini/antigravity-cli/conversations/*.db` (main-thread
+            extractor in runner_agy.extract_main_conversation_events)
+  - gemini:`~/.gemini/tmp/*/chats/session-*.jsonl` chat-history normalizer
+
+Runs as a single-flight background job; progress is exposed via
+`get_status()` for the REST layer. agy/gemini only carry what the native
+format stores (e.g. gemini tool calls are text-embedded) — imported
+faithfully within that constraint.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +36,17 @@ from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_KINDS = {"claude", "codex"}
+SUPPORTED_KINDS = {"claude", "codex", "agy", "gemini"}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically (temp file + replace) so a crash
+    mid-write cannot leave a truncated job/registry file — the two pieces
+    of state that make import survive restarts."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +93,10 @@ def enumerate_native_sessions(
                 out.extend(_enumerate_claude(pid, provider))
             elif kind == "codex":
                 out.extend(_enumerate_codex(pid, provider))
+            elif kind == "agy":
+                out.extend(_enumerate_agy(pid, provider))
+            elif kind == "gemini":
+                out.extend(_enumerate_gemini(pid, provider))
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
     return out
@@ -197,14 +215,150 @@ def _codex_iso(value) -> str:
         return ""
 
 
+# ---------------------------------- agy ------------------------------------ #
+
+def _agy_home(provider: dict) -> Path:
+    # agy hard-wires $HOME/.gemini/antigravity-cli (no config-dir env);
+    # honor a provider config_dir override as the HOME root when set.
+    cfg = provider.get("config_dir") or ""
+    return Path(os.path.expandvars(cfg)).expanduser() if cfg else Path.home()
+
+
+def _agy_cwd_map(home: Path) -> dict[str, str]:
+    """Reverse agy's `last_conversations.json` (cwd → conversation_id)
+    into conversation_id → cwd so each imported session recovers its
+    original working directory."""
+    path = home / ".gemini" / "antigravity-cli" / "cache" / "last_conversations.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(v): str(k) for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _enumerate_agy(provider_id: str, provider: dict) -> list[NativeSession]:
+    home = _agy_home(provider)
+    convs = home / ".gemini" / "antigravity-cli" / "conversations"
+    if not convs.exists():
+        return []
+    cwd_map = _agy_cwd_map(home)
+    out: list[NativeSession] = []
+    for db_path in convs.glob("*.db"):
+        try:
+            st = db_path.stat()
+        except OSError:
+            continue
+        conv_id = db_path.stem
+        out.append(NativeSession(
+            provider_id=provider_id,
+            provider_kind="agy",
+            native_id=conv_id,
+            jsonl_path=str(db_path),
+            cwd=cwd_map.get(conv_id, ""),
+            created_at=datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+        ))
+    return out
+
+
+# --------------------------------- gemini ---------------------------------- #
+
+def _gemini_home(provider: dict) -> Path:
+    cfg = provider.get("config_dir") or ""
+    if cfg:
+        return Path(os.path.expandvars(cfg)).expanduser()
+    raw = os.environ.get("GEMINI_CLI_HOME", "")
+    return Path(os.path.expandvars(raw)).expanduser() if raw else Path.home()
+
+
+def _gemini_read_meta(path: Path) -> tuple[str, str, str]:
+    """First-line metadata → (session_id, start_time_iso, first_user_prompt).
+
+    The gemini CLI writes one `session-*.jsonl` per conversation under
+    `~/.gemini/tmp/<project>/chats/`. Line 1 is metadata; subsequent
+    lines are `{type: user|gemini|$set, ...}` events. We stream only
+    until the first user prompt to avoid loading large transcripts.
+    """
+    session_id = path.stem
+    started_at = ""
+    first_prompt = ""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if "sessionId" in obj and not started_at:
+                    session_id = str(obj.get("sessionId") or session_id)
+                    started_at = str(obj.get("startTime") or "")
+                    continue
+                if obj.get("type") == "user" and not first_prompt:
+                    content = obj.get("content")
+                    if isinstance(content, list):
+                        parts = [str(i.get("text", "")) for i in content if isinstance(i, dict)]
+                        first_prompt = "\n".join(p for p in parts if p).strip()
+                    elif isinstance(content, str):
+                        first_prompt = content.strip()
+                    if first_prompt:
+                        break
+    except OSError:
+        pass
+    return session_id, started_at, first_prompt
+
+
+def _enumerate_gemini(provider_id: str, provider: dict) -> list[NativeSession]:
+    tmp = _gemini_home(provider) / ".gemini" / "tmp"
+    if not tmp.exists():
+        return []
+    out: list[NativeSession] = []
+    for project_dir in tmp.iterdir():
+        if not project_dir.is_dir():
+            continue
+        cwd = ""
+        root_file = project_dir / ".project_root"
+        if root_file.exists():
+            try:
+                cwd = root_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                cwd = ""
+        chats = project_dir / "chats"
+        if not chats.is_dir():
+            continue
+        for session_path in chats.glob("session-*.jsonl"):
+            session_id, started_at, first_prompt = _gemini_read_meta(session_path)
+            out.append(NativeSession(
+                provider_id=provider_id,
+                provider_kind="gemini",
+                native_id=session_id,
+                jsonl_path=str(session_path),
+                cwd=cwd,
+                title=first_prompt[:80],
+                created_at=started_at,
+            ))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Replay -> segment -> apply (reuses the recovery funnel)
 # --------------------------------------------------------------------------- #
 
 def _replay_events(sess: NativeSession) -> list[dict]:
-    """Read the whole native session and return the flat enriched event
-    list the recovery replay functions produce. Synthesizes a minimal
-    run_dir with a state.json so the existing readers work unchanged."""
+    """Read the whole native session and return the flat event list that
+    the segmenter consumes. Claude/codex reuse the recovery replay
+    functions via a synthesized run_dir; agy/gemini have their own
+    native-format normalizers."""
+    if sess.provider_kind == "agy":
+        import runner_agy
+        return runner_agy.extract_main_conversation_events(Path(sess.jsonl_path))
+    if sess.provider_kind == "gemini":
+        return _gemini_native_events(Path(sess.jsonl_path))
+
     from run_recovery import _replay_from_claude_jsonl, _replay_from_codex_rollout
 
     jsonl_path = Path(sess.jsonl_path)
@@ -226,6 +380,71 @@ def _replay_events(sess: NativeSession) -> list[dict]:
             events, _ctx = _replay_from_codex_rollout(run_dir)
             return events
         return _replay_from_claude_jsonl(run_dir)
+
+
+_GEMINI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.gemini")
+
+
+def _wrapped(role: str, content: list[dict], *, uid: str) -> dict:
+    """Build a Claude-shaped agent_message envelope. `apply_event` only
+    appends an event to the render tree when it carries a `uuid`, so the
+    caller MUST supply a stable one (deterministic → re-import safe)."""
+    return {
+        "type": "agent_message",
+        "data": {
+            "type": role,
+            "message": {"role": role, "content": content},
+            "uuid": uid,
+            "parentUuid": "root",
+        },
+    }
+
+
+def _gemini_native_events(path: Path) -> list[dict]:
+    """Normalize a gemini-CLI chat-history transcript (`session-*.jsonl`)
+    into Claude-shaped events: `user` lines → user-prompt turn
+    boundaries, `gemini` lines → assistant text. Metadata and `$set`
+    lines are skipped. Tool calls are text-embedded in this format, so
+    they ride along inside the assistant text."""
+    events: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                etype = obj.get("type")
+                if etype == "user":
+                    content = obj.get("content")
+                    if isinstance(content, list):
+                        parts = [str(i.get("text", "")) for i in content if isinstance(i, dict)]
+                        text = "\n".join(p for p in parts if p).strip()
+                    elif isinstance(content, str):
+                        text = content.strip()
+                    else:
+                        text = ""
+                    if text:
+                        uid = str(uuid.uuid5(_GEMINI_UUID_NAMESPACE, f"user|{text}"))
+                        events.append(_wrapped("user", [{"type": "text", "text": text}], uid=uid))
+                elif etype == "gemini":
+                    content = obj.get("content")
+                    if isinstance(content, str):
+                        text = content.strip()
+                    elif isinstance(content, list):
+                        text = "\n".join(
+                            str(i.get("text", "")) for i in content if isinstance(i, dict)
+                        ).strip()
+                    else:
+                        text = ""
+                    if text:
+                        uid = str(uuid.uuid5(_GEMINI_UUID_NAMESPACE, f"assistant|{text}"))
+                        events.append(_wrapped("assistant", [{"type": "text", "text": text}], uid=uid))
+    except OSError:
+        logger.exception("native_import: gemini read failed for %s", path)
+    return events
 
 
 @dataclass
@@ -270,15 +489,38 @@ def _extract_text(data: dict) -> str:
 
 
 def _segment_turns(events: list[dict]) -> list[_Turn]:
+    """Group a flat event stream into user-prompt → assistant-event turns.
+
+    Two real-data cases handled (both surfaced by importing live sessions):
+
+      - Leading metadata (ai-title / queue-operation / file-history-snapshot)
+        arrives BEFORE the first user prompt. Creating a synthetic turn for
+        it yields an empty leading assistant bubble, so leading non-boundary
+        events are buffered and prepended to the first real turn (where
+        apply_event still fires their side effects, e.g. ai-title rename).
+      - The same prompt emitted more than once (agy re-emits; replays) would
+        fork consecutive prompt-only turns with empty assistants. Consecutive
+        boundaries collapse into the latest prompt instead.
+    """
     turns: list[_Turn] = []
+    leading: list[dict] = []
     for event in events:
         data = _event_data(event)
         if _is_user_prompt(data):
-            turns.append(_Turn(prompt=_extract_text(data)))
-        else:
-            if not turns:
-                turns.append(_Turn())  # leading assistant content with no prompt
+            prompt = _extract_text(data)
+            if turns and not turns[-1].events:
+                turns[-1].prompt = prompt  # collapse consecutive prompt-only turn
+            else:
+                turns.append(_Turn(prompt=prompt))
+                if leading:
+                    turns[-1].events[:0] = leading
+                    leading = []
+        elif turns:
             turns[-1].events.append(event)
+        else:
+            leading.append(event)
+    if not turns and leading:
+        turns.append(_Turn(events=leading))  # no prompt at all → one synthetic turn
     return turns
 
 
@@ -298,11 +540,15 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
     a no-op (returns the existing root_id) unless `force=True`. Returns
     the Better Agent root session id.
     """
-    if not force:
-        existing = _registry_get(sess.registry_key)
-        if existing:
-            return existing
+    with _import_lock_for(sess.registry_key):
+        if not force:
+            existing = _registry_get(sess.registry_key)
+            if existing:
+                return existing
+        return _import_session_locked(sess)
 
+
+def _import_session_locked(sess: NativeSession) -> str:
     events = _replay_events(sess)
     turns = _segment_turns(events)
     # Drop turns that carry neither a prompt nor any events (noise).
@@ -368,6 +614,20 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
                         sess.registry_key, _event_data(ev).get("uuid"),
                     )
             assistant_msg["isStreaming"] = False
+            # A turn whose every event bypassed the render tree (pure
+            # metadata) leaves an empty assistant bubble — drop the pair.
+            if not assistant_msg.get("events"):
+                messages.pop()
+                messages.pop()
+
+    # Every turn collapsed to pure metadata → nothing renderable. Tear down
+    # the just-created empty session rather than leave an orphan bubble.
+    if not (session_manager.get(root_id) or {}).get("messages"):
+        try:
+            session_manager.delete(root_id)
+        except Exception:
+            logger.exception("native_import: failed to delete empty session %s", root_id)
+        raise ValueError("native session has no importable events")
 
     _repair_updated_at_to_last_activity(root_id, _max_event_timestamp(events))
     _registry_set(sess.registry_key, root_id)
@@ -383,6 +643,22 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
 # --------------------------------------------------------------------------- #
 
 _REGISTRY_LOCK = threading.Lock()
+
+
+# Per-key import lock: closes the TOCTOU window between the idempotency
+# registry check and session creation so two concurrent imports of the same
+# native session can't create duplicate Better Agent sessions.
+_IMPORT_LOCKS_GUARD = threading.Lock()
+_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _import_lock_for(key: str) -> threading.Lock:
+    with _IMPORT_LOCKS_GUARD:
+        lock = _IMPORT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _IMPORT_LOCKS[key] = lock
+        return lock
 
 
 def _registry_path() -> Path:
@@ -402,9 +678,7 @@ def _registry_load() -> dict:
 
 
 def _registry_save(data: dict) -> None:
-    path = _registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _atomic_write_text(_registry_path(), json.dumps(data, indent=2))
 
 
 def _registry_get(key: str) -> Optional[str]:
@@ -460,9 +734,39 @@ _JOB_LOCK = threading.Lock()
 _JOB: Optional[JobStatus] = None
 
 
+def _job_state_path() -> Path:
+    return paths.ba_home() / "native_import_job.json"
+
+
+def _persist_job(status: JobStatus) -> None:
+    """Checkpoint job state to disk so an interrupted import survives a
+    backend restart (see `resume_if_interrupted`). Best-effort: a write
+    failure must never abort the in-memory job."""
+    try:
+        _atomic_write_text(_job_state_path(), json.dumps(status.to_dict()))
+    except Exception:
+        logger.exception("native_import: failed to persist job state")
+
+
+def _load_persisted_job() -> Optional[dict]:
+    path = _job_state_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def get_status() -> dict:
     with _JOB_LOCK:
-        return (_JOB or JobStatus()).to_dict()
+        if _JOB is not None:
+            return _JOB.to_dict()
+    # No in-memory job (e.g. right after restart, before resume fires) —
+    # surface the last persisted state so the UI isn't blank.
+    persisted = _load_persisted_job()
+    return persisted if persisted else JobStatus().to_dict()
 
 
 def start_import(provider_ids: Optional[list[str]] = None) -> dict:
@@ -478,6 +782,7 @@ def start_import(provider_ids: Optional[list[str]] = None) -> dict:
             started_at=datetime.now().isoformat(),
         )
         status_ref = _JOB
+    _persist_job(status_ref)
     thread = threading.Thread(
         target=_run_import, args=(status_ref, provider_ids), daemon=True, name="native-import",
     )
@@ -485,29 +790,48 @@ def start_import(provider_ids: Optional[list[str]] = None) -> dict:
     return status_ref.to_dict()
 
 
+def resume_if_interrupted() -> None:
+    """Resume an import that a backend restart interrupted.
+
+    A persisted job with status "running" can only exist if the process
+    died mid-import — a live job is held in memory only. Re-running for
+    its provider scope is safe: the idempotency registry skips every
+    session already imported before the crash, so the resume finishes the
+    remainder without duplicates. Called from backend startup.
+    """
+    persisted = _load_persisted_job()
+    if not persisted or persisted.get("status") != "running":
+        return
+    provider_ids = persisted.get("provider_ids") or None
+    logger.info("native_import: resuming interrupted import (providers=%s)", provider_ids)
+    start_import(provider_ids)
+
+
 def _run_import(status: JobStatus, provider_ids: Optional[list[str]]) -> None:
     imported_keys = already_imported_keys()
     sessions = enumerate_native_sessions(provider_ids)
     status.total = len(sessions)
+    _persist_job(status)
     try:
         for sess in sessions:
             if sess.registry_key in imported_keys:
                 status.skipped += 1
-                continue
-            status.current = sess.registry_key
-            try:
-                import_session(sess)
-                status.imported += 1
-                imported_keys.add(sess.registry_key)
-            except Exception as exc:
-                status.failed += 1
-                status.errors.append({"key": sess.registry_key, "error": str(exc)})
-                logger.exception("native_import: failed %s", sess.registry_key)
+            else:
+                status.current = sess.registry_key
+                try:
+                    import_session(sess)
+                    status.imported += 1
+                    imported_keys.add(sess.registry_key)
+                except Exception as exc:
+                    status.failed += 1
+                    status.errors.append({"key": sess.registry_key, "error": str(exc)})
+                    logger.exception("native_import: failed %s", sess.registry_key)
+            _persist_job(status)  # checkpoint so a crash here resumes cleanly
+        status.status = "done"
     except Exception:
         status.status = "error"
         logger.exception("native_import: job crashed")
-    else:
-        status.status = "done"
     finally:
         status.current = ""
         status.finished_at = datetime.now().isoformat()
+        _persist_job(status)
