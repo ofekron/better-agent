@@ -152,7 +152,7 @@ describe("NewSessionModal offline provider cache", () => {
     );
   });
 
-  it("creates through browser-test extension options", async () => {
+  it("creates through browser-harness extension options", async () => {
     cacheProviders([provider], provider.id);
     cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
@@ -173,13 +173,13 @@ describe("NewSessionModal offline provider cache", () => {
       expect(container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
     });
 
-    fireEvent.click(getByLabelText("orchestration.browserTestHeadless"));
+    fireEvent.click(getByLabelText("orchestration.browserHarnessHeadless"));
     fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        browserTestEnabled: true,
-        browserTestHeadless: false,
+        browserHarnessEnabled: true,
+        browserHarnessHeadless: false,
       }),
       undefined,
     );
@@ -300,17 +300,17 @@ describe("NewSessionModal offline provider cache", () => {
             extensionId: "ofek-dev.first",
             label: "First extension",
             defaultValue: false,
-            applyToSessionConfig: (value) => ({ browserTestEnabled: value }),
+            applyToSessionConfig: (value) => ({ browserHarnessEnabled: value }),
           },
           {
             id: "enabled",
             extensionId: "ofek-dev.second",
             label: "Second extension",
             defaultValue: false,
-            applyToSessionConfig: (value) => ({ browserTestHeadless: value }),
+            applyToSessionConfig: (value) => ({ browserHarnessHeadless: value }),
           },
         ]}
-        browserTestEnabled={false}
+        browserHarnessEnabled={false}
       />,
     );
 
@@ -323,8 +323,8 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        browserTestEnabled: false,
-        browserTestHeadless: true,
+        browserHarnessEnabled: false,
+        browserHarnessHeadless: true,
       }),
       undefined,
     );

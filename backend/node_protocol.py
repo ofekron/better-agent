@@ -83,7 +83,7 @@ class SpawnRun(TypedDict, total=False):
     internal_token: Optional[str]    # primary's internal_token (so worker can authenticate)
     supervised: bool
     supervisor_agent_session_id: Optional[str]
-    browser_test_enabled: bool
+    browser_harness_enabled: bool
     open_file_panel_enabled: bool
     extra_env: Optional[dict[str, str]]
     disabled_builtin_extensions: Optional[list[str]]

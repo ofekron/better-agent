@@ -279,7 +279,7 @@ class Provider(ABC):
         worker_agent_session_id: Optional[str] = None,
         mssg_sender_session_id: Optional[str] = None,
         is_worker: bool = False,
-        browser_test_enabled: bool = False,
+        browser_harness_enabled: bool = False,
         open_file_panel_enabled: bool = False,
         working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,

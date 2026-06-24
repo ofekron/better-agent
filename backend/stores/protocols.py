@@ -71,8 +71,8 @@ class SessionsStorage(Protocol):
         orchestration_mode: str = "team",
         source: str = "web",
         provider_id: Optional[str] = None,
-        browser_test_enabled: bool = True,
-        browser_test_headless: bool = True,
+        browser_harness_enabled: bool = True,
+        browser_harness_headless: bool = True,
         node_id: str = "primary",
     ) -> dict: ...
 

@@ -269,7 +269,7 @@ def _install_core_mcp_gate_extensions() -> None:
     )
     _install_coordination_extension_record()
     _install_session_bridge_extension_record()
-    _install_browser_test_extension_record()
+    _install_browser_harness_extension_record()
     _install_credential_broker_extension_record()
     _install_provider_config_sync_extension_record()
     _install_canvas_extension_record()
@@ -328,30 +328,30 @@ def _install_provider_config_sync_extension_record() -> None:
     _save_runtime_extension_record(data, extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
 
 
-def _install_browser_test_extension_record() -> None:
-    package = Path(_TMP_HOME) / "browser-test-extension"
+def _install_browser_harness_extension_record() -> None:
+    package = Path(_TMP_HOME) / "browser-harness-extension"
     (package / "mcp").mkdir(parents=True, exist_ok=True)
-    (package / "mcp" / "server.py").write_text("print('browser test')\n", encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('browser harness')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_BROWSER_TEST_EXTENSION_ID] = {
+    data["extensions"][extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_BROWSER_TEST_EXTENSION_ID,
-            "name": "Browser Test",
+            "id": extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
+            "name": "Browser Harness",
             "version": "1.0.0",
-            "description": "Browser Test",
+            "description": "Browser Harness",
             "surfaces": ["backend_feature", "runtime_mcp"],
             "entrypoints": {
                 "mcp": [
                     {
-                        "name": "better-agent-browser-test",
+                        "name": "better-agent-browser-harness",
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
                         "user_facing": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
-                        "predicate": {"equals": {"browser_test_enabled": True}},
+                        "predicate": {"equals": {"browser_harness_enabled": True}},
                     }
                 ]
             },
@@ -364,9 +364,9 @@ def _install_browser_test_extension_record() -> None:
         "source": {
             "type": "git",
             "repo_url": "https://example.test/private.git",
-            "extension_path": "extensions/browser-test",
+            "extension_path": "extensions/browser-harness",
             "ref": "",
-            "commit_sha": "browser-test-private",
+            "commit_sha": "browser-harness-private",
             "install_path": str(package),
         },
         "entitlement": {
@@ -377,7 +377,7 @@ def _install_browser_test_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_BROWSER_TEST_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID)
 
 
 def _install_credential_broker_extension_record() -> None:
@@ -902,7 +902,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     )
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
-        "browser_test_enabled": True,
+        "browser_harness_enabled": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -916,7 +916,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     servers = config["mcp_servers"]
     for name in (
         "demo",
-        "better-agent-browser-test",
+        "better-agent-browser-harness",
         "better-agent-coordination",
         "better-agent-session-bridge",
         "credential-broker",
@@ -927,7 +927,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "better-agent-canvas",
     ):
         check(name in servers, f"built-in MCP config injects {name}")
-    check("browser-test" not in servers, "public browser-test MCP is not injected")
+    check("browser-harness" not in servers, "public browser-harness MCP is not injected")
     check("session-bridge" not in servers, "public session-bridge MCP is not injected")
     check("get-requirements" not in servers, "public requirements MCP is not injected")
     check("canvas" not in servers, "public canvas MCP is not injected")
@@ -1347,12 +1347,12 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Gemini provider persists open_file_panel_enabled into runner input",
     )
     check(
-        '"browser_test_enabled": bool(browser_test_enabled)' in codex_src,
-        "Codex provider persists browser_test_enabled into runner input",
+        '"browser_harness_enabled": bool(browser_harness_enabled)' in codex_src,
+        "Codex provider persists browser_harness_enabled into runner input",
     )
     check(
-        '"browser_test_enabled": bool(browser_test_enabled)' in gemini_src,
-        "Gemini provider persists browser_test_enabled into runner input",
+        '"browser_harness_enabled": bool(browser_harness_enabled)' in gemini_src,
+        "Gemini provider persists browser_harness_enabled into runner input",
     )
     check(
         '"context_strategy": user_prefs.get_context_strategy()' in codex_src,

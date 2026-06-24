@@ -79,7 +79,7 @@ def _spawn(run_id: str, prompt: str, session_id: str | None = None) -> tuple[sub
         "internal_token": "linger-test-token",
         "fork": False,
         "supervised": False,
-        "browser_test_enabled": False,
+        "browser_harness_enabled": False,
         "open_file_panel_enabled": False,
     }))
     stdout = (run_dir / "stdout.log").open("ab")

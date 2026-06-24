@@ -31,8 +31,8 @@ export const KNOWN_TAGS: Record<string, string> = {
   // Manager: worker prep.
   "worker-prep": "Worker prep",
 
-  // Browser test boot.
-  "browser-test-boot": "Browser test boot",
+  // Browser harness boot.
+  "browser-harness-boot": "Browser harness boot",
 
   // Cross-session delegated worker/task prompt.
   "delegated-task": "Delegated task",

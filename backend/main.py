@@ -4152,10 +4152,10 @@ async def create_session(body: Any = Body(default=None)):
         logger.info("create_session %s mode=file_editing(persistent)", result["session_id"][:8])
         await _apply_initial_session_folder(session.get("id"), requested_folder_id)
         return session
-    browser_test_enabled = (
-        body.get("browser_test_enabled", True)
+    browser_harness_enabled = (
+        body.get("browser_harness_enabled", True)
         and _builtin_extension_runtime_ready(
-            extension_store.BUILTIN_BROWSER_TEST_EXTENSION_ID
+            extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID
         )
     )
     session = await asyncio.to_thread(
@@ -4167,8 +4167,8 @@ async def create_session(body: Any = Body(default=None)):
         source=requested_source,
         provider_id=requested_provider_id,
         reasoning_effort=requested_effort,
-        browser_test_enabled=browser_test_enabled,
-        browser_test_headless=body.get("browser_test_headless", True),
+        browser_harness_enabled=browser_harness_enabled,
+        browser_harness_headless=body.get("browser_harness_headless", True),
         node_id=node_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
@@ -7412,7 +7412,7 @@ async def internal_managed_run_create_session(
             provider_id=provider_id,
             node_id=node_id,
             source="extension",
-            browser_test_enabled=False,
+            browser_harness_enabled=False,
         )
     )
     import extension_session_ownership

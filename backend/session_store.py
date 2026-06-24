@@ -2108,8 +2108,8 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("capability_contexts", [])
     session.setdefault("working_mode", None)
     session.setdefault("working_mode_meta", None)
-    session.setdefault("browser_test_enabled", True)
-    session.setdefault("browser_test_headless", True)
+    session.setdefault("browser_harness_enabled", True)
+    session.setdefault("browser_harness_headless", True)
     session.setdefault("bare_config", False)
     session.setdefault("pinned", False)
     session.setdefault("archived", False)
@@ -2252,8 +2252,8 @@ def create_session(
     source: str = "web",
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
-    browser_test_enabled: bool = True,
-    browser_test_headless: bool = True,
+    browser_harness_enabled: bool = True,
+    browser_harness_headless: bool = True,
     node_id: str = "primary",
     worker_creation_policy: str = "ask",
     bare_config: bool = False,
@@ -2330,8 +2330,8 @@ def create_session(
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
-        "browser_test_enabled": browser_test_enabled,
-        "browser_test_headless": browser_test_headless,
+        "browser_harness_enabled": browser_harness_enabled,
+        "browser_harness_headless": browser_harness_headless,
         "worker_creation_policy": (
             worker_creation_policy
             if worker_creation_policy in ("ask", "approve", "deny")

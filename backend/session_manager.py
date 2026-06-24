@@ -2594,8 +2594,8 @@ class SessionManager:
         source: str = "web",
         provider_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
-        browser_test_enabled: bool = True,
-        browser_test_headless: bool = True,
+        browser_harness_enabled: bool = True,
+        browser_harness_headless: bool = True,
         node_id: str = "primary",
         worker_creation_policy: str = "ask",
         bare_config: bool = False,
@@ -2613,8 +2613,8 @@ class SessionManager:
             orchestration_mode=orchestration_mode, source=source,
             provider_id=provider_id,
             reasoning_effort=reasoning_effort,
-            browser_test_enabled=browser_test_enabled,
-            browser_test_headless=browser_test_headless,
+            browser_harness_enabled=browser_harness_enabled,
+            browser_harness_headless=browser_harness_headless,
             node_id=node_id,
             worker_creation_policy=worker_creation_policy,
             bare_config=bare_config,
@@ -5061,7 +5061,7 @@ class SessionManager:
             })
 
         # Create Y as a brand-new root in native mode. Inherits cwd /
-        # model / provider / browser-test / node from X so file refs in
+        # model / provider / browser-harness / node from X so file refs in
         # the copied messages stay valid (same cwd).
         y = session_store.create_session(
             name=f"{x_snap.get('name') or 'session'} (supervisor)",
@@ -5075,8 +5075,8 @@ class SessionManager:
             ),
             provider_id=x_snap.get("provider_id"),
             reasoning_effort=x_snap.get("reasoning_effort"),
-            browser_test_enabled=bool(x_snap.get("browser_test_enabled")),
-            browser_test_headless=bool(x_snap.get("browser_test_headless")),
+            browser_harness_enabled=bool(x_snap.get("browser_harness_enabled")),
+            browser_harness_headless=bool(x_snap.get("browser_harness_headless")),
             node_id=x_snap.get("node_id") or "primary",
         )
         # Take ownership of S1 outright + baseline its tailer cursor.

@@ -1,4 +1,4 @@
-"""Base class for subprocess-backed agents (workers, browser-test, etc.).
+"""Base class for subprocess-backed agents (workers, browser-harness, etc.).
 
 Owns a Better Agent session record and its underlying agent-CLI session id
 (`agent_sid` — the provider-specific session: claude_sid for Claude,

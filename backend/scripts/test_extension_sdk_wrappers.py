@@ -1,6 +1,6 @@
 """Path + payload checks for the generic-core + delegation SDK wrappers and the
 inter-extension ``call_extension`` primitive. Feature-specific capabilities
-(requirements, scheduler, credentials, browser-test, project-updates,
+(requirements, scheduler, credentials, browser-harness, project-updates,
 continuation-recall, provider-config-sync) are intentionally NOT in the shared
 SDK — they live in per-extension SDKs reached via ``call_extension``.
 
@@ -228,7 +228,7 @@ def main_test() -> int:
             parent_session_id="root",
             init_prompt="boot",
             agent_sid="sid",
-            event_prefix="browser_test",
+            event_prefix="browser_harness",
             extra_env={"BU_CDP_URL": "http://127.0.0.1:1"},
         )
         check(
@@ -242,7 +242,7 @@ def main_test() -> int:
         removed = [
             "get_requirements", "search_requirements", "capture_project_update",
             "list_project_updates", "mark_project_updates_seen",
-            "credential_request", "credential_execute", "browser_test",
+            "credential_request", "credential_execute", "browser_harness",
             "create_schedule", "list_schedules", "delete_schedule",
             "recall_continuation", "broadcast_provider_config_change", "open_config_panel",
         ]

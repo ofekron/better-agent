@@ -1,7 +1,7 @@
-"""Browser Test runtime belongs to the private extension.
+"""Browser Harness runtime belongs to the private extension.
 
 Run with:
-    cd backend && .venv/bin/python scripts/test_browser_test_extension_boundary.py
+    cd backend && .venv/bin/python scripts/test_browser_harness_extension_boundary.py
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ def _run() -> bool:
     main = (BACKEND / "main.py").read_text(encoding="utf-8")
     results = [
         (
-            "public browser-test route is removed",
-            "/api/internal/browser-test" not in main,
+            "public browser-harness route is removed",
+            "/api/internal/browser-harness" not in main,
             "old route remains",
         ),
         (
-            "public browser-test runtime module is removed",
-            not (BACKEND / "orchs" / "_browser_test.py").exists(),
-            "backend/orchs/_browser_test.py still exists",
+            "public browser-harness runtime module is removed",
+            not (BACKEND / "orchs" / "_browser_harness.py").exists(),
+            "backend/orchs/_browser_harness.py still exists",
         ),
         (
             "generic managed-run substrate exists",

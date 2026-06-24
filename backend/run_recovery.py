@@ -1697,7 +1697,7 @@ async def _retry_recovered_run(
         supervised=inp.get("supervised", False),
         supervisor_agent_session_id=inp.get("supervisor_agent_session_id"),
         worker_agent_session_id=inp.get("worker_agent_session_id"),
-        browser_test_enabled=inp.get("browser_test_enabled", False),
+        browser_harness_enabled=inp.get("browser_harness_enabled", False),
         open_file_panel_enabled=inp.get("open_file_panel_enabled", False),
         provider_run_config=inp.get("provider_run_config"),
         capability_contexts=inp.get("capability_contexts"),

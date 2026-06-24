@@ -994,11 +994,11 @@ export interface Session {
    *     manager-mode delegations. */
   kind?: "user" | "delegate_fork" | "supervisor_worker" | "adv_sync_fork";
   caller_agent_session_id?: string | null;
-  /** Whether the browser-test MCP tool is available for this session.
+  /** Whether the browser-harness MCP tool is available for this session.
    * Checked by default on new sessions. The tool spawns a dedicated
    * testing agent that autonomously executes high-level test descriptions. */
-  browser_test_enabled?: boolean;
-  browser_test_headless?: boolean;
+  browser_harness_enabled?: boolean;
+  browser_harness_headless?: boolean;
   pinned?: boolean;
   archived?: boolean;
   /** User opted this session in as eligible for the Team worker picker.

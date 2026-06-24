@@ -1114,7 +1114,7 @@ def _build_open_file_panel_tool(
     internal_token: str,
 ):
     """Build an in-process SDK MCP tool that opens a file in the user's
-    UI. POSTs to /api/internal/open-file-panel. Mirrors the browser-test
+    UI. POSTs to /api/internal/open-file-panel. Mirrors the browser-harness
     tool's loopback pattern but is fast (no long block)."""
 
     def _post_open_file_panel_sync(payload: dict) -> dict:
@@ -1988,7 +1988,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # top-level turns (manager OR native). Worker delegations and
     # supervisor/verdict turns never set this flag, so the agent can
     # only point the user at code from a turn the user actually
-    # initiated. Mode-agnostic, like browser-test.
+    # initiated. Mode-agnostic, like browser-harness.
     open_file_panel_enabled = inputs.get("open_file_panel_enabled", False)
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     # Bare (TestApe-isolated) sessions are headless: they get NONE of the

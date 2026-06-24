@@ -50,7 +50,7 @@ _HARNESS_DELIVERY_NATIVE = "native"
 _HARNESS_DELIVERY_RUNTIME = "runtime"
 _HARNESS_DELIVERY_MODES = {_HARNESS_DELIVERY_NATIVE, _HARNESS_DELIVERY_RUNTIME}
 _RESERVED_MCP_SERVER_NAMES = {
-    "browser-test",
+    "browser-harness",
     "canvas",
     "communicate",
     "create-worker",
@@ -79,7 +79,7 @@ BUILTIN_CANVAS_EXTENSION_ID = "ofek-dev.canvas"
 BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = "ofek-dev.trace-inspector"
 BUILTIN_REARRANGER_EXTENSION_ID = "ofek-dev.rearranger"
 BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = "ofek-dev.prompt-engineer"
-BUILTIN_BROWSER_TEST_EXTENSION_ID = "ofek-dev.browser-test"
+BUILTIN_BROWSER_HARNESS_EXTENSION_ID = "ofek-dev.browser-harness"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_NEEDS_USER_DECISION_EXTENSION_ID = "ofek-dev.needs-user-decision"
@@ -107,7 +107,7 @@ _PRIVATE_EXTENSION_PATHS = {
     BUILTIN_TRACE_INSPECTOR_EXTENSION_ID: "extensions/trace-inspector",
     BUILTIN_REARRANGER_EXTENSION_ID: "extensions/rearranger",
     BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "extensions/prompt-engineer",
-    BUILTIN_BROWSER_TEST_EXTENSION_ID: "extensions/browser-test",
+    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "extensions/browser-harness",
     MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
 _PUBLIC_EXTENSION_PATHS = {
@@ -134,7 +134,7 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_TRACE_INSPECTOR_EXTENSION_ID: "Trace inspector",
     BUILTIN_REARRANGER_EXTENSION_ID: "Rearranger",
     BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "Prompt engineer",
-    BUILTIN_BROWSER_TEST_EXTENSION_ID: "Browser test",
+    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "Browser harness",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_NEEDS_USER_DECISION_EXTENSION_ID: "Needs user decision",
@@ -153,7 +153,7 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",),
     BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: ("project_structure_edit",),
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
-    BUILTIN_BROWSER_TEST_EXTENSION_ID: ("default_session",),
+    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: ("default_session",),
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
     BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",),

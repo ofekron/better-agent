@@ -529,7 +529,7 @@ const BUILTIN_EXTENSION_IDS = {
   canvas: "ofek-dev.canvas",
   rearranger: "ofek-dev.rearranger",
   promptEngineer: "ofek-dev.prompt-engineer",
-  browserTest: "ofek-dev.browser-test",
+  browserHarness: "ofek-dev.browser-harness",
 } as const;
 
 type BuiltinExtensionFlags = Record<keyof typeof BUILTIN_EXTENSION_IDS, boolean>;
@@ -545,7 +545,7 @@ const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   canvas: true,
   rearranger: true,
   promptEngineer: true,
-  browserTest: true,
+  browserHarness: true,
 };
 
 function useBuiltinExtensionFlags(authStatus: "loading" | "authed"): BuiltinExtensionFlags {
@@ -1839,9 +1839,9 @@ function AppMain({
               queued.model,
               queued.cwd,
               queued.orchestration_mode,
-              queued.browser_test_enabled,
+              queued.browser_harness_enabled,
               queued.provider_id,
-              queued.browser_test_headless,
+              queued.browser_harness_headless,
               false,
               undefined,
               queued.node_id,
@@ -3973,9 +3973,9 @@ function AppMain({
       nextModel,
       nextCwd,
       nextMode,
-      currentSession?.browser_test_enabled ?? true,
+      currentSession?.browser_harness_enabled ?? true,
       nextProviderId,
-      currentSession?.browser_test_headless ?? true,
+      currentSession?.browser_harness_headless ?? true,
       false,
       undefined,
       currentSession?.node_id ?? "primary",
@@ -4250,8 +4250,8 @@ function AppMain({
         cwd: config.cwd,
         orchestration_mode: config.orchestrationMode,
         provider_id: config.main.providerId,
-        browser_test_enabled: config.browserTestEnabled,
-        browser_test_headless: config.browserTestHeadless,
+        browser_harness_enabled: config.browserHarnessEnabled,
+        browser_harness_headless: config.browserHarnessHeadless,
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
@@ -4345,9 +4345,9 @@ function AppMain({
             config.main.model,
             config.cwd,
             config.orchestrationMode,
-            config.browserTestEnabled,
+            config.browserHarnessEnabled,
             config.main.providerId,
-            config.browserTestHeadless,
+            config.browserHarnessHeadless,
             false,
             undefined,
             config.nodeId,
@@ -4403,9 +4403,9 @@ function AppMain({
           config.main.model,
           config.cwd,
           config.orchestrationMode,
-          config.browserTestEnabled,
+          config.browserHarnessEnabled,
           config.main.providerId,
-          config.browserTestHeadless,
+          config.browserHarnessHeadless,
           true,
           config.fileEditPath,
           config.nodeId,
@@ -6278,7 +6278,7 @@ function AppMain({
             capabilityPickerClient={providerConfigSyncClient}
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
-            browserTestEnabled={builtinExtensions.browserTest}
+            browserHarnessEnabled={builtinExtensions.browserHarness}
           />
         </Suspense>
       )}

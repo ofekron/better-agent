@@ -107,7 +107,7 @@ TRANSLATIONS: dict[str, str] = {
     "runner.delegate_url_error": "delegate URL error: {reason}",
     "runner.delegate_general_error": "Delegate error: {e}",
     "runner.delegate_non_json": "delegate: non-json response: {e}: {raw}",
-    "runner.browser_test_non_json": "browser-test: non-json response: {e}: {raw}",
+    "runner.browser_harness_non_json": "browser-harness: non-json response: {e}: {raw}",
     "runner.open_file_panel_non_json": "open-file-panel: non-json response: {e}: {raw}",
     "runner.cancelled": "cancelled",
     "runner.failed_read_input": "failed to read input.json: {e}",

@@ -47,8 +47,8 @@ interface SessionConfig {
   main: RoleConfig;
   worker: RoleConfig;
   cwd: string;
-  browserTestEnabled: boolean;
-  browserTestHeadless: boolean;
+  browserHarnessEnabled: boolean;
+  browserHarnessHeadless: boolean;
   fileEditEnabled: boolean;
   fileEditPath?: string;
   /** Multi-machine: the topology node id that will execute this
@@ -114,7 +114,7 @@ interface Props {
   capabilityPickerClient: Pick<ProviderConfigSyncApiClient, "listCapabilityPickerSources">;
   teamEnabled?: boolean;
   machineNodesEnabled?: boolean;
-  browserTestEnabled?: boolean;
+  browserHarnessEnabled?: boolean;
   extensionOptions?: NewSessionExtensionOption[];
 }
 
@@ -137,8 +137,8 @@ function saveDefaults(config: SessionConfig) {
       orchestrationMode: config.orchestrationMode,
       main: config.main,
       worker: config.worker,
-      browserTestEnabled: config.browserTestEnabled,
-      browserTestHeadless: config.browserTestHeadless,
+      browserHarnessEnabled: config.browserHarnessEnabled,
+      browserHarnessHeadless: config.browserHarnessHeadless,
       folderId: config.folderId,
     }),
   );
@@ -162,12 +162,12 @@ function extensionOptionDefaults(
   const values: Record<string, NewSessionExtensionOptionValue> = {};
   for (const option of flattenExtensionOptions(options)) {
     const key = extensionOptionKey(option);
-    if (option.id === "browser_test_enabled") {
-      values[key] = saved.browserTestEnabled ?? option.defaultValue;
+    if (option.id === "browser_harness_enabled") {
+      values[key] = saved.browserHarnessEnabled ?? option.defaultValue;
       continue;
     }
-    if (option.id === "browser_test_headless") {
-      values[key] = saved.browserTestHeadless ?? option.defaultValue;
+    if (option.id === "browser_harness_headless") {
+      values[key] = saved.browserHarnessHeadless ?? option.defaultValue;
       continue;
     }
     values[key] = option.defaultValue;
@@ -422,7 +422,7 @@ export function NewSessionModal({
   capabilityPickerClient,
   teamEnabled = true,
   machineNodesEnabled = true,
-  browserTestEnabled: browserTestExtensionEnabled = true,
+  browserHarnessEnabled: browserHarnessExtensionEnabled = true,
   extensionOptions = EMPTY_EXTENSION_OPTIONS,
 }: Props) {
   const { t } = useTranslation();
@@ -462,21 +462,21 @@ export function NewSessionModal({
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [
       ...(
-        browserTestExtensionEnabled
+        browserHarnessExtensionEnabled
           ? [
               {
-                id: "browser_test_enabled",
-                extensionId: "ofek-dev.browser-test",
-                label: t("orchestration.browserTest"),
+                id: "browser_harness_enabled",
+                extensionId: "ofek-dev.browser-harness",
+                label: t("orchestration.browserHarness"),
                 defaultValue: true,
-                applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserTestEnabled: value }),
+                applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessEnabled: value }),
                 children: [
                   {
-                    id: "browser_test_headless",
-                    extensionId: "ofek-dev.browser-test",
-                    label: t("orchestration.browserTestHeadless"),
+                    id: "browser_harness_headless",
+                    extensionId: "ofek-dev.browser-harness",
+                    label: t("orchestration.browserHarnessHeadless"),
                     defaultValue: true,
-                    applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserTestHeadless: value }),
+                    applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessHeadless: value }),
                   },
                 ],
               },
@@ -485,7 +485,7 @@ export function NewSessionModal({
       ),
       ...extensionOptions,
     ],
-    [browserTestExtensionEnabled, extensionOptions, t],
+    [browserHarnessExtensionEnabled, extensionOptions, t],
   );
   const [extensionOptionValues, setExtensionOptionValues] = useState<
     Record<string, NewSessionExtensionOptionValue>
@@ -567,7 +567,7 @@ export function NewSessionModal({
         setWorker(resolveRoleConfig(defaults.worker, list, activeId, modelsByProvider, "worker"));
       })
       .catch(() => {});
-  }, [open, browserTestExtensionEnabled, sessionExtensionOptions]);
+  }, [open, browserHarnessExtensionEnabled, sessionExtensionOptions]);
 
   // Backfill `cwd` when `projects` arrives AFTER the modal opened. The
   // App-level projects list is fetched async on mount; if the user
@@ -695,8 +695,8 @@ export function NewSessionModal({
       main,
       worker,
       cwd: effectiveCwd,
-      browserTestEnabled: false,
-      browserTestHeadless: true,
+      browserHarnessEnabled: false,
+      browserHarnessHeadless: true,
       fileEditEnabled,
       fileEditPath: undefined,
       nodeId,
@@ -740,7 +740,7 @@ export function NewSessionModal({
     const checked = extensionOptionValues[key] ?? option.defaultValue;
     return (
       <div key={key}>
-        <label className={`browser-test-toggle${nested ? " browser-test-sub-toggle" : ""}`}>
+        <label className={`browser-harness-toggle${nested ? " browser-harness-sub-toggle" : ""}`}>
           <input
             type="checkbox"
             checked={checked}
@@ -953,7 +953,7 @@ export function NewSessionModal({
           </div>
 
           <div className="ns-modal-section">
-            <label className="browser-test-toggle">
+            <label className="browser-harness-toggle">
               <input
                 type="checkbox"
                 checked={fileEditEnabled}

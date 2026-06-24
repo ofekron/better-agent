@@ -39,7 +39,7 @@ payload = {
     "internal_token": "regression-token",
     "fork": False,
     "supervised": False,
-    "browser_test_enabled": False,
+    "browser_harness_enabled": False,
     "open_file_panel_enabled": False,
 }
 (RUN_DIR / "input.json").write_text(json.dumps(payload))

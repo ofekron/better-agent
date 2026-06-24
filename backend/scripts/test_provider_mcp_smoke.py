@@ -61,7 +61,7 @@ async def _run_provider_smoke(provider_name: str, provider_cls, main, session_st
         orchestration_mode="native",
         source="cli",
         provider_id=f"smoke-{provider_name}",
-        browser_test_enabled=False,
+        browser_harness_enabled=False,
     )
     sid = session["id"]
     queue: asyncio.Queue = asyncio.Queue()
@@ -80,7 +80,7 @@ async def _run_provider_smoke(provider_name: str, provider_cls, main, session_st
         app_session_id=sid,
         backend_url=f"http://127.0.0.1:{port}",
         internal_token=main.coordinator.internal_token,
-        browser_test_enabled=False,
+        browser_harness_enabled=False,
         open_file_panel_enabled=True,
         provider_run_config={},
         capability_contexts=[],

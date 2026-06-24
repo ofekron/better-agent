@@ -1497,7 +1497,7 @@ class TurnManager:
         loop = asyncio.get_running_loop()
 
         _session_rec = session_manager.get(primary_session_id or app_session_id)
-        bt_enabled = bool((_session_rec or {}).get("browser_test_enabled", False))
+        bt_enabled = bool((_session_rec or {}).get("browser_harness_enabled", False))
         reasoning_effort = (_session_rec or {}).get("reasoning_effort")
 
         backend_url: Optional[str] = None
@@ -1673,7 +1673,7 @@ class TurnManager:
                     supervised=supervised,
                     supervisor_agent_session_id=supervisor_agent_session_id,
                     worker_agent_session_id=worker_agent_session_id,
-                    browser_test_enabled=bt_enabled,
+                    browser_harness_enabled=bt_enabled,
                     open_file_panel_enabled=user_initiated,
                     working_mode=(_session_rec or {}).get("working_mode"),
                     continuation_chain=_session_rec_chain or None,

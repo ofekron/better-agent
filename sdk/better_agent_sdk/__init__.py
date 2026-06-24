@@ -18,7 +18,7 @@ ownership-gated message mutation, settings/config — over core's loopback
 ``/api/internal/*`` API.
 
 Feature-specific capabilities (requirements, scheduler, credentials,
-browser-test, project-structure, etc.) are owned by their extensions, which
+browser-harness, project-structure, etc.) are owned by their extensions, which
 ship their own SDKs. One extension reaches another through
 ``Client.call_extension``; core routes the call without baking in feature logic.
 """
