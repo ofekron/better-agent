@@ -205,6 +205,11 @@ def ba_home() -> Path:
     return root
 
 
+# Alias to satisfy requirements extension and global rules.
+bc_home = ba_home
+
+
+
 def encode_cwd(cwd: str) -> str:
     """Normalize a cwd into a filesystem-safe token.
 
