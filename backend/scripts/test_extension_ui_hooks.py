@@ -340,14 +340,24 @@ def test_builtin_ask_manifest_declares_backend_routes_permission() -> None:
 
 def test_builtin_ask_backend_entrypoint_is_mounted() -> None:
     _seed_store_with_marketplace()
+    # Reconcile installs the real public ask package from the bundled repo so
+    # its backend entrypoint + backend_routes permission are present. Reads via
+    # get_extension() are pure and do not seed; list_extensions_with_reconciliation
+    # is the explicit seed path (same idiom as test_marketplace_extension_mcp).
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     spec = extension_store.backend_entrypoint_spec(extension_store.BUILTIN_ASK_EXTENSION_ID)
     assert spec is not None
     assert spec["prefix"] == "/api/extensions/ofek-dev.ask/backend"
     assert spec["effective_permissions"]["backend_routes"] is True
 
 
-def test_fresh_store_surfaces_public_but_not_private_builtin_ui_hooks() -> None:
+def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
+    # First-party builtins surface their UI hooks once seeded + runtime-ready,
+    # regardless of whether they ship as public bundled (ask) or private local
+    # (project-structure) packages. The builtin→private migration dissolved the
+    # old public/private visibility distinction — both are first-party and trusted.
     _seed_store_with_marketplace()
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     hooks = extension_store.ui_hooks()
     assert [
         q for q in hooks["quick_buttons"]
@@ -356,7 +366,32 @@ def test_fresh_store_surfaces_public_but_not_private_builtin_ui_hooks() -> None:
     assert [
         p for p in hooks["pages"]
         if p["extension_id"] == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
-    ] == []
+    ]
+
+
+def test_hidden_marketplace_page_still_surfaces_in_ui_hooks() -> None:
+    # PUBLIC_EXTENSION_LIST_HIDDEN_IDS hides the marketplace from the manage-list,
+    # but its page UI hook must still surface — otherwise the Marketplace vanishes
+    # from Settings entirely. Regression: ui_hooks() must pass include_hidden=True.
+    assert extension_store.MARKETPLACE_EXTENSION_ID in extension_store.PUBLIC_EXTENSION_LIST_HIDDEN_IDS
+    _seed_store_with_marketplace()
+    data = extension_store._load()  # type: ignore[attr-defined]
+    record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
+    record["manifest"]["surfaces"] = ["backend_feature", "frontend_feature"]
+    record["manifest"]["entrypoints"] = {
+        "page": {
+            "id": "main",
+            "label": "Marketplace",
+            "icon": "store",
+            "open": {"type": "navigate", "path_template": "/marketplace"},
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    pages = [
+        p for p in extension_store.ui_hooks()["pages"]
+        if p["extension_id"] == extension_store.MARKETPLACE_EXTENSION_ID
+    ]
+    assert len(pages) == 1, "hidden marketplace page must still surface in ui_hooks"
 
 
 def test_installed_manifest_is_authoritative_without_public_sync() -> None:

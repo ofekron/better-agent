@@ -2246,7 +2246,11 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
                 record["updated_at"] = _now()
                 changed = True
             continue
-        if extension_id == MARKETPLACE_EXTENSION_ID and _required_marketplace_repo_root() is None:
+        if (
+            extension_id == MARKETPLACE_EXTENSION_ID
+            and _required_marketplace_repo_root() is None
+            and os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") != "1"
+        ):
             repo_root = _repo_root()
             package_dir = (repo_root / extension_path).resolve()
         if repo_root is None or package_dir is None or not package_dir.exists():
@@ -3878,7 +3882,9 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     settings = _load_ui_settings()
     quick_buttons: list[dict[str, Any]] = []
     pages: list[dict[str, Any]] = []
-    for record in list_extensions():
+    # include_hidden: PUBLIC_EXTENSION_LIST_HIDDEN_IDS hides extensions from the
+    # manage-list only; their UI hooks (e.g. the marketplace page) must still surface.
+    for record in list_extensions(include_hidden=True):
         manifest = record["manifest"]
         extension_id = manifest["id"]
         if not _record_active(record) or not _record_runtime_ready(record):
