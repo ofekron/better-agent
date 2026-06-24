@@ -22,11 +22,16 @@
           "strip_wrapper": true,
           "style": {
             "bold": true,
-            "font_scale": 1.3
+            "font_scale": 1.3,
+            "highlight": {
+              "color": "#ff8c00",
+              "alpha": 0.18
+            }
           },
           "marker": {
             "color": "#ff8c00",
-            "tooltip": "Needs your decision"
+            "tooltip": "Needs your decision",
+            "sound": true
           },
           "clear_on": "view"
         }

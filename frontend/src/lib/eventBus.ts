@@ -36,7 +36,7 @@ export interface BusEventMap {
   session_marker_changed: {
     session_id: string;
     extension_id: string;
-    marker: { color: string; tooltip: string } | null;
+    marker: { color: string; tooltip: string; sound?: boolean } | null;
   };
   // Finer per-session monitoring state (active / idle / blocked_on_user /
   // waiting_on_background / stopped). Fires on transitions that don't flip

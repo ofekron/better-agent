@@ -116,20 +116,41 @@ _cache = _ExistsCache()
 # rebuilt on every enable/disable and on backend startup by
 # `extension_applied_config`.
 #
-# A rule: {"tag": "NEEDS_USER_DECISION", "bold": True, "font_scale": 1.3}.
+# A rule: {"tag": "NEEDS_USER_DECISION", "bold": True, "font_scale": 1.3,
+# "highlight": {"color": "#ff8c00", "alpha": 0.18}}.
 # Styling that the markdown renderer can express safely is applied here
-# (bold via **…**); font scaling is carried as a frontend-recognized
-# sentinel span the conversation renderer maps to a CSS size — never raw
-# HTML (the markdown pipeline escapes raw HTML by design).
+# (bold via **…**); font scaling + background highlight are carried as a
+# frontend-recognized sentinel span the conversation renderer maps to CSS —
+# never raw HTML (the markdown pipeline escapes raw HTML by design).
 
 _tag_rules: dict[str, dict] = {}
 _tag_scan_re: Optional[re.Pattern[str]] = None
 
-# Sentinel the frontend conversation renderer recognizes to enlarge inner
-# text. Kept ASCII + bracketed so it round-trips through markdown untouched
-# and is trivially matched by a frontend component override.
-_FONT_SENTINEL_OPEN = "⁣[[bcsize:{scale}]]"
-_FONT_SENTINEL_CLOSE = "[[/bcsize]]⁣"
+# Sentinel the frontend conversation renderer recognizes to style inner text
+# (font scale + transparent background highlight). Attrs are `key=value`
+# joined by `;`: `s=SCALE` and `bg=HEX` / `a=ALPHA`. Kept ASCII + bracketed
+# so it round-trips through markdown untouched and is trivially matched by a
+# frontend component override.
+_STYLE_SENTINEL_OPEN = "⁣[[bcstyle:{attrs}]]"
+_STYLE_SENTINEL_CLOSE = "[[/bcstyle]]⁣"
+
+
+def _style_attrs(rule: dict) -> str:
+    """Serialize a rule's inline-style attrs into the bcstyle sentinel's
+    attribute string. Only emits attrs the rule actually declares."""
+    parts: list[str] = []
+    scale = rule.get("font_scale")
+    if isinstance(scale, (int, float)) and scale and scale != 1:
+        parts.append(f"s={scale}")
+    highlight = rule.get("highlight")
+    if isinstance(highlight, dict):
+        color = highlight.get("color")
+        if isinstance(color, str) and color:
+            parts.append(f"bg={color}")
+        alpha = highlight.get("alpha")
+        if isinstance(alpha, (int, float)):
+            parts.append(f"a={alpha}")
+    return ";".join(parts)
 
 
 def set_tag_rules(rules: list[dict]) -> None:
@@ -164,11 +185,9 @@ def _apply_tag_rules(text: str) -> str:
             return m.group(0)
         if rule.get("bold"):
             inner = f"**{inner.strip()}**"
-        scale = rule.get("font_scale")
-        if isinstance(scale, (int, float)) and scale and scale != 1:
-            inner = (
-                _FONT_SENTINEL_OPEN.format(scale=scale) + inner + _FONT_SENTINEL_CLOSE
-            )
+        attrs = _style_attrs(rule)
+        if attrs:
+            inner = _STYLE_SENTINEL_OPEN.format(attrs=attrs) + inner + _STYLE_SENTINEL_CLOSE
         return inner
 
     return _tag_scan_re.sub(_sub, text)

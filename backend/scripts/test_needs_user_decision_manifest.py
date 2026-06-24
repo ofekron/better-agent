@@ -49,7 +49,12 @@ def main() -> int:
         assert r["strip_wrapper"] is True
         assert r["bold"] is True
         assert r["font_scale"] == 1.3
-        assert r["marker"] == {"color": "#ff8c00", "tooltip": "Needs your decision"}
+        assert r["highlight"] == {"color": "#ff8c00", "alpha": 0.18}, r.get("highlight")
+        assert r["marker"] == {
+            "color": "#ff8c00",
+            "tooltip": "Needs your decision",
+            "sound": True,
+        }, r.get("marker")
         assert r["clear_on"] == "view"
 
         print("PASS test_needs_user_decision_manifest")

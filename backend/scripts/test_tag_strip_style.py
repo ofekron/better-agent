@@ -35,17 +35,21 @@ def main() -> int:
                 "strip_wrapper": True,
                 "bold": True,
                 "font_scale": 1.3,
+                "highlight": {"color": "#ff8c00", "alpha": 0.18},
             }
         ])
 
         out = file_ref_resolver._apply_tag_rules(src)
         assert "<NEEDS_USER_DECISION>" not in out and "</NEEDS_USER_DECISION>" not in out, \
             f"wrapper not stripped: {out!r}"
-        # Bold wraps the inner text; font sentinel wraps the bolded text so
+        # Bold wraps the inner text; style sentinel wraps the bolded text so
         # the frontend can split on the sentinel without breaking the **..**.
         assert "**hi**" in out, f"bold not applied: {out!r}"
-        assert "[[bcsize:1.3]]" in out and "[[/bcsize]]" in out, \
-            f"font sentinel missing: {out!r}"
+        assert "[[bcstyle:" in out and "[[/bcstyle]]" in out, \
+            f"style sentinel missing: {out!r}"
+        assert "s=1.3" in out, f"font-scale attr missing: {out!r}"
+        assert "bg=#ff8c00" in out and "a=0.18" in out, \
+            f"highlight attrs missing: {out!r}"
 
         # Fast path: no '<' -> identity (no regex work).
         plain = "just plain text no tags"

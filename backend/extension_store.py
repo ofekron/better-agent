@@ -811,6 +811,25 @@ _TAG_RULE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _TAG_RULE_CLEAR_ON = {"view"}
 
 
+def _validate_highlight(value: Any, *, prefix: str) -> dict[str, Any]:
+    """`{"color": "#rrggbb", "alpha": 0..1}` — a transparent background tint
+    applied to the tag's inner text. Fail-closed on unknown keys / bad types."""
+    if not isinstance(value, dict):
+        raise ExtensionError(f"{prefix} must be an object")
+    unknown = set(value) - {"color", "alpha"}
+    if unknown:
+        raise ExtensionError(f"{prefix} has unknown keys: {', '.join(sorted(unknown))}")
+    color = value.get("color")
+    if not isinstance(color, str) or not _TAG_RULE_COLOR_RE.fullmatch(color):
+        raise ExtensionError(f"{prefix}.color must match ^#[0-9a-fA-F]{{6}}$")
+    alpha = value.get("alpha", 0.2)
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
+        raise ExtensionError(f"{prefix}.alpha must be a number")
+    if not (0.0 <= float(alpha) <= 1.0):
+        raise ExtensionError(f"{prefix}.alpha must be in [0.0, 1.0]")
+    return {"color": color, "alpha": float(alpha)}
+
+
 def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]:
     """Declarative, auto-reverting render rules an extension applies to
     user-visible assistant text. STRICT, fail-closed validation; rejects
@@ -856,7 +875,7 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
         if style_raw is not None:
             if not isinstance(style_raw, dict):
                 raise ExtensionError(f"{prefix}.style must be an object")
-            unknown = set(style_raw) - {"bold", "font_scale"}
+            unknown = set(style_raw) - {"bold", "font_scale", "highlight"}
             if unknown:
                 raise ExtensionError(f"{prefix}.style has unknown keys: {', '.join(sorted(unknown))}")
             if "bold" in style_raw:
@@ -870,12 +889,15 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
                 if not (1.0 <= float(scale) <= 3.0):
                     raise ExtensionError(f"{prefix}.style.font_scale must be in [1.0, 3.0]")
                 rule["font_scale"] = float(scale)
+            highlight_raw = style_raw.get("highlight")
+            if highlight_raw is not None:
+                rule["highlight"] = _validate_highlight(highlight_raw, prefix=prefix + ".style.highlight")
 
         marker_raw = raw.get("marker")
         if marker_raw is not None:
             if not isinstance(marker_raw, dict):
                 raise ExtensionError(f"{prefix}.marker must be an object")
-            unknown = set(marker_raw) - {"color", "tooltip"}
+            unknown = set(marker_raw) - {"color", "tooltip", "sound"}
             if unknown:
                 raise ExtensionError(f"{prefix}.marker has unknown keys: {', '.join(sorted(unknown))}")
             color = marker_raw.get("color")
@@ -884,7 +906,12 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
             tooltip = marker_raw.get("tooltip")
             if not isinstance(tooltip, str) or len(tooltip) > 80:
                 raise ExtensionError(f"{prefix}.marker.tooltip must be a string of length <= 80")
-            rule["marker"] = {"color": color, "tooltip": tooltip}
+            marker: dict[str, Any] = {"color": color, "tooltip": tooltip}
+            if "sound" in marker_raw:
+                if not isinstance(marker_raw["sound"], bool):
+                    raise ExtensionError(f"{prefix}.marker.sound must be a boolean")
+                marker["sound"] = marker_raw["sound"]
+            rule["marker"] = marker
 
         clear_on = raw.get("clear_on")
         if clear_on is not None:

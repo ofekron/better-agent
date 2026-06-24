@@ -183,13 +183,50 @@ function ContinuationPill({ chainDepth }: { chainDepth: number }) {
   );
 }
 
-// Font-scale sentinel emitted by the backend tag-rule pass
-// (file_ref_resolver). `⁣[[bcsize:SCALE]]…[[/bcsize]]⁣` — ASCII + bracketed
+// Inline-style sentinel emitted by the backend tag-rule pass
+// (file_ref_resolver). `⁣[[bcstyle:ATTRS]]…[[/bcstyle]]⁣` where ATTRS is
+// `key=value` pairs joined by `;` — `s=SCALE` (font scale) and
+// `bg=HEX` + `a=ALPHA` (transparent background highlight). ASCII + bracketed
 // so it round-trips through markdown untouched. Rendered here as a styled
 // inline span (NEVER raw HTML — the markdown pipeline escapes that by
-// design). Scaled segments render their inner markdown in a nested
-// MarkdownPreview wrapped in a font-size span.
-const FONT_SENTINEL_RE = /⁣\[\[bcsize:([\d.]+)\]\]([\s\S]*?)\[\[\/bcsize\]\]⁣/;
+// design). Styled segments render their inner markdown in a nested
+// MarkdownPreview wrapped in a style span.
+const STYLE_SENTINEL_RE = /⁣\[\[bcstyle:([^\]]*)\]\]([\s\S]*?)\[\[\/bcstyle\]\]⁣/;
+const STYLE_SENTINEL_STRIP_RE = /⁣\[\[bcstyle:[^\]]*\]\]|\[\[\/bcstyle\]\]⁣/g;
+
+function parseStyleAttrs(raw: string): { fontSize?: string; background?: string } {
+  const out: { fontSize?: string; background?: string } = {};
+  let bg: string | undefined;
+  let alpha = 0.2;
+  let hasBg = false;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === "s") {
+      const n = Number(v);
+      if (Number.isFinite(n)) out.fontSize = `${Math.min(3, Math.max(1, n))}em`;
+    } else if (k === "bg") {
+      bg = v;
+      hasBg = true;
+    } else if (k === "a") {
+      const n = Number(v);
+      if (Number.isFinite(n)) alpha = Math.min(1, Math.max(0, n));
+    }
+  }
+  if (hasBg && bg) out.background = hexAlphaToRgba(bg, alpha);
+  return out;
+}
+
+function hexAlphaToRgba(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return hex;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 function ScaledMarkdown({
   source,
@@ -207,26 +244,22 @@ function ScaledMarkdown({
       urlTransform={(url) => url}
     />
   );
-  if (!FONT_SENTINEL_RE.test(source)) return md("md", source);
+  if (!STYLE_SENTINEL_RE.test(source)) return md("md", source);
 
   const nodes: ReactNode[] = [];
   let rest = source;
   let i = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const m = rest.match(FONT_SENTINEL_RE);
+    const m = rest.match(STYLE_SENTINEL_RE);
     if (!m || m.index === undefined) {
       if (rest) nodes.push(md(`t${i}`, rest));
       break;
     }
     const before = rest.slice(0, m.index);
     if (before) nodes.push(md(`t${i}`, before));
-    const scaleNum = Number(m[1]);
-    const scale = Number.isFinite(scaleNum)
-      ? Math.min(3, Math.max(1, scaleNum))
-      : 1;
     nodes.push(
-      <span key={`s${i}`} style={{ fontSize: `${scale}em` }} className="bc-font-scaled">
+      <span key={`s${i}`} style={parseStyleAttrs(m[1])} className="bc-font-scaled">
         {md(`si${i}`, m[2])}
       </span>,
     );
@@ -260,7 +293,7 @@ const MessageBox = memo(function MessageBox({
   const renderedText = decodeEscapedUnicodeForDisplay(text);
   if (isEffectivelyEmpty(renderedText)) return null;
   const preview = firstLineSummary(
-    renderedText.replace(/⁣\[\[bcsize:[\d.]+\]\]/g, "").replace(/\[\[\/bcsize\]\]⁣/g, ""),
+    renderedText.replace(STYLE_SENTINEL_STRIP_RE, ""),
   );
   const mdComponents = markdownLinkifyComponents(onFileClick);
   if (!collapsible) {

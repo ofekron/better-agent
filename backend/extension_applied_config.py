@@ -39,6 +39,8 @@ def _tag_rules_from_record(record: dict) -> list[dict]:
             flat["bold"] = True
         if rule.get("font_scale"):
             flat["font_scale"] = rule["font_scale"]
+        if rule.get("highlight"):
+            flat["highlight"] = rule["highlight"]
         if rule.get("marker"):
             flat["marker"] = rule["marker"]
         if rule.get("clear_on"):

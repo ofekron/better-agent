@@ -70,6 +70,7 @@ export type MonitoringState =
 export interface MarkerInfo {
   color: string;
   tooltip: string;
+  sound?: boolean;
 }
 
 export interface SessionMeta {
@@ -406,7 +407,11 @@ class SessionRegistry {
     if (!prev) return; // markers don't materialize a session
     const markers = { ...prev.markers };
     if (d.marker) {
-      markers[d.extension_id] = { color: d.marker.color, tooltip: d.marker.tooltip };
+      markers[d.extension_id] = {
+        color: d.marker.color,
+        tooltip: d.marker.tooltip,
+        ...(d.marker.sound ? { sound: true } : {}),
+      };
     } else {
       delete markers[d.extension_id];
     }

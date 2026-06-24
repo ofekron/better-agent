@@ -32,6 +32,7 @@ import { TokenUsageDisplay } from "./components/TokenUsage";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
+import { useAttentionSound } from "./utils/attentionSound";
 import {
   createFetchProviderConfigSyncClient,
   type ProviderConfigSyncCapabilityPickerOutput,
@@ -598,6 +599,7 @@ function AppMain({
   const sessionActionModalModules = useExtensionFrontendModules("session-action-modal");
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
   const builtinExtensions = useBuiltinExtensionFlags(authStatus);
+  useAttentionSound();
 
   // Responsive layout mode. Width-only (see useViewport docs).
   // When mode !== 'desktop' the sidebar and right-panel become
