@@ -3,8 +3,8 @@ import { eventBus } from "../lib/eventBus";
 
 // A short two-tone "ding" synthesized via the Web Audio API so we ship no
 // audio asset. Played when an extension attention marker that declares
-// `sound: true` lands on a session (e.g. the needs-user-decision extension
-// firing on a turn that needs the user).
+// `sound: true` lands on a session (e.g. the user-attention extension's
+// needs-decision marker firing on a turn that needs the user).
 //
 // Browsers suspend AudioContext until a user gesture; we lazily create +
 // resume it on the first marker. If playback is blocked (no gesture yet,

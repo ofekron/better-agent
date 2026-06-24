@@ -82,7 +82,7 @@ BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = "ofek-dev.prompt-engineer"
 BUILTIN_BROWSER_HARNESS_EXTENSION_ID = "ofek-dev.browser-harness"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
-BUILTIN_NEEDS_USER_DECISION_EXTENSION_ID = "ofek-dev.needs-user-decision"
+BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: frozenset({"project-updates"}),
     BUILTIN_REQUIREMENTS_EXTENSION_ID: frozenset({"get-requirements"}),
@@ -95,6 +95,7 @@ REQUIRED_EXTENSION_IDS = {MARKETPLACE_EXTENSION_ID}
 PUBLIC_EXTENSION_LIST_HIDDEN_IDS = frozenset({MARKETPLACE_EXTENSION_ID})
 _OBSOLETE_EXTENSION_IDS = {
     "better-agent.marketplace": MARKETPLACE_EXTENSION_ID,
+    "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
 }
 _PRIVATE_EXTENSION_PATHS = {
     BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: "extensions/team-orchestration",
@@ -117,7 +118,7 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "extensions/provider-config-sync",
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
-    BUILTIN_NEEDS_USER_DECISION_EXTENSION_ID: "extensions/needs-user-decision",
+    BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
 }
 _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
@@ -137,7 +138,7 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "Browser harness",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
-    BUILTIN_NEEDS_USER_DECISION_EXTENSION_ID: "Needs user decision",
+    BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
     MARKETPLACE_EXTENSION_ID: "Marketplace",
 }
 _DEFAULT_MARKETPLACE_BASE_URL = "https://ofek-dev.com/api/marketplace"

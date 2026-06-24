@@ -1,17 +1,17 @@
 {
   "kind": "better-agent-extension",
-  "id": "ofek-dev.needs-user-decision",
-  "name": "Needs user decision",
-  "version": "0.1.0",
-  "description": "Highlights agent output that needs the user's attention or decision, and marks the session until the user views it.",
+  "id": "ofek-dev.user-attention",
+  "name": "User attention",
+  "version": "0.2.0",
+  "description": "Marks a session for the user's attention: an orange dot when the agent surfaces something needing a decision, and a blue dot when the agent reports all tasks are done. The marker clears when the user views the session.",
   "surfaces": [
     "instructions"
   ],
   "entrypoints": {
     "instructions": [
       {
-        "name": "needs-user-decision",
-        "path": "instructions/needs_user_decision.md",
+        "name": "user-attention",
+        "path": "instructions/user_attention.md",
         "level": "global"
       }
     ],
@@ -34,6 +34,16 @@
             "sound": true
           },
           "clear_on": "view"
+        },
+        {
+          "tag": "ALL_TASKS__DONE",
+          "strip_wrapper": true,
+          "marker": {
+            "color": "#2563eb",
+            "tooltip": "All tasks done",
+            "sound": false
+          },
+          "clear_on": "view"
         }
       ]
     }
@@ -49,7 +59,7 @@
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",
-        "instructions/needs_user_decision.md"
+        "instructions/user_attention.md"
       ],
       "python_modules": []
     }

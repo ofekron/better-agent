@@ -27,7 +27,7 @@ def _record(enabled: bool) -> dict:
     return {
         "enabled": enabled,
         "manifest": {
-            "id": "ofek-dev.needs-user-decision",
+            "id": "ofek-dev.user-attention",
             "entrypoints": {
                 "applied_config": {
                     "tag_rules": [
