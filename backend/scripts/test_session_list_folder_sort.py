@@ -50,7 +50,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [folderized_old, unfiled_new],
-                key=lambda s: app_main._session_list_sort_key(s, folder_view=True),
+                key=lambda s: app_main._session_list_sort_key(s, True, "updated_at"),
                 reverse=True,
             )
         ]
@@ -81,7 +81,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [folderized_old, unfiled_new],
-                key=lambda s: app_main._session_list_sort_key(s, folder_view=False),
+                key=lambda s: app_main._session_list_sort_key(s, False, "updated_at"),
                 reverse=True,
             )
         ]

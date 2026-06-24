@@ -2497,6 +2497,7 @@ async def _auto_delete_expired_sessions() -> None:
 
 def _session_list_sort_key(session: dict, folder_view: bool, sort_by: str) -> tuple:
     inner = (
+        int(session.get("message_count", 0) or 0) == 0,
         bool(session.get("pinned", False)),
         session_store.timestamp_sort_value(session.get(sort_by)),
     )

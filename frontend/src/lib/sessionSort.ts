@@ -22,11 +22,17 @@ export function sessionSortNumeric(session: Session, sortField: string): number 
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** True when a session has no messages yet (a brand-new, empty session). */
+function isEmptySession(session: Session): boolean {
+  return (session.message_count ?? 0) === 0;
+}
+
 /** Order sessions for the sidebar. Mirrors the backend sort key
- * (`_session_list_sort_key` in main.py): pinned first, then the chosen
- * sort field descending, then stable by original index. `sortField`
- * MUST match the backend `sort_by` or local re-sorts silently scramble
- * the backend's ordering on every mutation. */
+ * (`_session_list_sort_key` in main.py): empty (0-message) sessions
+ * first, then pinned, then the chosen sort field descending, then
+ * stable by original index. `sortField` MUST match the backend
+ * `sort_by` or local re-sorts silently scramble the backend's
+ * ordering on every mutation. */
 export function sortSessionsForList(
   sessions: Session[],
   folderView = false,
@@ -41,6 +47,9 @@ export function sortSessionsForList(
           Number(Boolean(a.session.folder_id));
         if (folderDelta !== 0) return folderDelta;
       }
+      const emptyDelta =
+        Number(isEmptySession(b.session)) - Number(isEmptySession(a.session));
+      if (emptyDelta !== 0) return emptyDelta;
       const pinnedDelta =
         Number(Boolean(b.session.pinned)) - Number(Boolean(a.session.pinned));
       if (pinnedDelta !== 0) return pinnedDelta;
