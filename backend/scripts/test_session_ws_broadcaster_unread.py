@@ -222,6 +222,34 @@ def test_allowlist_contains_new_types() -> None:
     print(f"{PASS} allowlist_contains_new_types")
 
 
+def test_marker_set_dispatches_allowlisted_frame() -> None:
+    """Regression: marker_set → broadcast_global('session_marker_changed').
+    Before the fix the type was missing from GLOBAL_EVENT_ALLOWLIST, so
+    broadcast_global raised ValueError inside the fire-and-forget task —
+    the frame was dropped and the exception showed up only as an
+    unretrieved-task log line. With the type allowlisted the frame lands."""
+    sid = _create_session(cwd="/tmp/proj-marker")
+    marker = {"kind": "attention", "label": "needs-review"}
+    calls = _drive(sid, {
+        "kind": "marker_set",
+        "extension_id": "ext-reviews",
+        "marker": marker,
+    })
+    assert calls == [
+        (
+            "session_marker_changed",
+            {
+                "session_id": sid,
+                "extension_id": "ext-reviews",
+                "marker": marker,
+                "cwd": "/tmp/proj-marker",
+                "node_id": "primary",
+            },
+        )
+    ], f"marker frame missing/malformed: {calls}"
+    print(f"{PASS} marker_set_dispatches_allowlisted_frame")
+
+
 def main() -> int:
     try:
         test_running_changed_mapping_visible()
@@ -231,6 +259,7 @@ def main() -> int:
         test_missing_session_returns_safe_default()
         test_todos_snapshot_carries_app_session_id()
         test_allowlist_contains_new_types()
+        test_marker_set_dispatches_allowlisted_frame()
         print("ALL PASSED")
         return 0
     except AssertionError as e:

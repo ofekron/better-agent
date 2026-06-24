@@ -228,7 +228,35 @@ def _run() -> bool:
         ("no stale KNOWN_DYNAMIC_CALLERS entries",
          not dynamic_stale, f"stale: {sorted(dynamic_stale)}"))
 
-    # 4) Specific sanity: the two types added this session are present.
+    # 4) SessionWSBroadcaster.on_change builds `{"type": <literal>}`
+    # payloads that _dispatch fans out via broadcast_global. The
+    # `session_ws_broadcaster.py` _dispatch entry in KNOWN_DYNAMIC_CALLERS
+    # trusts those literals are allowlisted — verify it for real so a new
+    # mapping (e.g. session_marker_changed, message_auto_retry_changed)
+    # can't slip through silently. Only dict-literal `"type":` keys count;
+    # f-strings / comments are ignored.
+    bcast = Path(_BACKEND) / "session_ws_broadcaster.py"
+    bsrc = bcast.read_text()
+    btree = ast.parse(bsrc, filename=str(bcast))
+    bcast_types: set[str] = set()
+    for node in ast.walk(btree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if (
+                    isinstance(k, ast.Constant)
+                    and isinstance(k.value, str)
+                    and k.value == "type"
+                    and isinstance(v, ast.Constant)
+                    and isinstance(v.value, str)
+                ):
+                    bcast_types.add(v.value)
+    bcast_missing = sorted(t for t in bcast_types if t not in ALLOWLIST)
+    results.append(
+        ("every SessionWSBroadcaster `type` literal is allowlisted",
+         not bcast_missing,
+         f"missing: {bcast_missing}"))
+
+    # 5) Specific sanity: the two types added this session are present.
     results.append(
         ("`models_catalog_changed` in allowlist",
          "models_catalog_changed" in ALLOWLIST, "missing"))
@@ -238,6 +266,18 @@ def _run() -> bool:
     results.append(
         ("`session_organization_changed` in allowlist",
          "session_organization_changed" in ALLOWLIST, "missing"))
+    # PATCH /api/user-prefs broadcasts this after every pref write; an
+    # unallowlisted type made the call raise ValueError → 500 on every
+    # folder-view / sort / tabs toggle.
+    results.append(
+        ("`user_prefs_changed` in allowlist",
+         "user_prefs_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`session_marker_changed` in allowlist",
+         "session_marker_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_auto_retry_changed` in allowlist",
+         "message_auto_retry_changed" in ALLOWLIST, "missing"))
 
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:

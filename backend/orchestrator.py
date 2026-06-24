@@ -2974,6 +2974,12 @@ class Coordinator:
         # `{session_id, msg_id, retry_at}` for live convergence.
         # Transient — must NOT be persisted to events.jsonl.
         "message_retrying_changed",
+        # Per-message auto-retry toggle (orchestrator arms/disarms the
+        # background auto-retry on a transiently-failed message).
+        # Authoritative state lives on the assistant message; payload
+        # `{session_id, msg_id, value}` for live cross-tab convergence.
+        # Was missing → broadcast_global raised ValueError on every toggle.
+        "message_auto_retry_changed",
         # Backend startup-task lifecycle. Authoritative state lives in
         # `startup_task_registry` (in-memory); REST snapshot via
         # `GET /api/startup_tasks` for first paint, WS push for live
@@ -3019,6 +3025,14 @@ class Coordinator:
         # ack via POST /api/sessions/{id}/seen. Payload:
         # `{session_id, unread_count, last_seen_event_uid?}`.
         "session_unread_changed",
+        # Per-session extension attention marker (set/cleared by an
+        # extension via session_manager.set_marker / clear_marker).
+        # Authoritative state lives in session_store's marker projection;
+        # payload `{session_id, extension_id, marker|None, cwd, node_id}`
+        # so the tabs bar / sidebar render the marker dot across tabs
+        # without a refetch. Was missing → broadcast_global raised
+        # ValueError on every marker_set/marker_cleared.
+        "session_marker_changed",
         # Multi-machine: worker-node connect/disconnect transitions.
         # Authoritative state lives in `node_store` (in-memory registry);
         # REST snapshot via GET /api/nodes for first paint, this WS push
