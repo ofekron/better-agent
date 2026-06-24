@@ -12,7 +12,7 @@ import { MessageGroup } from "./MessageBubble";
 import { buildThreadColorMap } from "../threadColors";
 import { useOpProgress } from "../progress/store";
 import { useViewport } from "../hooks/useViewport";
-import { mergeMessagesSorted } from "../utils/mergeMessages";
+import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
 
@@ -131,11 +131,8 @@ export function ForkSplitView({
   const sharedHasOlder = !!(tree.pagination?.has_older);
   const sharedLoadOlderFn = useCallback(async () => {
     if (!onLoadOlderMessages) return;
-    const oldest = sharedMessages.reduce(
-      (min, m) => { const s = m.seq ?? 0; return s < min ? s : min; },
-      Infinity,
-    );
-    if (isFinite(oldest) && oldest > 0) {
+    const oldest = oldestNumericSeq(sharedMessages);
+    if (oldest !== null && oldest > 0) {
       await onLoadOlderMessages(tree.id, oldest);
     }
   }, [onLoadOlderMessages, tree.id, sharedMessages]);
@@ -345,14 +342,8 @@ export function ForkSplitView({
               onLoadOlderMessages={
                 onLoadOlderMessages
                   ? async () => {
-                      const oldest = msgs.reduce(
-                        (min, m) => {
-                          const s = m.seq ?? 0;
-                          return s < min ? s : min;
-                        },
-                        Infinity,
-                      );
-                      if (isFinite(oldest) && oldest > 0) {
+                      const oldest = oldestNumericSeq(msgs);
+                      if (oldest !== null && oldest > 0) {
                         await onLoadOlderMessages(pane.id, oldest);
                       }
                     }

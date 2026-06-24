@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
-import { mergeMessagesSorted } from "../utils/mergeMessages";
+import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
@@ -433,11 +433,8 @@ export function Chat({
 
   const loadOlderFn = useCallback(async () => {
     if (!onLoadOlderMessages || !session?.id) return;
-    const oldest = messages.reduce(
-      (min, m) => { const s = m.seq ?? 0; return s < min ? s : min; },
-      Infinity,
-    );
-    if (isFinite(oldest) && oldest > 0) {
+    const oldest = oldestNumericSeq(messages);
+    if (oldest !== null && oldest > 0) {
       await onLoadOlderMessages(session.id, oldest);
     }
   }, [onLoadOlderMessages, session?.id, messages]);
