@@ -3,9 +3,14 @@
 Two shared utilities back every search surface:
 
   - `run_search_sessions_session(query, *, propose=..., propose_target=,
-     propose_msg_id=, timeout=, max_results=)` — the local indexed/grep
-     ranking engine. When `propose` is set it also stamps the picker on the
-     target in the same call.
+     propose_msg_id=, timeout=, max_results=)` — the ranking engine. Runs
+     on a provisioned session: one hidden base session is primed once (its
+     provision prompt loads the `search-in-sessions` skill + the JSON-answer
+     contract), then **forked** per call so each fork only carries the real
+     query and greps the session transcripts. The base persists across
+     searches; the per-call forks are ephemeral. When `propose` is set it
+     also stamps the picker on the target in the same call (a "batch"
+     search+propose).
 
   - `propose_sessions(list, reasoning, *, target_sid, msg_id)` — stamps the
      session picker (`ask_result`) on a target session's assistant message
@@ -13,8 +18,9 @@ Two shared utilities back every search surface:
 
 Consumers:
   - **Ask flow** (`search()`): appends a user turn on the stable Ask
-    session, runs local search, appends an assistant turn carrying the
-    reasoning + picker. The Ask session runs NO claude turns itself.
+    session, runs a worker, appends an assistant turn carrying the
+    reasoning + picker. The Ask session runs NO claude turns itself — it is
+    a UI container; the only LLM is the ephemeral worker.
   - **session-bridge `search_sessions` MCP tool**: wraps
     `run_search_sessions_session` (agent's `propose` flag → batch vs split).
   - **`propose_sessions` MCP tool**: wraps the stamp utility (target =
@@ -192,20 +198,6 @@ def validate_proposed(session_ids: list) -> list[str]:
     return out
 
 
-def _run_local_search_sync(query: str, max_results: int) -> list[str]:
-    session_store._ensure_summary_index(blocking=True)
-    ranked = session_store.grep_sessions(
-        query,
-        max_results,
-        session_store.DEFAULT_SEARCH_FIELDS,
-    )
-    return validate_proposed([
-        item.get("session_id")
-        for item in ranked
-        if isinstance(item, dict)
-    ])[:max_results]
-
-
 def _resolve_proposed_project(path: str) -> tuple[str, str]:
     """Validate the model's `proposed_project_path` against `project_store`
     AND return the matching project's `node_id`. Returns `("", "")` when
@@ -307,11 +299,17 @@ def _apply_proposed_sessions(
     return result, event
 
 
-# ── Session search ranking engine ────────────────────────────────────────
+# ── Search worker (the shared ranking engine) ───────────────────────────
 #
-# `run_search_sessions_session` uses the local summary index plus grep-backed
-# transcript search. Both the Ask flow and the session-bridge `search_sessions`
-# MCP tool call this path, so search stays independent of provider runners.
+# `run_search_sessions_session` runs on a provisioned session via the
+# generic `provisioning` framework: one hidden base session is primed once
+# (its provision prompt loads the `search-in-sessions` skill + the JSON-
+# answer contract, then responds "ready"), and each call forks that base so
+# the fork only carries the real query and greps the transcripts. The base
+# persists across searches; forks are ephemeral. Both the Ask flow and the
+# session-bridge `search_sessions` MCP tool call it. The base is excluded
+# from session-bridge tools in the runner (recursion prevention); the
+# provision prompt also forbids calling any session-finding tool.
 
 # Worker cwd = the BC repo root so claude loads `.claude/skills/search-in-
 # sessions`. The worker only greps an absolute path, so the cwd is inert
@@ -395,25 +393,44 @@ async def run_search_sessions_session(
     max_results: int = _DEFAULT_MAX_RESULTS,
     include_worker_events: bool = False,
 ) -> dict:
-    """Run the local indexed/grep session search and return ranked ids."""
+    """Run one provisioned search-worker fork and return the ranked ids.
+
+    Forks the provisioned search base (primed once with the grep methodology
+    + JSON-answer contract) so the fork only carries the raw query, greps
+    the transcripts, and answers in JSON. The base persists across calls;
+    the fork is ephemeral. When `propose` is set, also stamps the picker on
+    `propose_target`/`propose_msg_id` in the same call.
+
+    Returns `{session_ids, reasoning, error}`; `error` is one of `None`,
+    `"empty_query"`, `"timeout"`, `"dispatch_failed"`, `"parse_failed"`.
+    """
     if not query or not query.strip():
         return {"session_ids": [], "reasoning": "", "error": "empty_query"}
     query = query.strip()
 
+    ctx = {
+        "sessions_dir": str(ba_home() / "sessions"),
+        "max_results": max_results,
+    }
     try:
-        session_ids = await asyncio.to_thread(
-            _run_local_search_sync,
-            query,
-            max_results,
+        result = await asyncio.wait_for(
+            provisioning.run(SEARCH_SPEC, query, ctx),
+            timeout=timeout,
         )
+    except asyncio.TimeoutError:
+        return {"session_ids": [], "reasoning": "", "error": "timeout"}
     except Exception:
-        logger.exception("run_search_sessions_session: local search failed")
+        logger.exception("run_search_sessions_session: provisioned dispatch failed")
         return {"session_ids": [], "reasoning": "", "error": "dispatch_failed"}
 
-    reasoning = (
-        f"Local session search matched {len(session_ids)} session"
-        f"{'' if len(session_ids) == 1 else 's'} for: {query}"
-    )
+    reported = result.value
+    if not isinstance(reported, dict) or reported.get("error"):
+        return {"session_ids": [], "reasoning": "", "error": "parse_failed"}
+
+    session_ids = validate_proposed(reported.get("session_ids") or [])[:max_results]
+    reasoning = reported.get("reasoning", "")
+    if not isinstance(reasoning, str):
+        reasoning = ""
 
     if propose and propose_target and propose_msg_id:
         propose_sessions(
@@ -427,7 +444,7 @@ async def run_search_sessions_session(
         "error": None,
     }
     if include_worker_events:
-        out["_worker_events"] = []
+        out["_worker_events"] = result.dispatch_result.get("events") or []
     return out
 
 

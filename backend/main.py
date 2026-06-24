@@ -1581,6 +1581,7 @@ _SIDEBAR_WORKING_MODE_META_KEYS = {
 
 def _sidebar_session_payload(session: dict) -> dict:
     payload = dict(session)
+    payload["initiated_by"] = _initiated_by(session)
     meta = payload.get("working_mode_meta")
     if isinstance(meta, dict):
         payload["working_mode_meta"] = {
@@ -2512,6 +2513,26 @@ def _split_session_filter(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+# Sessions the user started themselves (typed a prompt) vs ones created by
+# Better Agent's own tooling (native import, extensions, internal forks /
+# sub-sessions / delegations). Derived from existing fields — no migration.
+_TOOL_SOURCE_VALUES = {"import", "extension", "virtual"}
+_TOOL_KIND_VALUES = {"delegate_fork", "sub_session", "adv_sync_fork", "supervisor_worker"}
+
+
+def _initiated_by(session: dict) -> str:
+    """'user' for human-started sessions, 'tool' for Better-Agent-tool-created."""
+    if session.get("virtual") or session.get("extension_id"):
+        return "tool"
+    if session.get("source") in _TOOL_SOURCE_VALUES:
+        return "tool"
+    if session.get("kind") in _TOOL_KIND_VALUES:
+        return "tool"
+    if session.get("caller_agent_session_id"):
+        return "tool"
+    return "user"
+
+
 def _split_session_search_fields(value: str | None) -> set[str]:
     if value is None:
         return set(session_store.DEFAULT_SEARCH_FIELDS)
@@ -2580,6 +2601,7 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "model_ids",
         "modes",
         "sources",
+        "initiated_by",
     }
     unknown = set(body) - allowed
     if unknown:
@@ -2598,6 +2620,7 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "model_ids": _session_filter_list_from_body(body, "model_ids"),
         "modes": _session_filter_list_from_body(body, "modes"),
         "sources": _session_filter_list_from_body(body, "sources"),
+        "initiated_by": _session_filter_list_from_body(body, "initiated_by"),
     }
 
 
@@ -2614,6 +2637,7 @@ def _session_matches_list_filters(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    initiated_by: set[str],
     content_scores: dict[str, int] | None = None,
 ) -> bool:
     if not show_archived and session.get("archived"):
@@ -2633,6 +2657,8 @@ def _session_matches_list_filters(
     if modes and (session.get("orchestration_mode") or "team") not in modes:
         return False
     if sources and (session.get("source") or "web") not in sources:
+        return False
+    if initiated_by and _initiated_by(session) not in initiated_by:
         return False
     if tag_ids:
         manual_tags = {
@@ -2689,6 +2715,7 @@ def _filter_sort_sessions_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    initiated_by: set[str],
     content_scores: dict[str, int],
     sort_by: str,
 ) -> list[dict]:
@@ -2706,6 +2733,7 @@ def _filter_sort_sessions_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            initiated_by=initiated_by,
             content_scores=content_scores,
         )
     ]
@@ -2741,6 +2769,7 @@ def _build_local_sessions_page_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    initiated_by: set[str],
     search_fields: str | None,
     sort_by: str,
 ) -> tuple[list[dict], int]:
@@ -2779,6 +2808,7 @@ def _build_local_sessions_page_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            initiated_by=initiated_by,
             content_scores=content_scores,
             sort_by=sort_by,
         )
@@ -2809,6 +2839,7 @@ async def get_sessions(
     model_ids: str | None = Query(None),
     modes: str | None = Query(None),
     sources: str | None = Query(None),
+    initiated_by: str | None = Query(None),
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
 ):
@@ -2852,6 +2883,7 @@ async def get_sessions(
             "model_ids": _split_session_filter(model_ids),
             "modes": _split_session_filter(modes),
             "sources": _split_session_filter(sources),
+            "initiated_by": _split_session_filter(initiated_by),
             "search_fields": search_fields,
             "sort_by": effective_sort_by,
         }
@@ -8165,8 +8197,9 @@ async def internal_session_bridge_search(
 ):
     _require_builtin_runtime_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
     """Invoked by the session-bridge `search_sessions` MCP tool. Runs the
-    same local indexed/grep ranking engine as the Ask UI and returns ranked
-    sessions. No picker; the agent can call `propose_sessions` separately."""
+    same provisioned search-worker ranking engine as the Ask UI and returns
+    ranked sessions. No picker; the agent can call `propose_sessions`
+    separately."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     query = str(body.get("query") or "").strip()

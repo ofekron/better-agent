@@ -228,7 +228,12 @@ def test_validate_proposed_drops_unknown() -> bool:
     return True
 
 
-def test_run_search_sessions_uses_local_index() -> bool:
+def test_run_search_sessions_uses_provisioned_worker() -> bool:
+    """The ranking engine MUST dispatch the provisioned search worker —
+    not fall back to a local index grep. Mocks `provisioning.run` to return
+    a worker reply carrying one live id, one ghost id, and reasoning, then
+    asserts the ghost is filtered by `validate_proposed`, the worker's
+    reasoning flows through, and the worker was actually invoked."""
     _reset_home()
     session_store.write_session_full(
         {
@@ -241,25 +246,102 @@ def test_run_search_sessions_uses_local_index() -> bool:
         bump_updated_at=False,
     )
 
-    async def _explode(*args, **kwargs):
-        raise AssertionError("provisioned search worker should not run")
+    from provisioning.manager import ProvisionedResult
+
+    calls: list = []
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        calls.append((spec, query, ctx))
+        return ProvisionedResult(
+            text='{"session_ids": ["auth-local", "ghost"], "reasoning": "r"}',
+            value={"session_ids": ["auth-local", "ghost"], "reasoning": "worker reasoning"},
+            config=None,
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={"events": [{"type": "agent_message", "data": {"text": "x"}}]},
+        )
 
     original = session_search.provisioning.run
-    session_search.provisioning.run = _explode
+    session_search.provisioning.run = _fake_run
     try:
         out = asyncio.run(
-            session_search.run_search_sessions_session("Auth", max_results=5)
+            session_search.run_search_sessions_session("Auth", max_results=5, include_worker_events=True)
         )
     finally:
         session_search.provisioning.run = original
 
+    if not calls:
+        print(f"{FAIL} worker: provisioning.run was never called")
+        return False
+    if calls[0][0] is not session_search.SEARCH_SPEC:
+        print(f"{FAIL} worker: wrong spec {calls[0][0]!r}")
+        return False
     if out.get("error") is not None:
-        print(f"{FAIL} local_search: unexpected error {out!r}")
+        print(f"{FAIL} worker: unexpected error {out!r}")
         return False
+    # Ghost id dropped by validate_proposed; worker reasoning preserved.
     if out.get("session_ids") != ["auth-local"]:
-        print(f"{FAIL} local_search: got {out!r}")
+        print(f"{FAIL} worker: got session_ids {out.get('session_ids')!r}")
         return False
-    print(f"{PASS} run_search_sessions_session uses local index")
+    if out.get("reasoning") != "worker reasoning":
+        print(f"{FAIL} worker: reasoning {out.get('reasoning')!r}")
+        return False
+    if out.get("_worker_events") != [{"type": "agent_message", "data": {"text": "x"}}]:
+        print(f"{FAIL} worker: events {out.get('_worker_events')!r}")
+        return False
+    print(f"{PASS} run_search_sessions_session dispatches the provisioned worker")
+    return True
+
+
+def test_run_search_sessions_worker_parse_failed() -> bool:
+    """A worker reply with no usable JSON maps to error=parse_failed."""
+    from provisioning.manager import ProvisionedResult
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        return ProvisionedResult(
+            text="the worker rambled, no json",
+            value={"error": "parse_failed"},
+            config=None,
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={"events": []},
+        )
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session("anything")
+        )
+    finally:
+        session_search.provisioning.run = original
+    if out.get("error") != "parse_failed":
+        print(f"{FAIL} parse_failed: got {out!r}")
+        return False
+    print(f"{PASS} worker parse failure -> error=parse_failed")
+    return True
+
+
+def test_run_search_sessions_worker_timeout() -> bool:
+    """A dispatch timeout maps to error=timeout."""
+    import asyncio as _asyncio
+
+    async def _hang(spec, query, ctx=None, *, model=None):
+        await _asyncio.sleep(60)
+        return None
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _hang
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session("anything", timeout=0.05)
+        )
+    finally:
+        session_search.provisioning.run = original
+    if out.get("error") != "timeout":
+        print(f"{FAIL} timeout: got {out!r}")
+        return False
+    print(f"{PASS} worker timeout -> error=timeout")
     return True
 
 
@@ -380,7 +462,9 @@ def main_run() -> int:
         test_extract_first_user_prompt_shapes,
         test_build_index_filters_hidden_and_archived,
         test_validate_proposed_drops_unknown,
-        test_run_search_sessions_uses_local_index,
+        test_run_search_sessions_uses_provisioned_worker,
+        test_run_search_sessions_worker_parse_failed,
+        test_run_search_sessions_worker_timeout,
         test_empty_query_returns_empty_query_error,
         test_parse_failed_is_not_an_error_bubble,
         test_ask_error_message_mapping,
