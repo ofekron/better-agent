@@ -1581,7 +1581,6 @@ _SIDEBAR_WORKING_MODE_META_KEYS = {
 
 def _sidebar_session_payload(session: dict) -> dict:
     payload = dict(session)
-    payload["initiated_by"] = _initiated_by(session)
     meta = payload.get("working_mode_meta")
     if isinstance(meta, dict):
         payload["working_mode_meta"] = {
@@ -2511,27 +2510,6 @@ def _split_session_filter(value: str | None) -> set[str]:
     if not value:
         return set()
     return {item.strip() for item in value.split(",") if item.strip()}
-
-
-# Sessions the user started themselves (typed a prompt) vs ones created by
-# Better Agent's own tooling (native import, extensions, internal forks /
-# sub-sessions / delegations, adv-sync review). Derived from existing
-# fields — no migration.
-_TOOL_SOURCE_VALUES = {"import", "extension", "virtual"}
-_TOOL_KIND_VALUES = {"delegate_fork", "sub_session", "adv_sync_fork", "supervisor_worker"}
-
-
-def _initiated_by(session: dict) -> str:
-    """'user' for human-started sessions, 'agent' for Better-Agent-tool-created."""
-    if session.get("virtual") or session.get("extension_id"):
-        return "agent"
-    if session.get("source") in _TOOL_SOURCE_VALUES:
-        return "agent"
-    if session.get("kind") in _TOOL_KIND_VALUES:
-        return "agent"
-    if session.get("caller_agent_session_id"):
-        return "agent"
-    return "user"
 
 
 def _split_session_search_fields(value: str | None) -> set[str]:

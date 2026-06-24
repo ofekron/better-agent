@@ -113,8 +113,6 @@ type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
 type SessionSource = "web" | "cli" | "import";
 const SESSION_SOURCES: SessionSource[] = ["web", "cli", "import"];
-type SessionInitiatedBy = "user" | "agent";
-const SESSION_INITIATED_BY: SessionInitiatedBy[] = ["user", "agent"];
 
 type FolderRenderNode = {
   folder: SessionFolder;
@@ -1074,7 +1072,6 @@ export function SessionList({
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [selectedModes, setSelectedModes] = useState<OrchestrationMode[]>([]);
   const [selectedSources, setSelectedSources] = useState<SessionSource[]>([]);
-  const [selectedInitiatedBy, setSelectedInitiatedBy] = useState<SessionInitiatedBy[]>([]);
   const [fileEditModeFilter, setFileEditModeFilter] = useState<SessionFileEditModeFilter>("any");
   const [selectedSearchFields, setSelectedSearchFields] = useState<SessionSearchField[]>(SESSION_SEARCH_FIELDS);
   const [orgError, setOrgError] = useState<string | null>(null);
@@ -1282,11 +1279,6 @@ export function SessionList({
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }, []);
-  const toggleInitiatedByFilter = useCallback((id: SessionInitiatedBy) => {
-    setSelectedInitiatedBy((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
-  }, []);
   const toggleSearchField = useCallback((field: SessionSearchField) => {
     setSelectedSearchFields((prev) =>
       prev.includes(field) ? prev.filter((x) => x !== field) : [...prev, field],
@@ -1300,7 +1292,6 @@ export function SessionList({
     setSelectedModelIds([]);
     setSelectedModes([]);
     setSelectedSources([]);
-    setSelectedInitiatedBy([]);
     setFileEditModeFilter("any");
     setSelectedSearchFields(SESSION_SEARCH_FIELDS);
   }, []);
@@ -1352,16 +1343,6 @@ export function SessionList({
     const valid = new Set(sourceOptions);
     return selectedSources.filter((id) => valid.has(id));
   }, [sourceOptions, selectedSources]);
-  const initiatedByOptions = useMemo(() => {
-    const present = new Set(
-      sessions.map((session) => (session.initiated_by ?? "user") as SessionInitiatedBy),
-    );
-    return SESSION_INITIATED_BY.filter((v) => present.has(v));
-  }, [sessions]);
-  const activeInitiatedBy = useMemo(() => {
-    const valid = new Set(initiatedByOptions);
-    return selectedInitiatedBy.filter((id) => valid.has(id));
-  }, [initiatedByOptions, selectedInitiatedBy]);
   const folderPathById = useMemo(() => buildFolderPathMap(folders), [folders]);
 
   const activeProviderIds = useMemo(() => {
@@ -1386,7 +1367,6 @@ export function SessionList({
     activeModelIds.length > 0 ||
     activeModes.length > 0 ||
     activeSources.length > 0 ||
-    activeInitiatedBy.length > 0 ||
     fileEditModeFilter !== "any";
   const searchQueryActive = Boolean(search.trim());
   const searchStatusLoading = searching && searchQueryActive;
@@ -1406,7 +1386,6 @@ export function SessionList({
       modelIds: activeModelIds,
       modes: activeModes,
       sources: activeSources,
-      initiatedBy: activeInitiatedBy,
       fileEditMode: fileEditModeFilter,
     }),
     [
@@ -1414,7 +1393,6 @@ export function SessionList({
       activeModes,
       activeProviderIds,
       activeSources,
-      activeInitiatedBy,
       aiResult,
       backendProjectPath,
       fileEditModeFilter,
@@ -2030,27 +2008,6 @@ export function SessionList({
                       onClick={() => toggleSourceFilter(src)}
                     >
                       {t(`session.source.${src}`, src)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {initiatedByOptions.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.initiatedByFilter")}</div>
-              <div className="session-tag-filter">
-                {initiatedByOptions.map((kind) => {
-                  const active = selectedInitiatedBy.includes(kind);
-                  return (
-                    <button
-                      key={kind}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => toggleInitiatedByFilter(kind)}
-                    >
-                      {t(`session.initiatedBy.${kind}`, kind)}
                     </button>
                   );
                 })}
