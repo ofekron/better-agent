@@ -1796,251 +1796,6 @@ export function SessionList({
           )}
         </div>
       </div>
-      {orgPanel === "advanced" && (
-        <div className="session-org-bar session-advanced-filter-bar">
-          <div className="session-filter-group">
-            <div className="session-filter-label">{t("session.sortBy")}</div>
-            <div className="session-tag-filter">
-              <button
-                type="button"
-                className={`session-tag-toggle ${(sessionSort ?? "updated_at") === "updated_at" ? "active" : ""}`}
-                aria-pressed={(sessionSort ?? "updated_at") === "updated_at"}
-                onClick={() => void changeSessionSort("updated_at")}
-              >
-                {t("session.sortByModified")}
-              </button>
-              <button
-                type="button"
-                className={`session-tag-toggle ${sessionSort === "last_user_prompt_at" ? "active" : ""}`}
-                aria-pressed={sessionSort === "last_user_prompt_at"}
-                onClick={() => void changeSessionSort("last_user_prompt_at")}
-              >
-                {t("session.sortByUserPrompt")}
-              </button>
-              <button
-                type="button"
-                className={`session-tag-toggle ${sessionSort === "last_opened_at" ? "active" : ""}`}
-                aria-pressed={sessionSort === "last_opened_at"}
-                onClick={() => void changeSessionSort("last_opened_at")}
-              >
-                {t("session.sortByOpened")}
-              </button>
-            </div>
-          </div>
-          <div className="session-filter-group">
-            <div className="session-filter-label">{t("session.showArchived")}</div>
-            <div className="session-tag-filter">
-              <button
-                type="button"
-                className={`session-tag-toggle ${showArchived ? "active" : ""}`}
-                aria-pressed={showArchived}
-                onClick={() => setShowArchived((v) => !v)}
-              >
-                {showArchived ? t("session.hideArchived") : t("session.showArchived")}
-              </button>
-            </div>
-          </div>
-          <div className="session-filter-group">
-            <div className="session-filter-label">{t("session.searchIn")}</div>
-            <div className="session-tag-filter session-search-field-filter">
-              {SESSION_SEARCH_FIELDS_ALL.map((field) => {
-                const active = selectedSearchFields.includes(field);
-                return (
-                  <label key={field} className={`session-search-field-toggle ${active ? "active" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={active}
-                      onChange={() => toggleSearchField(field)}
-                    />
-                    <span>{t(`session.searchField.${field}`)}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-          {folders.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.folder")}</div>
-              <div className="session-tag-filter">
-                <button
-                  type="button"
-                  className={`session-tag-toggle ${selectedFolderId === "" ? "active" : ""}`}
-                  aria-pressed={selectedFolderId === ""}
-                  onClick={() => setSelectedFolderId("")}
-                >
-                  {t("session.allFolders")}
-                </button>
-                {folders.map((folder) => {
-                  const active = selectedFolderId === folder.id;
-                  return (
-                    <button
-                      key={folder.id}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => setSelectedFolderId(active ? "" : folder.id)}
-                    >
-                      {folderPathById.get(folder.id) ?? folder.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {(tags.length > 0 || requirementTagOptions.length > 0) && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.tags")}</div>
-              {tags.length > 0 && (
-                <div className="session-tag-filter">
-                  {tags.map((tag) => {
-                    const active = selectedTagIds.includes(tag.id);
-                    return (
-                      <button
-                        key={tag.id}
-                        type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleTagFilter(tag.id)}
-                      >
-                        {tag.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {requirementTagOptions.length > 0 && (
-                <div className="session-tag-filter session-requirement-filter">
-                  {requirementTagOptions.map((tag) => {
-                    const key = reqTagKey(tag);
-                    const active = selectedReqTagKeys.has(key);
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        className={`role-chip session-requirement-tag session-requirement-tag-${tag.kind} ${active ? "session-requirement-tag-active" : ""}`}
-                        title={`${tag.kind}: ${tag.label}`}
-                        aria-pressed={active}
-                        onClick={() => toggleTagFilter(key)}
-                      >
-                        {tag.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-          {providerOptions.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.providerFilter")}</div>
-              <div className="session-tag-filter">
-                {providerOptions.map((provider) => {
-                  const active = selectedProviderIds.includes(provider.id);
-                  return (
-                    <button
-                      key={provider.id}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => toggleProviderFilter(provider.id)}
-                    >
-                      {provider.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {modelOptions.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.modelFilter")}</div>
-              <div className="session-tag-filter">
-                {modelOptions.map((model) => {
-                  const active = selectedModelIds.includes(model);
-                  return (
-                    <button
-                      key={model}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => toggleModelFilter(model)}
-                    >
-                      {model}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {modeOptions.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.modeFilter")}</div>
-              <div className="session-tag-filter">
-                {modeOptions.map((mode) => {
-                  const active = selectedModes.includes(mode);
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => toggleModeFilter(mode)}
-                    >
-                      {orchestrationLabel(t, mode)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {sourceOptions.length > 0 && (
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.sourceFilter")}</div>
-              <div className="session-tag-filter">
-                {sourceOptions.map((src) => {
-                  const active = selectedSources.includes(src);
-                  return (
-                    <button
-                      key={src}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => toggleSourceFilter(src)}
-                    >
-                      {t(`session.source.${src}`, src)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          <div className="session-filter-group">
-            <div className="session-filter-label">{t("session.fileEditModeFilter")}</div>
-            <div className="session-tag-filter">
-              {SESSION_FILE_EDIT_MODE_FILTERS.map((value) => {
-                const active = fileEditModeFilter === value;
-                return (
-                  <button
-                    key={value}
-                    type="button"
-                    className={`session-tag-toggle ${active ? "active" : ""}`}
-                    aria-pressed={active}
-                    onClick={() => setFileEditModeFilter(value)}
-                  >
-                    {t(`session.fileEditMode.${value}`)}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          {advancedFilterActive && (
-            <button type="button" className="btn-small session-filter-clear" onClick={clearAdvancedFilters}>
-              {t("session.clearFilters")}
-            </button>
-          )}
-          {orgError && <div className="session-org-error">{orgError}</div>}
-        </div>
-      )}
       {(aiResult || aiError || aiLoading || searchStatusLoading) && (
         <div className="ai-search-status">
           {aiLoading && (
@@ -2136,6 +1891,251 @@ export function SessionList({
           setNewFolderDragOver(false);
         }}
       >
+        {orgPanel === "advanced" && (
+          <div className="session-org-bar session-advanced-filter-bar">
+            <div className="session-filter-group">
+              <div className="session-filter-label">{t("session.sortBy")}</div>
+              <div className="session-tag-filter">
+                <button
+                  type="button"
+                  className={`session-tag-toggle ${(sessionSort ?? "updated_at") === "updated_at" ? "active" : ""}`}
+                  aria-pressed={(sessionSort ?? "updated_at") === "updated_at"}
+                  onClick={() => void changeSessionSort("updated_at")}
+                >
+                  {t("session.sortByModified")}
+                </button>
+                <button
+                  type="button"
+                  className={`session-tag-toggle ${sessionSort === "last_user_prompt_at" ? "active" : ""}`}
+                  aria-pressed={sessionSort === "last_user_prompt_at"}
+                  onClick={() => void changeSessionSort("last_user_prompt_at")}
+                >
+                  {t("session.sortByUserPrompt")}
+                </button>
+                <button
+                  type="button"
+                  className={`session-tag-toggle ${sessionSort === "last_opened_at" ? "active" : ""}`}
+                  aria-pressed={sessionSort === "last_opened_at"}
+                  onClick={() => void changeSessionSort("last_opened_at")}
+                >
+                  {t("session.sortByOpened")}
+                </button>
+              </div>
+            </div>
+            <div className="session-filter-group">
+              <div className="session-filter-label">{t("session.showArchived")}</div>
+              <div className="session-tag-filter">
+                <button
+                  type="button"
+                  className={`session-tag-toggle ${showArchived ? "active" : ""}`}
+                  aria-pressed={showArchived}
+                  onClick={() => setShowArchived((v) => !v)}
+                >
+                  {showArchived ? t("session.hideArchived") : t("session.showArchived")}
+                </button>
+              </div>
+            </div>
+            <div className="session-filter-group">
+              <div className="session-filter-label">{t("session.searchIn")}</div>
+              <div className="session-tag-filter session-search-field-filter">
+                {SESSION_SEARCH_FIELDS_ALL.map((field) => {
+                  const active = selectedSearchFields.includes(field);
+                  return (
+                    <label key={field} className={`session-search-field-toggle ${active ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => toggleSearchField(field)}
+                      />
+                      <span>{t(`session.searchField.${field}`)}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            {folders.length > 0 && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.folder")}</div>
+                <div className="session-tag-filter">
+                  <button
+                    type="button"
+                    className={`session-tag-toggle ${selectedFolderId === "" ? "active" : ""}`}
+                    aria-pressed={selectedFolderId === ""}
+                    onClick={() => setSelectedFolderId("")}
+                  >
+                    {t("session.allFolders")}
+                  </button>
+                  {folders.map((folder) => {
+                    const active = selectedFolderId === folder.id;
+                    return (
+                      <button
+                        key={folder.id}
+                        type="button"
+                        className={`session-tag-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => setSelectedFolderId(active ? "" : folder.id)}
+                      >
+                        {folderPathById.get(folder.id) ?? folder.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {(tags.length > 0 || requirementTagOptions.length > 0) && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.tags")}</div>
+                {tags.length > 0 && (
+                  <div className="session-tag-filter">
+                    {tags.map((tag) => {
+                      const active = selectedTagIds.includes(tag.id);
+                      return (
+                        <button
+                          key={tag.id}
+                          type="button"
+                          className={`session-tag-toggle ${active ? "active" : ""}`}
+                          aria-pressed={active}
+                          onClick={() => toggleTagFilter(tag.id)}
+                        >
+                          {tag.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {requirementTagOptions.length > 0 && (
+                  <div className="session-tag-filter session-requirement-filter">
+                    {requirementTagOptions.map((tag) => {
+                      const key = reqTagKey(tag);
+                      const active = selectedReqTagKeys.has(key);
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          className={`role-chip session-requirement-tag session-requirement-tag-${tag.kind} ${active ? "session-requirement-tag-active" : ""}`}
+                          title={`${tag.kind}: ${tag.label}`}
+                          aria-pressed={active}
+                          onClick={() => toggleTagFilter(key)}
+                        >
+                          {tag.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {providerOptions.length > 0 && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.providerFilter")}</div>
+                <div className="session-tag-filter">
+                  {providerOptions.map((provider) => {
+                    const active = selectedProviderIds.includes(provider.id);
+                    return (
+                      <button
+                        key={provider.id}
+                        type="button"
+                        className={`session-tag-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => toggleProviderFilter(provider.id)}
+                      >
+                        {provider.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {modelOptions.length > 0 && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.modelFilter")}</div>
+                <div className="session-tag-filter">
+                  {modelOptions.map((model) => {
+                    const active = selectedModelIds.includes(model);
+                    return (
+                      <button
+                        key={model}
+                        type="button"
+                        className={`session-tag-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => toggleModelFilter(model)}
+                      >
+                        {model}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {modeOptions.length > 0 && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.modeFilter")}</div>
+                <div className="session-tag-filter">
+                  {modeOptions.map((mode) => {
+                    const active = selectedModes.includes(mode);
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={`session-tag-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => toggleModeFilter(mode)}
+                      >
+                        {orchestrationLabel(t, mode)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {sourceOptions.length > 0 && (
+              <div className="session-filter-group">
+                <div className="session-filter-label">{t("session.sourceFilter")}</div>
+                <div className="session-tag-filter">
+                  {sourceOptions.map((src) => {
+                    const active = selectedSources.includes(src);
+                    return (
+                      <button
+                        key={src}
+                        type="button"
+                        className={`session-tag-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => toggleSourceFilter(src)}
+                      >
+                        {t(`session.source.${src}`, src)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            <div className="session-filter-group">
+              <div className="session-filter-label">{t("session.fileEditModeFilter")}</div>
+              <div className="session-tag-filter">
+                {SESSION_FILE_EDIT_MODE_FILTERS.map((value) => {
+                  const active = fileEditModeFilter === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`session-tag-toggle ${active ? "active" : ""}`}
+                      aria-pressed={active}
+                      onClick={() => setFileEditModeFilter(value)}
+                    >
+                      {t(`session.fileEditMode.${value}`)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {advancedFilterActive && (
+              <button type="button" className="btn-small session-filter-clear" onClick={clearAdvancedFilters}>
+                {t("session.clearFilters")}
+              </button>
+            )}
+            {orgError && <div className="session-org-error">{orgError}</div>}
+          </div>
+        )}
         {searching && sessions.length > 0 && (
           <div className="session-list-loading session-list-loading-top">
             <span className="session-list-spinner" aria-hidden="true" />
