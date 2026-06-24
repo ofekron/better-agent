@@ -115,6 +115,47 @@ def _under_projects(cwd: str, project_paths: list[str]) -> bool:
     return False
 
 
+def _ba_managed_native_ids() -> set[str]:
+    """Native session ids Better Agent itself spawned or manages — its own
+    user sessions plus internal agent sessions (delegate forks, sub-sessions,
+    adv-sync review runs, workers, supervisor sessions). These already live
+    in BA (or did), so importing their native transcripts would duplicate
+    agent/internal sessions rather than recover a real user conversation.
+
+    Detected two ways: every BA-spawned provider session has a run dir whose
+    `state.json` records its `session_id`; and current BA session trees
+    reference their provider sid as `agent_session_id`. A native session
+    matching either is BA-managed and skipped at import."""
+    ids: set[str] = set()
+    try:
+        from runs_dir import runs_root
+        root = runs_root()
+        if root.exists():
+            for d in root.iterdir():
+                st = d / "state.json" if d.is_dir() else None
+                if not st or not st.exists():
+                    continue
+                try:
+                    o = json.loads(st.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                sid = o.get("session_id") if isinstance(o, dict) else None
+                if isinstance(sid, str) and sid:
+                    ids.add(sid)
+    except Exception:
+        logger.exception("native_import: runs scan failed")
+    try:
+        import session_store
+        for s in session_store.list_sessions():
+            for k in ("agent_session_id", "supervisor_agent_session_id"):
+                v = s.get(k)
+                if isinstance(v, str) and v:
+                    ids.add(v)
+    except Exception:
+        logger.exception("native_import: session_store scan failed")
+    return ids
+
+
 def enumerate_native_sessions(
     provider_ids: Optional[list[str]] = None,
     project_paths: Optional[list[str]] = None,
@@ -144,6 +185,12 @@ def enumerate_native_sessions(
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
     if project_paths is not None:
         out = [s for s in out if _under_projects(s.cwd, project_paths) and not _is_junk_cwd(s.cwd)]
+    # Always skip native sessions Better Agent itself spawned/manages — they
+    # are agent/internal sessions (or already-in-BA user sessions), not real
+    # external conversations worth importing.
+    managed = _ba_managed_native_ids()
+    if managed:
+        out = [s for s in out if s.native_id not in managed]
     return out
 
 
