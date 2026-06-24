@@ -3,27 +3,7 @@
 Better Agent is source-available for non-commercial use. It is not
 OSI-approved open-source software because commercial rights are reserved.
 
-## GitHub mirror is read-only
-
-The public GitHub repository is a one-way mirror of the maintainer's private
-development branch and is rewritten on each release sync. **Pull requests
-cannot be merged from GitHub** — they would be overwritten by the next sync.
-
-To contribute:
-
-1. **Open a GitHub issue** describing the problem or proposed change.
-2. If you have a fix, attach it to the issue as a patch (`git format-patch`)
-   or include the diff inline. Do not open a pull request.
-3. The maintainer will review, apply on the private branch with attribution,
-   and the change will appear in the next public sync.
-
-For larger features, open an issue first to align on direction before
-preparing a patch.
-
-## Contributor Certificate
-
-By submitting a contribution (via issue patch, diff, or any other channel), you
-confirm that:
+By submitting a contribution, you confirm that:
 
 1. you have the right to submit it;
 2. your contribution can be distributed under the Better Agent license in
@@ -33,8 +13,9 @@ confirm that:
 4. your contribution does not grant trademark, commercial-use, hosted-service,
    or marketplace rights.
 
-Include a Developer Certificate of Origin sign-off line in your patch or
-issue comment:
+This project uses Developer Certificate of Origin sign-off for outside
+contributions unless a future counsel-reviewed CLA replaces it. Every commit in
+a merge request must include:
 
 ```text
 Signed-off-by: Name <email@example.com>

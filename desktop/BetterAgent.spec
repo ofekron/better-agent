@@ -102,7 +102,7 @@ if sys.platform == "darwin":
         coll,
         name="Better Agent.app",
         icon=None,
-        bundle_identifier="com.betterclaude.app",
+        bundle_identifier="com.betteragent.app",
         info_plist={
             "CFBundleName": "Better Agent",
             "CFBundleDisplayName": "Better Agent",

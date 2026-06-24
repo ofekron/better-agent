@@ -1,4 +1,4 @@
-package com.betterclaude.app;
+package com.betteragent.app;
 
 import android.content.Intent;
 import android.net.Uri;

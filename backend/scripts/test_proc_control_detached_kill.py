@@ -13,8 +13,8 @@ import signal
 import subprocess
 import sys
 import time
-
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from proc_control import process_control
 

@@ -1,6 +1,6 @@
 import { registerPlugin } from "@capacitor/core";
 
-// Native counterpart: ApkUpdaterPlugin.java (com.betterclaude.app).
+// Native counterpart: ApkUpdaterPlugin.java (com.betteragent.app).
 // Downloads an APK from the backend (carrying the bearer token the auth
 // gate requires) and hands it to Android's package installer.
 interface ApkUpdaterPlugin {

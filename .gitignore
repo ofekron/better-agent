@@ -11,6 +11,9 @@ dist/
 *.log
 
 # Generated local build inputs / test artifacts
+# APKs embed this machine's backend IP at build time (detect-ips.mjs),
+# so they are machine-specific and must never be committed.
+*.apk
 frontend/src/serverCandidates.generated.ts
 frontend/releases/
 marketing/better-agent/downloads/
@@ -43,12 +46,14 @@ test-results/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
 
-# --- Public release exclusions (managed by sync-public-release.sh) ---
+# Internal agent instructions — not for public release
 /AGENTS.md
 /CLAUDE.md
 /GEMINI.md
 /CLAUDE.md.bc-sync-backup.sha256
 /GEMINI.md.bc-sync-backup.sha256
+
+# Local dev environment / personal agent config — not for public release
 /.venv
 /.agents/
 /.claude/
@@ -56,6 +61,8 @@ test-results/
 /.githooks/
 /marketing/
 /skills-lock.json
+
+# Internal planning / release-ops docs
 /main.py
 /PUBLICATION_CHECKLIST.md
 /PROMPT_remove_persistent_runner.md

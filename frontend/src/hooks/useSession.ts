@@ -76,6 +76,7 @@ export type SessionListFilters = {
   modelIds?: string[];
   modes?: string[];
   sources?: string[];
+  initiatedBy?: string[];
   sortBy?: string;
 };
 
@@ -103,23 +104,8 @@ function sameSessionListFilters(
     sameStringList(a.modelIds, b.modelIds) &&
     sameStringList(a.modes, b.modes) &&
     sameStringList(a.sources, b.sources) &&
+    sameStringList(a.initiatedBy, b.initiatedBy) &&
     (a.sortBy ?? "") === (b.sortBy ?? "")
-  );
-}
-
-function hasActiveSessionListFilters(filters: SessionListFilters): boolean {
-  return (
-    Boolean(filters.projectPath) ||
-    Boolean(filters.search?.trim()) ||
-    Boolean(filters.showArchived) ||
-    (filters.fileEditMode ?? "any") !== "any" ||
-    Boolean(filters.folderId) ||
-    Boolean(filters.folderView) ||
-    Boolean(filters.tagIds?.length) ||
-    Boolean(filters.providerIds?.length) ||
-    Boolean(filters.modelIds?.length) ||
-    Boolean(filters.modes?.length) ||
-    Boolean(filters.sources?.length)
   );
 }
 
@@ -684,6 +670,7 @@ export function useSession(authStatus?: string) {
         if (filters.modelIds?.length) params.set("model_ids", filters.modelIds.join(","));
         if (filters.modes?.length) params.set("modes", filters.modes.join(","));
         if (filters.sources?.length) params.set("sources", filters.sources.join(","));
+        if (filters.initiatedBy?.length) params.set("initiated_by", filters.initiatedBy.join(","));
         if (filters.sortBy) params.set("sort_by", filters.sortBy);
         const res = await fetch(`${API}/api/sessions?${params}`, {
           credentials: "include",
@@ -791,23 +778,19 @@ export function useSession(authStatus?: string) {
         }
         const session = await res.json();
         const filters = sessionListFiltersRef.current;
-        if (hasActiveSessionListFilters(filters)) {
-          void fetchSessions(filters);
-        } else {
-          // Dedup: the backend's `session_created` WS broadcast can land
-          // on this same tab before this POST `await` resolves, in which
-          // case `appendSessionIfNew` already inserted it. Without this
-          // check the sidebar shows the new session twice.
-          setSessions((prev) =>
-            sortSessionsForList(
-              prev.some((s) => s.id === session.id)
-                ? prev.map((s) => (s.id === session.id ? session : s))
-                : [session, ...prev],
-              filters.folderView ?? false,
-              filters.sortBy ?? "updated_at",
-            ),
-          );
-        }
+        // Dedup: the backend's `session_created` WS broadcast can land
+        // on this same tab before this POST `await` resolves, in which
+        // case `appendSessionIfNew` already inserted it. Without this
+        // check the sidebar shows the new session twice.
+        setSessions((prev) =>
+          sortSessionsForList(
+            prev.some((s) => s.id === session.id)
+              ? prev.map((s) => (s.id === session.id ? session : s))
+              : [session, ...prev],
+            filters.folderView ?? false,
+            filters.sortBy ?? "updated_at",
+          ),
+        );
         lastEventSeqBySessionRef.current = {
           ...lastEventSeqBySessionRef.current,
           [session.id]: 0,
@@ -1946,10 +1929,6 @@ export function useSession(authStatus?: string) {
   const appendSessionIfNew = useCallback((session: Session) => {
     if (!isSidebarVisibleSession(session)) return;
     const filters = sessionListFiltersRef.current;
-    if (hasActiveSessionListFilters(filters)) {
-      void fetchSessions(filters);
-      return;
-    }
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
       return sortSessionsForList(
@@ -1958,7 +1937,7 @@ export function useSession(authStatus?: string) {
         filters.sortBy ?? "updated_at",
       );
     });
-  }, [fetchSessions]);
+  }, []);
 
   /** Drop a session by id (from a WS `session_deleted` event). Mirrors
    * the optimistic removal in `deleteSession`, but driven by the WS

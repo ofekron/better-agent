@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
-  appId: "com.betterclaude.app",
+  appId: "com.betteragent.app",
   appName: "Better Agent",
   webDir: "dist",
   // The WebView loads local files at http://localhost/ for the lifetime

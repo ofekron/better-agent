@@ -6,13 +6,13 @@ import UniformTypeIdentifiers
 /// shared App Group container, records their file URLs in the App
 /// Group's UserDefaults (the format `SendIntentPlugin` reads in the
 /// host app's AppDelegate), then re-opens the host app via the
-/// `betterclaude://` scheme.
+/// `betteragent://` scheme.
 ///
-/// App Group `group.com.betterclaude.app` must be enabled on BOTH this
+/// App Group `group.com.betteragent.app` must be enabled on BOTH this
 /// extension target and the main app target.
 class ShareViewController: UIViewController {
-    private let appGroup = "group.com.betterclaude.app"
-    private let urlScheme = "betterclaude"
+    private let appGroup = "group.com.betteragent.app"
+    private let urlScheme = "betteragent"
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)

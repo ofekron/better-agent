@@ -7,10 +7,10 @@ def bcVersionCode = (project.hasProperty('bcVersionCode') ? project.bcVersionCod
 def bcVersionName = project.hasProperty('bcVersionName') ? project.bcVersionName : '1.0'
 
 android {
-    namespace = "com.betterclaude.app"
+    namespace = "com.betteragent.app"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.betterclaude.app"
+        applicationId "com.betteragent.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode bcVersionCode

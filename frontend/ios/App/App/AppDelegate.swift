@@ -37,11 +37,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Called when the app was launched with a url. The Share
         // Extension (see ShareExtension/) writes shared image(s) into the
         // shared App Group container and re-opens the host app via the
-        // `betterclaude://` scheme. Hydrate the send-intent ShareStore
+        // `betteragent://` scheme. Hydrate the send-intent ShareStore
         // from the App Group so SendIntent.checkSendIntentReceived() can
         // return them, then fire the JS `sendIntentReceived` event.
-        if url.scheme == "betterclaude" {
-            let appGroup = "group.com.betterclaude.app"
+        if url.scheme == "betteragent" {
+            let appGroup = "group.com.betteragent.app"
             let store = ShareStore.store
             store.shareItems.removeAll()
             if let prefs = UserDefaults(suiteName: appGroup),

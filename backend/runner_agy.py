@@ -647,6 +647,63 @@ def _extract_subagent_conversation_events(
     return events
 
 
+def extract_main_conversation_events(
+    db_path: Path, parent_uuid: str = "root",
+) -> list[dict[str, Any]]:
+    """Extract the MAIN thread of an agy conversation DB as top-level
+    Claude-shaped events (user prompts + assistant text + tool_use /
+    tool_result), for native-session import.
+
+    `_agy_worker_events` only reconstructs the subagent fan-out (the main
+    text arrives via the live stream during a run). This is the offline
+    counterpart: it walks the same `steps` table and reuses the same
+    decoding helpers so a native conversation imports with real
+    user-prompt turn boundaries and inline tool calls.
+    """
+    events: list[dict[str, Any]] = []
+    last_tool_id = ""
+    for step in _read_agy_steps(db_path):
+        if step.get("step_type") == 14:
+            for text in step["strings"]:
+                if len(text) >= 12 and re.search(r"\s", text):
+                    events.append(_agent_message(
+                        role="user",
+                        content=[{"type": "text", "text": text}],
+                        parent_uuid=parent_uuid,
+                    ))
+            continue
+        strings = step["strings"]
+        payload = step.get("json") or {}
+        tool_id, tool_name = "", ""
+        if payload and strings:
+            tokens = _leading_tokens(strings[0])
+            if len(tokens) > 1 and _valid_tool_name(tokens[1]):
+                tool_id, tool_name = tokens[0], tokens[1]
+            elif len(strings) > 1 and _valid_tool_name(strings[1]):
+                tool_id, tool_name = strings[0], strings[1]
+        if tool_id and tool_name:
+            last_tool_id = tool_id
+            events.append(_tool_use_event(
+                tool_id=tool_id, name=tool_name, input_data=payload,
+                parent_uuid=parent_uuid,
+            ))
+            continue
+        text = _meaningful_text(strings)
+        if not text:
+            continue
+        if step.get("step_type") in {7, 8, 9, 23, 101, 127, 132} and last_tool_id:
+            events.append(_tool_result_event(
+                tool_id=last_tool_id, content=text, parent_uuid=parent_uuid,
+            ))
+        else:
+            events.append(_agent_message(
+                role="assistant",
+                content=[{"type": "text", "text": text}],
+                parent_uuid=parent_uuid,
+            ))
+    return events
+
+
 def _agy_worker_events(
     *,
     agy_home: Path,
