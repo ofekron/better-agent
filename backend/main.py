@@ -4263,10 +4263,7 @@ async def reopen_fork(session_id: str):
 async def internal_supervisor_default_prompt(_body: dict | None = Body(default=None)):
     _require_builtin_runtime_extension(extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID)
     from orchs.supervisor._verdict import DEFAULT_SUPERVISOR_CUSTOM_PROMPT
-    return {
-        "prompt": DEFAULT_SUPERVISOR_CUSTOM_PROMPT,
-        "last_prompt": config_store.get_last_supervisor_prompt(),
-    }
+    return {"prompt": DEFAULT_SUPERVISOR_CUSTOM_PROMPT}
 
 
 @app.post("/api/internal/supervisor/toggle")
@@ -4279,10 +4276,6 @@ async def internal_supervisor_toggle(body: dict = Body(...)):
     custom_prompt = body.get("custom_prompt")
     if custom_prompt is not None and not isinstance(custom_prompt, str):
         return {"success": False, "status": 400, "error": "custom_prompt must be a string"}
-    # Remember the prompt the user entered so the next enable (in any session)
-    # pre-fills with it instead of the system default.
-    if enabled and isinstance(custom_prompt, str) and custom_prompt.strip():
-        await asyncio.to_thread(config_store.set_last_supervisor_prompt, custom_prompt)
     session = await asyncio.to_thread(
         session_manager.set_supervisor_enabled,
         session_id,

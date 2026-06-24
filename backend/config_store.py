@@ -402,7 +402,6 @@ def _load_state() -> dict:
                 raw.get("disabled_builtin_extensions")
             ),
             "internal_llm": _normalize_internal_llm(raw.get("internal_llm")),
-            "last_supervisor_prompt": str(raw.get("last_supervisor_prompt") or ""),
         }
     # Old flat schema → migrate, persist, then drop the legacy keychain
     # slot. Order matters: save first so a crash during _delete_legacy_api_key
@@ -454,7 +453,6 @@ def _save_state(state: dict) -> None:
             state.get("disabled_builtin_extensions")
         ),
         "internal_llm": _normalize_internal_llm(state.get("internal_llm")),
-        "last_supervisor_prompt": str(state.get("last_supervisor_prompt") or ""),
     })
 
 
@@ -482,21 +480,6 @@ def set_delegate_task_policy(policy: str) -> str:
     state["delegate_task_policy"] = normalized
     _save_state(state)
     return normalized
-
-
-def get_last_supervisor_prompt() -> str:
-    """Last custom prompt the user entered when enabling supervisor.
-    Global (cross-session) default used to pre-fill the supervisor prompt
-    modal on the next enable. Empty string until the user sets one."""
-    return str(_load_state().get("last_supervisor_prompt") or "")
-
-
-def set_last_supervisor_prompt(prompt: str) -> str:
-    value = str(prompt or "")
-    state = _load_state()
-    state["last_supervisor_prompt"] = value
-    _save_state(state)
-    return value
 
 
 # ----------------------------------------------------------------------------
