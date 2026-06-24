@@ -113,8 +113,8 @@ type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
 type SessionSource = "web" | "cli" | "import";
 const SESSION_SOURCES: SessionSource[] = ["web", "cli", "import"];
-type SessionInitiatedBy = "user" | "tool";
-const SESSION_INITIATED_BY: SessionInitiatedBy[] = ["user", "tool"];
+type SessionInitiatedBy = "user" | "agent";
+const SESSION_INITIATED_BY: SessionInitiatedBy[] = ["user", "agent"];
 
 type FolderRenderNode = {
   folder: SessionFolder;

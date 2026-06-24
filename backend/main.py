@@ -2515,21 +2515,22 @@ def _split_session_filter(value: str | None) -> set[str]:
 
 # Sessions the user started themselves (typed a prompt) vs ones created by
 # Better Agent's own tooling (native import, extensions, internal forks /
-# sub-sessions / delegations). Derived from existing fields — no migration.
+# sub-sessions / delegations, adv-sync review). Derived from existing
+# fields — no migration.
 _TOOL_SOURCE_VALUES = {"import", "extension", "virtual"}
 _TOOL_KIND_VALUES = {"delegate_fork", "sub_session", "adv_sync_fork", "supervisor_worker"}
 
 
 def _initiated_by(session: dict) -> str:
-    """'user' for human-started sessions, 'tool' for Better-Agent-tool-created."""
+    """'user' for human-started sessions, 'agent' for Better-Agent-tool-created."""
     if session.get("virtual") or session.get("extension_id"):
-        return "tool"
+        return "agent"
     if session.get("source") in _TOOL_SOURCE_VALUES:
-        return "tool"
+        return "agent"
     if session.get("kind") in _TOOL_KIND_VALUES:
-        return "tool"
+        return "agent"
     if session.get("caller_agent_session_id"):
-        return "tool"
+        return "agent"
     return "user"
 
 
