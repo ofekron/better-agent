@@ -568,11 +568,23 @@ def _strip_protobuf_artifacts(text: str) -> str:
     """Clean the protobuf-ish wrappers agy puts around model prose.
 
     A type-15 assistant string carries a trailing "2(bot-<uuid>)" bot-identifier
-    suffix that _meaningful_text rejects (its "bot-" guard). The leading
-    protobuf field-marker byte is already stripped by _strings_from_blob's
-    printable-ASCII filter, so here we only drop the trailing bot suffix."""
+    suffix that _meaningful_text rejects (its "bot-" guard). The blob is often
+    truncated before the closing ")" and the uuid may be partial, so the suffix
+    match is tolerant. _strings_from_blob's printable-ASCII filter leaves a
+    single leading protobuf field-marker char on prose (e.g. "II am waiting" ->
+    the first "I" is a marker); strip one leading duplicate when the rest reads
+    as a sentence."""
     text = text.strip()
-    text = re.sub(r"\d?\(bot-[0-9a-fA-F-]+\)$", "", text)
+    # Strip the bot-identifier wherever it appears (the blob often continues
+    # past the uuid, so anchoring to end-of-string misses it).
+    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]+\)?", "", text)
+    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]*$", "", text)
+    text = re.sub(r"^\d", "", text, count=1)
+    # Drop a single leading field-marker char duplicated onto sentence start
+    # ("II am" -> "I am", "## He" -> "# He" is left alone — only collapse an
+    # immediate repeat of the first char).
+    if len(text) >= 3 and text[0] == text[1] and text[2] == " ":
+        text = text[1:]
     return text.strip()
 
 
@@ -607,49 +619,54 @@ class _ParentMainState:
         if _step_is_message_line(step):
             return []
         payload = step.get("json") or {}
-        if payload and "Subagents" in payload:
-            return []
-        tool_id, tool_name, input_data = _classify_parent_tool(step)
-        if tool_id and tool_name:
-            sig = _tool_signature(tool_name, payload)
-            if sig in self._seen_tools:
-                return []
-            self._seen_tools.add(sig)
-            self._last_tool_id = tool_id
-            return [_tool_use_event(
-                tool_id=tool_id, name=tool_name, input_data=input_data,
-                parent_uuid=self.parent_uuid,
-            )]
+        is_subagent_delegation = bool(payload and "Subagents" in payload)
         # agy wraps type-15 assistant prose in protobuf field markers and a
-        # trailing "2(bot-<uuid>)" suffix. _meaningful_text rejects strings
+        # "2(bot-<uuid>)" identifier. _meaningful_text rejects strings
         # containing "bot-", so strip the artifacts first or the turn is lost.
         cleaned = [_strip_protobuf_artifacts(s) for s in step["strings"]]
         text = _meaningful_text(cleaned)
-        if not text or text in self._prompt_texts:
-            return []
-        if step.get("step_type") in {7, 8, 9, 23, 101} and self._last_tool_id:
-            return [_tool_result_event(
-                tool_id=self._last_tool_id, content=text,
-                parent_uuid=self.parent_uuid,
-            )]
-        return [_agent_message(
-            role="assistant",
-            content=[{"type": "text", "text": text}],
-            parent_uuid=self.parent_uuid,
-        )]
+        if text and text in self._prompt_texts:
+            text = None
+        # A step can carry BOTH an assistant text turn and a tool call (like a
+        # Claude text+tool_use turn). Emit text first, then the tool, so the
+        # prose is not lost when the model narrates before acting.
+        out: list[dict[str, Any]] = []
+        if text:
+            if step.get("step_type") in {7, 8, 9, 23, 101} and self._last_tool_id:
+                out.append(_tool_result_event(
+                    tool_id=self._last_tool_id, content=text,
+                    parent_uuid=self.parent_uuid,
+                ))
+            else:
+                out.append(_agent_message(
+                    role="assistant",
+                    content=[{"type": "text", "text": text}],
+                    parent_uuid=self.parent_uuid,
+                ))
+        # Subagent delegations route to their worker panel; do NOT also emit a
+        # main-thread tool_use (single representation, matches Claude delegate).
+        if not is_subagent_delegation:
+            tool_id, tool_name, input_data = _classify_parent_tool(step)
+            if tool_id and tool_name:
+                sig = _tool_signature(tool_name, payload)
+                if sig not in self._seen_tools:
+                    self._seen_tools.add(sig)
+                    self._last_tool_id = tool_id
+                    out.append(_tool_use_event(
+                        tool_id=tool_id, name=tool_name, input_data=input_data,
+                        parent_uuid=self.parent_uuid,
+                    ))
+        return out
 
     def _user_prompt_events(self, step: dict[str, Any]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+        # The parent's user prompt is already persisted as the session's user
+        # message — never re-emit it as a thread event (would duplicate the
+        # user bubble). We only record the prompt texts so a type-23 echo of
+        # the same text is suppressed downstream.
         for text in step["strings"]:
-            if len(text) < 12 or not re.search(r"\s", text):
-                continue
-            self._prompt_texts.add(text)
-            out.append(_agent_message(
-                role="user",
-                content=[{"type": "text", "text": text}],
-                parent_uuid=self.parent_uuid,
-            ))
-        return out
+            if len(text) >= 12 and re.search(r"\s", text):
+                self._prompt_texts.add(text)
+        return []
 
 
 def _extract_parent_main_events(

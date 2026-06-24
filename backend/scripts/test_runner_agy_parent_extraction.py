@@ -157,17 +157,25 @@ def main() -> int:
         main_events = runner_agy._extract_parent_main_events(parent_db, "root")
         msgs = _main_thread_agent_messages(main_events)
 
-        # (a) Text turns are separate ordered agent_message events with
-        #     protobuf artifacts stripped.
+        # (a) Assistant text turns are separate ordered agent_message events
+        #     with protobuf artifacts stripped. The user prompt (type 14) is
+        #     NOT re-emitted — it is already the session's user message, so
+        #     emitting it would duplicate the user bubble.
         texts = [
             (_content(e).get("text") or "")
             for e in msgs
             if _content(e).get("type") == "text"
         ]
-        if len(msgs) >= 2 and msgs[0]["data"]["type"] == "user" and texts:
-            print(f"{PASS}  user prompt + assistant text emitted as separate ordered events")
+        user_msgs = [
+            e for e in msgs
+            if e["data"]["type"] == "user" and _content(e).get("type") == "text"
+        ]
+        if texts and not user_msgs and msgs[0]["data"]["type"] == "assistant":
+            print(f"{PASS}  assistant text emitted as separate ordered events, "
+                  f"user prompt not duplicated")
         else:
-            print(f"{FAIL}  expected user prompt then assistant text; got {len(msgs)} msgs")
+            print(f"{FAIL}  expected assistant text first and NO user-prompt "
+                  f"event; got {len(msgs)} msgs ({len(user_msgs)} user-prompt)")
             failures += 1
 
         assistant_texts = [t for t in texts if "analyze the SDK" in t]
