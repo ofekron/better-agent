@@ -66,8 +66,8 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "agy" | "ollama" | "zai" | "custom";
-type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "ollama" | "zai" | "custom";
+type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
 type SettingsSection =
   | "providers"
   | "language"
@@ -169,6 +169,13 @@ function configDirCopyForKind(kind: string): {
       hintKey: "setup.configDirHintAgy",
     };
   }
+  if (kind === "copilot") {
+    return {
+      labelKey: "setup.configDirLabelCopilot",
+      placeholderKey: "setup.configDirPlaceholderCopilot",
+      hintKey: "setup.configDirHintCopilot",
+    };
+  }
   return {
     labelKey: "setup.configDirLabelClaude",
     placeholderKey: "setup.configDirPlaceholderClaude",
@@ -216,6 +223,20 @@ const TEMPLATES: Template[] = [
       base_url: "",
       config_dir: "$HOME/.gemini/antigravity-cli",
       default_model: "Gemini 3.5 Flash (Medium)",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "copilot",
+    label: "Copilot",
+    blurb: "GitHub Copilot subscription — uses the `copilot` CLI, OAuth via `gh auth login`.",
+    defaults: {
+      name: "Copilot",
+      kind: "copilot",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "gpt-5.2-codex",
       default_reasoning_effort: "",
     },
   },
@@ -1972,6 +1993,7 @@ function WizardTemplates({
   const TEMPLATE_KEYS: Record<TemplateId, { labelKey: string; blurbKey: string }> = {
     claude: { labelKey: "setup.templateClaudeLabel", blurbKey: "setup.templateClaudeBlurb" },
     codex: { labelKey: "setup.templateCodexLabel", blurbKey: "setup.templateCodexBlurb" },
+    copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
     agy: { labelKey: "setup.templateAgyLabel", blurbKey: "setup.templateAgyBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },

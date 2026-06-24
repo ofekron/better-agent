@@ -322,6 +322,9 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     if kind == "agy":
         from provider_agy import fetch_agy_models
         return fetch_agy_models
+    if kind == "copilot":
+        from provider_copilot import fetch_copilot_models
+        return fetch_copilot_models
     return None
 
 
@@ -354,6 +357,9 @@ def _static_cold_start(provider: dict) -> list[str]:
     if kind == "agy":
         from provider_agy import AGY_MODELS
         return list(AGY_MODELS)
+    if kind == "copilot":
+        from provider_copilot import COPILOT_MODELS
+        return list(COPILOT_MODELS)
     if kind == "claude" and provider.get("mode", "subscription") == "subscription":
         return list(_SUBSCRIPTION_ALIASES)
     return []

@@ -79,6 +79,17 @@ INSTALLERS: dict[str, ProviderInstaller] = {
         prerequisite_argv=("npm", "--version"),
     ),
     "agy": _agy_installer(),
+    "copilot": ProviderInstaller(
+        kind="copilot",
+        label="GitHub Copilot CLI",
+        command="copilot",
+        # copilot-cli ships as a Homebrew cask (`brew install copilot-cli`).
+        # `gh copilot` is the alternate managed-download path; both rely on
+        # `gh auth login` for OAuth, done outside the installer.
+        install_argv=("brew", "install", "copilot-cli"),
+        verify_argv=("copilot", "--version"),
+        prerequisite_argv=("brew", "--version"),
+    ),
 }
 
 

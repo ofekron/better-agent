@@ -737,6 +737,9 @@ def _resolve_class(kind: str) -> type[Provider]:
     if kind == "agy":
         from provider_agy import AgyProvider
         return AgyProvider
+    if kind == "copilot":
+        from provider_copilot import CopilotProvider
+        return CopilotProvider
     raise ValueError(f"unknown provider kind: {kind!r}")
 
 
