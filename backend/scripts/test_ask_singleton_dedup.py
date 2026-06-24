@@ -117,9 +117,22 @@ def test_ask_search_acks_user_message_before_worker_finishes(monkeypatch):
     ]
 
 
-def test_ask_search_projects_worker_events_into_virtual_turn(monkeypatch):
+def test_ask_msg_uses_worker_text_but_not_its_transcript(monkeypatch):
+    """The Ask assistant message derives its visible text from the worker's
+    answer, but must NOT graft the worker fork's internal transcript (which
+    carries the inherited provision "ready" priming + every grep tool_use)
+    onto its own `events`. That transcript leaked as noise into the Ask
+    turn; the worker's event log lives in the worker panel/provenance."""
     create_ask_session()
     worker_events = [
+        {
+            "type": "agent_message",
+            "data": {
+                "uuid": "assistant-0",
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "ready"}]},
+            },
+        },
         {
             "type": "agent_message",
             "data": {
@@ -163,8 +176,57 @@ def test_ask_search_projects_worker_events_into_virtual_turn(monkeypatch):
     messages = virtual_session_store.get(session_search.ASK_SINGLETON_ID)["messages"]
     assistant = next(m for m in messages if m.get("role") == "assistant")
     assert assistant["content"] == "matched from worker events"
-    assert assistant["events"] == [worker_events[0]]
+    assert assistant["events"] == []
+    assert "ready" not in (assistant.get("content") or "")
     assert assistant["completed_at"]
+
+
+def test_ask_search_emits_running_indicator(monkeypatch):
+    """The Ask session never enters `_run_state`, so the normal
+    `running_changed` recompute path can't flag the ~40s worker turn. The
+    search must ping `session_running_changed` True on start and False on
+    completion so the UI shows a running badge instead of looking frozen."""
+    create_ask_session()
+    broadcasts: list[tuple[str, dict]] = []
+
+    async def fake_run_search(query: str, **kwargs):
+        return {"session_ids": [], "reasoning": "x", "error": None}
+
+    monkeypatch.setattr(
+        session_search,
+        "run_search_sessions_session",
+        fake_run_search,
+    )
+    monkeypatch.setattr(
+        session_search,
+        "_broadcast_global_later",
+        lambda event_type, data: broadcasts.append((event_type, data)),
+    )
+
+    result = asyncio.run(
+        session_search.search(
+            "running indicator",
+            client_id="ask-client-run",
+            lifecycle_msg_id="life-run",
+        )
+    )
+
+    assert result["error"] is None
+    running = [
+        d["value"]
+        for (event_type, d) in broadcasts
+        if event_type == "session_running_changed"
+    ]
+    assert running == [True, False]
+
+
+def test_ask_assistant_msg_drops_empty_worker_transcript():
+    """No worker events (e.g. dispatch_failed) → empty content falls back to
+    the result reasoning; events still []."""
+    result = {"session_ids": [], "reasoning": "fallback", "error": "dispatch_failed"}
+    msg = session_search._ask_assistant_message_from_worker_result(result)
+    assert msg["events"] == []
+    assert msg["content"] == "fallback"
 
 
 def test_ask_ui_search_sessions_is_pure(monkeypatch):

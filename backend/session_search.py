@@ -488,6 +488,21 @@ async def _broadcast_ask_session_updated() -> None:
         )
 
 
+def _broadcast_ask_running(value: bool) -> None:
+    """Flip the Ask session's running badge so the UI shows the search
+    worker turn in flight (it takes ~30-40s). Wire-only metadata ping —
+    the Ask session never enters `_run_state`, so the normal
+    `running_changed` recompute path can't fire for it; this ping carries
+    the value directly. Outside `msg.events` / `events.jsonl`, like the
+    other Ask metadata broadcasts (convergence invariant does not apply)."""
+    _broadcast_global_later("session_running_changed", {
+        "session_id": ASK_SINGLETON_ID,
+        "value": value,
+        "cwd": str(_REPO_ROOT),
+        "node_id": "primary",
+    })
+
+
 async def ensure_ask_session() -> dict:
     """Lazy-create the stable Ask session — the UI container that
     accumulates search turns. Hidden from the sidebar and from
@@ -615,10 +630,19 @@ def _ask_error_message(error_code: object) -> str:
 
 
 def _ask_assistant_message_from_worker_result(result: dict) -> dict:
-    events = _render_events_from_worker_result(result)
-    content = extract_output_text(strip_synthetic_events(events)) if events else ""
+    worker_events = _render_events_from_worker_result(result)
+    content = (
+        extract_output_text(strip_synthetic_events(worker_events))
+        if worker_events else ""
+    )
     if not content:
         content = str(result.get("reasoning") or "")
+    # The Ask bubble shows only the worker's answer text + the picker — not
+    # the worker fork's internal transcript. That transcript carries the
+    # inherited provision exchange (the "ready" priming reply) plus every
+    # grep tool_use, which leaks as noise into the Ask turn. The worker's
+    # own event log is retained in the worker panel/provenance; it must not
+    # be grafted onto the Ask message's `events`.
     # The Ask turn never renders as a red error bubble: any worker error is
     # surfaced inside the picker (see `_ask_error_message`). The assistant
     # message is always a completed, non-error turn.
@@ -626,7 +650,7 @@ def _ask_assistant_message_from_worker_result(result: dict) -> dict:
         "id": uuid.uuid4().hex,
         "role": "assistant",
         "content": content,
-        "events": events,
+        "events": [],
         "timestamp": datetime.now().isoformat(),
         "isStreaming": False,
         "completed_at": datetime.now().isoformat(),
@@ -678,34 +702,42 @@ async def _ask_search(
         await on_user_message(user_msg)
     await _broadcast_ask_session_updated()
 
-    result = await run_search_sessions_session(
-        query,
-        timeout=timeout,
-        max_results=max_results,
-        include_worker_events=True,
-    )
+    _broadcast_ask_running(True)
+    try:
+        result = await run_search_sessions_session(
+            query,
+            timeout=timeout,
+            max_results=max_results,
+            include_worker_events=True,
+        )
 
-    assistant_msg = _ask_assistant_message_from_worker_result(result)
-    asst_msg_id = assistant_msg["id"]
-    await asyncio.to_thread(
-        virtual_session_store.append_message,
-        ASK_EXTENSION_ID,
-        ASK_SINGLETON_ID,
-        assistant_msg,
-    )
-    # Always stamp the picker — even with no matches or on a worker error —
-    # so the user gets the Create-new / Never-mind actions and any error is
-    # shown inside the picker rather than as a red "Failed" bubble.
-    _, event = await asyncio.to_thread(
-        _apply_proposed_sessions,
-        result.get("session_ids") or [], result.get("reasoning", ""),
-        target_sid=ASK_SINGLETON_ID, msg_id=asst_msg_id,
-        error=_ask_error_message(result.get("error")),
-    )
-    if event is not None:
-        _broadcast_global_later("message_ask_result_changed", event)
-    await _broadcast_ask_session_updated()
-    return {k: v for k, v in result.items() if not k.startswith("_")}
+        assistant_msg = _ask_assistant_message_from_worker_result(result)
+        asst_msg_id = assistant_msg["id"]
+        await asyncio.to_thread(
+            virtual_session_store.append_message,
+            ASK_EXTENSION_ID,
+            ASK_SINGLETON_ID,
+            assistant_msg,
+        )
+        # Always stamp the picker — even with no matches or on a worker error —
+        # so the user gets the Create-new / Never-mind actions and any error is
+        # shown inside the picker rather than as a red "Failed" bubble.
+        _, event = await asyncio.to_thread(
+            _apply_proposed_sessions,
+            result.get("session_ids") or [], result.get("reasoning", ""),
+            target_sid=ASK_SINGLETON_ID, msg_id=asst_msg_id,
+            error=_ask_error_message(result.get("error")),
+        )
+        if event is not None:
+            _broadcast_global_later("message_ask_result_changed", event)
+        await _broadcast_ask_session_updated()
+        return {k: v for k, v in result.items() if not k.startswith("_")}
+    finally:
+        # Latest-wins: a newer search may have cancelled this task and taken
+        # over `_inflight`. Only clear the running badge if this task is still
+        # the active one — otherwise we'd snuff the newer search's indicator.
+        if _inflight is asyncio.current_task():
+            _broadcast_ask_running(False)
 
 
 def set_ask_choice(msg_id: str, chosen_session_id: Optional[str]) -> Optional[dict]:
