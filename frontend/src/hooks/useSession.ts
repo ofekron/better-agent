@@ -75,6 +75,7 @@ export type SessionListFilters = {
   providerIds?: string[];
   modelIds?: string[];
   modes?: string[];
+  sources?: string[];
   sortBy?: string;
 };
 
@@ -101,6 +102,7 @@ function sameSessionListFilters(
     sameStringList(a.providerIds, b.providerIds) &&
     sameStringList(a.modelIds, b.modelIds) &&
     sameStringList(a.modes, b.modes) &&
+    sameStringList(a.sources, b.sources) &&
     (a.sortBy ?? "") === (b.sortBy ?? "")
   );
 }
@@ -116,7 +118,8 @@ function hasActiveSessionListFilters(filters: SessionListFilters): boolean {
     Boolean(filters.tagIds?.length) ||
     Boolean(filters.providerIds?.length) ||
     Boolean(filters.modelIds?.length) ||
-    Boolean(filters.modes?.length)
+    Boolean(filters.modes?.length) ||
+    Boolean(filters.sources?.length)
   );
 }
 
@@ -680,6 +683,7 @@ export function useSession(authStatus?: string) {
         if (filters.providerIds?.length) params.set("provider_ids", filters.providerIds.join(","));
         if (filters.modelIds?.length) params.set("model_ids", filters.modelIds.join(","));
         if (filters.modes?.length) params.set("modes", filters.modes.join(","));
+        if (filters.sources?.length) params.set("sources", filters.sources.join(","));
         if (filters.sortBy) params.set("sort_by", filters.sortBy);
         const res = await fetch(`${API}/api/sessions?${params}`, {
           credentials: "include",

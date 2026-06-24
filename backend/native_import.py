@@ -560,10 +560,10 @@ def _import_session_locked(sess: NativeSession) -> str:
         name=_derive_title(sess, turns),
         cwd=sess.cwd,
         orchestration_mode="native",
-        # session_store only accepts "web"/"cli"; "cli" is the closest
-        # origin for a session imported from a native CLI transcript. The
-        # idempotency registry is the source of truth for "imported".
-        source="cli",
+        # "import" is a first-class source so imported sessions are
+        # distinguishable in advanced search (web / cli / import). The
+        # idempotency registry is the source of truth for "already imported".
+        source="import",
         provider_id=sess.provider_id or None,
     )
     root_id = created["id"]
@@ -769,9 +769,15 @@ def get_status() -> dict:
     return persisted if persisted else JobStatus().to_dict()
 
 
-def start_import(provider_ids: Optional[list[str]] = None) -> dict:
+def start_import(
+    provider_ids: Optional[list[str]] = None,
+    limit: Optional[int] = None,
+) -> dict:
     """Start the background import. Single-flight: a second call while
-    running returns the current status instead of starting a new job."""
+    running returns the current status instead of starting a new job.
+
+    `limit` caps the number of NEW sessions imported (already-imported
+    sessions are still skipped, not counted against the limit)."""
     with _JOB_LOCK:
         global _JOB
         if _JOB is not None and _JOB.status == "running":
@@ -784,7 +790,8 @@ def start_import(provider_ids: Optional[list[str]] = None) -> dict:
         status_ref = _JOB
     _persist_job(status_ref)
     thread = threading.Thread(
-        target=_run_import, args=(status_ref, provider_ids), daemon=True, name="native-import",
+        target=_run_import, args=(status_ref, provider_ids, limit),
+        daemon=True, name="native-import",
     )
     thread.start()
     return status_ref.to_dict()
@@ -797,7 +804,8 @@ def resume_if_interrupted() -> None:
     died mid-import — a live job is held in memory only. Re-running for
     its provider scope is safe: the idempotency registry skips every
     session already imported before the crash, so the resume finishes the
-    remainder without duplicates. Called from backend startup.
+    remainder without duplicates. Called from backend startup. Resume
+    ignores any prior limit (it finishes everything remaining).
     """
     persisted = _load_persisted_job()
     if not persisted or persisted.get("status") != "running":
@@ -807,13 +815,17 @@ def resume_if_interrupted() -> None:
     start_import(provider_ids)
 
 
-def _run_import(status: JobStatus, provider_ids: Optional[list[str]]) -> None:
+def _run_import(
+    status: JobStatus, provider_ids: Optional[list[str]], limit: Optional[int],
+) -> None:
     imported_keys = already_imported_keys()
     sessions = enumerate_native_sessions(provider_ids)
     status.total = len(sessions)
     _persist_job(status)
     try:
         for sess in sessions:
+            if limit is not None and status.imported >= limit:
+                break  # cap reached — stop importing new sessions
             if sess.registry_key in imported_keys:
                 status.skipped += 1
             else:

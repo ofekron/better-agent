@@ -1129,12 +1129,14 @@ async def start_native_import(body: dict):
     """Start a background job that ingests every native CLI session of
     the given providers (all configured providers when `provider_ids` is
     omitted) into Better Agent sessions. Single-flight. Returns current
-    job status."""
+    job status. `limit` caps the number of NEW sessions imported."""
     provider_ids = body.get("provider_ids") if isinstance(body, dict) else None
     if provider_ids is not None and not isinstance(provider_ids, list):
         raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
     import native_import
-    return await asyncio.to_thread(native_import.start_import, provider_ids)
+    return await asyncio.to_thread(
+        native_import.start_import, provider_ids, _parse_native_import_limit(body),
+    )
 
 
 @app.get("/api/native-import/status")
@@ -1172,6 +1174,50 @@ async def native_import_preview(provider_ids: Optional[str] = None):
             native_import.unsupported_providers, ids,
         ),
     }
+
+
+def _parse_native_import_limit(body: dict):
+    raw = body.get("limit") if isinstance(body, dict) else None
+    if raw is None:
+        return None
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+    if limit < 0:
+        raise HTTPException(status_code=400, detail="limit must be >= 0")
+    return limit or None
+
+
+@app.post("/api/internal/native-import")
+async def internal_start_native_import(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Internal-token-gated trigger for the native import. Runs the
+    import INSIDE the backend process, which is the only safe way when
+    the backend is live — a separate process writing session.json races
+    the backend's in-memory cache (it re-persists and clobbers the
+    render tree). Used by the CLI/import scripts."""
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import native_import
+    provider_ids = body.get("provider_ids") if isinstance(body, dict) else None
+    if provider_ids is not None and not isinstance(provider_ids, list):
+        raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
+    return await asyncio.to_thread(
+        native_import.start_import, provider_ids, _parse_native_import_limit(body),
+    )
+
+
+@app.get("/api/internal/native-import/status")
+async def internal_native_import_status(
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import native_import
+    return await asyncio.to_thread(native_import.get_status)
 
 
 @app.get("/api/models")
@@ -2518,6 +2564,7 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "provider_ids",
         "model_ids",
         "modes",
+        "sources",
     }
     unknown = set(body) - allowed
     if unknown:
@@ -2535,6 +2582,7 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "provider_ids": _session_filter_list_from_body(body, "provider_ids"),
         "model_ids": _session_filter_list_from_body(body, "model_ids"),
         "modes": _session_filter_list_from_body(body, "modes"),
+        "sources": _session_filter_list_from_body(body, "sources"),
     }
 
 
@@ -2550,6 +2598,7 @@ def _session_matches_list_filters(
     provider_ids: set[str],
     model_ids: set[str],
     modes: set[str],
+    sources: set[str],
     content_scores: dict[str, int] | None = None,
 ) -> bool:
     if not show_archived and session.get("archived"):
@@ -2567,6 +2616,8 @@ def _session_matches_list_filters(
     if model_ids and (session.get("model") or "") not in model_ids:
         return False
     if modes and (session.get("orchestration_mode") or "team") not in modes:
+        return False
+    if sources and (session.get("source") or "web") not in sources:
         return False
     if tag_ids:
         manual_tags = {
@@ -2622,6 +2673,7 @@ def _filter_sort_sessions_for_list(
     provider_ids: set[str],
     model_ids: set[str],
     modes: set[str],
+    sources: set[str],
     content_scores: dict[str, int],
     sort_by: str,
 ) -> list[dict]:
@@ -2638,6 +2690,7 @@ def _filter_sort_sessions_for_list(
             provider_ids=provider_ids,
             model_ids=model_ids,
             modes=modes,
+            sources=sources,
             content_scores=content_scores,
         )
     ]
@@ -2672,6 +2725,7 @@ def _build_local_sessions_page_for_list(
     provider_ids: set[str],
     model_ids: set[str],
     modes: set[str],
+    sources: set[str],
     search_fields: str | None,
     sort_by: str,
 ) -> tuple[list[dict], int]:
@@ -2709,6 +2763,7 @@ def _build_local_sessions_page_for_list(
             provider_ids=provider_ids,
             model_ids=model_ids,
             modes=modes,
+            sources=sources,
             content_scores=content_scores,
             sort_by=sort_by,
         )
@@ -2738,6 +2793,7 @@ async def get_sessions(
     provider_ids: str | None = Query(None),
     model_ids: str | None = Query(None),
     modes: str | None = Query(None),
+    sources: str | None = Query(None),
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
 ):
@@ -2780,6 +2836,7 @@ async def get_sessions(
             "provider_ids": _split_session_filter(provider_ids),
             "model_ids": _split_session_filter(model_ids),
             "modes": _split_session_filter(modes),
+            "sources": _split_session_filter(sources),
             "search_fields": search_fields,
             "sort_by": effective_sort_by,
         }

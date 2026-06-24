@@ -858,8 +858,9 @@ export interface Session {
   orchestration_mode?: OrchestrationMode;
   /** Where the session was created. Defaults to "web" for legacy records
    * (backend migrates on read). CLI-created sessions are tagged "cli" so
-   * the sidebar can render a badge. */
-  source?: "web" | "cli" | "extension";
+   * the sidebar can render a badge. "import" = ingested from a native
+   * provider CLI session. */
+  source?: "web" | "cli" | "extension" | "import";
   virtual?: boolean;
   extension_id?: string;
   backing_session_ids?: string[];

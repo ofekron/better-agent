@@ -5070,7 +5070,7 @@ class SessionManager:
             orchestration_mode="native",
             source=(
                 x_snap.get("source")
-                if x_snap.get("source") in ("web", "cli")
+                if x_snap.get("source") in ("web", "cli", "import")
                 else "web"
             ),
             provider_id=x_snap.get("provider_id"),

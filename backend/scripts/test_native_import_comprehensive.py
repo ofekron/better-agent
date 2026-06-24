@@ -481,7 +481,7 @@ def _assert_session_invariants(root_id: str) -> None:
     sess = session_manager.get(root_id)
     check(sess is not None, "session exists")
     check(sess["orchestration_mode"] == "native", "mode native")
-    check(sess["source"] == "cli", "imported sessions tagged cli origin")
+    check(sess["source"] == "import", "imported sessions tagged source=import")
     msgs = sess["messages"]
     check(len(msgs) >= 2, "has messages")
     check(msgs[0]["role"] == "user", "starts with user")

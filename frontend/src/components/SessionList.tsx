@@ -111,6 +111,8 @@ const SESSION_SEARCH_FIELDS_ALL: SessionSearchField[] = ["content", "title", "fi
 const SESSION_SEARCH_FIELDS: SessionSearchField[] = ["title", "first_prompt"];
 type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
+type SessionSource = "web" | "cli" | "import";
+const SESSION_SOURCES: SessionSource[] = ["web", "cli", "import"];
 
 type FolderRenderNode = {
   folder: SessionFolder;
@@ -1069,6 +1071,7 @@ export function SessionList({
   const [selectedProviderIds, setSelectedProviderIds] = useState<string[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [selectedModes, setSelectedModes] = useState<OrchestrationMode[]>([]);
+  const [selectedSources, setSelectedSources] = useState<SessionSource[]>([]);
   const [fileEditModeFilter, setFileEditModeFilter] = useState<SessionFileEditModeFilter>("any");
   const [selectedSearchFields, setSelectedSearchFields] = useState<SessionSearchField[]>(SESSION_SEARCH_FIELDS);
   const [orgError, setOrgError] = useState<string | null>(null);
@@ -1271,6 +1274,11 @@ export function SessionList({
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }, []);
+  const toggleSourceFilter = useCallback((id: SessionSource) => {
+    setSelectedSources((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }, []);
   const toggleSearchField = useCallback((field: SessionSearchField) => {
     setSelectedSearchFields((prev) =>
       prev.includes(field) ? prev.filter((x) => x !== field) : [...prev, field],
@@ -1283,6 +1291,7 @@ export function SessionList({
     setSelectedProviderIds([]);
     setSelectedModelIds([]);
     setSelectedModes([]);
+    setSelectedSources([]);
     setFileEditModeFilter("any");
     setSelectedSearchFields(SESSION_SEARCH_FIELDS);
   }, []);
@@ -1324,6 +1333,16 @@ export function SessionList({
     const present = new Set(sessions.map((session) => session.orchestration_mode ?? "team"));
     return (["team", "native", "virtual"] as OrchestrationMode[]).filter((mode) => present.has(mode));
   }, [sessions]);
+  const sourceOptions = useMemo(() => {
+    const present = new Set(
+      sessions.map((session) => (session.source ?? "web") as SessionSource),
+    );
+    return SESSION_SOURCES.filter((src) => present.has(src));
+  }, [sessions]);
+  const activeSources = useMemo(() => {
+    const valid = new Set(sourceOptions);
+    return selectedSources.filter((id) => valid.has(id));
+  }, [sourceOptions, selectedSources]);
   const folderPathById = useMemo(() => buildFolderPathMap(folders), [folders]);
 
   const activeProviderIds = useMemo(() => {
@@ -1347,6 +1366,7 @@ export function SessionList({
     activeProviderIds.length > 0 ||
     activeModelIds.length > 0 ||
     activeModes.length > 0 ||
+    activeSources.length > 0 ||
     fileEditModeFilter !== "any";
   const searchQueryActive = Boolean(search.trim());
   const searchStatusLoading = searching && searchQueryActive;
@@ -1365,12 +1385,14 @@ export function SessionList({
       providerIds: activeProviderIds,
       modelIds: activeModelIds,
       modes: activeModes,
+      sources: activeSources,
       fileEditMode: fileEditModeFilter,
     }),
     [
       activeModelIds,
       activeModes,
       activeProviderIds,
+      activeSources,
       aiResult,
       backendProjectPath,
       fileEditModeFilter,
@@ -1965,6 +1987,27 @@ export function SessionList({
                       onClick={() => toggleModeFilter(mode)}
                     >
                       {orchestrationLabel(t, mode)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {sourceOptions.length > 0 && (
+            <div className="session-filter-group">
+              <div className="session-filter-label">{t("session.sourceFilter")}</div>
+              <div className="session-tag-filter">
+                {sourceOptions.map((src) => {
+                  const active = selectedSources.includes(src);
+                  return (
+                    <button
+                      key={src}
+                      type="button"
+                      className={`session-tag-toggle ${active ? "active" : ""}`}
+                      aria-pressed={active}
+                      onClick={() => toggleSourceFilter(src)}
+                    >
+                      {t(`session.source.${src}`, src)}
                     </button>
                   );
                 })}
