@@ -78,6 +78,7 @@ export interface SessionMeta {
   unread_count: number;
   monitoring_state: MonitoringState;
   markers: Record<string, MarkerInfo>;
+  testape_active?: boolean;
 }
 
 export interface ProjectAggregate {
@@ -97,6 +98,7 @@ interface SessionEntry {
   cwd: string;
   node_id: string;
   markers: Record<string, MarkerInfo>;
+  testape_active?: boolean;
 }
 
 /** The one place `is_running` is defined: a session is running iff its
@@ -111,6 +113,7 @@ const EMPTY_SESSION: SessionMeta = {
   unread_count: 0,
   monitoring_state: "stopped",
   markers: EMPTY_MARKERS,
+  testape_active: false,
 };
 const EMPTY_AGGREGATE: ProjectAggregate = {
   running_count: 0,
@@ -126,7 +129,8 @@ type BufferedDelta =
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
   | { type: "session_deleted"; payload: SessionDeletedPayload }
-  | { type: "session_metadata_updated"; payload: SessionMetadataPayload };
+  | { type: "session_metadata_updated"; payload: SessionMetadataPayload }
+  | { type: "testape_session_state"; payload: { session_id: string; active: boolean } };
 
 interface SessionRunningPayload {
   session_id: string;
@@ -236,6 +240,9 @@ class SessionRegistry {
       ["session_metadata_updated", (p) => {
         this.dispatch("session_metadata_updated", p as SessionMetadataPayload);
       }],
+      ["testape_session_state", (p) => {
+        this.dispatch("testape_session_state", p as { session_id: string; active: boolean });
+      }],
     ]);
 
     // Drift recovery: when the tab comes back into focus, re-snapshot.
@@ -313,6 +320,7 @@ class SessionRegistry {
         cwd: s.cwd ?? "",
         node_id: s.node_id || "primary",
         markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
+        testape_active: false,
       });
     }
     this.sessions = nextSessions;
@@ -366,6 +374,8 @@ class SessionRegistry {
         return this.onDeleted(ev.payload);
       case "session_metadata_updated":
         return this.onMetadataUpdated(ev.payload);
+      case "testape_session_state":
+        return this.onTestApeState(ev.payload);
     }
   }
 
@@ -416,6 +426,18 @@ class SessionRegistry {
       delete markers[d.extension_id];
     }
     this.sessions.set(d.session_id, { ...prev, markers });
+    this.version += 1;
+    this.notifySession(d.session_id);
+  }
+
+  private onTestApeState(d: { session_id: string; active: boolean }) {
+    if (!d.session_id) return;
+    const prev = this.sessions.get(d.session_id);
+    if (!prev) return;
+    this.sessions.set(d.session_id, {
+      ...prev,
+      testape_active: d.active,
+    });
     this.version += 1;
     this.notifySession(d.session_id);
   }
@@ -521,6 +543,7 @@ class SessionRegistry {
       cwd: sess.cwd ?? "",
       node_id: sess.node_id || "primary",
       markers: {},
+      testape_active: false,
     };
     this.sessions.set(sess.id, entry);
     this.recomputeAndNotifySession(sess.id, entry.cwd, entry.node_id);
@@ -646,7 +669,8 @@ class SessionRegistry {
       cached &&
       cached.unread_count === e.unread_count &&
       cached.monitoring_state === e.monitoring_state &&
-      cached.markers === e.markers
+      cached.markers === e.markers &&
+      cached.testape_active === e.testape_active
     ) {
       return cached;
     }
@@ -657,6 +681,7 @@ class SessionRegistry {
       unread_count: e.unread_count,
       monitoring_state: e.monitoring_state,
       markers: e.markers,
+      testape_active: !!e.testape_active,
     };
     this.metaCache.set(sid, next);
     return next;

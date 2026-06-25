@@ -89,6 +89,24 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
   });
 
+  it("testape_session_state updates testape_active for the matching sid", () => {
+    const sid = "sess-testape-1";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
+    eventBus.publish("testape_session_state", {
+      session_id: sid,
+      active: true,
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(true);
+    eventBus.publish("testape_session_state", {
+      session_id: sid,
+      active: false,
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
+  });
+
   it("session_unread_changed updates unread_count", () => {
     const sid = "sess-unread-1";
     eventBus.publish("session_created", {
@@ -129,6 +147,8 @@ describe("sessionRegistry — per-session deltas", () => {
       is_running: false,
       unread_count: 0,
       monitoring_state: "stopped",
+      markers: {},
+      testape_active: false,
     });
   });
 

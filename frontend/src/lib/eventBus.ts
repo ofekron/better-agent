@@ -80,6 +80,10 @@ export interface BusEventMap {
     cwd: string;
   };
   extensions_changed: Record<string, unknown>;
+  testape_session_state: {
+    session_id: string;
+    active: boolean;
+  };
   // A session row drag started/ended in the sidebar. Pure transient UI
   // fact — published so extensions (e.g. the agent board) can reveal a
   // drop surface while a session is being dragged. Carries the session id
