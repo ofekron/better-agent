@@ -849,6 +849,12 @@ async def _broadcast_provider_changed():
     )
 
 
+async def _broadcast_install(event_type: str, data: dict) -> None:
+    """Fan-out for streaming provider-CLI installs. provider_setup calls
+    this per stdout/stderr line and on completion."""
+    await coordinator.broadcast_global(event_type, data)
+
+
 async def _record_last_model(provider_id: str | None, model: str | None) -> None:
     """Remember the model the user chose for a provider so pickers can
     pre-choose it on the next provider switch. Broadcasts only on an
@@ -1290,10 +1296,18 @@ async def get_provider_setup_status():
     return {"providers": results}
 
 
+@app.get("/api/provider-setup/installs")
+async def get_provider_setup_installs():
+    """Snapshot of in-memory install runs for first paint; live deltas
+    arrive via `provider_install_progress` / `provider_install_finished`
+    WS events."""
+    return {"runs": provider_setup.get_install_runs()}
+
+
 @app.post("/api/provider-setup/install")
 async def install_provider_setup(payload: ProviderSetupInstallPayload):
     try:
-        return await provider_setup.install_provider_cli(payload.kind)
+        return await provider_setup.start_install(payload.kind, _broadcast_install)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -8064,6 +8064,68 @@ button.run-badge-clickable:focus-visible {
   line-height: 1.35;
 }
 
+.provider-install-terminal {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b0d10;
+  color: #e6edf3;
+}
+
+.provider-install-terminal.failed {
+  border-color: var(--danger);
+}
+
+.provider-install-terminal-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.provider-install-state {
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+}
+
+.provider-install-state.running { color: #58a6ff; }
+.provider-install-state.succeeded { color: #3fb950; }
+.provider-install-state.failed { color: #f85149; }
+
+.provider-install-terminal-body {
+  flex: 1;
+  min-height: 60px;
+  overflow: auto;
+  padding: 6px 8px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: calc(11px * var(--app-font-scale));
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.provider-install-terminal-empty {
+  opacity: 0.6;
+}
+
+.terminal-line.stderr {
+  color: #f85149;
+}
+
+@media (max-width: 720px) {
+  .first-run-provider-grid {
+    grid-template-columns: 1fr;
+  }
+  .provider-install-terminal {
+    max-height: 180px;
+  }
+}
+
 .first-run-next > div {
   display: flex;
   gap: 8px;

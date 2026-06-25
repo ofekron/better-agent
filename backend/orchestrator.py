@@ -2920,6 +2920,12 @@ class Coordinator:
     # ------------------------------------------------------------------
     GLOBAL_EVENT_ALLOWLIST: set[str] = {
         "provider_changed",
+        # Streaming provider-CLI install (Settings → Provider CLI tools).
+        # Authoritative state is provider_setup._INSTALL_RUNS; REST
+        # snapshot at GET /api/provider-setup/installs. Per-line stdout/
+        # stderr deltas (progress) + terminal state (finished).
+        "provider_install_progress",
+        "provider_install_finished",
         "projects_changed",
         "project_mappings_changed",
         "workers_changed",

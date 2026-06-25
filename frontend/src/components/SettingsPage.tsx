@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { Project, Provider, ProvidersState, ReasoningEffort } from "../types";
 import { trackPromise } from "../progress/store";
@@ -12,6 +12,7 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { LanguageSelector } from "./LanguageSelector";
+import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { PasswordManagerSetting } from "./PasswordManagerSetting";
@@ -337,6 +338,31 @@ export function SettingsPage({
     }
   };
 
+  // Streaming provider-CLI installs. Backend owns the run registry; this
+  // is the live projection. Concurrent installs (different kinds) are
+  // allowed — each runs as its own background task.
+  const onInstallFinished = useCallback(() => {
+    void refetchSetupStatus();
+  }, []);
+  const { runs: installRuns, startInstall } = useProviderInstalls(onInstallFinished);
+
+  const installProvider = useCallback(
+    (kind: InstallableProviderKind) => {
+      setError("");
+      trackPromise(`providerSetup:install:${kind}`, async () => {
+        try {
+          await startInstall(kind);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "install failed");
+          throw e;
+        }
+      }).promise.catch(() => {
+        /* error already surfaced via setError */
+      });
+    },
+    [startInstall],
+  );
+
   const refetchPrefs = async () => {
     try {
       const { promise } = trackPromise("userPrefs:firstRun", async () => {
@@ -474,22 +500,8 @@ export function SettingsPage({
             }).promise;
             await refetchRepository();
           })}
-          onInstallProvider={(kind) => runBusyAction(setBusy, setError, "install failed", async () => {
-            const result = await trackPromise(`providerSetup:install:${kind}`, async () => {
-              const r = await fetch(`${API}/api/provider-setup/install`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ kind }),
-              });
-              if (!r.ok) throw new Error(await r.text());
-              return (await r.json()) as ProviderSetupStatus;
-            }).promise;
-            setSetupStatuses((prev) => prev.map((item) => item.kind === result.kind ? result : item));
-            if (!result.installed) {
-              throw new Error(result.install?.stderr || result.install?.stdout || result.verify.stderr || result.verify.stdout || "install failed");
-            }
-            await refetchSetupStatus();
-          })}
+          onInstallProvider={installProvider}
+          installRuns={installRuns}
           onVerifyProviders={() => refetchSetupStatus()}
           onNetworkBindChange={(address) => runBusyAction(setBusy, setError, "network save failed", async () => {
             await trackPromise("userPrefs:networkBind", async () => {
@@ -642,6 +654,7 @@ interface ProvidersListProps {
   onLoadConfigRepo: (remoteUrl: string) => void;
   onSyncConfigRepo: () => void;
   onInstallProvider: (kind: InstallableProviderKind) => void;
+  installRuns: Record<string, InstallRun>;
   onVerifyProviders: () => void;
   onNetworkBindChange: (address: NetworkBindAddress) => void;
 }
@@ -1337,6 +1350,7 @@ function ProvidersList({
   onLoadConfigRepo,
   onSyncConfigRepo,
   onInstallProvider,
+  installRuns,
   onVerifyProviders,
   onNetworkBindChange,
 }: ProvidersListProps) {
@@ -1399,6 +1413,7 @@ function ProvidersList({
           onLoadConfigRepo={onLoadConfigRepo}
           onSyncConfigRepo={onSyncConfigRepo}
           onInstallProvider={onInstallProvider}
+          installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
           onNetworkBindChange={onNetworkBindChange}
         />
@@ -1584,6 +1599,7 @@ function ProvidersSettingsSection({
   onLoadConfigRepo,
   onSyncConfigRepo,
   onInstallProvider,
+  installRuns,
   onVerifyProviders,
   onNetworkBindChange,
   onRefreshApp,
@@ -1617,6 +1633,7 @@ function ProvidersSettingsSection({
           onLoadConfigRepo={onLoadConfigRepo}
           onSyncConfigRepo={onSyncConfigRepo}
           onInstallProvider={onInstallProvider}
+          installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
           onAdd={onAdd}
         />
@@ -1626,6 +1643,7 @@ function ProvidersSettingsSection({
           statuses={setupStatuses}
           busy={busy}
           onInstallProvider={onInstallProvider}
+          installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
         />
       )}
@@ -1695,11 +1713,13 @@ function ProviderCliTools({
   statuses,
   busy,
   onInstallProvider,
+  installRuns,
   onVerifyProviders,
 }: {
   statuses: ProviderSetupStatus[];
   busy: boolean;
   onInstallProvider: (kind: InstallableProviderKind) => void;
+  installRuns: Record<string, InstallRun>;
   onVerifyProviders: () => void;
 }) {
   const { t } = useTranslation();
@@ -1719,8 +1739,45 @@ function ProviderCliTools({
         statuses={statuses}
         busy={busy}
         onInstallProvider={onInstallProvider}
+        installRuns={installRuns}
       />
     </section>
+  );
+}
+
+const TERMINAL_OPEN_STATES = new Set(["running", "succeeded", "failed"]);
+
+function InstallTerminal({ run }: { run: InstallRun }) {
+  const { t } = useTranslation();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const lines = run.lines;
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines.length]);
+  const stateLabel =
+    run.state === "running"
+      ? t("setup.installing")
+      : run.state === "succeeded"
+        ? t("setup.installSucceeded")
+        : t("setup.installFailed");
+  return (
+    <div className={`provider-install-terminal ${run.state}`}>
+      <div className="provider-install-terminal-header">
+        <span className={`provider-install-state ${run.state}`}>{stateLabel}</span>
+      </div>
+      <div className="provider-install-terminal-body" ref={bodyRef}>
+        {lines.length === 0 ? (
+          <span className="provider-install-terminal-empty">{t("setup.installing")}</span>
+        ) : (
+          lines.map((line, i) => (
+            <div key={i} className={`terminal-line ${line.s}`}>
+              {line.t || " "}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1728,37 +1785,46 @@ function ProviderCliToolGrid({
   statuses,
   busy,
   onInstallProvider,
+  installRuns,
 }: {
   statuses: ProviderSetupStatus[];
   busy: boolean;
   onInstallProvider: (kind: InstallableProviderKind) => void;
+  installRuns: Record<string, InstallRun>;
 }) {
   const { t } = useTranslation();
   return (
     <div className="first-run-provider-grid">
-      {statuses.map((item) => (
-        <div key={item.kind} className={`first-run-provider ${item.installed ? "ready" : ""}`}>
-          <div className="first-run-provider-main">
-            <strong>{item.label}</strong>
-            <span>{item.installed ? t("setup.cliInstalled") : t("setup.cliMissing", { command: item.command })}</span>
+      {statuses.map((item) => {
+        const run = installRuns[item.kind];
+        const running = run?.state === "running";
+        const showTerminal = run && TERMINAL_OPEN_STATES.has(run.state);
+        return (
+          <div key={item.kind} className={`first-run-provider ${item.installed ? "ready" : ""}`}>
+            <div className="first-run-provider-main">
+              <strong>{item.label}</strong>
+              <span>{item.installed ? t("setup.cliInstalled") : t("setup.cliMissing", { command: item.command })}</span>
+            </div>
+            <code>{item.install_command.join(" ")}</code>
+            {!item.prerequisite.ok && (
+              <span className="setup-field-hint">{t("setup.prerequisiteMissing", { command: item.prerequisite_command })}</span>
+            )}
+            {showTerminal && <InstallTerminal run={run} />}
+            <button
+              type="button"
+              className={item.installed ? "btn-secondary" : "setup-save-btn"}
+              disabled={running || busy || !item.prerequisite.ok}
+              onClick={() => onInstallProvider(item.kind)}
+            >
+              {running
+                ? t("setup.installing")
+                : item.installed
+                  ? t("setup.updateButton")
+                  : t("setup.installButton")}
+            </button>
           </div>
-          <code>{item.install_command.join(" ")}</code>
-          {!item.prerequisite.ok && (
-            <span className="setup-field-hint">{t("setup.prerequisiteMissing", { command: item.prerequisite_command })}</span>
-          )}
-          {item.install && !item.install.ok && (
-            <span className="setup-error">{item.install.stderr || item.install.stdout}</span>
-          )}
-          <button
-            type="button"
-            className={item.installed ? "btn-secondary" : "setup-save-btn"}
-            disabled={busy || !item.prerequisite.ok}
-            onClick={() => onInstallProvider(item.kind)}
-          >
-            {item.installed ? t("setup.updateButton") : t("setup.installButton")}
-          </button>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1777,6 +1843,7 @@ function FirstRunWizard({
   onLoadConfigRepo,
   onSyncConfigRepo,
   onInstallProvider,
+  installRuns,
   onVerifyProviders,
   onNetworkBindChange,
   onRefreshApp,
@@ -1796,6 +1863,7 @@ function FirstRunWizard({
   onLoadConfigRepo: (remoteUrl: string) => void;
   onSyncConfigRepo: () => void;
   onInstallProvider: (kind: InstallableProviderKind) => void;
+  installRuns: Record<string, InstallRun>;
   onVerifyProviders: () => void;
   onNetworkBindChange: (address: NetworkBindAddress) => void;
   onRefreshApp?: () => void;
@@ -1827,6 +1895,7 @@ function FirstRunWizard({
         statuses={statuses}
         busy={busy}
         onInstallProvider={onInstallProvider}
+        installRuns={installRuns}
       />
       <div className="first-run-step">
         <div className="first-run-step-copy">

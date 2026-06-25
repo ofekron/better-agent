@@ -108,6 +108,12 @@ export type WSEventType =
   // Provider list / active-provider changed — frontend refetches its
   // ModelSelector + open ProvidersModal so all tabs converge.
   | "provider_changed"
+  // Streaming provider-CLI install (Settings → Provider CLI tools).
+  // provider_setup streams installer stdout/stderr line-by-line
+  // (progress) and a terminal state (finished); useProviderInstalls
+  // owns the registry projection.
+  | "provider_install_progress"
+  | "provider_install_finished"
   | "provider_config_sync_changed"
   | "extensions_changed"
   // Per-provider model catalog delta — fired by the daily refresher

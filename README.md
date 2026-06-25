@@ -1,6 +1,6 @@
 # Better Agent
 
-**A local desktop workspace for coding agents.**
+**A local web workspace for coding agents.**
 
 Better Agent brings Claude, Codex, Gemini, and compatible local or API-backed
 providers into one interface built for real coding work: local sessions, visible
