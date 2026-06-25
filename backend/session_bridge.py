@@ -166,6 +166,14 @@ async def _run_turn(
     return {"text": _msg_text(m) if m else "", "turn_id": (m or {}).get("id", "")}
 
 
+async def run_for_extension(target_sid: str, prompt: str, *, source: str) -> dict:
+    """Public entry for a trusted builtin extension to deliver a prompt to an
+    existing session and run its turn (continue mode). Unlike `delegate`, there
+    is no caller turn — the trigger is a direct user action surfaced by the
+    extension. Refuses if the target is busy (continue-mode contract)."""
+    return await _run(target_sid, prompt, "continue", source=source)
+
+
 async def _run(
     target_sid: str,
     prompt: str,
