@@ -312,30 +312,49 @@ echo "Syncing backend deps..."
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
 bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)"
 
-# --- First-time keychain bootstrap (non-interactive) ----------------
-# No prompts: a chosen username/password is friction for a single-user
-# local tool, so first run mints random credentials. Phones don't type
-# them — the login screen shows a one-time QR (backend-minted, see
-# qr_auth.py) to onboard external devices. Override either value via
-# BA_USERNAME / BA_PASSWORD if you want something memorable.
+# --- First-time keychain bootstrap ----------------------------------
+# A cleartext password is NEVER echoed (terminal scrollback, tmux/CI logs
+# would leak a full-access credential). Three modes, none of which print a
+# secret:
+#   - BA_PASSWORD set    → use it silently (headless / scripted).
+#   - interactive TTY    → prompt the operator to choose one.
+#   - no TTY and no env  → mint a random one, do NOT print it; onboard via
+#                          the login-screen QR, or `--reset-auth` to set a
+#                          known password.
+# Override the username via BA_USERNAME (defaults to a random ba-XXXX).
 if ! kc_has username || ! kc_has password_hash || ! kc_has session_secret; then
   echo
-  echo "Better Agent — minting random credentials (non-interactive)."
+  echo "Better Agent — first-time auth setup (credentials live in your OS keychain only)."
   UNAME="${BA_USERNAME:-$("$PY" -c "import secrets; print('ba-'+secrets.token_hex(4))")}"
-  PW="${BA_PASSWORD:-$("$PY" -c "import secrets; print(secrets.token_urlsafe(18))")}"
+  PW=""
+  if [ -n "${BA_PASSWORD:-}" ]; then
+    PW="$BA_PASSWORD"
+    echo "Using credentials from BA_USERNAME / BA_PASSWORD."
+  elif [ -t 0 ]; then
+    read -p "Username [$UNAME]: " _u; [ -n "$_u" ] && UNAME="$_u"
+    while true; do
+      read -s -p "Password: " PW1; echo
+      read -s -p "Confirm:  " PW2; echo
+      if [ -z "$PW1" ]; then echo "Empty password — try again."; continue; fi
+      if [ "$PW1" != "$PW2" ]; then echo "Mismatch — try again."; continue; fi
+      PW="$PW1"; break
+    done
+  else
+    PW="$("$PY" -c "import secrets; print(secrets.token_urlsafe(18))")"
+    echo "No TTY and no BA_PASSWORD — set a RANDOM password (not shown)."
+    echo "Onboard devices via the QR on the login screen, or run ./run.sh --reset-auth to choose one."
+  fi
   # Password reaches python via stdin (NOT argv) so it stays out of `ps`.
   HASH=$(printf '%s' "$PW" | "$PY" -c "import sys, argon2; print(argon2.PasswordHasher().hash(sys.stdin.read()))")
   SECRET=$("$PY" -c "import secrets; print(secrets.token_hex(32))")
   kc_set username "$UNAME"
   kc_set password_hash "$HASH"
   kc_set session_secret "$SECRET"
-  echo "  username: $UNAME"
-  echo "  password: $PW"
-  echo "  (scan the QR on the login screen to sign in a phone — no typing)"
-  unset PW HASH SECRET UNAME
+  unset PW PW1 PW2 _u HASH SECRET
   echo
-  echo "Stored. Starting backend..."
+  echo "Stored for user '$UNAME'. Starting backend..."
   echo
+  unset UNAME
 fi
 
 rm -f "$FLAG"
