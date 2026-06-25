@@ -1039,6 +1039,26 @@ class Coordinator:
         if key and self._active_prompt_client_ids.get(key) == item_id:
             self._active_prompt_client_ids.pop(key, None)
 
+    def try_claim_prompt_client_id(
+        self,
+        app_session_id: str,
+        item_id: str,
+        client_id: object,
+    ) -> Optional[str]:
+        """Atomically claim `(app_session_id, client_id)` for `item_id`.
+
+        Returns the item_id already holding the claim (⇒ this is a
+        duplicate send — caller should echo the in-flight turn and skip)
+        or None after claiming it for `item_id`. No await: atomic on the
+        single-threaded loop, so two concurrent same-client_id sends
+        (offline re-dispatch / reconnect) can't both claim. Closes the
+        TOCTOU between the WS handler's read-only dedup checks and
+        `submit_prompt`, which would otherwise let the second send persist
+        and broadcast a phantom queued bubble before being deduped."""
+        return self._remember_active_prompt_client_id(
+            app_session_id, item_id, client_id,
+        )
+
     def active_prompt_for_client_id(
         self,
         app_session_id: str,
@@ -1085,15 +1105,20 @@ class Coordinator:
             self._prompt_queues[app_session_id] = q
         item_id = params.get("_queued_id") or str(uuid.uuid4())
         params["_queued_id"] = item_id
-        existing_item_id = self._remember_active_prompt_client_id(
-            app_session_id,
-            item_id,
-            params.get("client_id"),
-        )
-        if existing_item_id:
-            if item_id != existing_item_id:
-                session_manager.remove_queued_prompt(app_session_id, item_id)
-            return existing_item_id
+        # The WS handler may have already claimed the client_id for this
+        # item_id via try_claim_prompt_client_id (atomic admission gate).
+        # Re-claiming here would see its own claim and wrongly self-dedup,
+        # so skip it in that case.
+        if not params.pop("_client_id_claimed", False):
+            existing_item_id = self._remember_active_prompt_client_id(
+                app_session_id,
+                item_id,
+                params.get("client_id"),
+            )
+            if existing_item_id:
+                if item_id != existing_item_id:
+                    session_manager.remove_queued_prompt(app_session_id, item_id)
+                return existing_item_id
         q.put_nowait(params)
         # Track queued IDs
         ids = self._queued_ids.setdefault(app_session_id, [])
@@ -2196,6 +2221,11 @@ class Coordinator:
                 cancelled_set = self._cancelled_ids.get(app_session_id, set())
                 if item_id in cancelled_set:
                     cancelled_set.discard(item_id)
+                    # Release the client_id claim — this item is cancelled
+                    # and will never complete, so the turn-end _forget never
+                    # runs. Without this its (session, client_id) claim leaks
+                    # and would block a future genuine re-send.
+                    self._forget_active_prompt_item(item_id)
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
