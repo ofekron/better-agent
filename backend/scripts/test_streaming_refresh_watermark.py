@@ -28,6 +28,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -101,6 +102,8 @@ def test_projection_heads_diverge() -> bool:
 def test_get_session_watermark_is_render_head() -> bool:
     sid, render_head = _fresh_streaming_session()
     tree = asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None))
+    if hasattr(tree, "body"):
+        tree = json.loads(tree.body)
     wm = (tree.get("max_seq_by_sid") or {}).get(sid, 0)
     raw = event_ingester.max_seq_by_sid(sid).get(sid, 0)
     if wm == raw:

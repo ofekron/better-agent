@@ -33,6 +33,9 @@ async def _run() -> bool:
 
     original_file_op = main._file_op
     original_ttl = main._GIT_STATUS_TTL_SECONDS
+    if original_ttl < 15.0:
+        print(f"{FAIL} git-status cache TTL is below frontend poll interval: {original_ttl!r}")
+        return False
     main._file_op = fake_file_op
     main._GIT_STATUS_TTL_SECONDS = 60.0
     main._clear_git_status_cache()
@@ -62,6 +65,30 @@ async def _run() -> bool:
         if len(get_calls) != 2:
             print(f"{FAIL} commit did not invalidate git-status cache: {calls!r}")
             return False
+
+        main._clear_git_status_cache()
+        calls.clear()
+        released.clear()
+        main._GIT_STATUS_TTL_SECONDS = 0.0
+        refresh = asyncio.create_task(main._cached_git_status("primary", "/repo"))
+        await asyncio.sleep(0)
+        released.set()
+        warm = await refresh
+        released.clear()
+        stale = await asyncio.wait_for(
+            main._cached_git_status("primary", "/repo"),
+            timeout=0.1,
+        )
+        if stale != warm:
+            print(f"{FAIL} expired cache did not return stale value: stale={stale!r} warm={warm!r}")
+            return False
+        await asyncio.sleep(0)
+        get_calls = [call for call in calls if call[0] == "get_git_status"]
+        if len(get_calls) != 2:
+            print(f"{FAIL} stale git-status did not start exactly one refresh: {calls!r}")
+            return False
+        released.set()
+        await asyncio.sleep(0)
 
         print(f"{PASS} git-status cache coalesces, reuses, and invalidates")
         return True

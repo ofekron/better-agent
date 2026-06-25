@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { applyTagHighlights, PENDING_TAG_ID } from "../utils/tagHighlights";
-import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
+import { copyToClipboard } from "../utils/clipboard";
+import { useMobileActionSheet, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import Icon from "./Icon";
 
@@ -22,41 +23,6 @@ interface PopupState {
 }
 
 type Phase = "actions" | "comment";
-
-/** Copy text to clipboard with a textarea+execCommand fallback for
- *  insecure contexts (HTTP / non-localhost) where the modern
- *  clipboard API is unavailable. The textarea is kept in the viewport
- *  (top-left, 1×1px, transparent) and explicitly focused so that
- *  iOS Safari and Android WebView accept execCommand("copy"). */
-async function copyToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "0";
-    ta.style.left = "0";
-    ta.style.width = "1px";
-    ta.style.height = "1px";
-    ta.style.padding = "0";
-    ta.style.border = "none";
-    ta.style.outline = "none";
-    ta.style.boxShadow = "none";
-    ta.style.background = "transparent";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try {
-      document.execCommand("copy");
-    } catch {
-      // best effort
-    }
-    document.body.removeChild(ta);
-  }
-}
 
 export function SelectionPopup({ onAdd, onAdvSync }: Props) {
   const { t } = useTranslation();
@@ -169,7 +135,7 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
       if (!messageId) return;
 
       // On mobile, use the action sheet instead of the floating popup.
-      if (isTouch && isMobileViewport()) {
+      if (isTouch && isTouchInteractionViewport()) {
         showMobileSheet(text, messageId);
         return;
       }

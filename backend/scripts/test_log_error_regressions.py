@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import _test_home
@@ -14,6 +17,8 @@ _HERE = Path(__file__).resolve()
 _BACKEND = _HERE.parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import runs_dir as runs_dir_mod  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -61,29 +66,76 @@ def test_session_index_skips_malformed_roots(failures: list[str]) -> None:
     check(session_store._index_loaded is True, "session index loads despite malformed root/fork records", failures)
 
 
-def test_prompt_templates_use_meipass(failures: list[str]) -> None:
-    import prompt_templates
+def test_migrated_root_cache_returns_isolated_trees(failures: list[str]) -> None:
+    import session_store
+    from paths import ba_home
 
+    root = {
+        "_schema_version": session_store.SCHEMA_VERSION,
+        "id": "cache-root",
+        "name": "cache-root",
+        "model": "gpt-5.5",
+        "cwd": "/tmp",
+        "orchestration_mode": "native",
+        "kind": "user",
+        "parent_session_id": None,
+        "forks": [],
+        "messages": [{"id": "m1", "role": "user", "content": "before", "seq": 0}],
+        "next_seq": 1,
+        "created_at": "2026-06-21T00:00:00",
+        "updated_at": "2026-06-21T00:00:00",
+        "source": "cli",
+    }
+    sessions = ba_home() / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "cache-root.json").write_text(json.dumps(root), encoding="utf-8")
+    session_store._migrated_root_cache.clear()
+    first = session_store.get_root_tree("cache-root")
+    if first:
+        first["messages"][0]["content"] = "mutated"
+    second = session_store.get_root_tree("cache-root")
+    check(
+        bool(second) and second["messages"][0]["content"] == "before",
+        "migrated root cache returns isolated trees",
+        failures,
+    )
+
+
+def test_stub_last_events_are_isolated(failures: list[str]) -> None:
+    import session_manager as session_manager_module
+
+    summary_event = {"type": "agent_message", "data": {"content": [{"text": "tail"}]}}
+    copied = session_manager_module._copy_jsonish([summary_event])
+    copied[0]["data"]["content"][0]["text"] = "mutated"
+    check(
+        summary_event["data"]["content"][0]["text"] == "tail",
+        "stub last_events copy is isolated",
+        failures,
+    )
+
+
+def test_prompt_templates_use_meipass(failures: list[str]) -> None:
     root = Path(tempfile.mkdtemp(prefix="bc-test-meipass-"))
-    old_meipass = getattr(sys, "_MEIPASS", None)
     try:
         prompt = root / "prompts" / "demo"
         prompt.mkdir(parents=True)
         (prompt / "system.md").write_text("Hello $name", encoding="utf-8")
-        sys._MEIPASS = str(root)  # type: ignore[attr-defined]
+        script = (
+            "import sys; "
+            f"sys._MEIPASS = {str(root)!r}; "
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r}); "
+            "import prompt_templates; "
+            "print(prompt_templates.render_prompt('demo/system.md', {'name': 'BC'}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True,
+        )
         check(
-            prompt_templates.render_prompt("demo/system.md", {"name": "BC"}) == "Hello BC",
+            completed.stdout.strip() == "Hello BC",
             "prompt templates resolve from PyInstaller extraction root",
             failures,
         )
     finally:
-        if old_meipass is None:
-            try:
-                del sys._MEIPASS  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-        else:
-            sys._MEIPASS = old_meipass  # type: ignore[attr-defined]
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -103,7 +155,8 @@ def test_jsonl_path_positive_cache(failures: list[str]) -> None:
         os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         project = claude_home / "projects" / "encoded"
         project.mkdir(parents=True)
         target = project / "agent-sid.jsonl"
@@ -117,7 +170,8 @@ def test_jsonl_path_positive_cache(failures: list[str]) -> None:
         helpers.Path.glob = old_glob  # type: ignore[method-assign]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -143,7 +197,8 @@ def test_jsonl_path_encoded_cwd_fast_path(failures: list[str]) -> None:
         os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         target_dir = claude_home / "projects" / encode_cwd(str(project_root))
         target_dir.mkdir(parents=True)
         target = target_dir / "agent-sid.jsonl"
@@ -156,7 +211,8 @@ def test_jsonl_path_encoded_cwd_fast_path(failures: list[str]) -> None:
         helpers.Path.glob = old_glob  # type: ignore[method-assign]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -183,7 +239,8 @@ def test_jsonl_read_path_uses_session_provider_config(failures: list[str]) -> No
     try:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         target_dir = claude_home / "projects" / encode_cwd(str(project_root))
         target_dir.mkdir(parents=True)
         target = target_dir / "agent-sid.jsonl"
@@ -205,7 +262,8 @@ def test_jsonl_read_path_uses_session_provider_config(failures: list[str]) -> No
         config_store.get_provider = old_get_provider  # type: ignore[assignment]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         shutil.rmtree(claude_home, ignore_errors=True)
         shutil.rmtree(project_root, ignore_errors=True)
 
@@ -227,7 +285,8 @@ def test_jsonl_path_negative_cache(failures: list[str]) -> None:
         (claude_home / "projects").mkdir(parents=True)
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers.Path.glob = counted_glob  # type: ignore[method-assign]
         first = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
         second = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
@@ -237,7 +296,8 @@ def test_jsonl_path_negative_cache(failures: list[str]) -> None:
         helpers.Path.glob = old_glob  # type: ignore[method-assign]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -262,7 +322,8 @@ def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
         (claude_home / "projects").mkdir(parents=True)
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers.Path.glob = counted_glob  # type: ignore[method-assign]
         first = helpers.compute_jsonl_path("/tmp", "missing-agent-a")
         second = helpers.compute_jsonl_path("/tmp", "missing-agent-b")
@@ -272,7 +333,295 @@ def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
         helpers.Path.glob = old_glob  # type: ignore[method-assign]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
-        helpers._RUN_STATE_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_coalesces_concurrent_provider_index(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-concurrent-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+    calls_lock = threading.Lock()
+
+    def counted_glob(self: Path, pattern: str):
+        with calls_lock:
+            calls["glob"] += 1
+        time.sleep(0.05)
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+
+        results: list[Path | None] = []
+        threads = [
+            threading.Thread(
+                target=lambda sid=sid: results.append(
+                    helpers.compute_jsonl_path("/tmp", sid)
+                )
+            )
+            for sid in ("missing-a", "missing-b", "missing-c", "missing-d")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        check(
+            results == [None, None, None, None],
+            "jsonl helper returns concurrent misses consistently",
+            failures,
+        )
+        check(
+            calls["glob"] == 1,
+            "jsonl helper coalesces concurrent provider index builds",
+            failures,
+        )
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_targets_run_state_by_sid(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-state-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        older = runs / "older"
+        newer = runs / "newer"
+        older.mkdir()
+        newer.mkdir()
+        older_jsonl = older / "session_events.jsonl"
+        newer_jsonl = newer / "session_events.jsonl"
+        older_jsonl.write_text("{}\n", encoding="utf-8")
+        newer_jsonl.write_text("{}\n", encoding="utf-8")
+        (older / "state.json").write_text(
+            json.dumps({"session_id": "agent-sid", "jsonl_path": str(older_jsonl)}),
+            encoding="utf-8",
+        )
+        (newer / "state.json").write_text(
+            json.dumps({"session_id": "agent-sid", "jsonl_path": str(newer_jsonl)}),
+            encoding="utf-8",
+        )
+        os.utime(older / "state.json", (1_700_000_000, 1_700_000_000))
+        os.utime(newer / "state.json", (1_700_000_100, 1_700_000_100))
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+
+        found = helpers.compute_jsonl_path("/tmp", "agent-sid")
+        check(found == newer_jsonl, "jsonl helper targets run-state by sid", failures)
+    finally:
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_uses_run_state_ledger_before_recent_scan(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-ledger-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    original_candidates = runs_dir_mod._recent_state_candidates
+
+    def fail_candidates(*_args, **_kwargs):
+        raise AssertionError("ledger-known sid should not scan recent run dirs")
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        run_dir = runs / "ledger-known"
+        run_dir.mkdir()
+        jsonl = run_dir / "session_events.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+        runs_dir_mod.atomic_write_json(
+            run_dir / "state.json",
+            {"session_id": "ledger-agent", "jsonl_path": str(jsonl)},
+        )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        runs_dir_mod._recent_state_candidates = fail_candidates  # type: ignore[assignment]
+
+        found = helpers.compute_jsonl_path("/tmp", "ledger-agent")
+        check(found == jsonl, "jsonl helper uses run-state ledger before recent scan", failures)
+    finally:
+        runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-cache-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    original_scan = runs_dir_mod._recent_state_scan
+    calls = {"scan": 0}
+
+    def counted_scan(*args, **kwargs):
+        calls["scan"] += 1
+        return original_scan(*args, **kwargs)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for sid in ("agent-a", "agent-b"):
+            run_dir = runs / sid
+            run_dir.mkdir()
+            jsonl = run_dir / "session_events.jsonl"
+            jsonl.write_text("{}\n", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps({"session_id": sid, "jsonl_path": str(jsonl)}),
+                encoding="utf-8",
+            )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        runs_dir_mod._recent_state_scan = counted_scan  # type: ignore[assignment]
+
+        first = helpers.compute_jsonl_path("/tmp", "agent-a")
+        second = helpers.compute_jsonl_path("/tmp", "agent-b")
+        check(first is not None and second is not None, "jsonl helper resolves cached run-state sids", failures)
+        check(calls["scan"] == 1, "jsonl helper reuses recent run-state index", failures)
+    finally:
+        runs_dir_mod._recent_state_scan = original_scan  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-miss-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for idx in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 8):
+            run_dir = runs / f"run-{idx}"
+            run_dir.mkdir()
+            (run_dir / "state.json").write_text(
+                json.dumps({"session_id": f"other-{idx}"}),
+                encoding="utf-8",
+            )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+
+        found = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        check(found is None, "jsonl helper returns missing run-state sid", failures)
+        _, candidates, _index, _root_signature, _pending = next(
+            iter(runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.values()),
+            (0.0, (), {}, (0, 0, 0, 0, 0), ()),
+        )
+        check(
+            len(candidates) == runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT,
+            "jsonl helper bounds run-state miss to recent index",
+            failures,
+        )
+    finally:
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_missing_jsonl_warning_is_throttled(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-warn-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    warnings: list[tuple] = []
+    old_warning = helpers.log.warning
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        helpers._MISSING_JSONL_WARNED_AT.clear()
+        helpers.log.warning = lambda *args, **kwargs: warnings.append(args)  # type: ignore[assignment]
+
+        first = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        helpers._JSONL_PATH_CACHE.clear()
+        second = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+
+        check(first is None and second is None, "jsonl helper returns throttled missing path", failures)
+        check(len(warnings) == 1, "jsonl helper throttles repeated missing-path warnings", failures)
+    finally:
+        helpers.log.warning = old_warning  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        helpers._MISSING_JSONL_WARNED_AT.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -284,12 +633,20 @@ def main() -> int:
     failures: list[str] = []
     try:
         test_session_index_skips_malformed_roots(failures)
+        test_migrated_root_cache_returns_isolated_trees(failures)
+        test_stub_last_events_are_isolated(failures)
         test_prompt_templates_use_meipass(failures)
         test_jsonl_path_positive_cache(failures)
         test_jsonl_path_encoded_cwd_fast_path(failures)
         test_jsonl_read_path_uses_session_provider_config(failures)
         test_jsonl_path_negative_cache(failures)
         test_jsonl_path_indexes_multiple_misses(failures)
+        test_jsonl_path_coalesces_concurrent_provider_index(failures)
+        test_jsonl_path_targets_run_state_by_sid(failures)
+        test_jsonl_path_uses_run_state_ledger_before_recent_scan(failures)
+        test_jsonl_path_reuses_recent_run_state_index(failures)
+        test_jsonl_path_run_state_miss_stays_bounded(failures)
+        test_missing_jsonl_warning_is_throttled(failures)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:

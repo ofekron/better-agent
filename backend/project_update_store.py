@@ -12,19 +12,79 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from paths import ba_home, encode_cwd
+from paths import ba_home
 
 _lock = threading.Lock()
+_counts_loaded = False
+_unseen_counts: dict[str, int] = {}
+_total_unseen_count = 0
+_counts_version = 0
 
 
 def _updates_dir() -> Path:
     return ba_home() / "project_updates"
 
 
-def _project_path(project_id: str) -> Path:
+def _project_path(project_id: str, *, create_dir: bool = True) -> Path:
     d = _updates_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    if create_dir:
+        d.mkdir(parents=True, exist_ok=True)
     return d / f"{project_id}.jsonl"
+
+
+def _read_entries_path_locked(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def _read_entries_locked(project_id: str) -> list[dict]:
+    return _read_entries_path_locked(_project_path(project_id, create_dir=False))
+
+
+def _ensure_counts_locked() -> None:
+    global _counts_loaded, _total_unseen_count
+    if _counts_loaded:
+        return
+    _unseen_counts.clear()
+    total = 0
+    d = _updates_dir()
+    if d.exists():
+        for path in d.glob("*.jsonl"):
+            count = 0
+            for entry in _read_entries_path_locked(path):
+                if not entry.get("seen"):
+                    count += 1
+            if count:
+                _unseen_counts[path.stem] = count
+                total += count
+    _total_unseen_count = total
+    _counts_loaded = True
+
+
+def _set_count_locked(project_id: str, count: int) -> None:
+    global _total_unseen_count, _counts_version
+    previous = _unseen_counts.get(project_id, 0)
+    if count == previous:
+        return
+    if count > 0:
+        _unseen_counts[project_id] = count
+        _total_unseen_count += count - previous
+        _counts_version += 1
+        return
+    _unseen_counts.pop(project_id, None)
+    _total_unseen_count -= previous
+    _counts_version += 1
 
 
 def append(project_id: str, text: str) -> dict:
@@ -37,45 +97,60 @@ def append(project_id: str, text: str) -> dict:
     }
     path = _project_path(project_id)
     with _lock:
+        _ensure_counts_locked()
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+        _set_count_locked(project_id, _unseen_counts.get(project_id, 0) + 1)
     return entry
 
 
 def list_unseen(project_id: str) -> list[dict]:
     """Return all unseen entries for a project."""
-    path = _project_path(project_id)
-    if not path.exists():
-        return []
     with _lock:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not entry.get("seen"):
-            entries.append(entry)
-    return entries
+        return [entry for entry in _read_entries_locked(project_id) if not entry.get("seen")]
 
 
 def unseen_count(project_id: str) -> int:
-    return len(list_unseen(project_id))
+    with _lock:
+        _ensure_counts_locked()
+        return _unseen_counts.get(project_id, 0)
+
+
+def unseen_counts(project_ids: list[str]) -> dict[str, int]:
+    with _lock:
+        _ensure_counts_locked()
+        return {project_id: _unseen_counts.get(project_id, 0) for project_id in project_ids}
+
+
+def peek_unseen_counts(project_ids: list[str]) -> dict[str, int] | None:
+    with _lock:
+        if not _counts_loaded:
+            return None
+        return {project_id: _unseen_counts.get(project_id, 0) for project_id in project_ids}
 
 
 def total_unseen() -> int:
     """Sum of unseen counts across every project that has an update log."""
-    d = _updates_dir()
-    if not d.exists():
-        return 0
-    total = 0
-    for path in d.glob("*.jsonl"):
-        total += unseen_count(path.stem)
-    return total
+    with _lock:
+        _ensure_counts_locked()
+        return _total_unseen_count
+
+
+def warm_counts() -> None:
+    with _lock:
+        _ensure_counts_locked()
+
+
+def peek_total_unseen() -> int | None:
+    with _lock:
+        if not _counts_loaded:
+            return None
+        return _total_unseen_count
+
+
+def version_token() -> int:
+    with _lock:
+        return _counts_version
 
 
 def mark_seen(project_id: str, entry_ids: list[str]) -> int:
@@ -85,17 +160,11 @@ def mark_seen(project_id: str, entry_ids: list[str]) -> int:
         return 0
     ids_set = set(entry_ids)
     with _lock:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        _ensure_counts_locked()
+        entries = _read_entries_locked(project_id)
         updated = []
         count = 0
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for entry in entries:
             if entry.get("id") in ids_set and not entry.get("seen"):
                 entry["seen"] = True
                 count += 1
@@ -103,23 +172,12 @@ def mark_seen(project_id: str, entry_ids: list[str]) -> int:
         with open(path, "w", encoding="utf-8") as f:
             for entry in updated:
                 f.write(json.dumps(entry) + "\n")
+        if count:
+            _set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)
     return count
 
 
 def list_all(project_id: str) -> list[dict]:
     """Return all entries (seen + unseen) for a project."""
-    path = _project_path(project_id)
-    if not path.exists():
-        return []
     with _lock:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return entries
+        return _read_entries_locked(project_id)

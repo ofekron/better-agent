@@ -1,10 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { ForkSplitView } from "../src/components/ForkSplitView";
 import type { Session } from "../src/types";
+
+beforeEach(() => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: 1280,
+  });
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    writable: true,
+    value: 800,
+  });
+});
 
 /** Render a component into a detached container — used for unit tests
  * of ForkSplitView in isolation, without the full App harness. */
@@ -96,6 +109,42 @@ describe("ForkSplitView (isolated)", () => {
     h.unmount();
   });
 
+  it("defaults desktop fork view to focused original pane", async () => {
+    const sharedUser = makeUserMsg({ id: "u1", content: "shared", seq: 0 });
+    const root: Session = {
+      ...makeSession({ id: "root", name: "main" }),
+      messages: [sharedUser],
+      forks: [],
+    };
+    const fork1 = makeFork(root, { id: "fork-1", name: "fork one" });
+    const fork2 = makeFork(root, { id: "fork-2", name: "fork two" });
+    root.forks = [fork1, fork2];
+
+    const h = await renderComponent(
+      <ForkSplitView
+        tree={root}
+        pendingBySession={{}}
+        runStateBySession={{}}
+        focusedSessionId={root.id}
+        onSetFocus={() => {}}
+        onCloseFork={() => {}}
+        onReopenFork={() => {}}
+      />,
+    );
+
+    expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).not.toBeNull();
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(2);
+    expect(
+      h.container
+        .querySelector(`[data-testid="fork-pane"][data-session-id="${root.id}"]`)
+        ?.classList.contains("fork-pane-focus-hidden"),
+    ).toBe(false);
+    expect(
+      (h.container.querySelector('[data-testid="fork-grid"]') as HTMLElement).style.gridTemplateColumns,
+    ).toContain("0fr");
+    h.unmount();
+  });
+
   it("focus radio click invokes onSetFocus with the pane id", async () => {
     const root: Session = {
       ...makeSession({ id: "root" }),
@@ -124,6 +173,81 @@ describe("ForkSplitView (isolated)", () => {
     expect(radio).not.toBeNull();
     await act(async () => radio!.click());
     expect(calls).toEqual([f.id]);
+    h.unmount();
+  });
+
+  it("animates into focused view and returns to split view", async () => {
+    const sharedUser = makeUserMsg({ id: "u1", content: "shared", seq: 0 });
+    const root: Session = {
+      ...makeSession({ id: "root", name: "main" }),
+      messages: [sharedUser],
+      forks: [],
+    };
+    const fork1 = makeFork(root, { id: "fork-1", name: "fork one" });
+    const fork2 = makeFork(root, { id: "fork-2", name: "fork two" });
+    root.forks = [fork1, fork2];
+
+    const focusCalls: string[] = [];
+    const h = await renderComponent(
+      <ForkSplitView
+        tree={root}
+        pendingBySession={{}}
+        runStateBySession={{}}
+        focusedSessionId={root.id}
+        onSetFocus={(id) => focusCalls.push(id)}
+        onCloseFork={() => {}}
+        onReopenFork={() => {}}
+      />,
+    );
+
+    const forkPane = h.container.querySelector(
+      `[data-testid="fork-pane"][data-session-id="${fork1.id}"]`,
+    );
+    const openButton = forkPane?.querySelector(".fork-pane-view-button") as HTMLButtonElement;
+    await act(async () => openButton.click());
+
+    expect(focusCalls).toEqual([fork1.id]);
+    const focusedPanes = h.container.querySelectorAll('[data-testid="fork-pane"]');
+    expect(focusedPanes.length).toBe(3);
+    expect(
+      h.container.querySelector(`[data-testid="fork-pane"][data-session-id="${fork1.id}"]`),
+    ).not.toBeNull();
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(2);
+    for (const hidden of h.container.querySelectorAll(".fork-pane-focus-hidden")) {
+      expect((hidden as HTMLElement).style.height).toBe("");
+      expect(hidden.getAttribute("inert")).toBe("");
+    }
+    expect(
+      (h.container.querySelector('[data-testid="fork-grid"]') as HTMLElement).style.gridTemplateColumns,
+    ).toContain("0fr");
+    expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).not.toBeNull();
+
+    await h.rerender(
+      <ForkSplitView
+        tree={root}
+        pendingBySession={{}}
+        runStateBySession={{}}
+        focusedSessionId={fork2.id}
+        onSetFocus={(id) => focusCalls.push(id)}
+        onCloseFork={() => {}}
+        onReopenFork={() => {}}
+      />,
+    );
+
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(2);
+    expect(
+      h.container
+        .querySelector(`[data-testid="fork-pane"][data-session-id="${fork2.id}"]`)
+        ?.classList.contains("fork-pane-focus-hidden"),
+    ).toBe(false);
+    expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).not.toBeNull();
+
+    const back = h.container.querySelector('[data-testid="fork-back-to-split"]') as HTMLButtonElement;
+    await act(async () => back.click());
+
+    expect(h.container.querySelectorAll('[data-testid="fork-pane"]').length).toBe(3);
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(0);
+    expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).toBeNull();
     h.unmount();
   });
 

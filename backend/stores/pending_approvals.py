@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,9 @@ def _dir() -> Path:
 
 EXPIRY_HOURS = 24
 PRUNE_AFTER_DAYS = 7
+_pending_cache_lock = threading.Lock()
+_pending_cache: tuple[int, list[dict]] | None = None
+_pending_cache_version = 0
 
 
 def _now() -> str:
@@ -69,6 +73,40 @@ def _path(delegation_id: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", delegation_id):
         raise ValueError(f"invalid delegation_id: {delegation_id!r}")
     return _dir() / f"{delegation_id}.json"
+
+
+def _invalidate_pending_cache() -> None:
+    global _pending_cache, _pending_cache_version
+    with _pending_cache_lock:
+        _pending_cache = None
+        _pending_cache_version += 1
+
+
+def _pending_snapshot() -> list[dict]:
+    global _pending_cache
+    while True:
+        with _pending_cache_lock:
+            version = _pending_cache_version
+            cached = _pending_cache
+            if cached is not None and cached[0] == version:
+                return [dict(item) for item in cached[1]]
+        if not _dir().exists():
+            records: list[dict] = []
+        else:
+            records = []
+            for path in _dir().glob("*.json"):
+                try:
+                    rec = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if rec.get("status") == "pending":
+                    records.append(rec)
+            records.sort(key=lambda r: r.get("created_at", ""))
+        with _pending_cache_lock:
+            if version != _pending_cache_version:
+                continue
+            _pending_cache = (version, [dict(item) for item in records])
+            return records
 
 
 @perf.timed_fn("store.approval.create")
@@ -122,6 +160,7 @@ def create(
     if path.exists():
         raise ValueError(f"approval already exists for delegation_id={delegation_id!r}")
     path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    _invalidate_pending_cache()
     return record
 
 
@@ -142,21 +181,10 @@ def list_pending(*, cwd: Optional[str] = None) -> list[dict]:
     """All pending approvals, optionally filtered by cwd. Used by the
     REST `GET /api/pending_approvals?cwd=...` endpoint for WS-reconnect
     rehydration."""
-    if not _dir().exists():
-        return []
-    out: list[dict] = []
-    for path in _dir().glob("*.json"):
-        try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if rec.get("status") != "pending":
-            continue
-        if cwd is not None and rec.get("cwd") != cwd:
-            continue
-        out.append(rec)
-    out.sort(key=lambda r: r.get("created_at", ""))
-    return out
+    records = _pending_snapshot()
+    if cwd is None:
+        return records
+    return [rec for rec in records if rec.get("cwd") == cwd]
 
 
 @perf.timed_fn("store.approval.transition")
@@ -236,6 +264,7 @@ def _transition_locked(
                 f.seek(0)
                 f.truncate()
                 f.write(json.dumps(rec, indent=2))
+                _invalidate_pending_cache()
                 return rec, "ok"
         finally:
             portable_lock.unlock(fd)
@@ -275,6 +304,7 @@ def delete(delegation_id: str) -> bool:
         return False
     try:
         path.unlink()
+        _invalidate_pending_cache()
         return True
     except OSError:
         return False
@@ -295,4 +325,6 @@ def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
                 deleted += 1
         except OSError:
             continue
+    if deleted:
+        _invalidate_pending_cache()
     return deleted

@@ -15,14 +15,14 @@ under ``entrypoints`` in their ``better-agent-extension.json``::
         ),
     )
     page = Page(
-        label="Project structure",
+        label="My page",
         icon="clipboard",
         open=HookAction.ensure(
-            endpoint="/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+            endpoint="/api/extensions/<extension-id>/backend/<path>/ensure",
             path_template="/s/{session_id}",
             include_cwd=True,
         ),
-        badge=Badge(endpoint="/api/extensions/ofek-dev.project-structure/backend/project-updates/total"),
+        badge=Badge(endpoint="/api/extensions/<extension-id>/backend/<path>/total"),
     )
 
 The serialized dicts match core's manifest schema (validated by
@@ -107,17 +107,21 @@ class Badge:
 
 @dataclass(frozen=True)
 class QuickButton:
-    """A single session action button rendered in the desktop chat toolbar
-    and the mobile top bar."""
+    """A single action button rendered on the surfaces named in
+    ``placements``: "session" (desktop chat toolbar + mobile top bar) and/or
+    "settings" (Settings page header). Omitted placements means both."""
 
     label: str
     action: HookAction
     icon: str | None = None
+    placements: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"label": self.label, "action": self.action.to_dict()}
         if self.icon:
             data["icon"] = self.icon
+        if self.placements is not None:
+            data["placements"] = list(self.placements)
         return data
 
 
@@ -264,6 +268,38 @@ class McpServer:
             data["replaces_builtin"] = self.replaces_builtin
         if self.predicate is not None:
             data["predicate"] = self.predicate.to_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class Daemon:
+    """entrypoints.daemons entry. lifecycle="backend" daemons run as children
+    of the backend process; lifecycle="supervisor" daemons are installed and
+    run by the platform daemon host and survive backend restarts (requires
+    permissions.daemons="supervisor" consent)."""
+
+    name: str
+    module: str
+    lifecycle: str = "backend"
+    max_restarts: int = 5
+    backoff_seconds: float = 5
+    env_allowlist: tuple[str, ...] = ()
+    ports: tuple[int, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "name": self.name,
+            "module": self.module,
+            "lifecycle": self.lifecycle,
+            "restart_policy": {
+                "max_restarts": self.max_restarts,
+                "backoff_seconds": self.backoff_seconds,
+            },
+        }
+        if self.env_allowlist:
+            data["env_allowlist"] = list(self.env_allowlist)
+        if self.ports:
+            data["ports"] = list(self.ports)
         return data
 
 

@@ -70,6 +70,7 @@ def main_test() -> int:
             cwd="/repo",
             model="m",
             backend_url="http://core",
+            provider_id="provider-sdk",
         )
 
         env_keys = [
@@ -132,17 +133,33 @@ def main_test() -> int:
             ("create_sub_session", lambda: c.create_sub_session("parent", description="d"),
              "POST", "/api/internal/create-sub-session",
              {"sender_session_id": "parent", "description": "d", "provider_id": "", "model": "m",
-              "reasoning_effort": "", "cwd": "/repo", "node_id": ""}),
+              "reasoning_effort": "", "cwd": "/repo", "node_id": "",
+              "disallowed_tools": None, "disabled_builtin_extensions": None}),
+            ("resolve_internal_llm", lambda: c.resolve_internal_llm("requirement_analysis"),
+             "POST", "/api/internal/extension-internal-llm/resolve",
+             {"task_key": "requirement_analysis"}),
             ("delegate_task", lambda: c.delegate_task("do it", target_session_id="t1"),
              "POST", "/api/internal/delegate-task",
              {"sender_session_id": "caller-sid", "task": "do it", "target_session_id": "t1",
-              "provider_id": "", "model": "m", "reasoning_effort": "", "sub_session": True, "cwd": "/repo"}),
+              "provider_id": "", "model": "m", "reasoning_effort": "", "sub_session": True, "cwd": "/repo",
+              "run_mode": "direct"}),
             ("ask", lambda: c.ask("t1", "hi"),
              "POST", "/api/internal/ask",
-             {"sender_session_id": "caller-sid", "target_session_id": "t1", "message": "hi", "ask_id": ""}),
+             {"sender_session_id": "caller-sid", "target_session_id": "t1", "target_worker_id": "",
+              "target_worker_pool": "", "pool_affinity_key": "", "message": "hi", "ask_id": "", "provider_id": "",
+              "model": "", "reasoning_effort": "", "mode": "wait_and_grab_last_assistant_mssg_in_turn"}),
+            ("ask_async_mode", lambda: c.ask(target_worker_pool="pool-a", message="hi",
+                                             pool_affinity_key="thread-a",
+                                             mode="continue_and_expect_mssg_back_async"),
+             "POST", "/api/internal/ask",
+             {"sender_session_id": "caller-sid", "target_session_id": "", "target_worker_id": "",
+              "target_worker_pool": "pool-a", "pool_affinity_key": "thread-a", "message": "hi", "ask_id": "", "provider_id": "",
+              "model": "", "reasoning_effort": "", "mode": "continue_and_expect_mssg_back_async"}),
             ("mssg", lambda: c.mssg("t1", "hi"),
              "POST", "/api/internal/mssg",
-             {"sender_session_id": "caller-sid", "target_session_id": "t1", "message": "hi"}),
+             {"sender_session_id": "caller-sid", "target_session_id": "t1", "target_worker_id": "",
+              "target_worker_pool": "", "pool_affinity_key": "", "message": "hi", "provider_id": "", "model": "",
+              "reasoning_effort": "", "collapse_key": "", "collapse_policy": ""}),
             ("ask_propose", lambda: c.ask_propose(["s1", "s2"], reasoning="r"),
              "POST", "/api/internal/ask-propose",
              {"caller_sid": "caller-sid", "session_ids": ["s1", "s2"], "reasoning": "r", "proposed_project_path": ""}),
@@ -151,13 +168,52 @@ def main_test() -> int:
              None),
             ("request_user_input", lambda: c.request_user_input([{"id": "q", "header": "H", "question": "Q"}], timeout_seconds=30),
              "POST", "/api/internal/user-input/request",
-             {"app_session_id": "caller-sid", "questions": [{"id": "q", "header": "H", "question": "Q"}], "timeout_seconds": 30}),
+             {"app_session_id": "caller-sid", "kind": "input", "questions": [{"id": "q", "header": "H", "question": "Q"}], "timeout_seconds": 30}),
+            ("request_user_approval", lambda: c.request_user_approval("Deploy?", timeout_seconds=30),
+             "POST", "/api/internal/user-input/request",
+             {"app_session_id": "caller-sid", "kind": "approval", "prompt": "Deploy?", "timeout_seconds": 30}),
             ("call_extension", lambda: c.call_extension("other-ext", "/foo", {"a": 1}),
              "POST", "/api/internal/extension-call",
              {"target_extension_id": "other-ext", "path": "/foo", "method": "POST", "body": {"a": 1}}),
-            ("lock_ops", lambda: c.lock_ops("git_ops", holder_token="tok", release=True),
+            ("lock_ops", lambda: c.lock_ops("git_ops", holder_token="tok", release=True, lease_seconds=30),
              "POST", "/api/internal/coordination/lock-ops",
-             {"key": "git_ops", "release": True, "holder_token": "tok"}),
+             {
+                 "key": "git_ops",
+                 "op": "",
+                 "release": True,
+                 "renew": False,
+                 "validate": False,
+                 "reattach": False,
+                 "owned": False,
+                 "holder_token": "tok",
+                 "owner": {
+                     "app_session_id": "caller-sid",
+                     "cwd": "/repo",
+                     "provider_id": "provider-sdk",
+                     "source": "better_agent_sdk.Client.lock_ops",
+                 },
+                 "lease_seconds": 30,
+             }),
+            ("lock_ops_multi", lambda: c.lock_ops("", keys=["a", "b"], timeout_seconds=12),
+             "POST", "/api/internal/coordination/lock-ops",
+             {
+                 "key": "",
+                 "op": "",
+                 "release": False,
+                 "renew": False,
+                 "validate": False,
+                 "reattach": False,
+                 "owned": False,
+                 "holder_token": "",
+                 "owner": {
+                     "app_session_id": "caller-sid",
+                     "cwd": "/repo",
+                     "provider_id": "provider-sdk",
+                     "source": "better_agent_sdk.Client.lock_ops",
+                 },
+                 "keys": ["a", "b"],
+                 "timeout_seconds": 12,
+             }),
             ("get_session_fields", lambda: c.get_session_fields(["current_todos"]),
              "POST", "/api/internal/session-fields",
              {"session_id": "caller-sid", "fields": ["current_todos"]}),
@@ -179,27 +235,7 @@ def main_test() -> int:
         check(captured["method"] == "GET" and captured["url"].endswith("/api/settings/internal-llm"),
               "get_internal_llm -> GET settings/internal-llm")
 
-        # call_internal: cleaned loopback substrate — POST only, auto-injects
-        # app_session_id (caller value wins), prefix-gates to /api/internal/.
-        captured.clear()
-        c.call_internal("/api/internal/schedules", {"action": "list"})
-        check(captured["method"] == "POST"
-              and captured["url"].endswith("/api/internal/schedules")
-              and captured["data"] == {"action": "list", "app_session_id": "caller-sid"},
-              "call_internal POSTs + auto-injects app_session_id")
-        captured.clear()
-        c.call_internal("/api/internal/x", {"app_session_id": "explicit", "k": 1})
-        check(captured["data"] == {"app_session_id": "explicit", "k": 1},
-              "call_internal preserves caller app_session_id")
-        gate_ok = False
-        try:
-            c.call_internal("/api/evil", {})
-        except BetterAgentError:
-            gate_ok = True
-        check(gate_ok, "call_internal rejects non-/api/internal/ path")
-        captured.clear()
-        c.call_internal("/api/internal/x", {}, timeout=120.0)
-        check(captured["timeout"] == 120.0, "call_internal forwards timeout")
+        check(not hasattr(c, "call_internal"), "SDK exposes no raw internal path transport")
 
         # ask_fork payload shape (many fields — spot check the key ones)
         captured.clear()

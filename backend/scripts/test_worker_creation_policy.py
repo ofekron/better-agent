@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-worker-policy-")
-os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -18,11 +19,44 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import auth  # noqa: E402
+import extension_store  # noqa: E402
 import session_store  # noqa: E402
 from orchs.manager import _delegation  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _install_team_gate_extension() -> None:
+    package = Path(_TMP_HOME) / "team-orchestration-fixture"
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_store.extension_id_for_role('team-orchestration'),
+        "name": "Team orchestration",
+        "version": "1.0.0",
+        "description": "test fixture",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    with (package / "better-agent-extension.json").open("w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(package.parent),
+            "extension_path": package.name,
+            "ref": "",
+            "commit_sha": "team-test",
+        },
+        persist=True,
+    )
 
 
 def _new_manager_session(policy: str = "ask") -> str:
@@ -34,23 +68,6 @@ def _new_manager_session(policy: str = "ask") -> str:
         worker_creation_policy=policy,
     )
     return session["id"]
-
-
-def _capture_metadata_event(session_id: str, action) -> dict | None:
-    received: list[dict] = []
-
-    async def cb(ev):
-        received.append(ev)
-
-    main.coordinator.register_ws(session_id, cb)
-    try:
-        action()
-    finally:
-        main.coordinator.unregister_ws(session_id, cb)
-    for ev in received:
-        if ev.get("type") == "session_metadata_updated":
-            return ev
-    return None
 
 
 def test_default_policy_is_ask(client: TestClient) -> bool:
@@ -66,26 +83,22 @@ def test_default_policy_is_ask(client: TestClient) -> bool:
     return True
 
 
-def test_rest_sets_policy_and_broadcasts(client: TestClient) -> bool:
+def test_rest_sets_policy(client: TestClient) -> bool:
     sid = _new_manager_session()
 
-    def go():
-        return client.put(
-            f"/api/sessions/{sid}/worker_creation_policy",
-            json={"worker_creation_policy": "approve"},
-        )
-
-    ev = _capture_metadata_event(sid, go)
+    response = client.put(
+        f"/api/sessions/{sid}/worker_creation_policy",
+        json={"worker_creation_policy": "approve"},
+    )
+    if response.status_code != 200:
+        print(f"  expected 200, got {response.status_code}: {response.text}")
+        return False
     session = session_store.get_session(sid)
     if session.get("worker_creation_policy") != "approve":
         print(f"  persisted mismatch: {session}")
         return False
-    if not ev:
-        print("  no session_metadata_updated broadcast")
-        return False
-    patch = ((ev.get("data") or {}).get("patch") or {})
-    if patch.get("worker_creation_policy") != "approve":
-        print(f"  patch mismatch: {ev}")
+    if response.json().get("worker_creation_policy") != "approve":
+        print(f"  response mismatch: {response.text}")
         return False
     return True
 
@@ -146,14 +159,16 @@ def test_auto_deny_short_circuits_fresh_worker_creation(client: TestClient) -> b
 
 TESTS = [
     ("default policy is ask", test_default_policy_is_ask),
-    ("REST sets policy and broadcasts", test_rest_sets_policy_and_broadcasts),
+    ("REST sets policy", test_rest_sets_policy),
     ("invalid policy is rejected", test_invalid_policy_is_rejected),
     ("deny short-circuits fresh worker creation", test_auto_deny_short_circuits_fresh_worker_creation),
 ]
 
 
 def main_run() -> int:
+    _install_team_gate_extension()
     with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
+        client.headers.update({"Authorization": f"Bearer {auth.create_token('worker-policy-test')}"})
         failed = 0
         try:
             for name, fn in TESTS:

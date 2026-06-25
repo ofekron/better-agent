@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-unread-")
@@ -31,6 +32,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+import session_manager as session_manager_module  # noqa: E402
+import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -165,6 +168,174 @@ def test_mark_seen_zeros() -> None:
     print(f"{PASS} mark_seen_zeros")
 
 
+def test_mark_seen_does_not_copy_session_tree() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("copy-guard"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    original_deepcopy = session_manager_module.copy.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and value.get("id") == sid:
+            raise AssertionError("mark_seen copied the full session tree")
+        return original_deepcopy(value)
+
+    session_manager_module.copy.deepcopy = guarded_deepcopy
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_manager_module.copy.deepcopy = original_deepcopy
+    assert result == {"last_seen_event_uid": "copy-guard"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_does_not_copy_session_tree")
+
+
+def test_mark_seen_uses_journal_latest_uid() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("scan-fallback"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+
+    original = session_manager_module._event_uuid_safe
+    import event_ingester as event_ingester_module
+    original_latest = event_ingester_module.event_ingester.latest_render_event_uid
+
+    def guarded_event_uuid(_event):
+        raise AssertionError("mark_seen scanned live message events")
+
+    event_ingester_module.event_ingester.latest_render_event_uid = (
+        lambda root_id, *, sid_filter=None: "journal-head"
+    )
+    session_manager_module._event_uuid_safe = guarded_event_uuid
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_manager_module._event_uuid_safe = original
+        event_ingester_module.event_ingester.latest_render_event_uid = original_latest
+    assert result == {"last_seen_event_uid": "journal-head"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_uses_journal_latest_uid")
+
+
+def test_mark_seen_uses_cached_latest_uid() -> None:
+    sid, msg = _mk_session("native")
+    import event_ingester as event_ingester_module
+    event_ingester_module.event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "uuid": "cached-head",
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "cached"}]},
+        },
+        source="test",
+        msg_id=msg["id"],
+    )
+
+    original_summaries = event_ingester_module.event_ingester.message_event_summaries
+    original_event_uuid = session_manager_module._event_uuid_safe
+
+    def guarded_summaries(*_args, **_kwargs):
+        raise AssertionError("mark_seen walked message summaries")
+
+    def guarded_event_uuid(_event):
+        raise AssertionError("mark_seen scanned live message events")
+
+    event_ingester_module.event_ingester.message_event_summaries = guarded_summaries
+    session_manager_module._event_uuid_safe = guarded_event_uuid
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        event_ingester_module.event_ingester.message_event_summaries = original_summaries
+        session_manager_module._event_uuid_safe = original_event_uuid
+    assert result == {"last_seen_event_uid": "cached-head"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_uses_cached_latest_uid")
+
+
+def test_mark_seen_avoids_full_tree_write() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("sidecar-head"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+
+    original_write = session_store.write_session_full
+
+    def guarded_write(*_args, **_kwargs):
+        raise AssertionError("mark_seen wrote the full session tree")
+
+    session_store.write_session_full = guarded_write
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_store.write_session_full = original_write
+    assert result == {"last_seen_event_uid": "sidecar-head"}, result
+    assert session_store.read_seen_cursors(sid).get(sid) == "sidecar-head"
+
+    session_manager._roots.clear()
+    session_manager._event_hydrated_roots.clear()
+    session_manager._unread_counts.clear()
+    session_manager._unread_hydrated.clear()
+    loaded = session_manager.get(sid)
+    assert loaded and loaded.get("last_seen_event_uid") == "sidecar-head"
+    print(f"{PASS} mark_seen_avoids_full_tree_write")
+
+
+def test_seen_cursor_write_is_idempotent() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("idempotent-sidecar"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    session_manager.mark_seen(sid, "idempotent-sidecar")
+    seen_path = Path(_TMP_HOME) / "sessions" / f"{sid}.seen.json"
+    before = seen_path.stat().st_mtime_ns
+    session_manager.mark_seen(sid, "idempotent-sidecar")
+    after = seen_path.stat().st_mtime_ns
+    assert after == before, "duplicate mark_seen rewrote the seen sidecar"
+    print(f"{PASS} seen_cursor_write_is_idempotent")
+
+
+def test_mark_unread_clears_seen_sidecar() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("clear-sidecar"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    session_manager.mark_seen(sid, "clear-sidecar")
+    assert session_store.read_seen_cursors(sid).get(sid) == "clear-sidecar"
+
+    session_manager.mark_unread(sid)
+    assert session_store.read_seen_cursors(sid).get(sid) is None
+
+    session_manager._roots.clear()
+    session_manager._event_hydrated_roots.clear()
+    session_manager._unread_counts.clear()
+    session_manager._unread_hydrated.clear()
+    loaded = session_manager.get(sid)
+    assert loaded and loaded.get("last_seen_event_uid") is None
+    print(f"{PASS} mark_unread_clears_seen_sidecar")
+
+
 def test_persistence_across_reload() -> None:
     """Persist `last_seen_event_uid`, then drop the in-memory
     SessionManager state and re-hydrate. Counter must rebuild
@@ -240,6 +411,12 @@ def main() -> int:
         test_append_bumps_unread()
         test_replace_does_not_bump()
         test_mark_seen_zeros()
+        test_mark_seen_does_not_copy_session_tree()
+        test_mark_seen_uses_journal_latest_uid()
+        test_mark_seen_uses_cached_latest_uid()
+        test_mark_seen_avoids_full_tree_write()
+        test_seen_cursor_write_is_idempotent()
+        test_mark_unread_clears_seen_sidecar()
         test_persistence_across_reload()
         test_worker_fork_does_not_bump_root()
         print("ALL PASSED")

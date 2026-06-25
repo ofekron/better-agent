@@ -28,6 +28,7 @@ import os
 import signal
 import subprocess
 import time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +104,8 @@ class ProcessControl(abc.ABC):
         servers, transient foreground tool processes — are infrastructure
         and do NOT count. `ignore_pgids`: detached groups the caller
         deliberately spawned itself (e.g. the runner's canvas auto-start)
-        — excluded, or a service spawn would read as background work and
-        the babysitter linger would never end. This is the babysitter
-        runner's reap signal: no detached descendants ⇒ no background
-        work ⇒ exit at turn end. Robust against MCP servers
+        — excluded so a service spawn does not read as background work.
+        Feeds the runner's activity probes. Robust against MCP servers
         spawning/restarting at any time (they stay in the runner's
         group), unlike a process snapshot baseline."""
 
@@ -334,10 +333,9 @@ class _WindowsProcessControl(ProcessControl):
     def has_detached_descendants(
         self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),
     ) -> bool:
-        # POSIX process-group semantics don't apply on Windows; the
-        # babysitter runner (and its bg-shell decoupling) targets POSIX.
-        # Returning False means a Windows runner exits as soon as the
-        # turn ends — acceptable until Windows is in scope.
+        # POSIX process-group semantics don't apply on Windows; bg-shell
+        # decoupling targets POSIX. Returning False means no detached
+        # background work is ever reported on Windows.
         return False
 
     def kill_detached_descendant_groups(

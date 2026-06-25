@@ -6,7 +6,7 @@ Pins:
      simulated rewind on.
   3. Models: static cold-start seed + `_resolve_refresh_fetch` dispatches to
      `fetch_copilot_models` (and the real CLI parses if installed).
-  4. Setup: copilot is in the installer map with a `brew install` argv and
+  4. Setup: copilot is in the installer map with a platform install argv and
      `copilot --version` verify.
   5. Runner event normalization: each Copilot session-state event type maps
      to the correct Claude-shaped agent_message (user text, assistant text,
@@ -24,12 +24,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-provider-copilot-")
-
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-provider-copilot-")
 
 import provider_copilot  # noqa: E402
 import runner_copilot  # noqa: E402
@@ -67,7 +67,7 @@ def test_build_env_clears_anthropic() -> bool:
 
 def test_models_static_seed() -> bool:
     seeded = models._static_cold_start({"kind": "copilot"})
-    return bool(seeded) and "gpt-5.2-codex" in seeded
+    return bool(seeded) and "auto" in seeded and "gpt-5.4" in seeded
 
 
 def test_models_refresh_dispatch() -> bool:
@@ -81,7 +81,50 @@ def test_models_fetch_parses_real_cli() -> bool:
     if not shutil.which("copilot"):
         return True
     parsed = provider_copilot.fetch_copilot_models()
-    return bool(parsed) and "gpt-5.2-codex" in parsed and len(parsed) >= 5
+    return (
+        bool(parsed)
+        and "auto" in parsed
+        and "gpt-5.4" in parsed
+        and len(parsed) >= 5
+    )
+
+
+def test_parses_config_help_models() -> bool:
+    sample = """
+Configuration Settings:
+
+  `model`: AI model to use for Copilot CLI; can be changed with /model command or --model flag option.
+    - "claude-sonnet-4.6"
+    - "gpt-5.4"
+    - "gpt-5.3-codex"
+    - "gpt-5-mini"
+
+  `contextTier`: context window tier for tiered-pricing models.
+"""
+    return provider_copilot._parse_copilot_config_models(sample) == [
+        "auto",
+        "claude-sonnet-4.6",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5-mini",
+        "mai-code-1-flash-picker",
+    ]
+
+
+def test_parses_legacy_help_choices() -> bool:
+    sample = """
+Options:
+  --model <model>  Set the AI model (choices: "gpt-5.4", "claude-sonnet-4.6", "gemma-3")
+"""
+    return provider_copilot._parse_copilot_help_choices(sample) == [
+        "auto",
+        "gpt-5.4",
+        "claude-sonnet-4.6",
+    ]
+
+
+def test_retired_model_fallbacks_to_auto() -> bool:
+    return provider_copilot._normalize_copilot_model("gpt-5.2-codex") == "auto"
 
 
 def test_setup_installer() -> bool:
@@ -89,11 +132,12 @@ def test_setup_installer() -> bool:
     if "copilot" not in kinds:
         return False
     inst = provider_setup.installer_for("copilot")
+    expected_prefix = ("winget", "install") if sys.platform == "win32" else ("brew", "install")
     return (
         inst.kind == "copilot"
         and inst.command == "copilot"
         and inst.verify_argv == ("copilot", "--version")
-        and inst.install_argv[:2] == ("brew", "install")
+        and inst.install_argv[:2] == expected_prefix
     )
 
 
@@ -123,7 +167,7 @@ def test_runner_normalizes_event_types() -> bool:
     ]
     for event, role, block_type, payload in cases:
         out = runner_copilot.normalize_copilot_event(
-            event, session_id=sid, parent_uuid=sid, model="gpt-5.2-codex",
+            event, session_id=sid, parent_uuid=sid, model="gpt-5.4",
         )
         if out is None or out["type"] != "agent_message":
             return False
@@ -163,6 +207,21 @@ def test_runner_uuid_is_deterministic() -> bool:
     return a["data"]["uuid"] == b["data"]["uuid"]
 
 
+def test_capability_context_labels_team_message() -> bool:
+    prompt = runner_copilot._prepend_capability_context("<mssg>done</mssg>", {
+        "source": "mssg",
+        "capability_contexts": [{
+            "name": "Runtime",
+            "category": "system",
+            "content": "Use runtime context.",
+        }],
+    })
+    return (
+        "## Message\n\n<mssg>" in prompt
+        and "## User prompt\n\n<mssg>" not in prompt
+    )
+
+
 TESTS = [
     ("registry_resolves_copilot", test_registry_resolves_copilot),
     ("capability_matrix", test_capability_matrix),
@@ -170,10 +229,14 @@ TESTS = [
     ("models_static_seed", test_models_static_seed),
     ("models_refresh_dispatch", test_models_refresh_dispatch),
     ("models_fetch_parses_real_cli", test_models_fetch_parses_real_cli),
+    ("parses_config_help_models", test_parses_config_help_models),
+    ("parses_legacy_help_choices", test_parses_legacy_help_choices),
+    ("retired_model_fallbacks_to_auto", test_retired_model_fallbacks_to_auto),
     ("setup_installer", test_setup_installer),
     ("runner_normalizes_event_types", test_runner_normalizes_event_types),
     ("runner_normalizer_skips_bookkeeping", test_runner_normalizer_skips_bookkeeping),
     ("runner_uuid_is_deterministic", test_runner_uuid_is_deterministic),
+    ("capability_context_labels_team_message", test_capability_context_labels_team_message),
 ]
 
 

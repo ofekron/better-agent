@@ -202,13 +202,14 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
-      if (url.endsWith("/api/extensions")) {
+      if (url.includes("/api/extensions?") || url.endsWith("/api/extensions")) {
         return jsonResponse({
           extensions: [
             {
               enabled: true,
               manifest: {
                 id: "ofek.scheduler",
+                description: "Runs scheduled session prompts and follow-up work.",
                 entrypoints: {
                   instructions: [{ name: "scheduler", level: "global" }],
                 },
@@ -231,7 +232,7 @@ describe("SettingsPage title", () => {
               session_state: true,
               internal_loopback: true,
               filesystem: "optional",
-              mutates_session_fields: ["rearranger_enabled"],
+              mutates_session_fields: ["supervisor_enabled"],
             },
             optional: ["filesystem"],
             grants: {},
@@ -251,10 +252,11 @@ describe("SettingsPage title", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Extensions" }));
 
     expect(await screen.findByText("Scheduler")).toBeTruthy();
+    expect(screen.getByText("Runs scheduled session prompts and follow-up work.")).toBeTruthy();
     const row = screen.getByText("Scheduler").closest(".extension-ui-settings-row");
     const groups = row?.querySelector(".extension-ui-settings-groups");
     expect(groups).toBeTruthy();
-    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(4);
+    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(6);
     expect(screen.getByText("App UI")).toBeTruthy();
     expect(screen.getByText("Buttons or pages this extension adds to Better Agent.")).toBeTruthy();
     expect(screen.getByText("Agent tools")).toBeTruthy();
@@ -266,7 +268,7 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("Access files")).toBeTruthy();
     expect(screen.getByLabelText("Blocked")).toBeTruthy();
     expect(screen.getByText("Change selected session fields")).toBeTruthy();
-    expect(screen.getByText("Limited to: rearranger_enabled")).toBeTruthy();
+    expect(screen.getByText("Limited to: supervisor_enabled")).toBeTruthy();
   });
 
   it("shows desktop app downloads in settings", async () => {
@@ -310,5 +312,146 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("0.1.42")).toBeTruthy();
     expect(screen.getByText("Download for Windows")).toBeTruthy();
     expect(screen.getByText("Not built on this server")).toBeTruthy();
+  });
+
+  it("persists the user display name from account settings", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/api/providers")) {
+        return jsonResponse({ providers: [], default_provider_id: null });
+      }
+      if (url.includes("/api/provider-setup/status")) {
+        return jsonResponse({ providers: [] });
+      }
+      if (url.includes("/api/user-prefs") && init?.method === "PATCH") {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: "Ofek Ron",
+        });
+      }
+      if (url.includes("/api/user-prefs")) {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: "ofek",
+          font_family: "system",
+          font_size: 14,
+        });
+      }
+      if (url.includes("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.includes("/api/provider-config-sync/repository")) {
+        return jsonResponse({ configured: false });
+      }
+      if (url.includes("/api/settings/password-manager")) {
+        return jsonResponse({ items: [] });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") } as Response);
+    });
+
+    render(
+      <SettingsPage
+        onClose={() => {}}
+        onOpenProviderConfigSync={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Account" }));
+    const input = await screen.findByLabelText("Display name");
+    fireEvent.change(input, { target: { value: "  Ofek   Ron  " } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/user-prefs",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ user_display_name: "Ofek Ron" }),
+        }),
+      );
+    });
+  });
+
+  it("requires current credentials before changing username and password", async () => {
+    const currentActor = "settings-test-principal-a";
+    const nextActor = "settings-test-principal-b";
+    const currentProof = "settings-test-proof-a";
+    const nextProof = "settings-test-proof-b";
+    const issuedToken = "settings-test-token";
+    const authEvents: string[] = [];
+    const onAuthUserChanged = (event: Event) => {
+      const username = (event as CustomEvent).detail?.username;
+      if (typeof username === "string") authEvents.push(username);
+    };
+    window.addEventListener("auth_user_changed", onAuthUserChanged);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/api/providers")) {
+        return jsonResponse({ providers: [], default_provider_id: null });
+      }
+      if (url.includes("/api/provider-setup/status")) {
+        return jsonResponse({ providers: [] });
+      }
+      if (url.includes("/api/user-prefs")) {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: currentActor,
+          font_family: "system",
+          font_size: 14,
+        });
+      }
+      if (url.includes("/api/auth/change_credentials") && init?.method === "POST") {
+        return jsonResponse({ username: nextActor, token: issuedToken });
+      }
+      if (url.includes("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.includes("/api/provider-config-sync/repository")) {
+        return jsonResponse({ configured: false });
+      }
+      if (url.includes("/api/settings/password-manager")) {
+        return jsonResponse({ items: [] });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") } as Response);
+    });
+
+    try {
+      render(
+        <SettingsPage
+          onClose={() => {}}
+          onOpenProviderConfigSync={() => {}}
+        />,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Account" }));
+      fireEvent.change(await screen.findByLabelText("Current username"), { target: { value: currentActor } });
+      fireEvent.change(screen.getByLabelText("Current password"), { target: { value: currentProof } });
+      fireEvent.change(screen.getByLabelText("New username"), { target: { value: ` ${nextActor} ` } });
+      fireEvent.change(screen.getByLabelText("New password"), { target: { value: nextProof } });
+      fireEvent.click(screen.getByRole("button", { name: "Change username and password" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/auth/change_credentials",
+          expect.objectContaining({
+            method: "POST",
+            body: JSON.stringify({
+              current_username: currentActor,
+              current_password: currentProof,
+              new_username: nextActor,
+              new_password: nextProof,
+            }),
+          }),
+        );
+      });
+      await waitFor(() => {
+        expect(authEvents).toEqual([nextActor]);
+      });
+    } finally {
+      window.removeEventListener("auth_user_changed", onAuthUserChanged);
+    }
   });
 });

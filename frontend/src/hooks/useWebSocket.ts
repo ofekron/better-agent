@@ -4,18 +4,17 @@ import type {
   CapabilityContext,
   OpenFilePanel,
   OrchestrationMode,
-  RearrangerStats,
-  RearrangerTree,
   RunInfo,
   SendMode,
   Session,
-  TokenUsage,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
 import { eventBus } from "../lib/eventBus";
 import { getWsUrl } from "../api";
 import { logPromptSend } from "../lib/promptSendLog";
+import { SnapshotTransport } from "../lib/snapshotTransport";
+import { logFailure, logTiming } from "../lib/frontendLogger";
 
 export interface ImagePayload {
   data: string;
@@ -29,15 +28,39 @@ export interface FilePayload {
   size: number;
 }
 
+type StubInvalidation = {
+  app_session_id: string;
+  msg_id: string;
+  stub: { event_count: number; last_events: WSEvent[] };
+};
+
 export type StreamingPhase = "manager" | "worker" | null;
 
 /** Fine-grained loading phase while the CLI subprocess is starting up.
  * Null once actual content starts flowing. */
 export type StreamingLoadPhase = "starting" | "connected" | null;
 
+function parseStubInvalidations(data: unknown): StubInvalidation[] {
+  const payload = data as { changes?: unknown };
+  const items = Array.isArray(payload?.changes) ? payload.changes : [data];
+  return items.filter((item): item is StubInvalidation => {
+    const row = item as StubInvalidation | null;
+    return Boolean(
+      row
+        && typeof row.app_session_id === "string"
+        && row.app_session_id.length > 0
+        && typeof row.msg_id === "string"
+        && row.msg_id.length > 0
+        && row.stub
+        && typeof row.stub.event_count === "number"
+        && Array.isArray(row.stub.last_events),
+    );
+  });
+}
+
 export function resolveLiveFrameSessionId(
   event: WSEvent,
-  focusedSessionId: string | null | undefined,
+  _focusedSessionId: string | null | undefined,
 ): string | null {
   const data = event.data as {
     app_session_id?: unknown;
@@ -49,32 +72,10 @@ export function resolveLiveFrameSessionId(
   if (event.type === "todos_snapshot" && typeof data?.session_id === "string" && data.session_id) {
     return data.session_id;
   }
-  return focusedSessionId ?? null;
-}
-
-/** Payload for a rearranger_updated WS event, surfaced to App for routing
- * into `updateRearranger`. The `tree` may be omitted on stats-only
- * updates (e.g. when a CLI call happened but its tree was rejected);
- * in that case only the cost fields should be merged. */
-export interface RearrangerUpdate {
-  appSessionId: string;
-  tree?: RearrangerTree;
-  rearrangerSessionId?: string | null;
-  lastMessageCount?: number;
-  rearrangerStats?: RearrangerStats | null;
-  tokenUsageTotal?: TokenUsage | null;
-  tokenUsageLast?: TokenUsage | null;
-}
-
-/** Payload for a rearranger_state WS event (feature on/off echo). */
-export interface RearrangerStateUpdate {
-  appSessionId: string;
-  enabled: boolean;
+  return null;
 }
 
 interface UseWebSocketOptions {
-  onRearrangerUpdate?: (u: RearrangerUpdate) => void;
-  onRearrangerState?: (s: RearrangerStateUpdate) => void;
   /** The app_session_id currently being viewed in the UI. When this
    * changes, the hook sends `unsubscribe` for the previous id and
    * `subscribe` for the new one so the backend's SessionWatcher knows
@@ -85,9 +86,8 @@ interface UseWebSocketOptions {
    * Used by the split-pane fork view: every visible pane's session
    * stays subscribed so its messages_replay / messages_delta /
    * user_message_persisted / run_state / session_metadata_updated
-   * frames flow in. Live `manager_event`/`worker_event` cosmetic
-   * frames still route only to the focused pane — non-focused panes
-   * converge via the persisted-delta path. */
+   * frames flow in. Live `manager_event`/`worker_event` frames route
+   * only when the backend provides their owning `app_session_id`. */
   additionalAppSessionIds?: string[];
   onRewindComplete?: (appSessionId: string, messages: ChatMessage[]) => void;
   /** Backend's response to a subscribe with `since_seq=N`. Carries
@@ -197,6 +197,10 @@ interface UseWebSocketOptions {
       model?: string;
       cwd?: string;
       supervisor_enabled?: boolean;
+      message_count?: number;
+      updated_at?: string;
+      last_user_prompt_at?: string;
+      last_opened_at?: string;
       right_panel_open?: boolean;
       right_panel_active_tab?:
         | "files"
@@ -204,7 +208,16 @@ interface UseWebSocketOptions {
         | "canvas"
         | "comments"
         | "todos"
+        | "screen"
+        | "changes"
+        | "communications"
+        | "board"
         | null;
+      right_panel_width?: number | null;
+      right_panel_mobile_height?: number | null;
+      right_panel_todos_dismissed?: boolean;
+      right_panel_auto_opened_by?: import("../types").Session["right_panel_auto_opened_by"];
+      sidebar_minimized?: boolean;
     }
   ) => void;
   /** A new fork session was just born (server-emitted on every fork
@@ -256,6 +269,15 @@ interface UseWebSocketOptions {
     message?: string;
     error?: string;
     reason?: string;
+  }) => void;
+  /** A pull request was created by the agent (Claude CLI `pr-link`
+   * agent_message). Fired only on the LIVE push, never on replay, so the
+   * caller can show an ephemeral chat-panel toast. */
+  onPrLink?: (info: {
+    sessionId?: string;
+    prNumber?: number;
+    prUrl: string;
+    prRepository?: string;
   }) => void;
   /** Backend ack that a prompt was queued (not sent immediately
    * because another turn was running). */
@@ -310,6 +332,23 @@ interface UseWebSocketOptions {
     msgId: string,
     autoRetry: { count: number; kind: string } | null
   ) => void;
+  onMessageContentUpdated?: (
+    appSessionId: string,
+    msgId: string,
+    content: string
+  ) => void;
+  onMessageContinuationChanged?: (
+    appSessionId: string,
+    msgId: string,
+    chainDepth: number | null
+  ) => void;
+  /** Per-turn provider/model/effort actually used. Re-stamped on each retry
+   *  iteration so a mid-message selector switch updates the badge live. */
+  onMessageRunMetaChanged?: (
+    appSessionId: string,
+    msgId: string,
+    runMeta: import("../types").ChatMessage["run_meta"]
+  ) => void;
   /** Per-turn picker payload (`ask_result`) stamped on an assistant
    * message — drives the inline session picker rendered below that turn. */
   onMessageAskResultChanged?: (
@@ -335,7 +374,7 @@ interface UseWebSocketOptions {
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
-  onSessionReconciled?: (rootId: string) => void;
+  onSessionReconciled?: (rootId: string, authoritative?: boolean) => void | Promise<void>;
   /** Stable per-tab id sent in PATCH bodies; events whose
    * `originated_by` matches this id are ignored locally. */
   clientId?: string;
@@ -357,19 +396,22 @@ interface UseWebSocketReturn {
     files?: FilePayload[],
     capabilityContexts?: CapabilityContext[],
   ) => boolean;
-  stopStreaming: (appSessionId: string) => void;
+  stopStreaming: (appSessionId: string) => boolean;
   sendPromoteQueued: (
     appSessionId: string,
     action?: "interrupt" | "steer",
+    queuedId?: string,
+    queuedIds?: string[],
   ) => boolean;
-  sendCancelQueued: (appSessionId: string) => boolean;
+  sendCancelQueued: (appSessionId: string, queuedId?: string) => boolean;
   sendUpdateQueued: (
     appSessionId: string,
     queuedId: string,
     content: string
   ) => boolean;
+  sendBeginQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
+  sendFinishQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
   events: WSEvent[];
-  traceSteps: WSEvent[];
   isStreaming: boolean;
   isStopping: boolean;
   streamingPhase: StreamingPhase;
@@ -384,8 +426,6 @@ export function useWebSocket(
 ): UseWebSocketReturn {
   // Latest-callback refs so onmessage sees fresh handlers without
   // triggering a WebSocket reconnect every time App re-renders.
-  const onRearrangerUpdateRef = useRef(options.onRearrangerUpdate);
-  const onRearrangerStateRef = useRef(options.onRearrangerState);
   const onRewindCompleteRef = useRef(options.onRewindComplete);
   const onMessagesReplayRef = useRef(options.onMessagesReplay);
   const onStubInvalidatedRef = useRef(options.onStubInvalidated);
@@ -414,6 +454,7 @@ export function useWebSocket(
   const onSessionOrganizationChangedRef = useRef(options.onSessionOrganizationChanged);
   const onProjectMappingsChangedRef = useRef(options.onProjectMappingsChanged);
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
+  const onPrLinkRef = useRef(options.onPrLink);
   const onPromptQueuedRef = useRef(options.onPromptQueued);
   const onTurnStartedRef = useRef(options.onTurnStarted);
   const onQueueConsumedRef = useRef(options.onQueueConsumed);
@@ -427,6 +468,13 @@ export function useWebSocket(
   const onMessageAutoRetryChangedRef = useRef(
     options.onMessageAutoRetryChanged
   );
+  const onMessageContentUpdatedRef = useRef(
+    options.onMessageContentUpdated
+  );
+  const onMessageContinuationChangedRef = useRef(
+    options.onMessageContinuationChanged
+  );
+  const onMessageRunMetaChangedRef = useRef(options.onMessageRunMetaChanged);
   const onMessageAskResultChangedRef = useRef(
     options.onMessageAskResultChanged
   );
@@ -437,8 +485,6 @@ export function useWebSocket(
   const onSessionReconciledRef = useRef(options.onSessionReconciled);
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
-    onRearrangerUpdateRef.current = options.onRearrangerUpdate;
-    onRearrangerStateRef.current = options.onRearrangerState;
     onRewindCompleteRef.current = options.onRewindComplete;
     onMessagesReplayRef.current = options.onMessagesReplay;
     onStubInvalidatedRef.current = options.onStubInvalidated;
@@ -466,6 +512,7 @@ export function useWebSocket(
     onSessionOrganizationChangedRef.current = options.onSessionOrganizationChanged;
     onProjectMappingsChangedRef.current = options.onProjectMappingsChanged;
     onSupervisorEventRef.current = options.onSupervisorEvent;
+    onPrLinkRef.current = options.onPrLink;
     onPromptQueuedRef.current = options.onPromptQueued;
     onTurnStartedRef.current = options.onTurnStarted;
     onQueueConsumedRef.current = options.onQueueConsumed;
@@ -473,14 +520,15 @@ export function useWebSocket(
     onMessageRecoveringChangedRef.current = options.onMessageRecoveringChanged;
     onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
     onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
+    onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
+    onMessageContinuationChangedRef.current = options.onMessageContinuationChanged;
+    onMessageRunMetaChangedRef.current = options.onMessageRunMetaChanged;
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
     onSessionProcessingRef.current = options.onSessionProcessing;
     onSessionReconciledRef.current = options.onSessionReconciled;
     clientIdRef.current = options.clientId;
   }, [
-    options.onRearrangerUpdate,
-    options.onRearrangerState,
     options.onRewindComplete,
     options.onMessagesReplay,
     options.onStubInvalidated,
@@ -515,6 +563,8 @@ export function useWebSocket(
     options.onMessageRecoveringChanged,
     options.onMessageRetryingChanged,
     options.onMessageAutoRetryChanged,
+    options.onMessageContentUpdated,
+    options.onMessageContinuationChanged,
     options.onMessageAskResultChanged,
     options.onMessageAskChoiceChanged,
     options.onSessionProcessing,
@@ -531,7 +581,6 @@ export function useWebSocket(
   }, [options.currentAppSessionId]);
   const [connected, setConnected] = useState(false);
   const [events, setEvents] = useState<WSEvent[]>([]);
-  const [traceSteps, setTraceSteps] = useState<WSEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [streamingPhase, setStreamingPhase] = useState<StreamingPhase>(null);
@@ -557,6 +606,7 @@ export function useWebSocket(
     [],
   );
   const wsRef = useRef<WebSocket | null>(null);
+  const snapshotTransportRef = useRef(new SnapshotTransport());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Mirror isStreaming into a ref so onmessage can gate the "loose
   // event" path without re-subscribing on every streaming transition.
@@ -597,9 +647,23 @@ export function useWebSocket(
     // Browser path is the same URL, just without a ?token= suffix.
     void url;
     const ws = new WebSocket(getWsUrl());
+    let routingVerifiedSnapshot = false;
+    let verifiedRouteResult: void | Promise<void>;
+
+    const routeVerifiedSnapshot = (event: WSEvent) => {
+      routingVerifiedSnapshot = true;
+      verifiedRouteResult = undefined;
+      try {
+        ws.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+        return verifiedRouteResult;
+      } finally {
+        routingVerifiedSnapshot = false;
+      }
+    };
 
     ws.onopen = () => {
       setConnected(true);
+      snapshotTransportRef.current.resume((frame) => ws.send(JSON.stringify(frame)));
     };
 
     ws.onclose = (ev) => {
@@ -625,8 +689,18 @@ export function useWebSocket(
     };
 
     ws.onmessage = (e) => {
+      const frameStartedAt = performance.now();
+      let eventType = "unknown";
+      const byteSize = typeof e.data === "string" ? e.data.length * 4 : 0;
       try {
         const event: WSEvent = JSON.parse(e.data);
+        eventType = event.type;
+        if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(
+          event,
+          (frame) => ws.send(JSON.stringify(frame)),
+          routeVerifiedSnapshot,
+          byteSize,
+        )) return;
 
         // Catch-all dispatch (progress bus extenders) BEFORE any typed
         // path so even early-return events (messages_replay etc.) still
@@ -674,6 +748,10 @@ export function useWebSocket(
             messages: ChatMessage[];
           };
           if (d.app_session_id && Array.isArray(d.messages)) {
+            logTiming("websocket", "messages_replay", frameStartedAt, {
+              bytes: byteSize,
+              messages: d.messages.length,
+            }, 100);
             onMessagesReplayRef.current?.(d.app_session_id, d.messages);
           }
           return;
@@ -683,13 +761,12 @@ export function useWebSocket(
         // historical turn — replace its stale stub so the expanded
         // turn re-fetches fresh full events.
         if (event.type === "stub_invalidated") {
-          const d = event.data as {
-            app_session_id: string;
-            msg_id: string;
-            stub: { event_count: number; last_events: WSEvent[] };
-          };
-          if (d.app_session_id && d.msg_id && d.stub) {
-            onStubInvalidatedRef.current?.(d.app_session_id, d.msg_id, d.stub);
+          for (const d of parseStubInvalidations(event.data)) {
+            onStubInvalidatedRef.current?.(
+              d.app_session_id,
+              d.msg_id,
+              d.stub,
+            );
           }
           return;
         }
@@ -703,6 +780,10 @@ export function useWebSocket(
             messages: ChatMessage[];
           };
           if (d.app_session_id && Array.isArray(d.messages)) {
+            logTiming("websocket", "messages_delta", frameStartedAt, {
+              bytes: byteSize,
+              messages: d.messages.length,
+            }, 50);
             onMessagesDeltaRef.current?.(d.app_session_id, d.messages);
           }
           return;
@@ -762,9 +843,12 @@ export function useWebSocket(
         // may have returned stale cache; silently refetch if the user
         // is viewing this root's session.
         if (event.type === "session_reconciled") {
-          const d = event.data as { root_id?: string };
+          const d = event.data as { root_id?: string; snapshot_refresh_id?: string };
           if (d.root_id) {
-            onSessionReconciledRef.current?.(d.root_id);
+            verifiedRouteResult = onSessionReconciledRef.current?.(
+              d.root_id,
+              typeof d.snapshot_refresh_id === "string",
+            );
           }
           return;
         }
@@ -789,13 +873,36 @@ export function useWebSocket(
         // message for the SPECIFIC session the event belongs to. The
         // backend's `_dispatch_raw` annotates `data.app_session_id`
         // on every per-session frame so a client subscribed to N
-        // panes can route each frame to the right one. Falls back
-        // to the focused pane id only as a defensive last resort —
-        // any new event type that forgets to carry app_session_id
-        // would otherwise misroute under split-fork view.
-        if (
+        // panes can route each frame to the right one. Ownerless
+        // render frames are ignored instead of being grafted onto
+        // whichever pane is focused.
+        // `pr-link` is a no-uuid metadata agent_message (a PR was just
+        // created). It never lands on the render tree — surface it only
+        // as an ephemeral chat-panel toast, on the LIVE push. Diverted
+        // BEFORE the turn-reducer routing below so it can't pollute the
+        // in-memory msg.events.
+        const prLinkData =
+          event.type === "agent_message"
+            ? (event.data as { type?: string; prUrl?: string } | undefined)
+            : undefined;
+        if (prLinkData?.type === "pr-link" && prLinkData.prUrl) {
+          const d = event.data as {
+            app_session_id?: string;
+            sessionId?: string;
+            prNumber?: number;
+            prUrl: string;
+            prRepository?: string;
+          };
+          onPrLinkRef.current?.({
+            sessionId: d.app_session_id ?? d.sessionId,
+            prNumber: d.prNumber,
+            prUrl: d.prUrl,
+            prRepository: d.prRepository,
+          });
+        } else if (
           event.type === "agent_message" ||
           event.type === "manager_event" ||
+          event.type === "model_switched" ||
           event.type === "steer_prompt" ||
           event.type === "worker_event" ||
           event.type === "turn_start" ||
@@ -817,7 +924,7 @@ export function useWebSocket(
           }
           // intentional fallthrough — the existing `setEvents` buffer
           // below still captures these for non-rendering uses
-          // (trace_step pairing, sidebar refresh signals, etc).
+          // (sidebar refresh signals, etc).
         }
 
         // User-message lifecycle (5 states emitted by the backend's
@@ -864,15 +971,13 @@ export function useWebSocket(
         // A new turn starts with turn_start — clear prior events.
         if (event.type === "turn_start") {
           setEvents([]);
-          setTraceSteps([]);
           setIsStreaming(true);
           setStreamingPhase("manager");
           setStreamingLoadPhase("starting");
           setLastResult(null);
           const managerSid =
-            (event.data as { app_session_id?: string })?.app_session_id ??
-            currentAppSessionIdRef.current ??
-            "";
+            (event.data as { app_session_id?: string })?.app_session_id ?? "";
+          if (!managerSid) return;
           setStreamingAppSessionId(managerSid || null);
           onTurnStartedRef.current?.(managerSid);
         }
@@ -923,10 +1028,6 @@ export function useWebSocket(
               queued_id: d.queued_id ?? null,
             });
           }
-        }
-
-        if (event.type === "trace_step") {
-          setTraceSteps((prev) => [...prev, event]);
         }
 
         // Phase follows whatever is actively producing events.
@@ -1019,35 +1120,18 @@ export function useWebSocket(
           if (sid) onTurnTerminalRef.current?.(sid);
         }
 
-        // Experimental rearranger events — do not accumulate in
-        // `events` (it's the per-turn buffer). Surface directly to the
-        // app via the optional callbacks.
-        if (event.type === "rearranger_updated") {
-          const d = event.data as {
-            app_session_id: string;
-            tree?: RearrangerTree;
-            rearranger_session_id?: string | null;
-            last_message_count?: number;
-            rearranger_stats?: RearrangerStats | null;
-            token_usage_total?: TokenUsage | null;
-            token_usage_last?: TokenUsage | null;
-          };
-          onRearrangerUpdateRef.current?.({
-            appSessionId: d.app_session_id,
-            tree: d.tree,
-            rearrangerSessionId: d.rearranger_session_id ?? null,
-            lastMessageCount: d.last_message_count,
-            rearrangerStats: d.rearranger_stats ?? null,
-            tokenUsageTotal: d.token_usage_total ?? null,
-            tokenUsageLast: d.token_usage_last ?? null,
-          });
-        }
         if (event.type === "rewind_complete") {
-          const d = event as unknown as {
+          const canonical = event.data as {
+            session_id?: string;
+            messages?: ChatMessage[];
+          } | undefined;
+          const d = canonical?.session_id ? canonical : event as unknown as {
             session_id: string;
             messages: ChatMessage[];
           };
-          onRewindCompleteRef.current?.(d.session_id, d.messages);
+          if (d.session_id && Array.isArray(d.messages)) {
+            onRewindCompleteRef.current?.(d.session_id, d.messages);
+          }
         }
         if (event.type === "message_recovering_changed") {
           const d = event.data as {
@@ -1090,6 +1174,48 @@ export function useWebSocket(
               d.session_id,
               d.msg_id,
               d.auto_retry ?? null
+            );
+          }
+        }
+        if (event.type === "message_content_updated") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            content: string;
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageContentUpdatedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.content ?? ""
+            );
+          }
+        }
+        if (event.type === "message_continuation_changed") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            chain_depth: number | null;
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageContinuationChangedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.chain_depth ?? null
+            );
+          }
+        }
+        if (event.type === "message_run_meta_changed") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            run_meta: import("../types").ChatMessage["run_meta"];
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageRunMetaChangedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.run_meta ?? null
             );
           }
         }
@@ -1143,6 +1269,8 @@ export function useWebSocket(
               provider_id?: string;
               supervisor_enabled?: boolean;
               pinned?: boolean;
+              topbar_pinned?: boolean;
+              topbar_pinned_at?: string | null;
               archived?: boolean;
               working_mode?: Session["working_mode"];
               working_mode_meta?: Session["working_mode_meta"];
@@ -1151,6 +1279,9 @@ export function useWebSocket(
               current_tasks?: import("../types").TaskItem[];
               messages?: import("../types").ChatMessage[];
               message_count?: number;
+              updated_at?: string;
+              last_user_prompt_at?: string;
+              last_opened_at?: string;
               pagination?: import("../types").Session["pagination"];
               worker_creation_policy?: import("../types").WorkerCreationPolicy;
               right_panel_open?: boolean;
@@ -1160,11 +1291,24 @@ export function useWebSocket(
                 | "canvas"
                 | "comments"
                 | "todos"
+                | "screen"
+                | "changes"
+                | "communications"
+                | "board"
                 | null;
+              right_panel_width?: number | null;
+              right_panel_mobile_height?: number | null;
+              right_panel_todos_dismissed?: boolean;
+              right_panel_auto_opened_by?: import("../types").Session["right_panel_auto_opened_by"];
+              sidebar_minimized?: boolean;
             };
             originated_by?: string | null;
           };
-          if (d.session_id && d.patch && d.originated_by !== clientIdRef.current) {
+          if (
+            d.session_id &&
+            d.patch &&
+            (d.originated_by == null || d.originated_by !== clientIdRef.current)
+          ) {
             onSessionMetadataUpdatedRef.current?.(d.session_id, d.patch);
           }
         }
@@ -1246,21 +1390,23 @@ export function useWebSocket(
         if (event.type === "project_mappings_changed") {
           onProjectMappingsChangedRef.current?.();
         }
-        if (event.type === "rearranger_state") {
-          const d = event.data as {
-            app_session_id: string;
-            enabled: boolean;
-          };
-          onRearrangerStateRef.current?.({
-            appSessionId: d.app_session_id,
-            enabled: !!d.enabled,
-          });
-        }
         // Provider list/active-id changed somewhere — let any open
         // ProvidersModal + every ModelSelector refetch via a global
         // window event. Cheaper than threading another callback prop.
         if (event.type === "provider_changed") {
           window.dispatchEvent(new Event("provider_changed"));
+        }
+        // Streaming provider-CLI install (Settings → Provider CLI tools).
+        // provider_setup streams installer stdout/stderr line-by-line
+        // (progress) and a terminal state (finished). useProviderInstalls
+        // owns the registry projection.
+        if (
+          event.type === "provider_install_progress" ||
+          event.type === "provider_install_finished"
+        ) {
+          window.dispatchEvent(
+            new CustomEvent(event.type, { detail: event.data }),
+          );
         }
         // Per-provider model catalog delta (daily refresher / manual
         // refresh). ModelSelector listens via useModelsCatalogChanged
@@ -1319,8 +1465,30 @@ export function useWebSocket(
             new CustomEvent("user_input_resolved", { detail: event.data }),
           );
         }
-      } catch {
+        // Interactive tool/command approval: a runner (Claude can_use_tool /
+        // Codex app-server) needs a human decision mid-turn. Chat renders an
+        // Approve/Deny card; the decision POSTs back and unblocks the runner.
+        if (event.type === "tool_approval_requested") {
+          window.dispatchEvent(
+            new CustomEvent("tool_approval_requested", { detail: event.data }),
+          );
+        }
+        if (event.type === "tool_approval_resolved") {
+          window.dispatchEvent(
+            new CustomEvent("tool_approval_resolved", { detail: event.data }),
+          );
+        }
+      } catch (err) {
+        logFailure("websocket", "frame_failed", err, {
+          bytes: byteSize,
+          event_type: eventType,
+        });
         // ignore parse errors
+      } finally {
+        logTiming("websocket", "frame_dispatch", frameStartedAt, {
+          bytes: byteSize,
+          event_type: eventType,
+        }, 100);
       }
     };
 
@@ -1331,7 +1499,15 @@ export function useWebSocket(
     connect();
     return () => {
       clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (!ws) return;
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
+      snapshotTransportRef.current.clear();
     };
   }, [connect]);
 
@@ -1494,8 +1670,8 @@ export function useWebSocket(
     [isStreaming]
   );
 
-  const stopStreaming = useCallback((appSessionId: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  const stopStreaming = useCallback((appSessionId: string): boolean => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     setIsStopping(true);
     wsRef.current.send(
       JSON.stringify({
@@ -1503,11 +1679,14 @@ export function useWebSocket(
         app_session_id: appSessionId,
       })
     );
+    return true;
   }, []);
 
   const sendPromoteQueued = useCallback((
     appSessionId: string,
     action: "interrupt" | "steer" = "interrupt",
+    queuedId?: string,
+    queuedIds?: string[],
   ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(
@@ -1515,17 +1694,20 @@ export function useWebSocket(
         type: "promote_queued",
         app_session_id: appSessionId,
         action,
+        queued_id: queuedId,
+        queued_ids: queuedIds,
       })
     );
     return true;
   }, []);
 
-  const sendCancelQueued = useCallback((appSessionId: string) => {
+  const sendCancelQueued = useCallback((appSessionId: string, queuedId?: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(
       JSON.stringify({
         type: "cancel_queued",
         app_session_id: appSessionId,
+        queued_id: queuedId,
       })
     );
     return true;
@@ -1547,6 +1729,30 @@ export function useWebSocket(
     []
   );
 
+  const sendBeginQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "begin_queued_edit",
+        app_session_id: appSessionId,
+        queued_id: queuedId,
+      })
+    );
+    return true;
+  }, []);
+
+  const sendFinishQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "finish_queued_edit",
+        app_session_id: appSessionId,
+        queued_id: queuedId,
+      })
+    );
+    return true;
+  }, []);
+
   return {
     connected,
     sendMessage,
@@ -1554,8 +1760,9 @@ export function useWebSocket(
     sendPromoteQueued,
     sendCancelQueued,
     sendUpdateQueued,
+    sendBeginQueuedEdit,
+    sendFinishQueuedEdit,
     events,
-    traceSteps,
     isStreaming,
     isStopping,
     streamingPhase,

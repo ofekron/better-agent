@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+import _test_home
+
+_TMP_HOME = _test_home.isolate("bc-test-req-native-windows-")
+
+import native_transcript_index as idx  # noqa: E402
+import requirement_context  # noqa: E402
+
+
+def _row(path: str, element_index: int, text: str, *, kind: str = "user_prompt", role: str = "user", tool_name: str = "") -> dict[str, object]:
+    return {
+        "hit_index": element_index,
+        "text": text,
+        "path": path,
+        "sid": "s1",
+        "cwd": "/repo",
+        "tag": "claude",
+        "element_kind": kind,
+        "tool_name": tool_name,
+        "ts_utc": f"2026-01-01T00:00:{element_index:02d}.000000Z",
+        "role": role,
+        "element_id": f"e{element_index}",
+        "element_index": element_index,
+    }
+
+
+def _seed() -> None:
+    conn = idx._writer_connection()
+    conn.execute("DELETE FROM native_element_fts")
+    conn.execute("DELETE FROM native_element_path")
+    conn.execute("DELETE FROM native_element_meta")
+    rows = [
+        ("setup context", "/p/native.jsonl", "s1", "/repo", "claude", "assistant_text", "", "2026-01-01T00:00:00.000000Z", "assistant", "e0", 0),
+        ("first requirements hit", "/p/native.jsonl", "s1", "/repo", "claude", "user_prompt", "", "2026-01-01T00:00:01.000000Z", "user", "e1", 1),
+        ("shared requirement confirmation", "/p/native.jsonl", "s1", "/repo", "claude", "assistant_text", "", "2026-01-01T00:00:02.000000Z", "assistant", "e2", 2),
+        ("second requirements hit", "/p/native.jsonl", "s1", "/repo", "claude", "user_prompt", "", "2026-01-01T00:00:03.000000Z", "user", "e3", 3),
+        ("tail context", "/p/native.jsonl", "s1", "/repo", "claude", "assistant_text", "", "2026-01-01T00:00:04.000000Z", "assistant", "e4", 4),
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
+        "FROM native_element_fts"
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
+        [(row[0], row[1]) for row in indexed],
+    )
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(idx._SCHEMA_VERSION),),
+    )
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('covered', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('last_walk_at', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(idx.time.time()),),
+    )
+    conn.commit()
+
+
+def main() -> int:
+    try:
+        _seed()
+        rows = requirement_context._native_transcript_sql_window_rows(
+            idx,
+            tokens=["requirements"],
+            cwds=("/repo",),
+            limit=2,
+        )
+        records = requirement_context._native_bundle_records_from_rows(rows)
+        if len(records) != 1:
+            raise AssertionError(f"expected one merged bundle, got {len(records)}")
+        text = records[0]["text"]
+        if text.count("shared requirement confirmation") != 1:
+            raise AssertionError("overlapping SQL windows duplicated shared transcript row")
+        if "first requirements hit" not in text or "second requirements hit" not in text:
+            raise AssertionError("merged bundle lost one of the overlapping hits")
+        if records[0]["native_hit_index"] not in {1, 3}:
+            raise AssertionError(f"unexpected native_hit_index {records[0]['native_hit_index']!r}")
+
+        request_input_row = _row(
+            "/p/user-input.jsonl",
+            9,
+            "request_user_input question asks whether commits must be precise",
+            kind="tool_call",
+            role="assistant",
+            tool_name="request_user_input",
+        )
+        conn = idx._writer_connection()
+        conn.execute(
+            "INSERT INTO native_element_fts"
+            "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                request_input_row["text"],
+                request_input_row["path"],
+                request_input_row["sid"],
+                request_input_row["cwd"],
+                request_input_row["tag"],
+                request_input_row["element_kind"],
+                request_input_row["tool_name"],
+                request_input_row["ts_utc"],
+                request_input_row["role"],
+                request_input_row["element_id"],
+                request_input_row["element_index"],
+            ),
+        )
+        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO native_element_path(rowid, path) VALUES (?, ?)", (rowid, request_input_row["path"]))
+        conn.execute(
+            "INSERT INTO native_element_meta"
+            "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rowid,
+                request_input_row["path"],
+                request_input_row["sid"],
+                request_input_row["cwd"],
+                request_input_row["tag"],
+                request_input_row["element_kind"],
+                request_input_row["tool_name"],
+                request_input_row["ts_utc"],
+                request_input_row["role"],
+                request_input_row["element_id"],
+                request_input_row["element_index"],
+            ),
+        )
+        conn.commit()
+        result = idx.run_readonly_sql(
+            "SELECT element_kind, tool_name, text FROM native_element_fts "
+            "WHERE native_element_fts MATCH ? AND tool_name = ? ORDER BY ts_utc",
+            ("commits", "request_user_input"),
+        )
+        if result.get("error"):
+            raise AssertionError(f"request_user_input tool filter failed: {result['error']}")
+        if result.get("rows") != [["tool_call", "request_user_input", request_input_row["text"]]]:
+            raise AssertionError(f"request_user_input tool call was not returned as evidence: {result.get('rows')!r}")
+
+        short_repeat = "continue"
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/short-first.jsonl", 1, short_repeat),
+            _row("/p/short-second.jsonl", 1, short_repeat),
+        ])
+        if "<repeated_text_ref " in records[1]["text"]:
+            raise AssertionError("short repeated user prompt should stay expanded")
+        if short_repeat not in records[1]["text"]:
+            raise AssertionError("short repeated user prompt text was lost")
+
+        repeated_text = " ".join(["same injected harness text with a durable requirement"] * 20)
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/first.jsonl", 1, repeated_text),
+            _row("/p/second.jsonl", 1, repeated_text),
+        ])
+        if len(records) != 2:
+            raise AssertionError(f"expected two bundles for repeated text, got {len(records)}")
+        if repeated_text not in records[0]["text"]:
+            raise AssertionError("first repeated text occurrence should stay expanded")
+        if "<repeated_text_ref " not in records[1]["text"]:
+            raise AssertionError("second exact repeated text occurrence was not collapsed")
+        if repeated_text in records[1]["text"]:
+            raise AssertionError("second exact repeated text occurrence still repeats full text")
+
+        shared_prefix = " ".join(f"harness{i}" for i in range(900))
+        first_text = f"{shared_prefix} first tail"
+        second_tail = "\n    second tail has the actual new requirement\n    keep indentation"
+        second_text = f"{shared_prefix} {second_tail}"
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/prefix-first.jsonl", 1, first_text),
+            _row("/p/prefix-second.jsonl", 1, second_text),
+        ])
+        if "<repeated_prefix_ref " not in records[1]["text"]:
+            raise AssertionError("second shared-prefix occurrence was not collapsed")
+        if second_tail not in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse lost the unique tail")
+        if "prefix_chars=8192 " in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse did not extend beyond the fixed bucket")
+        tail_text = records[1]["text"].split("unique_tail_after_prefix:", 1)[1]
+        if "harness899" in tail_text:
+            raise AssertionError("shared-prefix collapse left the end of the repeated prefix in the tail")
+        if shared_prefix in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse still repeats the full prefix")
+
+        global_tail = "\n    globally projected unique tail"
+        global_text = f"{shared_prefix} {global_tail}"
+        global_row = _row("/p/global-prefix.jsonl", 1, global_text)
+        global_row.update({
+            "repeat_group_id": 42,
+            "repeat_raw_tail_start": len(shared_prefix) + 1,
+            "repeat_norm_tail_start": len(" ".join(shared_prefix.split())),
+            "repeat_kind": "shared_prefix",
+            "repeat_hash_key": "a" * 64,
+            "repeat_count": 7,
+            "repeat_representative_rowid": 11,
+            "repeat_common_norm_prefix_len": len(" ".join(shared_prefix.split())),
+        })
+        records = requirement_context._native_bundle_records_from_rows([global_row])
+        if "<repeated_prefix_ref group_id=42 " not in records[0]["text"]:
+            raise AssertionError("global repeat metadata was not used for prefix collapse")
+        if global_tail not in records[0]["text"]:
+            raise AssertionError("global repeat metadata lost unique tail")
+        if "harness899" in records[0]["text"].split("unique_tail_after_prefix:", 1)[1]:
+            raise AssertionError("global repeat metadata left repeated prefix in tail")
+
+        global_exact = _row("/p/global-exact.jsonl", 1, repeated_text)
+        global_exact.update({
+            "repeat_group_id": 77,
+            "repeat_raw_tail_start": len(repeated_text),
+            "repeat_norm_tail_start": len(" ".join(repeated_text.split())),
+            "repeat_kind": "exact_text",
+            "repeat_hash_key": "b" * 64,
+            "repeat_count": 3,
+            "repeat_representative_rowid": 13,
+            "repeat_common_norm_prefix_len": len(" ".join(repeated_text.split())),
+        })
+        records = requirement_context._native_bundle_records_from_rows([global_exact])
+        if "<repeated_text_ref group_id=77 " not in records[0]["text"]:
+            raise AssertionError("global repeat metadata was not used for exact collapse")
+        if repeated_text in records[0]["text"]:
+            raise AssertionError("global exact repeat still emitted full text")
+        print("PASS requirement native bundle windows merge")
+        return 0
+    finally:
+        idx.shutdown()
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

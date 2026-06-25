@@ -4,16 +4,26 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from weakref import WeakKeyDictionary
 
 import perf
-from provider import RecoveredPopen
-from runs_dir import pid_alive as _pid_alive, runs_root as _runs_root
+from provider import RecoveredPopen, live_recovery_pid
+from runs_dir import (
+    iter_run_dirs,
+    pid_alive as _pid_alive,
+    runs_root as _runs_root,
+    salvage_complete_payload as _salvage_complete_payload,
+)
 from event_shape import extract_output_text as _extract_output_text
 from turn_helpers import (
     _is_rate_limit_attempt,
@@ -22,41 +32,100 @@ from turn_helpers import (
 )
 from session_manager import manager as session_manager
 from ingestion_versions import current_ingestion_version, marker_matches_current, write_marker
-from redigest_backup import RedigestBackup
+from redigest_backup import RecoveryRootLease, RedigestBackup
 
 logger = logging.getLogger(__name__)
+
+_RECOVERY_LEASE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="recovery-root-lease",
+)
+_RECOVERY_ROOT_ADMISSION: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[str, asyncio.Lock],
+] = WeakKeyDictionary()
+_PENDING_RECOVERY_LEASES: set[RecoveryRootLease] = set()
+_PENDING_RECOVERY_LEASES_LOCK = threading.Lock()
+_RECOVERY_LEASE_SHUTTING_DOWN = False
+_MARKER_INDEX_BATCH = threading.local()
+_TERMINAL_MARKER_QUANTUM_MAX = 16
+_TERMINAL_MARKER_QUANTUM_MS = 5.0
+
+
+def shutdown_recovery_lease_executor() -> None:
+    global _RECOVERY_LEASE_SHUTTING_DOWN
+    with _PENDING_RECOVERY_LEASES_LOCK:
+        _RECOVERY_LEASE_SHUTTING_DOWN = True
+        pending = tuple(_PENDING_RECOVERY_LEASES)
+    for lease in pending:
+        lease.cancel_pending_acquire()
+    _RECOVERY_LEASE_EXECUTOR.shutdown(wait=True, cancel_futures=False)
+
+_DEFAULT_RECOVERY_INTEGRATION_PARALLELISM = 8
+_MAX_RECOVERY_INTEGRATION_PARALLELISM = 32
+_RECOVERY_INTEGRATION_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_INTEGRATION_PARALLELISM"
+
+
+def _recovery_integration_parallelism(group_count: int) -> int:
+    if group_count <= 1:
+        return 1
+    raw = os.environ.get(_RECOVERY_INTEGRATION_PARALLELISM_ENV)
+    if raw is None or not raw.strip():
+        requested = _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM
+    else:
+        try:
+            requested = int(raw)
+        except ValueError:
+            logger.warning(
+                "invalid %s=%r; using default parallelism=%d",
+                _RECOVERY_INTEGRATION_PARALLELISM_ENV,
+                raw,
+                _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM,
+            )
+            requested = _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM
+    return max(1, min(group_count, _MAX_RECOVERY_INTEGRATION_PARALLELISM, requested))
 
 
 class _RecoveryLogSummary:
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.skips: Counter[str] = Counter()
         self.skip_samples: dict[str, list[str]] = defaultdict(list)
-        self.not_marked: Counter[str] = Counter()
-        self.not_marked_samples: dict[str, list[str]] = defaultdict(list)
+        self.tombstoned: Counter[str] = Counter()
+        self.tombstoned_samples: dict[str, list[str]] = defaultdict(list)
 
     def record_skip(self, reason: str, run_id: str | None) -> None:
-        self.skips[reason] += 1
-        if run_id and len(self.skip_samples[reason]) < 5:
-            self.skip_samples[reason].append(str(run_id)[:8])
+        with self._lock:
+            self.skips[reason] += 1
+            if run_id and len(self.skip_samples[reason]) < 5:
+                self.skip_samples[reason].append(str(run_id)[:8])
 
-    def record_not_marked(self, reason: str, run_id: str | None) -> None:
-        self.not_marked[reason] += 1
-        if run_id and len(self.not_marked_samples[reason]) < 5:
-            self.not_marked_samples[reason].append(str(run_id)[:8])
+    def record_tombstoned(self, reason: str, run_id: str | None) -> None:
+        with self._lock:
+            self.tombstoned[reason] += 1
+            if run_id and len(self.tombstoned_samples[reason]) < 5:
+                self.tombstoned_samples[reason].append(str(run_id)[:8])
 
     def emit(self) -> None:
-        for reason, count in sorted(self.skips.items()):
-            samples = ",".join(self.skip_samples.get(reason, []))
+        with self._lock:
+            skips = Counter(self.skips)
+            skip_samples = {k: list(v) for k, v in self.skip_samples.items()}
+            tombstoned = Counter(self.tombstoned)
+            tombstoned_samples = {
+                k: list(v) for k, v in self.tombstoned_samples.items()
+            }
+        for reason, count in sorted(skips.items()):
+            samples = ",".join(skip_samples.get(reason, []))
             logger.warning(
                 "integrate_recovered_runs: skipped %d run(s): %s%s",
                 count,
                 reason,
                 f" samples={samples}" if samples else "",
             )
-        for reason, count in sorted(self.not_marked.items()):
-            samples = ",".join(self.not_marked_samples.get(reason, []))
+        for reason, count in sorted(tombstoned.items()):
+            samples = ",".join(tombstoned_samples.get(reason, []))
             logger.warning(
-                "recovery: did not mark %d run(s) reconciled after %s; "
+                "recovery: tombstoned %d run(s) as reconciled after %s; "
                 "old ingestion version and native source is missing%s",
                 count,
                 reason,
@@ -153,6 +222,19 @@ def _replay_from_claude_jsonl(
     uuid_to_parent_uuid: dict[str, str] = {}
     subagent_registry = _SubagentRegistry()
 
+    # Upper replay bound for multi-turn session jsonls (stamped as
+    # `jsonl_slice_end` by the retired handoff-serving runners; still on
+    # disk for runs recorded before the per-turn restore). Without it a
+    # restart mid-turn-N+1 would replay turn N's slice to EOF and
+    # re-attribute the newer turn's lines to turn N's message.
+    slice_end: Optional[int] = None
+    try:
+        raw_end = state.get("jsonl_slice_end")
+        if raw_end is not None:
+            slice_end = int(raw_end)
+    except (TypeError, ValueError):
+        slice_end = None
+
     try:
         size = current_stat.st_size
         if pre_query_byte_offset > size:
@@ -164,7 +246,11 @@ def _replay_from_claude_jsonl(
             return []
         with jsonl_path.open("rb") as f:
             f.seek(pre_query_byte_offset)
+            consumed = pre_query_byte_offset
             for raw_bytes in f:
+                if slice_end is not None and consumed >= slice_end:
+                    break
+                consumed += len(raw_bytes)
                 if not raw_bytes.endswith(b"\n"):
                     break
                 raw = raw_bytes.decode("utf-8", errors="replace")
@@ -323,6 +409,49 @@ def _session_key(desc: dict) -> str:
     )
 
 
+def batch_runs_by_session(
+    recovered: list[dict], batch_max: int,
+) -> list[list[dict]]:
+    """Pack recovered runs into batches without splitting a session's
+    runs across batches. `integrate_recovered_runs` elects the latest
+    run per session bucket WITHIN the list it is given; a session
+    fragmented across batches would elect one "latest" per fragment and
+    replay non-latest slices onto the final message. A session with more
+    runs than `batch_max` gets its own oversized batch."""
+    groups: dict[str, list[dict]] = {}
+    for desc in recovered:
+        groups.setdefault(_session_key(desc), []).append(desc)
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    for descs in groups.values():
+        if len(descs) >= batch_max:
+            batches.append(descs)
+            continue
+        if current and len(current) + len(descs) > batch_max:
+            batches.append(current)
+            current = []
+        current.extend(descs)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _run_order_key(desc: dict) -> tuple[str, float]:
+    if not isinstance(desc, dict):
+        return ("", 0.0)
+    run_id = desc.get("run_id")
+    if not isinstance(run_id, str):
+        run_id = ""
+    started_at = desc.get("started_at")
+    if not isinstance(started_at, str):
+        started_at = ""
+    try:
+        mtime = (_runs_root() / run_id).stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (started_at, mtime)
+
+
 def _latest_run(descs: list[dict]) -> dict:
     """The only run in a session that may legitimately still need replay.
 
@@ -342,14 +471,270 @@ def _latest_run(descs: list[dict]) -> dict:
     deliberately the key and `pre_query_byte_offset` deliberately is NOT:
     a crashed latest run records `pre_query_byte_offset=0` and would
     mis-rank below an earlier completed run."""
-    def key(d: dict) -> tuple[str, float]:
-        try:
-            mtime = (_runs_root() / (d.get("run_id") or "")).stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        return (d.get("started_at") or "", mtime)
+    return max(descs, key=_run_order_key)
 
-    return max(descs, key=key)
+
+def _codex_replay_bound(desc: dict, next_desc: dict) -> Optional[int]:
+    if _provider_kind(desc) != "codex" or _provider_kind(next_desc) != "codex":
+        return None
+    try:
+        current_state = json.loads(
+            (_runs_root() / desc["run_id"] / "state.json").read_text(encoding="utf-8")
+        )
+        next_state = json.loads(
+            (_runs_root() / next_desc["run_id"] / "state.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(current_state, dict) or not isinstance(next_state, dict):
+            return None
+        current_path = Path(
+            current_state.get("jsonl_path") or current_state.get("rollout_path")
+        ).resolve()
+        next_path = Path(
+            next_state.get("jsonl_path") or next_state.get("rollout_path")
+        ).resolve()
+        current_start = current_state.get("pre_query_byte_offset", 0)
+        next_start = next_state.get("pre_query_byte_offset", 0)
+        if (
+            not isinstance(current_start, int)
+            or isinstance(current_start, bool)
+            or not isinstance(next_start, int)
+            or isinstance(next_start, bool)
+        ):
+            return None
+        size = current_path.stat().st_size
+        if current_path != next_path or not (0 <= current_start < next_start <= size):
+            return None
+        with current_path.open("rb") as f:
+            for offset in (current_start, next_start):
+                if offset:
+                    f.seek(offset - 1)
+                    if f.read(1) != b"\n":
+                        return None
+        return next_start
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+async def _integrate_recovered_session_group(
+    coordinator,
+    descs: list[dict],
+    summary: _RecoveryLogSummary,
+) -> None:
+    """Integrate one session bucket serially.
+
+    Recovery may run different session buckets in parallel, but this function
+    preserves the per-session invariant: choose the latest run once, reconcile
+    every older run without replay, and integrate at most that latest run.
+    """
+    from provider import get_provider, default_provider
+
+    # `_latest_run` does an `.stat()` per desc — sync FS I/O that adds up
+    # when a single session has many turn dirs. Push it to a worker thread so
+    # the event loop isn't blocked on stat latency.
+    phase_started = time.perf_counter()
+    ordered = await asyncio.to_thread(sorted, descs, key=_run_order_key)
+    perf.record(
+        "startup.recovery.session_group.sort",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
+    latest = ordered[-1]
+    terminal_markers: list[tuple[str, dict, str, int]] = []
+
+    async def flush_terminal_markers() -> None:
+        while terminal_markers:
+            import recovery_priority
+
+            await recovery_priority.admit_recovery_quantum()
+            started = time.perf_counter()
+            cpu_started = time.process_time()
+            chunk = terminal_markers[:_TERMINAL_MARKER_QUANTUM_MAX]
+            del terminal_markers[:len(chunk)]
+            processed, completed, retryable = await asyncio.to_thread(
+                _write_terminal_marker_quantum,
+                chunk,
+                summary,
+                _TERMINAL_MARKER_QUANTUM_MS,
+            )
+            if processed < len(chunk):
+                terminal_markers[:0] = chunk[processed:]
+            terminal_markers.extend(retryable)
+            perf.record(
+                "startup.recovery.terminal_marker.quantum",
+                (time.perf_counter() - started) * 1000.0,
+            )
+            perf.record(
+                "startup.recovery.terminal_marker.quantum_cpu",
+                (time.process_time() - cpu_started) * 1000.0,
+            )
+            perf.record_count("startup.recovery.terminal_marker.completed", completed)
+            perf.record_count("startup.recovery.terminal_marker.attempted", processed)
+            perf.record_count("startup.recovery.terminal_marker.retryable", len(retryable))
+            await asyncio.sleep(0)
+
+    for index, desc in enumerate(ordered):
+        # Per-desc yield so a long descs list (or a flood of provider-cache
+        # walks) doesn't starve WS/REST handlers between the heavy
+        # `_integrate_one` awaits. `sleep(0)` is the cheapest yield asyncio
+        # offers.
+        await asyncio.sleep(0)
+        run_id = desc.get("run_id")
+        if desc is not latest:
+            perf.record_count("startup.recovery.session_group.non_latest", 1)
+            if (
+                not _ingestion_version_current(desc)
+                and bool(desc.get("has_complete_json"))
+                and not bool(desc.get("alive"))
+                and index + 1 < len(ordered)
+            ):
+                bound = await asyncio.to_thread(
+                    _codex_replay_bound, desc, ordered[index + 1],
+                )
+                if bound is not None:
+                    desc["replay_end_byte"] = bound
+                else:
+                    if summary is not None:
+                        summary.record_skip("unsafe non-latest replay bound", run_id)
+                    continue
+            else:
+                terminal_markers.append((run_id, desc, "non-latest skip", 0))
+                if len(terminal_markers) >= _TERMINAL_MARKER_QUANTUM_MAX:
+                    await flush_terminal_markers()
+                continue
+        await flush_terminal_markers()
+        try:
+            owner_id = desc.get("provider_id")
+            owner = None
+            if owner_id:
+                try:
+                    owner = get_provider(owner_id)
+                except KeyError:
+                    owner = None
+                # `get_provider` returns the cached instance even when the
+                # on-disk record was deleted (so callers can finish in-flight
+                # cancels). For recovery we treat defunct as "owner is gone"
+                # — re-binding to active would route SIGTERM/auth to the
+                # wrong CLAUDE_CONFIG_DIR.
+                if owner is not None and owner.defunct:
+                    owner = None
+            if owner is None and owner_id and owner_id.startswith("remote:"):
+                # Remote run dir (written by RemoteProviderProxy.start_run).
+                # Proxies live outside the provider registry — resolve via
+                # provider_remote.
+                import provider_remote
+                owner = provider_remote.get_proxy(owner_id.split(":", 1)[1])
+            if owner is None and not owner_id:
+                # Legacy run with no provider_id stamped — fall back to active.
+                # Best-effort for pre-binding data.
+                try:
+                    owner = default_provider()
+                except Exception:
+                    owner = None
+            if owner is None:
+                summary.record_skip(
+                    f"owning provider {owner_id} is missing/defunct",
+                    run_id,
+                )
+                await _mark_reconciled_terminal_async(
+                    run_id,
+                    desc,
+                    "missing provider",
+                    summary=summary,
+                )
+                continue
+            await _integrate_one(coordinator, owner, desc, summary=summary)
+        except Exception:
+            logger.exception("integrate_recovered_runs: failed for %s", run_id)
+    await flush_terminal_markers()
+
+
+async def _await_uninterruptibly(task: asyncio.Future):
+    while not task.done():
+        try:
+            await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _to_thread_joined(fn, /, *args, **kwargs):
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+        return task.result()
+    except asyncio.CancelledError as cancelled:
+        await _await_uninterruptibly(task)
+        raise cancelled
+
+
+@dataclass(frozen=True)
+class _HeldRecoveryRootLease:
+    lease: RecoveryRootLease
+    admission: asyncio.Lock
+
+
+def _recovery_root_admission(root_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    by_root = _RECOVERY_ROOT_ADMISSION.get(loop)
+    if by_root is None:
+        by_root = {}
+        _RECOVERY_ROOT_ADMISSION[loop] = by_root
+    lock = by_root.get(root_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        by_root[root_id] = lock
+    return lock
+
+
+async def _acquire_recovery_root_lease(root_id: str) -> _HeldRecoveryRootLease:
+    if _RECOVERY_LEASE_SHUTTING_DOWN:
+        raise RuntimeError("recovery root lease executor is shutting down")
+    admission = _recovery_root_admission(root_id)
+    await admission.acquire()
+    lease = RecoveryRootLease(root_id)
+    with _PENDING_RECOVERY_LEASES_LOCK:
+        if _RECOVERY_LEASE_SHUTTING_DOWN:
+            admission.release()
+            raise RuntimeError("recovery root lease executor is shutting down")
+        _PENDING_RECOVERY_LEASES.add(lease)
+    loop = asyncio.get_running_loop()
+    task = loop.run_in_executor(_RECOVERY_LEASE_EXECUTOR, lease.acquire)
+    try:
+        try:
+            await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+            task.result()
+        except asyncio.CancelledError as cancelled:
+            lease.cancel_pending_acquire()
+            try:
+                await _await_uninterruptibly(task)
+            except RuntimeError as exc:
+                if str(exc) != "recovery root lease acquisition cancelled":
+                    raise
+            raise cancelled
+        with _PENDING_RECOVERY_LEASES_LOCK:
+            cancelled_before_transfer = (
+                _RECOVERY_LEASE_SHUTTING_DOWN or lease.acquire_cancelled
+            )
+        if cancelled_before_transfer:
+            lease.release()
+            raise RuntimeError("recovery root lease acquisition cancelled before transfer")
+        return _HeldRecoveryRootLease(lease=lease, admission=admission)
+    except BaseException:
+        try:
+            if lease.held:
+                lease.release()
+        finally:
+            admission.release()
+        raise
+    finally:
+        with _PENDING_RECOVERY_LEASES_LOCK:
+            _PENDING_RECOVERY_LEASES.discard(lease)
+
+
+async def _release_recovery_root_lease(held: _HeldRecoveryRootLease) -> None:
+    try:
+        held.lease.release()
+    finally:
+        held.admission.release()
 
 
 @perf.timed_fn("run_recovery.integrate_recovered_runs")
@@ -367,87 +752,103 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     Every non-latest run is reconciled WITHOUT replay: its turn already
     completed and was live-ingested, so replaying its slice of the
     shared cumulative claude jsonl would leak a prior turn's events onto
-    the final assistant message."""
-    from provider import get_provider, default_provider
-
+    the final assistant message. Independent session buckets are
+    integrated with bounded parallelism so a slow replay/reattach for one
+    session does not block reattaching runners for unrelated sessions.
+    """
     groups: dict[str, list[dict]] = {}
     for desc in recovered:
         groups.setdefault(_session_key(desc), []).append(desc)
 
+    group_items = list(groups.items())
+    parallelism = _recovery_integration_parallelism(len(group_items))
     summary = _RecoveryLogSummary()
+    started = time.monotonic()
+    if group_items:
+        logger.info(
+            "integrate_recovered_runs: integrating %d run(s) across %d "
+            "session bucket(s) with parallelism=%d",
+            len(recovered),
+            len(group_items),
+            parallelism,
+        )
+
+    semaphore = asyncio.Semaphore(parallelism)
+
+    async def _run_group(index: int, session_key: str, descs: list[dict]) -> None:
+        async with semaphore:
+            try:
+                await _integrate_recovered_session_group(coordinator, descs, summary)
+            except Exception:
+                logger.exception(
+                    "integrate_recovered_runs: session bucket %d (%s) failed",
+                    index,
+                    session_key,
+                )
+
     try:
-        for descs in groups.values():
-            # `_latest_run` does an `.stat()` per desc — sync FS I/O that
-            # adds up when a single session has many turn dirs. Push it to
-            # a worker thread so the event loop isn't blocked on stat
-            # latency.
-            latest = await asyncio.to_thread(_latest_run, descs)
-            for desc in descs:
-                # Per-desc yield so a long descs list (or a flood of
-                # provider-cache walks) doesn't starve WS/REST handlers
-                # between the heavy `_integrate_one` awaits. `sleep(0)` is
-                # the cheapest yield asyncio offers.
-                await asyncio.sleep(0)
-                run_id = desc.get("run_id")
-                if desc is not latest:
-                    # Non-latest: already-finalized prior turn. Reconcile so
-                    # the next scan skips it; replaying it would corrupt the
-                    # final message (see `_latest_run`).
-                    await _mark_reconciled_if_safe_async(
-                        run_id,
-                        desc,
-                        "non-latest skip",
-                        summary=summary,
-                    )
-                    continue
-                try:
-                    owner_id = desc.get("provider_id")
-                    owner = None
-                    if owner_id:
-                        try:
-                            owner = get_provider(owner_id)
-                        except KeyError:
-                            owner = None
-                        # `get_provider` returns the cached instance even
-                        # when the on-disk record was deleted (so callers
-                        # can finish in-flight cancels). For recovery we
-                        # treat defunct as "owner is gone" — re-binding to
-                        # active would route SIGTERM/auth to the wrong
-                        # CLAUDE_CONFIG_DIR.
-                        if owner is not None and owner.defunct:
-                            owner = None
-                    if owner is None and owner_id and owner_id.startswith("remote:"):
-                        # Remote run dir (written by RemoteProviderProxy.
-                        # start_run). Proxies live outside the provider
-                        # registry — resolve via provider_remote.
-                        import provider_remote
-                        owner = provider_remote.get_proxy(
-                            owner_id.split(":", 1)[1]
-                        )
-                    if owner is None and not owner_id:
-                        # Legacy run with no provider_id stamped — fall back
-                        # to active. Best-effort for pre-binding data.
-                        try:
-                            owner = default_provider()
-                        except Exception:
-                            owner = None
-                    if owner is None:
-                        summary.record_skip(
-                            f"owning provider {owner_id} is missing/defunct",
-                            run_id,
-                        )
-                        await _mark_reconciled_if_safe_async(
-                            run_id,
-                            desc,
-                            "missing provider",
-                            summary=summary,
-                        )
-                        continue
-                    await _integrate_one(coordinator, owner, desc, summary=summary)
-                except Exception:
-                    logger.exception("integrate_recovered_runs: failed for %s", run_id)
+        tasks = [
+            asyncio.create_task(
+                _run_group(index, session_key, descs),
+                name=f"recover-integrate-{index}",
+            )
+            for index, (session_key, descs) in enumerate(group_items)
+        ]
+        if tasks:
+            await asyncio.gather(*tasks)
     finally:
         summary.emit()
+        if group_items:
+            logger.info(
+                "integrate_recovered_runs: finished %d run(s) across %d "
+                "session bucket(s) in %.3fs",
+                len(recovered),
+                len(group_items),
+                time.monotonic() - started,
+            )
+
+
+# Providers whose runner normalizes its turn into session_events.jsonl
+# (Claude-shaped envelopes). They share the same recovery replay reader.
+import provider_manifest as _provider_manifest
+
+
+@dataclass
+class RecoveryReplay:
+    """Result of replaying a run's native stream for crash recovery. Each
+    reader carries its own extras — codex a context_window, claude the
+    unmatched orphan-subagent list — so they are NOT flattened to a bare
+    event list."""
+    events: list[dict]
+    context_window: Optional[int] = None
+    unmatched: list[dict] = field(default_factory=list)
+
+
+def _recovery_family(desc: dict | None) -> str:
+    """Recovery replay reader family ("claude"/"codex"/"gemini") for a run,
+    from the canonical manifest. Unknown kinds fall back to the claude
+    reader, matching the historical else-branch."""
+    spec = _provider_manifest.spec_for(_provider_kind(desc))
+    return spec.recovery_family if spec else "claude"
+
+
+def _replay_for_family(
+    family: str, run_dir: Path, *, replay_end_byte: Optional[int] = None,
+) -> RecoveryReplay:
+    """Single recovery-replay dispatch, keyed off the manifest recovery
+    family — the one place that maps a run to its native reader. gemini-family
+    runners write a Claude-shaped session_events.jsonl; codex carries a
+    context_window; claude surfaces the unmatched orphan-subagent list."""
+    if family == "gemini":
+        return RecoveryReplay(events=_replay_from_gemini_jsonl(run_dir))
+    if family == "codex":
+        events, ctx = _replay_from_codex_rollout(
+            run_dir, replay_end_byte=replay_end_byte,
+        )
+        return RecoveryReplay(events=events, context_window=ctx)
+    unmatched: list[dict] = []
+    events = _replay_from_claude_jsonl(run_dir, unmatched_out=unmatched)
+    return RecoveryReplay(events=events, unmatched=unmatched)
 
 
 def _provider_kind(desc: dict | None) -> str:
@@ -467,13 +868,175 @@ def _provider_kind(desc: dict | None) -> str:
     return "claude"
 
 
-def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> None:
-    if not run_id:
-        return
+def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> bool:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id in {".", ".."}
+        or os.sep in run_id
+        or (os.altsep is not None and os.altsep in run_id)
+    ):
+        logger.warning("invalid recovery run_id: %r", run_id)
+        return False
+    root = _runs_root()
+    run_dir = root / run_id
+    if os.name == "nt":
+        return _touch_reconciled_windows(run_id, desc, root, run_dir)
+    root_fd = -1
+    dir_fd = -1
     try:
-        write_marker(_runs_root() / run_id / "reconciled.marker", _provider_kind(desc))
+        from ingestion_versions import current_ingestion_version
+        provider_kind = _provider_kind(desc)
+        payload = {
+            "provider_kind": provider_kind,
+            "ingestion_version": current_ingestion_version(provider_kind),
+        }
+        st = run_dir.lstat()
+        if not __import__("stat").S_ISDIR(st.st_mode):
+            logger.warning("recovery run path is not a directory: %r", run_id)
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(root, flags)
+        dir_fd = os.open(run_id, flags, dir_fd=root_fd)
+        opened = os.fstat(dir_fd)
+        if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            logger.warning("recovery run directory changed during marker open: %r", run_id)
+            return False
+        temp_name = f".reconciled.marker.{uuid.uuid4().hex}.tmp"
+        temp_created = False
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=dir_fd,
+            )
+            temp_created = True
+            try:
+                encoded = json.dumps(payload, indent=2).encode("utf-8")
+                view = memoryview(encoded)
+                while view:
+                    written = os.write(temp_fd, view)
+                    if written <= 0:
+                        raise OSError("short reconciled marker write")
+                    view = view[written:]
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+            os.replace(temp_name, "reconciled.marker", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            temp_created = False
+        except BaseException:
+            if temp_created:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+            raise
+        os.fsync(dir_fd)
+        marker_st = os.stat("reconciled.marker", dir_fd=dir_fd, follow_symlinks=False)
+        current = run_dir.lstat()
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            logger.error("recovery run directory changed after marker write: %r", run_id)
+            return False
+        row = {
+            "run_id": run_id,
+            "marker_path": str(run_dir / "reconciled.marker"),
+            "provider_kind": str(provider_kind),
+            "ingestion_version": current_ingestion_version(provider_kind),
+            "marker_size": int(marker_st.st_size),
+            "marker_mtime_ns": int(marker_st.st_mtime_ns),
+            "marker_inode": int(marker_st.st_ino),
+            "written_at": time.time(),
+        }
+        collector = getattr(_MARKER_INDEX_BATCH, "rows", None)
+        if collector is not None:
+            collector.append(row)
+        else:
+            _append_reconciled_marker_rows(root, [row])
+        return True
     except Exception:
         logger.exception("_touch_reconciled: failed for %s", run_id)
+        return False
+    finally:
+        if dir_fd >= 0:
+            os.close(dir_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def _append_reconciled_marker_rows(root: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    from reconciled_marker_index import for_path
+    from runs_dir import reconciled_marker_index_path
+    for_path(reconciled_marker_index_path(root)).append_many(rows)
+
+
+def _windows_path_is_reparse(st: os.stat_result) -> bool:
+    attributes = int(getattr(st, "st_file_attributes", 0) or 0)
+    return bool(attributes & int(getattr(__import__("stat"), "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _touch_reconciled_windows(
+    run_id: str, desc: Optional[dict], root: Path, run_dir: Path,
+) -> bool:
+    try:
+        from ingestion_versions import current_ingestion_version
+        from windows_handle_marker import WindowsNativeOps, write_marker
+        provider_kind = _provider_kind(desc)
+        payload = {
+            "provider_kind": provider_kind,
+            "ingestion_version": current_ingestion_version(provider_kind),
+        }
+        marker_st = write_marker(WindowsNativeOps(), root, run_id, payload)
+        row = {
+            "run_id": run_id,
+            "marker_path": str(run_dir / "reconciled.marker"),
+            "provider_kind": str(provider_kind),
+            "ingestion_version": current_ingestion_version(provider_kind),
+            "marker_size": marker_st.size,
+            "marker_mtime_ns": marker_st.mtime_ns,
+            "marker_inode": marker_st.file_id & (2**63 - 1),
+            "written_at": time.time(),
+        }
+        collector = getattr(_MARKER_INDEX_BATCH, "rows", None)
+        if collector is not None:
+            collector.append(row)
+        else:
+            _append_reconciled_marker_rows(root, [row])
+        return True
+    except Exception:
+        logger.exception("_touch_reconciled_windows: failed for %s", run_id)
+        return False
+
+
+def _write_terminal_marker_quantum(
+    entries: list[tuple[str, dict, str, int]],
+    summary: _RecoveryLogSummary | None,
+    budget_ms: float,
+) -> tuple[int, int, list[tuple[str, dict, str, int]]]:
+    started = time.perf_counter()
+    completed = 0
+    processed = 0
+    retryable: list[tuple[str, dict, str, int]] = []
+    rows: list[dict] = []
+    _MARKER_INDEX_BATCH.rows = rows
+    try:
+        for run_id, desc, reason, attempts in entries:
+            succeeded = _mark_reconciled_terminal(run_id, desc, reason, summary=summary)
+            processed += 1
+            if succeeded:
+                completed += 1
+            elif attempts < 2:
+                retryable.append((run_id, desc, reason, attempts + 1))
+            else:
+                perf.record_count("startup.recovery.terminal_marker.retry_exhausted", 1)
+            if (time.perf_counter() - started) * 1000.0 >= budget_ms:
+                break
+    finally:
+        del _MARKER_INDEX_BATCH.rows
+    _append_reconciled_marker_rows(_runs_root(), rows)
+    return processed, completed, retryable
 
 
 def _ingestion_version_current(desc: dict) -> bool:
@@ -495,29 +1058,34 @@ def _can_mark_reconciled(desc: dict) -> bool:
     return _ingestion_version_current(desc) or _native_source_exists(desc)
 
 
-def _mark_reconciled_if_safe(
+def _mark_reconciled_terminal(
     run_id: str,
     desc: dict,
     reason: str,
     *,
     summary: _RecoveryLogSummary | None = None,
 ) -> bool:
+    """Write `reconciled.marker` for a run whose integration reached a
+    terminal outcome. When the run is version-stale AND its native
+    source is gone, no future pipeline version can ever re-digest it —
+    leaving it unmarked only re-grinds startup recovery on every
+    restart — so it is tombstoned as reconciled (recorded distinctly
+    for observability)."""
     if not _can_mark_reconciled(desc):
         if summary is not None:
-            summary.record_not_marked(reason, run_id)
+            summary.record_tombstoned(reason, run_id)
         else:
             logger.warning(
-                "recovery: not marking %s reconciled after %s; old ingestion "
-                "version and native source is missing",
+                "recovery: tombstoning %s as reconciled after %s; old "
+                "ingestion version and native source is missing, so it can "
+                "never be re-digested",
                 run_id,
                 reason,
             )
-        return False
-    _touch_reconciled(run_id, desc)
-    return True
+    return _touch_reconciled(run_id, desc)
 
 
-async def _mark_reconciled_if_safe_async(
+async def _mark_reconciled_terminal_async(
     run_id: str,
     desc: dict,
     reason: str,
@@ -525,7 +1093,7 @@ async def _mark_reconciled_if_safe_async(
     summary: _RecoveryLogSummary | None = None,
 ) -> bool:
     return await asyncio.to_thread(
-        _mark_reconciled_if_safe,
+        _mark_reconciled_terminal,
         run_id,
         desc,
         reason,
@@ -541,7 +1109,23 @@ def _apply_recovered_stream_event_sync(
     claude_sid: Optional[str],
     target_message_id: Optional[str],
     event: dict,
+    owner_token=None,
 ) -> None:
+    if owner_token is not None:
+        accepted, _ = session_manager.run_if_owner(
+            owner_token,
+            lambda: _apply_recovered_stream_event_sync(
+                persist_sid=persist_sid,
+                run_id=run_id,
+                mode=mode,
+                claude_sid=claude_sid,
+                target_message_id=target_message_id,
+                event=event,
+            ),
+        )
+        if not accepted:
+            raise KeyError(f"recovery owner revoked: {persist_sid}")
+        return
     event_type = event.get("type")
     data = event.get("data") or {}
     if event_type == "session_discovered":
@@ -590,7 +1174,16 @@ async def _drain_recovered_live_queue(
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     persist_sid = desc.get("persist_to") or app_sid
-    pid = desc.get("pid")
+    pid = live_recovery_pid(desc)
+    owner_retired = False
+    owner_invalidated = False
+    owner_token = await asyncio.to_thread(session_manager.claim_owner, persist_sid)
+    if owner_token is None:
+        logger.info(
+            "recovery owner not yet available for %s; leaving run retryable",
+            persist_sid,
+        )
+        return
     try:
         while True:
             if (not pid or not _pid_alive(int(pid))) and queue.empty():
@@ -611,11 +1204,40 @@ async def _drain_recovered_live_queue(
                 claude_sid=desc.get("session_id"),
                 target_message_id=recovering_msg_id,
                 event=event,
+                owner_token=owner_token,
+            )
+            if not await asyncio.to_thread(
+                lambda: session_manager.run_if_owner(owner_token, lambda: True)[0]
+            ):
+                owner_invalidated = True
+                if await asyncio.to_thread(
+                    session_manager.owner_deletion_committed, owner_token,
+                ):
+                    await asyncio.to_thread(
+                        _mark_reconciled_terminal,
+                        run_id,
+                        desc,
+                        "recovery owner durably deleted",
+                    )
+                    owner_retired = True
+                break
+    except KeyError:
+        owner_invalidated = True
+        if await asyncio.to_thread(
+            session_manager.owner_deletion_committed, owner_token,
+        ):
+            owner_retired = True
+            await asyncio.to_thread(
+                _mark_reconciled_terminal,
+                run_id,
+                desc,
+                "recovery owner durably deleted",
             )
     except Exception:
         logger.exception("_drain_recovered_live_queue: failed for %s", run_id)
     finally:
-        await _finalize_when_done(coordinator, provider, desc, recovering_msg_id)
+        if not owner_invalidated:
+            await _finalize_when_done(coordinator, provider, desc, recovering_msg_id)
 
 
 def _barrier_journal(persist_sid: str) -> None:
@@ -623,16 +1245,16 @@ def _barrier_journal(persist_sid: str) -> None:
     root is durable. MUST run before `reconciled.marker` on every
     post-replay path: replay submits fire-and-forget journal writes,
     and the marker permanently gates the run out of future replays.
-    Raises on timeout AND on an unresolvable root so the caller fails
-    closed (no marker) — a silent return would mark the run with the
-    replay's writes still queued."""
+    Raises on an unresolvable root so the caller fails closed (no
+    marker) — a silent return would mark the run with the replay's
+    writes still queued."""
     root_id = session_manager._root_id_for(persist_sid)
     if not root_id:
         raise RuntimeError(
             f"_barrier_journal: cannot resolve root for {persist_sid}"
         )
     from event_journal import event_journal_writer
-    event_journal_writer.barrier_sync(root_id)
+    event_journal_writer.barrier_sync(root_id, timeout=None)
 
 
 def _events_fully_ingested(desc: dict) -> bool:
@@ -706,7 +1328,7 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
     if not _ingestion_version_current(desc):
         return False
 
-    alive = bool(desc.get("alive"))
+    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     mode = desc.get("mode") or "manager"
     claude_sid = desc.get("session_id")
@@ -728,6 +1350,29 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
             return False
         if last_asst.get("agent_session_id") is None:
             return False
+
+    # Fully-ingested events are not enough to prove the turn reached the
+    # normal finalize chokepoint. A backend can die after the provider stream
+    # and complete.json are durable, but before `_finalize_turn_messages` (or
+    # recovery's `_apply_completion_state`) stamps the assistant terminal
+    # fields. Without this guard, recovery marks the run reconciled and leaves
+    # the sidebar/chat with a blank non-terminal assistant bubble forever.
+    if not alive and has_complete:
+        payload = _salvage_complete_payload(str(desc.get("run_id") or ""))
+        if payload is None:
+            return False
+        stopped = bool(last_asst.get("stopped_at"))
+        if bool(payload.get("success")):
+            if not stopped and not last_asst.get("completed_at"):
+                return False
+        elif not bool(desc.get("cancelled")):
+            error_text = str(payload.get("error") or "")
+            if (
+                not stopped
+                and error_text.lower() != "cancelled"
+                and not last_asst.get("error")
+            ):
+                return False
     return _events_fully_ingested(desc)
 
 
@@ -738,6 +1383,42 @@ async def _integrate_one(
     *,
     summary: _RecoveryLogSummary | None = None,
 ) -> None:
+    app_sid = desc.get("app_session_id")
+    if not app_sid:
+        await _integrate_one_locked(
+            coordinator,
+            provider,
+            desc,
+            summary=summary,
+            recovery_root_id=None,
+            root_lease=None,
+        )
+        return
+    persist_sid = desc.get("persist_to") or app_sid
+    root_id = await asyncio.to_thread(session_manager._root_id_for, persist_sid) or persist_sid
+    held_lease = await _acquire_recovery_root_lease(root_id)
+    try:
+        await _integrate_one_locked(
+            coordinator,
+            provider,
+            desc,
+            summary=summary,
+            recovery_root_id=root_id,
+            root_lease=held_lease.lease,
+        )
+    finally:
+        await _release_recovery_root_lease(held_lease)
+
+
+async def _integrate_one_locked(
+    coordinator,
+    provider,
+    desc: dict,
+    *,
+    summary: _RecoveryLogSummary | None,
+    recovery_root_id: str | None,
+    root_lease: RecoveryRootLease | None,
+) -> None:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     if not app_sid:
@@ -745,7 +1426,7 @@ async def _integrate_one(
             summary.record_skip("missing app_session_id", run_id)
         else:
             logger.info("integrate_recovered_runs: skip %s (no app_session_id)", run_id)
-        await _mark_reconciled_if_safe_async(
+        await _mark_reconciled_terminal_async(
             run_id,
             desc,
             "missing app session id",
@@ -774,7 +1455,7 @@ async def _integrate_one(
                 persist_sid,
             )
         if bool(desc.get("has_complete_json")) or bool(desc.get("cancelled")):
-            await _mark_reconciled_if_safe_async(
+            await _mark_reconciled_terminal_async(
                 run_id,
                 desc,
                 "missing session",
@@ -782,7 +1463,7 @@ async def _integrate_one(
             )
         return
 
-    alive = bool(desc.get("alive"))
+    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = bool(desc.get("cancelled"))
     recovering_msg_id = _descriptor_target_message_id(desc)
@@ -810,6 +1491,17 @@ async def _integrate_one(
                 "integrate_recovered_runs: skip %s (missing target_message_id)",
                 run_id,
             )
+        # Terminal: the run is dead or completed and the session has no
+        # attachable assistant message (`_last_assistant` fallback already
+        # failed) — replay hard-returns without a target, so rescanning
+        # can never integrate this run. Mark it so restarts stop
+        # re-queueing it for an expensive session-load + replay attempt.
+        await _mark_reconciled_terminal_async(
+            run_id,
+            desc,
+            "missing target_message_id",
+            summary=summary,
+        )
         return
 
     if not _ingestion_version_current(desc) and not await asyncio.to_thread(
@@ -828,6 +1520,19 @@ async def _integrate_one(
                 "leaving existing derived session data untouched",
                 run_id,
             )
+        # Terminal for DEAD/COMPLETED runs only: with the native source
+        # gone, no pipeline version can ever re-digest this run —
+        # tombstone instead of re-grinding it on every restart. A live
+        # run must stay eligible: it may still record its jsonl_path and
+        # write complete.json, and a marker would permanently cost it
+        # reattach and finalize.
+        if not (alive and not has_complete):
+            await _mark_reconciled_terminal_async(
+                run_id,
+                desc,
+                "old provider pipeline version and native source missing",
+                summary=summary,
+            )
         return
 
     # `_is_consistent` counts jsonl lines — sync FS I/O, keep it off
@@ -836,10 +1541,34 @@ async def _integrate_one(
     target_is_latest = bool(
         last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
     )
+    if (
+        not target_is_latest
+        and not (alive and not has_complete)
+        and desc.get("replay_end_byte") is None
+    ):
+        await _mark_reconciled_terminal_async(
+            run_id,
+            desc,
+            "target no longer latest",
+            summary=summary,
+        )
+        return
     if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
         _is_consistent, sess, desc,
     ):
-        await _mark_reconciled_if_safe_async(run_id, desc, "consistent state")
+        if last_asst_initial is not None:
+            await _emit_recovered_user_message_terminal(
+                coordinator=coordinator,
+                persist_sid=persist_sid,
+                mode=desc.get("mode") or "manager",
+                agent_sid=desc.get("session_id"),
+                run_id=run_id,
+                cancelled=cancelled,
+                sess=sess,
+                assistant_msg=last_asst_initial,
+            )
+            await _to_thread_joined(_barrier_journal, persist_sid)
+        await _mark_reconciled_terminal_async(run_id, desc, "consistent state")
         return
 
     mode = desc.get("mode") or "manager"
@@ -852,7 +1581,7 @@ async def _integrate_one(
     # doesn't race the background task and double-clear or pre-clear.
     handed_off = False
     if recovering_msg_id:
-        await asyncio.to_thread(
+        await _to_thread_joined(
             session_manager.set_msg_recovering,
             persist_sid,
             recovering_msg_id,
@@ -870,8 +1599,11 @@ async def _integrate_one(
         and not alive
         and has_complete
     ):
-        root_id = await asyncio.to_thread(session_manager._root_id_for, persist_sid) or persist_sid
-        redigest_backup = await asyncio.to_thread(RedigestBackup(root_id).capture)
+        if recovery_root_id is None or root_lease is None:
+            raise RuntimeError("redigest requires a held canonical-root lease")
+        redigest_backup = await _to_thread_joined(
+            RedigestBackup(recovery_root_id, lease=root_lease).capture,
+        )
 
     try:
         # The batch+replay block can take seconds for sessions with
@@ -885,7 +1617,7 @@ async def _integrate_one(
         # `asyncio.create_task` from a worker thread raises.
         integration_ok = True
         try:
-            await asyncio.to_thread(
+            await _to_thread_joined(
                 _apply_integration_sync,
                 persist_sid=persist_sid,
                 run_id=run_id,
@@ -896,6 +1628,7 @@ async def _integrate_one(
                 has_complete=has_complete,
                 cancelled=cancelled,
                 target_message_id=recovering_msg_id,
+                replay_end_byte=desc.get("replay_end_byte"),
             )
         except Exception:
             integration_ok = False
@@ -918,7 +1651,7 @@ async def _integrate_one(
         # subscribe (which already happens on every user navigation).
 
         if alive and not has_complete:
-            pid = desc.get("pid")
+            pid = live_recovery_pid(desc)
             run_dir = _runs_root() / run_id
             queue: asyncio.Queue = asyncio.Queue()
             attached_by_provider = False
@@ -946,9 +1679,11 @@ async def _integrate_one(
                     persist_to=persist_sid,
                     tailer=None,
                     tailer_task=None,
-                    bootstrap_task=None,
                     complete_task=None,
-                    lingering=False,
+                    # Participates in start_run's wind-down gate: a new
+                    # prompt on this native session waits on this event
+                    # (set by _cleanup_run when the run deregisters).
+                    released=asyncio.Event(),
                 )
                 provider._runs[run_id] = stub
 
@@ -983,7 +1718,8 @@ async def _integrate_one(
                         run_id[:8], pid, exc_info=True,
                     )
             coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
-            coordinator.turn_manager.run_state_add(
+            await _to_thread_joined(
+                coordinator.turn_manager.run_state_add,
                 app_sid,
                 run_id=run_id,
                 kind=mode,
@@ -1012,94 +1748,88 @@ async def _integrate_one(
                 )
             handed_off = True
         else:
-            # A still-alive runner WITH complete.json is a babysitter
-            # lingering for background work (it touched the `lingering`
-            # sentinel). Re-register it so the kill levers
-            # (lingering_runs / cancel_turn / shutdown cancel_all) and
-            # the run_lingering WS projection survive the restart;
-            # _watch_linger_exit deregisters it when it finally exits.
-            pid = desc.get("pid")
-            lr_dir = _runs_root() / run_id
-            if (
-                alive and pid and (lr_dir / "lingering").exists()
-                and run_id not in provider._runs
-                and hasattr(provider, "_watch_linger_exit")
-            ):
+            # One-time migration sweep: a runner from before the per-turn
+            # restore can still be alive past its completed turn (old
+            # babysitter linger). It is unregistered — no kill lever, and
+            # the wind-down gate can't see it — so a later --resume on its
+            # native session would cross-process ghost-enqueue. Background
+            # execution is forbidden on every run now, so a complete.json
+            # plus a live runner pid at startup is never legitimate: reap
+            # the tree.
+            _sweep_pid = desc.get("pid")
+            if alive and _sweep_pid:
                 try:
-                    from containment import containment
-                    containment().reattach(run_id, int(pid))
-                except Exception:
-                    logger.warning(
-                        "containment reattach failed run=%s pid=%s",
-                        run_id[:8], pid, exc_info=True,
+                    from proc_control import process_control
+                    await _to_thread_joined(
+                        process_control().force_kill, int(_sweep_pid),
                     )
-                stub = SimpleNamespace(
-                    run_id=run_id,
-                    run_dir=lr_dir,
-                    popen=RecoveredPopen(int(pid)),
-                    mode=mode,
-                    app_session_id=app_sid,
-                    queue=asyncio.Queue(),
-                    session_id=claude_sid,
-                    jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
-                    processed_byte=int(desc.get("processed_byte") or 0),
-                    started_at=datetime.now().isoformat(),
-                    cancelled=cancelled,
-                    persist_to=persist_sid,
-                    tailer=None,
-                    tailer_task=None,
-                    bootstrap_task=None,
-                    complete_task=None,
-                    lingering=True,
-                )
-                provider._runs[run_id] = stub
-                asyncio.create_task(
-                    provider._watch_linger_exit(stub),
-                    name=f"recover-linger-{run_id[:8]}",
-                )
-                logger.info(
-                    "integrate_recovered_runs: re-registered lingering "
-                    "babysitter %s (pid=%s)", run_id[:8], pid,
-                )
+                    logger.warning(
+                        "integrate_recovered_runs: reaped stale post-turn "
+                        "runner %s (pid=%s)", run_id[:8], _sweep_pid,
+                    )
+                except Exception:
+                    logger.exception(
+                        "integrate_recovered_runs: stale-runner sweep "
+                        "failed for %s", run_id[:8],
+                    )
             if not integration_ok:
                 # Wholesale replay/persist failure: leave the run
                 # unmarked so the next startup scan retries it. Marking
                 # here would make the loss permanent and silent.
                 if redigest_backup is not None:
-                    await asyncio.to_thread(redigest_backup.rollback)
+                    await _to_thread_joined(redigest_backup.rollback)
                 logger.warning(
                     "integrate_recovered_runs: leaving %s unreconciled "
                     "for retry on next startup", run_id,
                 )
                 return
+            if not (alive and not has_complete):
+                live_sess, terminal_asst, _ = await asyncio.to_thread(
+                    _recovery_target_snapshot,
+                    persist_sid,
+                    recovering_msg_id,
+                )
+                if live_sess is not None and terminal_asst is not None:
+                    await _emit_recovered_user_message_terminal(
+                        coordinator=coordinator,
+                        persist_sid=persist_sid,
+                        mode=mode,
+                        agent_sid=claude_sid,
+                        run_id=run_id,
+                        cancelled=cancelled,
+                        sess=live_sess,
+                        assistant_msg=terminal_asst,
+                    )
             # The replay's events.jsonl writes are fire-and-forget
             # (timeout=0 shard-executor submits). The marker permanently
             # gates this run out of future replays, so it must not land
             # before those writes are durable. Blocking barrier — keep
             # it off the event loop; never call it while holding the
             # root lock via batch.
-            await asyncio.to_thread(_barrier_journal, persist_sid)
-            await _mark_reconciled_if_safe_async(run_id, desc, "integration complete")
+            await _to_thread_joined(_barrier_journal, persist_sid)
+            await _mark_reconciled_terminal_async(run_id, desc, "integration complete")
             if redigest_backup is not None:
-                await asyncio.to_thread(redigest_backup.commit)
+                await _to_thread_joined(redigest_backup.commit)
     finally:
         # Sync path (or any exception before handoff) clears here.
         # Once `_finalize_when_done` is scheduled it owns the clear so we
         # don't yank the pill before its replay completes.
-        if recovering_msg_id and not handed_off:
-            await asyncio.to_thread(
-                session_manager.set_msg_recovering,
-                persist_sid,
-                recovering_msg_id,
-                False,
-            )
-        # An unconsumed backup here means an exception escaped the
-        # success-path tail (barrier/marker) AFTER a successful
-        # re-digest — the new state on disk is good, so commit (drop the
-        # snapshot). The failure path rolls back+returns before reaching
-        # here, and commit/rollback both mark the backup settled.
-        if redigest_backup is not None and not redigest_backup._settled:
-            await asyncio.to_thread(redigest_backup.commit)
+        try:
+            if recovering_msg_id and not handed_off:
+                await _to_thread_joined(
+                    session_manager.set_msg_recovering,
+                    persist_sid,
+                    recovering_msg_id,
+                    False,
+                )
+        finally:
+            # An unconsumed backup here means an exception escaped the
+            # success-path tail (barrier/marker) AFTER a successful
+            # re-digest — the new state on disk is good, so commit (drop the
+            # snapshot). The failure path rolls back+returns before reaching
+            # here, and commit/rollback both mark the backup settled.
+            if redigest_backup is not None and not redigest_backup._settled:
+                await _to_thread_joined(redigest_backup.commit)
 
 
 def _last_assistant(sess: dict) -> Optional[dict]:
@@ -1109,24 +1839,128 @@ def _last_assistant(sess: dict) -> Optional[dict]:
     return None
 
 
+async def _emit_recovered_user_message_terminal(
+    *,
+    coordinator,
+    persist_sid: str,
+    mode: str,
+    agent_sid: Optional[str],
+    run_id: str,
+    cancelled: bool,
+    sess: dict,
+    assistant_msg: dict,
+) -> None:
+    """Publish the user_message_* terminal that live turn finalization would
+    have emitted if the backend had not restarted mid-turn.
+
+    Recovery finalizes the render tree directly, bypassing
+    ``Coordinator.handle_prompt``'s normal emit_user_msg_done/failed path. That
+    left durable ask/mssg waiters with only sent/received events and no terminal
+    to reattach to after a restart. Emit once, keyed by the preceding user
+    message's lifecycle id, and let the existing event-bus persistence + WS
+    fanout handle both disk and live waiters.
+    """
+    try:
+        import user_msg_lifecycle
+        from orchs import get_strategy
+    except Exception:
+        logger.debug("recovery lifecycle terminal imports failed", exc_info=True)
+        return
+
+    user_msg = _last_user_before(sess, assistant_msg)
+    lifecycle_msg_id = (
+        user_msg.get("lifecycle_msg_id")
+        if isinstance(user_msg, dict) else None
+    )
+    if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+        return
+    try:
+        if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+            persist_sid, lifecycle_msg_id,
+        ) is not None:
+            return
+    except Exception:
+        logger.debug("recovery lifecycle terminal check failed", exc_info=True)
+        return
+
+    complete = _salvage_complete_payload(run_id)
+    success = bool(complete and complete.get("success")) and not cancelled
+    error = complete.get("error") if isinstance(complete, dict) else None
+    try:
+        if not success and not cancelled:
+            await coordinator.user_prompt_manager.emit_user_msg_failed(
+                persist_sid,
+                lifecycle_msg_id,
+                reason="recovered_run_failed",
+                error=error or "Run failed during recovery.",
+            )
+            return
+        strategy = get_strategy(mode)
+        strategy.record_turn_result(
+            lifecycle_msg_id,
+            role=mode,
+            success=success,
+            token_usage=complete.get("token_usage"),
+            error=error,
+            agent_sid=agent_sid or complete.get("session_id"),
+        )
+        await coordinator.user_prompt_manager.emit_user_msg_done(
+            persist_sid,
+            lifecycle_msg_id,
+            mode,
+            cancelled=cancelled,
+        )
+    except Exception:
+        logger.exception(
+            "recovery lifecycle terminal emit failed sid=%s run=%s",
+            persist_sid,
+            run_id,
+        )
+
+
 def _apply_completion_state(
     persist_sid: str,
     msg_id: str,
     *,
+    run_id: str,
     cancelled: bool,
 ) -> None:
-    """Pin the assistant msg as not-streaming at recovery completion.
+    """Pin a recovered assistant message to a terminal state.
 
-    Cancelled recovered runs must carry `stopped_at` so the rendered
-    message exits the in-flight UI state and exposes retry affordances.
-    Non-cancelled completions clear stale `stopped_at` because they
-    finished normally."""
+    Recovery is the finalize chokepoint for turns whose runner survived (or
+    completed during) a backend restart. It must leave the assistant message in
+    the same terminal shape as the live finalizer: successful runs get
+    `completed_at`, failed non-cancelled runs get an assistant error + sidebar
+    dot, and hard-killed/cancelled recovery does not forge a user-stop
+    `stopped_at`.
+    """
     session_manager.set_streaming(persist_sid, msg_id, False)
-    session_manager.set_stopped_at(
-        persist_sid,
-        msg_id,
-        datetime.utcnow().isoformat() if cancelled else None,
-    )
+
+    payload = None if cancelled else _salvage_complete_payload(run_id)
+    if payload is not None and payload.get("success"):
+        live = session_manager.get_ref(persist_sid) or {}
+        msg = _assistant_by_id(live, msg_id)
+        if msg is None or not (msg.get("stopped_at") or msg.get("completed_at")):
+            session_manager.set_completed_at(
+                persist_sid,
+                msg_id,
+                datetime.utcnow().isoformat(),
+            )
+        return
+
+    if payload is not None and not payload.get("success"):
+        live = session_manager.get_ref(persist_sid) or {}
+        msg = _assistant_by_id(live, msg_id)
+        if msg is not None and (msg.get("stopped_at") or msg.get("error")):
+            return
+        error_text = payload.get("error") or "Run failed during recovery."
+        if str(error_text).lower() != "cancelled":
+            session_manager.set_assistant_error(
+                persist_sid,
+                msg_id,
+                str(error_text),
+            )
+            session_manager.set_unseen_error(persist_sid, str(error_text))
 
 
 def _finalize_sync(
@@ -1160,7 +1994,9 @@ def _finalize_sync(
             last_asst=last_asst,
             msg_id=msg_id,
         )
-        _apply_completion_state(persist_sid, msg_id, cancelled=cancelled)
+        _apply_completion_state(
+            persist_sid, msg_id, run_id=run_id, cancelled=cancelled,
+        )
 
 
 def _apply_integration_sync(
@@ -1174,6 +2010,7 @@ def _apply_integration_sync(
     has_complete: bool,
     cancelled: bool,
     target_message_id: Optional[str],
+    replay_end_byte: Optional[int] = None,
 ) -> None:
     """Thread-side body of `_integrate_one`'s batch+replay. Runs
     under `asyncio.to_thread` so the event loop stays responsive
@@ -1206,6 +2043,7 @@ def _apply_integration_sync(
                 sess=live_sess,
                 last_asst=last_asst,
                 msg_id=msg_id,
+                replay_end_byte=replay_end_byte,
             )
 
         # Pin the per-msg primary CLI sid if not already set.
@@ -1226,6 +2064,7 @@ def _apply_integration_sync(
             _apply_completion_state(
                 persist_sid,
                 msg_id,
+                run_id=run_id,
                 cancelled=cancelled,
             )
 
@@ -1264,7 +2103,9 @@ def _replay_from_gemini_jsonl(run_dir: Path) -> list[dict]:
     return wrapped
 
 
-def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]]:
+def _replay_from_codex_rollout(
+    run_dir: Path, *, replay_end_byte: Optional[int] = None,
+) -> tuple[list[dict], Optional[int]]:
     state_path = run_dir / "state.json"
     if not state_path.exists():
         return [], None
@@ -1295,6 +2136,7 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
         Path(jsonl_path_str),
         start_byte=start_byte,
         namespace=str(session_id or run_dir.name),
+        end_byte=replay_end_byte,
     )
     backend_state_path = run_dir / "backend_state.json"
     try:
@@ -1348,6 +2190,9 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
             )
             if delegation_id in seen_delegations:
                 continue
+            child_start = codex_subagent_rollout_start_byte(Path(child_path))
+            if not child_start:
+                continue
             seen_delegations.add(delegation_id)
             wrapped.append({"type": "worker_start", "data": {
                 "delegation_id": delegation_id,
@@ -1358,11 +2203,8 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
                 "instructions_preview": "",
                 "run_mode": "codex_subagent",
                 "jsonl_path": child_path,
+                "reset_events": True,
             }})
-            try:
-                child_start = int(source.get("start_byte") or 0)
-            except (TypeError, ValueError):
-                child_start = 0
             child_events, _ = normalize_rollout_file(
                 Path(child_path),
                 start_byte=child_start,
@@ -1428,6 +2270,7 @@ def _replay_and_apply(
     sess: dict,
     last_asst: dict,
     msg_id: str,
+    replay_end_byte: Optional[int] = None,
 ) -> None:
     """Single replay+apply path shared by _integrate_one and
     _finalize_when_done. INVARIANT: must not diverge — both recovery
@@ -1444,17 +2287,15 @@ def _replay_and_apply(
         except Exception:
             pass
 
-    # Check provider kind to decide which native jsonl to replay.
-    # We resolve it robustly via the provider_id in backend_state.json.
-    kind = _provider_kind(desc)
-    unmatched: list[dict] = []
-    context_window: Optional[int] = None
-    if kind == "gemini":
-        all_events = _replay_from_gemini_jsonl(run_dir)
-    elif kind == "codex":
-        all_events, context_window = _replay_from_codex_rollout(run_dir)
-    else:
-        all_events = _replay_from_claude_jsonl(run_dir, unmatched_out=unmatched)
+    # Replay the run's native stream through the reader for its recovery
+    # family (resolved from the manifest via the provider_id in
+    # backend_state.json). Single dispatch — see _replay_for_family.
+    _replay = _replay_for_family(
+        _recovery_family(desc), run_dir, replay_end_byte=replay_end_byte,
+    )
+    all_events = _replay.events
+    context_window = _replay.context_window
+    unmatched = _replay.unmatched
 
     # Real last-activity timestamp carried by the events being re-ingested
     # (claude jsonl lines keep a top-level `timestamp`; codex stamps one).
@@ -1521,6 +2362,10 @@ def _replay_and_apply(
                     "(uuid=%s) — continuing with remaining signals",
                     run_id, (sig.get("data") or {}).get("uuid"),
                 )
+    # Empty extraction (stream ended on tool/thinking events AND no
+    # sdk_output fallback) must not clobber the content the guarded
+    # apply_event replay just restored — same rule as
+    # event_shape.project_content_snapshot.
     if extracted:
         session_manager.update_running_content(
             persist_sid, msg_id, extracted,
@@ -1580,8 +2425,9 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
         # Gemini-specific: "invalid session" is NOT a rate limit, but
         # might want its own recovery later. For now, keep it to 429s.
 
-    # Slow path: check event text for rate limit markers. Detect the
-    # gemini-family runners (gemini, agy, ...) by their resolved provider kind.
+    # Slow path: check event text for rate limit markers. Replay through the
+    # run's recovery-family reader (same dispatch as full recovery, so codex
+    # runs use the rollout reader here too — not the claude fallback).
     desc = None
     bs_path = run_dir / "backend_state.json"
     if bs_path.exists():
@@ -1589,10 +2435,7 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
             desc = json.loads(bs_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    if _provider_kind(desc) == "gemini":
-        events = _replay_from_gemini_jsonl(run_dir)
-    else:
-        events = _replay_from_claude_jsonl(run_dir)
+    events = _replay_for_family(_recovery_family(desc), run_dir).events
     return _is_rate_limit_attempt(error, events)
 
 
@@ -1677,18 +2520,29 @@ async def _retry_recovered_run(
 
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()
-    provider.start_run(
+    # Deliberately routed through start_run (not a gate bypass): if a
+    # previous run is still winding down on `resume_sid`, this retry must
+    # serialize behind it exactly like a fresh user prompt would —
+    # otherwise the retry recreates the second-CLI ghost-enqueue bug.
+    # Offload the synchronous spawn body off the event loop — parity with
+    # turn_manager's spawn path. Without this, blocking session-manager
+    # reads in _build_input_payload freeze the loop during recovery retries.
+    recovery_loop = asyncio.get_running_loop()
+    await asyncio.to_thread(session_manager.flush_pending_persists)
+    await asyncio.to_thread(
+        provider.start_run,
         run_id=new_run_id,
         prompt=inp.get("prompt", ""),
         images=inp.get("images"),
         cwd=inp.get("cwd", ""),
-        loop=asyncio.get_running_loop(),
+        loop=recovery_loop,
         queue=new_queue,
         model=inp.get("model"),
         reasoning_effort=inp.get("reasoning_effort"),
         session_id=resume_sid,  # --resume target
         mode=mode,
         app_session_id=app_sid,
+        source=inp.get("source"),
         disallowed_tools=inp.get("disallowed_tools"),
         setting_sources=inp.get("setting_sources"),
         backend_url=inp.get("backend_url"),
@@ -1726,7 +2580,8 @@ async def _retry_recovered_run(
     coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(new_run_id)
     provider_rs = provider._runs.get(new_run_id)
     pid = provider_rs.popen.pid if provider_rs and provider_rs.popen else None
-    coordinator.turn_manager.run_state_add(
+    await asyncio.to_thread(
+        coordinator.turn_manager.run_state_add,
         app_sid,
         run_id=new_run_id,
         kind=mode,
@@ -1773,7 +2628,7 @@ async def _finalize_when_done(
 ) -> None:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
-    pid = desc.get("pid")
+    pid = live_recovery_pid(desc)
     persist_sid = desc.get("persist_to") or app_sid
     run_dir = _runs_root() / run_id
     complete_path = run_dir / "complete.json"
@@ -1794,7 +2649,7 @@ async def _finalize_when_done(
             recovering_msg_id,
         )
         if sess is None:
-            provider._runs.pop(run_id, None)
+            provider._cleanup_run(run_id)
             coordinator.turn_manager.run_state_remove(app_sid, run_id)
             await coordinator.turn_manager.emit_run_state(app_sid)
             return
@@ -1853,7 +2708,7 @@ async def _finalize_when_done(
             if not cancelled and _should_retry_rate_limit(run_dir):
                 # Remove old recovered run from state before retry spawns
                 # a new one via provider.start_run (which adds its own).
-                provider._runs.pop(run_id, None)
+                provider._cleanup_run(run_id)
                 coordinator.turn_manager.run_state_remove(app_sid, run_id)
                 await _retry_recovered_run(
                     coordinator=coordinator,
@@ -1883,7 +2738,7 @@ async def _finalize_when_done(
                 logger.info(
                     "transient-error retry for recovered run %s", run_id,
                 )
-                provider._runs.pop(run_id, None)
+                provider._cleanup_run(run_id)
                 coordinator.turn_manager.run_state_remove(app_sid, run_id)
                 await _retry_recovered_run(
                     coordinator=coordinator,
@@ -1897,7 +2752,19 @@ async def _finalize_when_done(
                 )
                 return  # new task owns cleanup
 
-        provider._runs.pop(run_id, None)
+        if finalize_ok and last_asst is not None:
+            await _emit_recovered_user_message_terminal(
+                coordinator=coordinator,
+                persist_sid=persist_sid,
+                mode=desc.get("mode") or "native",
+                agent_sid=desc.get("session_id"),
+                run_id=run_id,
+                cancelled=cancelled,
+                sess=sess,
+                assistant_msg=last_asst,
+            )
+
+        provider._cleanup_run(run_id)
         coordinator.turn_manager.run_state_remove(app_sid, run_id)
         await coordinator.turn_manager.emit_run_state(app_sid)
         if not finalize_ok:
@@ -1910,7 +2777,7 @@ async def _finalize_when_done(
             return
         # Barrier before marker — see `_barrier_journal`.
         await asyncio.to_thread(_barrier_journal, persist_sid)
-        _mark_reconciled_if_safe(run_id, desc, "finalize complete")
+        _mark_reconciled_terminal(run_id, desc, "finalize complete")
     except asyncio.CancelledError:
         # Backend shutdown (Ctrl+C) cancelled this finalizer mid-flight.
         # `asyncio.to_thread` can't propagate cancellation into the
@@ -1986,26 +2853,18 @@ def set_remote_recovery_coordinator(coordinator) -> None:
     _remote_coordinator = coordinator
 
 
-async def integrate_remote_runs_for_node(
+def _pending_remote_runs_for_node(
     node_id: str,
     run_id_filter: Optional[set[str]] = None,
-) -> None:
-    coordinator = _remote_coordinator
-    if coordinator is None:
-        logger.warning(
-            "integrate_remote_runs_for_node: coordinator not set; "
-            "skipping recovery for node %s", node_id,
-        )
-        return
+) -> list[tuple[Path, dict]]:
     root = _runs_root()
     if not root.exists():
-        return
+        return []
     pending: list[tuple[Path, dict]] = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        if run_id_filter is not None and child.name not in run_id_filter:
-            continue
+    children = iter_run_dirs(run_id_filter)
+    if run_id_filter is None:
+        children = sorted(children)
+    for child in children:
         bs_path = child / "backend_state.json"
         if not bs_path.exists():
             continue
@@ -2019,6 +2878,25 @@ async def integrate_remote_runs_for_node(
         if bs.get("node_id") != node_id:
             continue
         pending.append((child, bs))
+    return pending
+
+
+async def integrate_remote_runs_for_node(
+    node_id: str,
+    run_id_filter: Optional[set[str]] = None,
+) -> None:
+    coordinator = _remote_coordinator
+    if coordinator is None:
+        logger.warning(
+            "integrate_remote_runs_for_node: coordinator not set; "
+            "skipping recovery for node %s", node_id,
+        )
+        return
+    pending = await asyncio.to_thread(
+        _pending_remote_runs_for_node,
+        node_id,
+        run_id_filter,
+    )
     if not pending:
         return
 

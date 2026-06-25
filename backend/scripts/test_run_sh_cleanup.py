@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "run.sh"
+RUN_WINDOWS = ROOT / "run_windows.bat"
+APP_ENTRY = ROOT / "backend" / "app_entry.py"
+MAIN = ROOT / "backend" / "main.py"
 
 
 def check(name: str, ok: bool, failures: list[str]) -> None:
@@ -19,8 +22,11 @@ def check(name: str, ok: bool, failures: list[str]) -> None:
 def main() -> int:
     failures: list[str] = []
     text = RUN_SH.read_text(encoding="utf-8")
+    windows_text = RUN_WINDOWS.read_text(encoding="utf-8")
+    app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
+    main_text = MAIN.read_text(encoding="utf-8")
     zai_start = text.index("run_zai_startup_check() {")
-    zai_end = text.index("\nbuild_frontend \"\"", zai_start)
+    zai_end = text.index('\nPENDING_REFRESH_ID=""', zai_start)
     zai_check = text[zai_start:zai_end]
 
     check(
@@ -36,6 +42,19 @@ def main() -> int:
     check(
         "launchctl path includes Homebrew and local CLIs",
         'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' in text,
+        failures,
+    )
+    deps_start = text.index("sync_backend_deps() {")
+    deps_end = text.index("# --- Install the `bagent` CLI command", deps_start)
+    deps_source = text[deps_start:deps_end]
+    check(
+        "backend dependency sync is fingerprint-skipped",
+        'local stamp="$DIR/backend/.venv/.requirements.stamp"' in deps_source
+        and "hashlib.sha256(path.read_bytes()).hexdigest()" in deps_source
+        and 'if [ "$stamped" = "$current" ]; then' in deps_source
+        and 'echo "Backend deps unchanged — skipping sync."' in deps_source
+        and '(cd "$DIR/backend" && "$UV" pip install -q --python "$PY" -r requirements.txt)' in deps_source
+        and "printf '%s' \"$current\" > \"$stamp\"" in deps_source,
         failures,
     )
     check(
@@ -68,7 +87,7 @@ def main() -> int:
     lock_cleanup = text[lock_start:lock_end]
     check(
         "lock holder cleanup does not kill descendants",
-        "collect_descendants" not in text
+        "collect_descendants" not in lock_cleanup
         and "pgrep -P" not in lock_cleanup
         and "xargs kill" not in lock_cleanup,
         failures,
@@ -81,6 +100,40 @@ def main() -> int:
     check(
         "cleanup tolerates no matching process",
         "pgrep -f \"$pattern\" 2>/dev/null || true" in text,
+        failures,
+    )
+    check(
+        "graceful restart timeout is configurable",
+        'GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"' in text
+        and "restart_limit=$((GRACEFUL_RESTART_TIMEOUT_SECONDS * 4))" in text,
+        failures,
+    )
+    check(
+        "direct uvicorn launch skips proxy header parsing",
+        "--no-proxy-headers" in text
+        and "--no-proxy-headers" in windows_text
+        and app_entry_text.count("proxy_headers=False") >= 2
+        and "proxy_headers=False" in main_text,
+        failures,
+    )
+    check(
+        "direct uvicorn launch disables websocket compression",
+        "--ws-per-message-deflate false" in text
+        and app_entry_text.count("ws_per_message_deflate=False") >= 2
+        and "ws_per_message_deflate=False" in main_text,
+        failures,
+    )
+    check(
+        "restart waits gracefully before force kill",
+        "wait_for_backend_exit() {" in text
+        and "Restart requested — waiting up to ${GRACEFUL_RESTART_TIMEOUT_SECONDS}s for graceful shutdown..." in text
+        and "Graceful restart timeout expired; forcing backend shutdown." in text
+        and 'kill -9 "$BACKEND_PID"' in text,
+        failures,
+    )
+    check(
+        "main loop uses bounded backend exit wait",
+        "wait_for_backend_exit" in text[text.index("while true; do"):],
         failures,
     )
     check(
@@ -119,9 +172,22 @@ def main() -> int:
         failures,
     )
     check(
+        "Z.AI startup checker honors legacy skip env",
+        '${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-${BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK:-0}}' in zai_check,
+        failures,
+    )
+    check(
         "Z.AI startup checker cannot fail run.sh",
         'echo "Z.AI glm-5.2 startup checker failed. See $log_path"' in zai_check
         and "return 0" in zai_check.split('echo "Z.AI glm-5.2 startup checker failed. See $log_path"', 1)[1],
+        failures,
+    )
+    loop_cleanup = text[text.index("\nreap_completed_children\n", text.index("while true; do")) :]
+    check(
+        "normal run.sh loop exit cleans owned long-lived children",
+        'stop_child_process "frontend build" "$FRONTEND_BUILD_PID"' in loop_cleanup
+        and 'stop_child_process "daemon host" "$DAEMON_HOST_PID"' in loop_cleanup
+        and 'stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"' not in loop_cleanup,
         failures,
     )
 

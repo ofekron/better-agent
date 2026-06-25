@@ -7,13 +7,21 @@ Run with:
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 
 BACKEND = Path(__file__).resolve().parents[1]
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+import extension_store as es  # noqa: E402
+
 RUNNER = BACKEND / "runner.py"
 EXTENSION_STORE = BACKEND / "extension_store.py"
 EXTENSION_PACKAGE_LOADER = BACKEND / "extension_package_loader.py"
+REQUIREMENT_CONTEXT = BACKEND / "requirement_context.py"
 REQUIREMENT_ANALYSIS = BACKEND / "requirement_analysis"
+PROVISIONING = BACKEND / "provisioning"
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -23,6 +31,8 @@ def _run() -> bool:
     runner = RUNNER.read_text(encoding="utf-8")
     extension_store = EXTENSION_STORE.read_text(encoding="utf-8")
     extension_package_loader = EXTENSION_PACKAGE_LOADER.read_text(encoding="utf-8")
+    requirement_context = REQUIREMENT_CONTEXT.read_text(encoding="utf-8")
+    processor_worker_name = "worker:" + "requirements:" + "query-processor"
     results = [
         (
             "runner has no in-process get-requirements builder",
@@ -33,7 +43,8 @@ def _run() -> bool:
         ),
         (
             "requirements extension may replace reserved MCP server",
-            'BUILTIN_REQUIREMENTS_EXTENSION_ID: frozenset({"get-requirements"})' in extension_store,
+            es._BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(es.extension_id_for_role('requirements'))
+            == frozenset({"get-requirements"}),
             "missing replacement allow-list entry",
         ),
         (
@@ -47,6 +58,25 @@ def _run() -> bool:
             "backend/requirements_extension.py still exists",
         ),
         (
+            "processor spec implementation is not in public requirement_context",
+            "class GetRequirementsProcessorSpec" not in requirement_context
+            and processor_worker_name not in requirement_context
+            and "request.search_hints" not in requirement_context,
+            "private processor spec payload still lives in requirement_context.py",
+        ),
+        (
+            "public requirement_context loads processor spec through provisioning registry",
+            "_get_provisioned_spec" in requirement_context
+            and "requirement_analysis.processor_spec" in requirement_context
+            and "provisioning.get" in requirement_context,
+            "processor spec is not resolved through the generic registry",
+        ),
+        (
+            "provisioning has no duplicate prompt renderer",
+            not (PROVISIONING / "prompts.py").exists(),
+            "duplicate render_prompt still lives in provisioning/prompts.py",
+        ),
+        (
             "generic extension package loader validates packages before import",
             "def ensure_package_importable" in extension_package_loader
             and "ExtensionPackageUnavailable" in extension_package_loader,
@@ -54,8 +84,8 @@ def _run() -> bool:
         ),
         (
             "requirements runtime files are an extension readiness gate",
-            "BUILTIN_RUNTIME_REQUIRED_PATHS" in extension_store
-            and 'BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",)' in extension_store,
+            es._BUILTIN_RUNTIME_REQUIRED_PATHS.get(es.extension_id_for_role('requirements'))
+            == ("requirement_analysis",),
             "requirements MCP can be runtime-ready without requirement_analysis",
         ),
     ]

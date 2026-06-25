@@ -9,12 +9,11 @@ import tempfile
 from pathlib import Path
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-builtin-extension-gates-"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 import _test_home
 _test_home.isolate("ba-test-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 dist_dir = ROOT.parent / "frontend" / "dist"
 created_dist = not dist_dir.exists()
@@ -89,8 +88,8 @@ def test_get_ask_session_lazily_ensures_virtual_session(client: TestClient) -> N
 
 
 def test_disabled_project_structure_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('project-structure'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('project-structure'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/project-updates/count",
@@ -125,12 +124,12 @@ def test_runtime_unready_extensions_block_routes(client: TestClient) -> None:
 def test_project_update_substrate_does_not_require_runtime_ready(client: TestClient) -> None:
     import extension_token_registry
     # Identity is token-derived: act as project-structure via ITS minted token.
-    ps_token = extension_token_registry.mint(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+    ps_token = extension_token_registry.mint(extension_store.extension_id_for_role('project-structure'))
     original_enabled = main._builtin_extension_enabled
     original_runtime_ready = main._builtin_extension_runtime_ready
     try:
         main._builtin_extension_enabled = (
-            lambda extension_id: extension_id == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+            lambda extension_id: extension_id == extension_store.extension_id_for_role('project-structure')
         )
         main._builtin_extension_runtime_ready = lambda _extension_id: False
         response = client.post(
@@ -162,8 +161,8 @@ def test_disabled_ask_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('team-orchestration'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
 
     response = client.post(
@@ -203,7 +202,6 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
 
     for path, payload in [
         ("/api/internal/session-bridge/search", {"query": "anything"}),
-        ("/api/internal/session-bridge/recall", {"app_session_id": "a", "query": "anything"}),
         (
             "/api/internal/session-bridge/delegate",
             {
@@ -231,8 +229,8 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_machine_nodes_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('machine-nodes'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('machine-nodes'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/machine-nodes/list",
@@ -267,8 +265,6 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         json={"query": "x"},
     )
     check(response.status_code == 404, "missing requirements extension blocks get-requirements")
-    response = client.get("/api/traces")
-    check(response.status_code == 404, "public trace inspector route is not exposed by core")
     install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, False)
     response = client.post(
@@ -278,11 +274,13 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     )
     check(response.status_code == 404, "disabled coordination blocks lock_ops")
     checks = [
-        (extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID, "post", "/api/internal/credential-ui/pending", {}),
-        (extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID, "post", "/api/internal/traces/list", {}),
+        (extension_store.extension_id_for_role('credential-broker'), "post", "/api/internal/credential-ui/pending", {}),
         (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
-        (extension_store.BUILTIN_REARRANGER_EXTENSION_ID, "post", "/api/internal/rearranger/toggle", {"app_session_id": "s", "enabled": True}),
-        (extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID, "post", "/api/internal/supervisor/default-prompt", {}),
+        (extension_store.extension_id_for_role('supervisor'), "post", "/api/internal/supervisor/default-prompt", {}),
+        # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
+        # the gate, a pure-public checkout (constant None) lets any core-token
+        # holder through the `None != None` identity check.
+        (extension_store.extension_id_for_role('agent-board'), "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
     ]
     import extension_token_registry
     for extension_id, method, path, payload in checks:
@@ -298,28 +296,91 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         check(response.status_code == 404, f"disabled {extension_id} blocks {path}")
 
 
-def test_trace_internal_substrate_requires_trace_extension_identity(client: TestClient) -> None:
-    import extension_token_registry
-    install_gate_extension(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID, True)
-    # Identity is token-derived: another extension's token must not pass the
-    # trace-inspector identity gate.
+def test_coordination_lock_ops_route_forwards_multi_key_body(client: TestClient) -> None:
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
-        "/api/internal/traces/list",
-        headers={"X-Internal-Token": extension_token_registry.mint("ofek-dev.ask")},
-        json={},
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": "", "keys": ["route-a", "route-b"], "timeout_seconds": 0.05, "lease_seconds": 30},
     )
-    check(response.status_code == 403, "trace substrate rejects other extension ids")
-    response = client.post(
-        "/api/internal/traces/list",
-        headers={
-            "X-Internal-Token": extension_token_registry.mint(
-                extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID
-            ),
+    body = response.json()
+    check(response.status_code == 200, "coordination lock_ops route accepts multi-key body")
+    check(body.get("success") is True, "coordination lock_ops route forwards keys")
+    check(body.get("keys") == ["route-a", "route-b"], "coordination lock_ops returns forwarded keys")
+    check(body.get("waited_keys") == [], "coordination lock_ops returns precise waited_keys")
+    renew = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": "",
+            "keys": body.get("keys"),
+            "op": "renew",
+            "holder_token": body.get("holder_token"),
+            "lease_seconds": 45,
         },
-        json={},
     )
-    check(response.status_code == 200, "trace substrate accepts trace inspector extension id")
+    check(renew.json().get("success") is True, "coordination lock_ops route renews multi-key lock")
+    release = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": "",
+            "keys": body.get("keys"),
+            "release": True,
+            "holder_token": body.get("holder_token"),
+        },
+    )
+    check(release.json().get("success") is True, "coordination lock_ops route releases multi-key lock")
+
+
+def test_coordination_owner_ops_require_core_identity(client: TestClient) -> None:
+    import extension_token_registry
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    response = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": extension_token_registry.mint(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)},
+        json={
+            "key": "route-owner-op",
+            "op": "reattach",
+            "owner": {"app_session_id": "forged-session", "cwd": "/repo"},
+        },
+    )
+    check(response.status_code == 403, "coordination owner-based lock ops require core identity")
+
+
+def test_coordination_lock_ops_route_overwrites_forged_owner_principal(client: TestClient) -> None:
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    internal_token = getattr(main.coordinator, "internal_token", "")
+    key = "route-owner-principal"
+    acquired = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": key,
+            "owner": {
+                "principal_extension_id": "forged-extension",
+                "source": "route-test",
+            },
+        },
+    ).json()
+    blocked = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": key},
+    ).json()
+    owner = ((blocked.get("holder") or {}).get("owner") or {})
+    check(acquired.get("success") is True, "coordination lock_ops route test acquires holder")
+    check(owner.get("principal_extension_id") == "core", "coordination lock_ops route overwrites forged owner principal")
+    release = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": key, "release": True, "holder_token": acquired.get("holder_token")},
+    )
+    check(release.json().get("success") is True, "coordination lock_ops route releases forged-principal test lock")
 
 
 if __name__ == "__main__":
@@ -336,8 +397,10 @@ if __name__ == "__main__":
             test_disabled_team_extension_blocks_routes(client)
             test_disabled_machine_nodes_extension_blocks_routes(client)
             test_disabled_misc_extensions_block_routes(client)
+            test_coordination_lock_ops_route_forwards_multi_key_body(client)
+            test_coordination_owner_ops_require_core_identity(client)
+            test_coordination_lock_ops_route_overwrites_forged_owner_principal(client)
             test_get_ask_session_lazily_ensures_virtual_session(client)
-            test_trace_internal_substrate_requires_trace_extension_identity(client)
     finally:
         if created_dist:
             shutil.rmtree(dist_dir, ignore_errors=True)

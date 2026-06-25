@@ -1,5 +1,6 @@
-import { parseInlineTagsBody } from "./inlineTagsPrompt";
+import { buildInlineTagsPreamble, parseInlineTagsBody } from "./inlineTagsPrompt";
 import type { ParsedInlineComment } from "./inlineTagsPrompt";
+import type { InlineTag } from "../types/inlineTag";
 
 const TAGS_RE = /<inline-tags>([\s\S]*?)<\/inline-tags>\n?/g;
 const REMINDER_RE = /<system-reminder>([\s\S]*?)<\/system-reminder>\n?/g;
@@ -54,4 +55,11 @@ export function splitPreview(preview: string): SplitPreview {
 export function applyQueuedEdit(originalPreview: string, editedUserText: string): string {
   const { prefix } = splitPreview(originalPreview);
   return prefix + editedUserText;
+}
+
+export function applyQueuedInlineTags(originalPreview: string, tags: InlineTag[]): string {
+  const { prefix, userText } = splitPreview(originalPreview);
+  const tagPreamble = buildInlineTagsPreamble(tags).trimEnd();
+  const parts = [prefix.trimEnd(), tagPreamble, userText].filter(Boolean);
+  return parts.join("\n\n");
 }

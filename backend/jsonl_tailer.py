@@ -46,10 +46,13 @@ import logging
 import os
 import random
 import sys
+import threading
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from weakref import WeakKeyDictionary
 
 import perf
 from claude_jsonl_enrich import _SubagentRegistry, enrich_jsonl_line
@@ -57,10 +60,48 @@ from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
 
-_CURSOR_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="jsonl-cursor",
+# Both pools below are shared across EVERY active tailer in the backend
+# (every open session/worker/fork), so a hardcoded tiny size starves under
+# real concurrency — hundreds of concurrent tailers on a 2-worker pool
+# queue up and stall, which stalls dispatch of subsequent lines to the
+# render tree (the tailer read loop awaits the callback before reading
+# the next line). Threads here are I/O-bound (stat/read/write syscalls),
+# so oversubscribing past `cpu_count` is fine and desirable.
+_CPU_COUNT = os.cpu_count() or 4
+
+# Frequent, lightweight stat()/read() polling done by every
+# `_FileTailFollower` / `_AppendOnlyByteFollower` on a ~50ms tick per
+# tailer. Kept separate from cursor persistence below so an occasional
+# slow disk-I/O-bound persist call can't starve this fast poll path.
+_FILE_POLL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_CPU_COUNT * 8,
+    thread_name_prefix="jsonl-poll",
 )
+# NOTE: cursor-advance persistence (provider `_on_cursor` /
+# `_on_tailer_progress` — writes `backend_state.json`, records to
+# `spawn_ledger`) does NOT get its own executor. `on_cursor_advance` is
+# called synchronously off `_notify_cursor` (see below) and MUST be
+# non-blocking — implementations hand actual I/O to
+# `cursor_ledger_worker`, a single dedicated background thread that
+# never makes the tailer's read loop wait. See `cursor_ledger_worker.py`.
+_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="subagent-scan",
+)
+_SUBAGENT_SCAN_MAX_PENDING_FUTURES = 2
+_SUBAGENT_SCAN_SEMAPHORES: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    asyncio.Semaphore,
+] = WeakKeyDictionary()
+
+
+def _subagent_scan_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _SUBAGENT_SCAN_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_SUBAGENT_SCAN_MAX_PENDING_FUTURES)
+        _SUBAGENT_SCAN_SEMAPHORES[loop] = sem
+    return sem
 
 
 # ============================================================================
@@ -112,6 +153,13 @@ class JsonlEventTailer(ABC):
     dedup in `event_ingester` makes the eventual re-ingest idempotent.
     Blank lines and decode-failures advance the cursor (the line was
     read, there's nothing to dispatch; retrying would loop forever).
+
+    `on_cursor_advance` contract: called synchronously, inline, after
+    every dispatched line — it MUST be non-blocking (no disk I/O, no
+    lock that could contend with another run). Implementations that need
+    to persist the cursor hand the actual write to
+    `cursor_ledger_worker.note()` instead of doing it here; see that
+    module for why.
     """
 
     # Jittered exponential backoff for dispatch retries. Designed to
@@ -247,15 +295,15 @@ class JsonlEventTailer(ABC):
         return False
 
     async def _notify_cursor(self) -> None:
+        # `on_cursor_advance` MUST be non-blocking — it runs synchronously
+        # on this tailer's own read loop, in line with every dispatched
+        # event. Implementations that need to persist anything hand the
+        # actual I/O to `cursor_ledger_worker.note()` (O(1), no disk, no
+        # lock contention with other runs) rather than doing it here.
         if self.on_cursor_advance is None:
             return
         try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                _CURSOR_EXECUTOR,
-                self.on_cursor_advance,
-                self.processed_offset,
-            )
+            self.on_cursor_advance(self.processed_offset)
         except Exception:
             logger.exception(
                 "%s: on_cursor_advance raised", type(self).__name__,
@@ -328,7 +376,7 @@ class _FileTailFollower:
         try:
             while not self._stop.is_set():
                 try:
-                    size = self._path.stat().st_size
+                    size = await self._stat_size()
                 except OSError:
                     await self._wait_tick()
                     continue
@@ -336,10 +384,7 @@ class _FileTailFollower:
                     pos, skip = 0, self._skip
                 if size > pos:
                     try:
-                        with open(self._path, "rb") as f:
-                            f.seek(pos)
-                            data = f.read()
-                            pos = f.tell()
+                        data, pos = await self._read_from(pos)
                     except OSError:
                         await self._wait_tick()
                         continue
@@ -356,6 +401,31 @@ class _FileTailFollower:
                 await self._wait_tick()
         finally:
             self.stdout.feed_eof()
+            self.returncode = 0
+
+    async def _stat_size(self) -> int:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _FILE_POLL_EXECUTOR,
+            self._stat_size_sync,
+        )
+
+    def _stat_size_sync(self) -> int:
+        return self._path.stat().st_size
+
+    async def _read_from(self, pos: int) -> tuple[bytes, int]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _FILE_POLL_EXECUTOR,
+            self._read_from_sync,
+            pos,
+        )
+
+    def _read_from_sync(self, pos: int) -> tuple[bytes, int]:
+        with open(self._path, "rb") as f:
+            f.seek(pos)
+            data = f.read()
+            return data, f.tell()
 
     async def _wait_tick(self) -> None:
         try:
@@ -382,9 +452,16 @@ class _FileTailFollower:
 class _AppendOnlyByteFollower:
     _POLL = 0.05
 
-    def __init__(self, path: Path, start_byte: int):
+    def __init__(
+        self,
+        path: Path,
+        start_byte: int,
+        *,
+        on_source_reset: Optional[Callable[[], None]] = None,
+    ):
         self._path = path
         self._start_byte = max(0, int(start_byte))
+        self._on_source_reset = on_source_reset
         self.stdout: asyncio.StreamReader = asyncio.StreamReader(limit=sys.maxsize)
         self.returncode: Optional[int] = None
         self._stop = asyncio.Event()
@@ -402,7 +479,7 @@ class _AppendOnlyByteFollower:
         try:
             while not self._stop.is_set():
                 try:
-                    st = self._path.stat()
+                    st = await self._stat()
                 except OSError:
                     await self._wait_tick()
                     continue
@@ -410,18 +487,18 @@ class _AppendOnlyByteFollower:
                 if self._inode is None:
                     self._inode = inode
                 if inode != self._inode or st.st_size < pos:
-                    logger.error(
+                    logger.warning(
                         "Claude jsonl changed while tailing %s "
-                        "(inode %s->%s, size=%d, cursor=%d); stopping",
+                        "(inode %s->%s, size=%d, cursor=%d); rewinding",
                         self._path, self._inode, inode, st.st_size, pos,
                     )
-                    return
+                    self._inode = inode
+                    pos = 0
+                    if self._on_source_reset is not None:
+                        self._on_source_reset()
                 if st.st_size > pos:
                     try:
-                        with open(self._path, "rb") as f:
-                            f.seek(pos)
-                            data = f.read()
-                            pos = f.tell()
+                        data, pos = await self._read_from(pos)
                     except OSError:
                         await self._wait_tick()
                         continue
@@ -431,6 +508,27 @@ class _AppendOnlyByteFollower:
         finally:
             self.stdout.feed_eof()
             self.returncode = 0
+
+    async def _stat(self) -> os.stat_result:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _FILE_POLL_EXECUTOR,
+            self._path.stat,
+        )
+
+    async def _read_from(self, pos: int) -> tuple[bytes, int]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _FILE_POLL_EXECUTOR,
+            self._read_from_sync,
+            pos,
+        )
+
+    def _read_from_sync(self, pos: int) -> tuple[bytes, int]:
+        with open(self._path, "rb") as f:
+            f.seek(pos)
+            data = f.read()
+            return data, f.tell()
 
     async def _wait_tick(self) -> None:
         try:
@@ -453,8 +551,17 @@ class _AppendOnlyByteFollower:
         return self.returncode
 
 
-async def _spawn_byte_follower(path: Path, *, start_byte: int):
-    return await _AppendOnlyByteFollower(path, start_byte).start()
+async def _spawn_byte_follower(
+    path: Path,
+    *,
+    start_byte: int,
+    on_source_reset: Optional[Callable[[], None]] = None,
+):
+    return await _AppendOnlyByteFollower(
+        path,
+        start_byte,
+        on_source_reset=on_source_reset,
+    ).start()
 
 
 async def _spawn_tail(path: Path, *, start_line: int = 1):
@@ -526,6 +633,11 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     """
 
     _SUB_DIR_POLL_INTERVAL = 0.2  # subagent meta files appear once per Agent call
+    _SUB_DIR_IDLE_POLL_INTERVAL = 1.5
+    _SUB_DIR_IDLE_BACKOFF = 1.6
+    _SUB_DIR_PENDING_FAST_SECONDS = 10.0
+    _active_sub_tailer_keys: set[tuple[str, str]] = set()
+    _active_sub_tailer_lock = threading.Lock()
 
     def __init__(
         self,
@@ -553,13 +665,17 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         self._sub_tasks: list[asyncio.Task] = []
         self._known_meta_files: set[str] = set()
         self._known_workflow_dirs: set[str] = set()
+        self._subagent_scan_wakeup: Optional[asyncio.Event] = None
+        self._subagent_pending_fast_until = 0.0
 
         self._proc: Optional[asyncio.subprocess.Process] = None
 
     async def _open_source(self) -> bool:
         try:
             self._proc = await _spawn_byte_follower(
-                self.path, start_byte=self.start_offset,
+                self.path,
+                start_byte=self.start_offset,
+                on_source_reset=self._reset_processed_offset,
             )
         except Exception:
             logger.exception(
@@ -567,6 +683,11 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             )
             return False
         return True
+
+    def _reset_processed_offset(self) -> None:
+        self.processed_offset = 0
+        if self.on_cursor_advance is not None:
+            self.on_cursor_advance(0)
 
     async def _next_line(self) -> Optional[bytes]:
         if self._proc is None or self._proc.stdout is None:
@@ -578,6 +699,7 @@ class ClaudeJsonlTailer(JsonlEventTailer):
 
     def _decode_line(self, raw_line: bytes) -> Optional[dict]:
         decoded = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+        pending_before = self._subagent_pending_count()
         ev = enrich_jsonl_line(
             decoded,
             self._uuid_to_tool_use_ids,
@@ -587,6 +709,8 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         )
         if ev is None:
             return None
+        if self._subagent_pending_count() > pending_before:
+            self._mark_subagent_pending_fast()
         # dispatch expects the inner enriched dict (not the
         # {"type": "agent_message", "data": ...} wrapper).
         return ev["data"]
@@ -732,6 +856,45 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     def _subagents_dir(self) -> Path:
         return self.path.parent / self.path.stem / "subagents"
 
+    def _subagent_pending_count(self) -> int:
+        return len(getattr(self.subagent_registry, "_pending", ()))
+
+    def _wake_subagent_scan(self) -> None:
+        wakeup = self._subagent_scan_wakeup
+        if wakeup is not None:
+            wakeup.set()
+
+    def _mark_subagent_pending_fast(self) -> None:
+        self._subagent_pending_fast_until = (
+            time.monotonic() + self._SUB_DIR_PENDING_FAST_SECONDS
+        )
+        self._wake_subagent_scan()
+
+    def _has_fresh_subagent_pending(self) -> bool:
+        return (
+            self._subagent_pending_count() > 0
+            and time.monotonic() <= self._subagent_pending_fast_until
+        )
+
+    def _should_scan_subagents(self) -> bool:
+        return self._subagent_pending_count() > 0 or bool(self._known_workflow_dirs)
+
+    def _next_subagent_poll_interval(
+        self,
+        current_interval: float,
+        *,
+        active: bool,
+    ) -> float:
+        if active:
+            return self._SUB_DIR_POLL_INTERVAL
+        return min(
+            self._SUB_DIR_IDLE_POLL_INTERVAL,
+            max(
+                self._SUB_DIR_POLL_INTERVAL,
+                current_interval * self._SUB_DIR_IDLE_BACKOFF,
+            ),
+        )
+
     async def _watch_subagents(self) -> None:
         """Poll the subagents directory for new `agent-*.meta.json` files,
         match them against pending Agent/Task tool_uses, and spawn a
@@ -739,25 +902,67 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         for Workflow subagents. Polling here is fine — meta files arrive
         once per Agent/Workflow call, not continuously."""
         sub_dir = self._subagents_dir()
+        poll_interval = self._SUB_DIR_POLL_INTERVAL
+        wakeup = asyncio.Event()
+        self._subagent_scan_wakeup = wakeup
         try:
             while not self._stop_event.is_set():
                 self._prune_done_sub_tasks()
-                if sub_dir.exists():
-                    self._poll_direct_subagents(sub_dir)
-                    self._poll_workflow_subagents(sub_dir)
-                await asyncio.sleep(self._SUB_DIR_POLL_INTERVAL)
+                loop = asyncio.get_running_loop()
+                if self._should_scan_subagents():
+                    known_meta_files = frozenset(self._known_meta_files)
+                    async with _subagent_scan_semaphore():
+                        with perf.timed("tailer.subagent_scan"):
+                            invalid_meta, direct, workflows = await loop.run_in_executor(
+                                _SUBAGENT_SCAN_EXECUTOR,
+                                self._scan_subagent_files,
+                                sub_dir,
+                                known_meta_files,
+                            )
+                else:
+                    invalid_meta, direct, workflows = [], [], []
+                applied = self._apply_subagent_scan(invalid_meta, direct, workflows)
+                if applied > 0:
+                    self._mark_subagent_pending_fast()
+                active = applied > 0 or self._has_fresh_subagent_pending()
+                poll_interval = self._next_subagent_poll_interval(
+                    poll_interval,
+                    active=active,
+                )
+                try:
+                    await asyncio.wait_for(wakeup.wait(), timeout=poll_interval)
+                    wakeup.clear()
+                    poll_interval = self._SUB_DIR_POLL_INTERVAL
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
                 "ClaudeJsonlTailer: subagent watcher crashed for %s", self.path,
             )
+        finally:
+            if self._subagent_scan_wakeup is wakeup:
+                self._subagent_scan_wakeup = None
 
-    def _poll_direct_subagents(self, sub_dir: Path) -> None:
-        """Scan `subagents/agent-*.meta.json` for Agent/Task subagents."""
+    def _scan_subagent_files(
+        self,
+        sub_dir: Path,
+        known_meta_files: frozenset[str],
+    ) -> tuple[
+        list[str],
+        list[tuple[str, Path, dict]],
+        list[tuple[Path, list[tuple[str, Path]]]],
+    ]:
+        invalid_meta: list[str] = []
+        direct: list[tuple[str, Path, dict]] = []
+        workflows: list[tuple[Path, list[tuple[str, Path]]]] = []
+        if not sub_dir.exists():
+            return invalid_meta, direct, workflows
+
         for meta_path in sub_dir.glob("agent-*.meta.json"):
             key = str(meta_path)
-            if key in self._known_meta_files:
+            if key in known_meta_files:
                 continue
             agent_id = meta_path.name[
                 len("agent-") : -len(".meta.json")
@@ -768,68 +973,83 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
-                logger.exception(
-                    "ClaudeJsonlTailer: failed to read subagent meta %s",
-                    meta_path,
-                )
-                self._known_meta_files.add(key)
+                invalid_meta.append(key)
+                continue
+            direct.append((agent_id, jsonl_path, meta))
+
+        wf_base = sub_dir / "workflows"
+        if not wf_base.exists():
+            return invalid_meta, direct, workflows
+        for wf_path in sorted(wf_base.iterdir()):
+            if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
+                continue
+            agents: list[tuple[str, Path]] = []
+            for meta_path in wf_path.glob("agent-*.meta.json"):
+                key = str(meta_path)
+                if key in known_meta_files:
+                    continue
+                agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
+                jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
+                if not jsonl_path.exists():
+                    continue
+                agents.append((agent_id, jsonl_path))
+            workflows.append((wf_path, agents))
+        return invalid_meta, direct, workflows
+
+    def _apply_subagent_scan(
+        self,
+        invalid_meta: list[str],
+        direct: list[tuple[str, Path, dict]],
+        workflows: list[tuple[Path, list[tuple[str, Path]]]],
+    ) -> int:
+        applied = 0
+        for key in invalid_meta:
+            logger.warning(
+                "ClaudeJsonlTailer: failed to read subagent meta %s",
+                key,
+            )
+            self._known_meta_files.add(key)
+            applied += 1
+        for agent_id, jsonl_path, meta in direct:
+            key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
+            if key in self._known_meta_files:
                 continue
             parent_tuid = self.subagent_registry.claim(
                 meta.get("agentType", "") or "",
                 meta.get("description", "") or "",
             )
             if parent_tuid is None:
-                # Race: parent tailer hasn't seen the matching
-                # Agent tool_use yet. Retry next tick. Don't
-                # mark seen.
                 continue
-            self._spawn_sub_tailer(agent_id, jsonl_path, parent_tuid, meta.get("agentType"))
-
-    def _poll_workflow_subagents(self, sub_dir: Path) -> None:
-        """Scan `subagents/workflows/wf_<id>/` for Workflow subagents.
-
-        Workflow agents use a different binding: the directory name
-        ``wf_<run_id>`` maps to a pending Workflow tool_use via FIFO
-        claim. All agents under that directory inherit the same
-        parent_tool_use_id.
-        """
-        wf_base = sub_dir / "workflows"
-        if not wf_base.exists():
-            return
-        for wf_path in sorted(wf_base.iterdir()):
-            if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
-                continue
-            wf_key = str(wf_path)
-            if wf_key in self._known_workflow_dirs:
-                # Already bound — but new agents may have appeared.
-                self._scan_wf_agents(wf_path)
-                continue
-            run_id = wf_path.name
-            parent_tuid = self.subagent_registry.claim_workflow(run_id)
-            if parent_tuid is None:
-                # No pending Workflow tool_use yet. Retry next tick.
-                continue
-            self._known_workflow_dirs.add(wf_key)
-            logger.info(
-                "ClaudeJsonlTailer: bound workflow %s to tool_use_id=%s",
-                run_id, parent_tuid,
+            self._spawn_sub_tailer(
+                agent_id, jsonl_path, parent_tuid, meta.get("agentType"),
             )
-            self._scan_wf_agents(wf_path)
+            applied += 1
 
-    def _scan_wf_agents(self, wf_path: Path) -> None:
-        """Spawn sub-tailers for any undiscovered agents under a workflow dir."""
-        parent_tuid = self.subagent_registry.get_workflow_parent(wf_path.name)
-        if not parent_tuid:
-            return
-        for meta_path in wf_path.glob("agent-*.meta.json"):
-            key = str(meta_path)
-            if key in self._known_meta_files:
+        for wf_path, agents in workflows:
+            wf_key = str(wf_path)
+            run_id = wf_path.name
+            if wf_key not in self._known_workflow_dirs:
+                parent_tuid = self.subagent_registry.claim_workflow(run_id)
+                if parent_tuid is None:
+                    continue
+                self._known_workflow_dirs.add(wf_key)
+                logger.info(
+                    "ClaudeJsonlTailer: bound workflow %s to tool_use_id=%s",
+                    run_id, parent_tuid,
+                )
+                applied += 1
+            parent_tuid = self.subagent_registry.get_workflow_parent(run_id)
+            if not parent_tuid:
                 continue
-            agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
-            jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
-            if not jsonl_path.exists():
-                continue
-            self._spawn_sub_tailer(agent_id, jsonl_path, parent_tuid, "workflow-subagent")
+            for agent_id, jsonl_path in agents:
+                key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
+                if key in self._known_meta_files:
+                    continue
+                self._spawn_sub_tailer(
+                    agent_id, jsonl_path, parent_tuid, "workflow-subagent",
+                )
+                applied += 1
+        return applied
 
     def _spawn_sub_tailer(
         self, agent_id: str, jsonl_path: Path, parent_tuid: str, agent_type: str,
@@ -838,6 +1058,16 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         meta_key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
         self._known_meta_files.add(meta_key)
         self.subagent_registry._bound[agent_id] = parent_tuid
+        active_key = (str(jsonl_path), parent_tuid)
+        with self._active_sub_tailer_lock:
+            if active_key in self._active_sub_tailer_keys:
+                logger.debug(
+                    "ClaudeJsonlTailer: sub-tailer already active for agent %s "
+                    "under tool_use_id=%s",
+                    agent_id, parent_tuid,
+                )
+                return
+            self._active_sub_tailer_keys.add(active_key)
         sub_tailer = ClaudeJsonlTailer(
             path=jsonl_path,
             start_offset=0,
@@ -847,15 +1077,24 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             inject_parent_tool_use_id=parent_tuid,
             is_subagent=True,
         )
-        self._sub_tasks.append(asyncio.create_task(
+        task = asyncio.create_task(
             sub_tailer.run(),
             name=f"claude-tailer-sub-{agent_id[:8]}",
-        ))
+        )
+        task.add_done_callback(
+            lambda _task, key=active_key: self._release_active_sub_tailer_key(key)
+        )
+        self._sub_tasks.append(task)
         logger.info(
             "ClaudeJsonlTailer: spawned sub-tailer for agent %s "
             "(type=%s) under tool_use_id=%s",
             agent_id, agent_type, parent_tuid,
         )
+
+    @classmethod
+    def _release_active_sub_tailer_key(cls, key: tuple[str, str]) -> None:
+        with cls._active_sub_tailer_lock:
+            cls._active_sub_tailer_keys.discard(key)
 
 
 # ============================================================================
@@ -894,6 +1133,17 @@ class GeminiJsonlTailer(JsonlEventTailer):
         )
         # Per-pass line buffer drained into _next_line one at a time.
         self._pending_lines: list[str] = []
+        # In-memory byte offset of the next unread line. Primes once from
+        # the line-count cursor (start_offset / processed_offset) so
+        # steady-state polls seek straight to new bytes instead of
+        # re-reading the whole file from the top every poll — which made
+        # the tailer O(total_lines) per poll and lagged the UI for long
+        # streamed turns (ba_runner / gemini session_events.jsonl grows
+        # large because the runner writes a cumulative line per delta).
+        # `processed_offset` (line count) stays the persisted recovery
+        # cursor; `_byte_cursor` is purely a read optimization.
+        self._byte_cursor: int = 0
+        self._cursor_ready: bool = False
 
     async def _open_source(self) -> bool:
         # Polling read needs no eager open. We just confirm the path
@@ -907,7 +1157,7 @@ class GeminiJsonlTailer(JsonlEventTailer):
         if self._pending_lines:
             return self._pending_lines.pop(0)
         while not self._stop_event.is_set():
-            new_lines = self._read_new_lines()
+            new_lines = await asyncio.to_thread(self._read_new_lines)
             if new_lines:
                 self._pending_lines = new_lines[1:]
                 return new_lines[0]
@@ -927,27 +1177,50 @@ class GeminiJsonlTailer(JsonlEventTailer):
                 return None
         return None
 
+    def _prime_byte_cursor(self) -> None:
+        """Establish `_byte_cursor` past the lines already counted in
+        `processed_offset` (start_offset on a fresh tailer, or the
+        persisted line-count cursor on a recovery re-attach). Run once.
+
+        Without this, every poll re-read the whole file from line 0,
+        skipping `processed_offset` lines via readline() — O(total) per
+        poll, O(n^2) over a turn — which lagged the UI and stalled the
+        deterministic drain (`await_line_tailer_drained`)."""
+        self._byte_cursor = 0
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as f:
+                    for _ in range(self.processed_offset):
+                        if f.readline() == "":
+                            break
+                    self._byte_cursor = f.tell()
+            except OSError:
+                self._byte_cursor = 0
+        self._cursor_ready = True
+
     def _read_new_lines(self) -> list[str]:
-        """Read every new line past `processed_line` (1-indexed cursor).
-        Returns the list of newly available raw lines; mutates nothing
-        except a quick file scan."""
+        """Read every new line past the byte cursor in one pass.
+
+        Seeks to `_byte_cursor` and reads only the bytes appended since
+        the last read (the file is append-only within a run dir), then
+        advances `_byte_cursor` to EOF. O(new bytes) per poll instead of
+        O(total). Blank/whitespace-only lines are filtered to match the
+        line-count semantics `_count_event_lines` and the base cursor use.
+        """
+        if not self._cursor_ready:
+            self._prime_byte_cursor()
         if not self.path.exists():
             return []
         try:
             with self.path.open("r", encoding="utf-8") as f:
-                # Skip already-processed lines. processed_line is the
-                # count of lines we've already emitted via _next_line
-                # (incremented by the base after each dispatch); the
-                # NEXT line to emit is line-index processed_line (0-
-                # indexed) so we skip exactly that many.
-                for _ in range(self.processed_offset):
-                    if f.readline() == "":
-                        return []
-                return [
+                f.seek(self._byte_cursor)
+                new_lines = [
                     line.rstrip("\n")
                     for line in f
                     if line and not line.isspace()
                 ]
+                self._byte_cursor = f.tell()
+                return new_lines
         except OSError:
             return []
 
@@ -1004,6 +1277,34 @@ class OwnedClaudeJsonlTailer:
         self._refcount = 0
         self._tailer: Optional[ClaudeJsonlTailer] = None
         self._task: Optional[asyncio.Task] = None
+        # One OwnedClaudeJsonlTailer is alive at a time per (app_session_id,
+        # agent_sid) — refcounted by the coordinator — so this key is
+        # stable and unique for `cursor_ledger_worker`.
+        self._cursor_key = f"owned:{self.app_session_id}:{self.agent_sid}"
+        self._owner_token = None
+        self._unsubscribe_owner_revoked: Optional[Callable[[], None]] = None
+        self._owner_retired = False
+
+    def _owner_revoked(self) -> None:
+        if self._tailer is not None:
+            self._tailer.stop()
+        self._owner_token = None
+        self._unsubscribe_owner_revoked = None
+        self._owner_retired = True
+
+    def _ensure_owner_token(self):
+        if self._owner_retired:
+            return None
+        if self._owner_token is not None:
+            return self._owner_token
+        token = session_manager.claim_owner(self.app_session_id)
+        if token is None:
+            return None
+        self._owner_token = token
+        self._unsubscribe_owner_revoked = session_manager.subscribe_owner_revoked(
+            token, self._owner_revoked,
+        )
+        return token
 
     @perf.timed_fn("tailer.dispatch")
     async def _dispatch(self, enriched: dict) -> None:
@@ -1055,13 +1356,21 @@ class OwnedClaudeJsonlTailer:
                 # dedup in apply_event only checks the target message,
                 # so UUIDs already present in a prior message would pass
                 # through undetected.
-                await asyncio.to_thread(
-                    strategy.ingest_orphan,
-                    app_session_id=self.app_session_id,
-                    event=event,
-                    ctx=ctx,
-                    source_is_provider_stream=True,
+                token = self._ensure_owner_token()
+                if token is None:
+                    return
+                accepted, _ = await asyncio.to_thread(
+                    session_manager.run_if_owner,
+                    token,
+                    lambda: strategy.ingest_orphan(
+                        app_session_id=self.app_session_id,
+                        event=event,
+                        ctx=ctx,
+                        source_is_provider_stream=True,
+                    ),
                 )
+                if not accepted:
+                    self._owner_revoked()
             except Exception:
                 logger.exception(
                     "OwnedClaudeJsonlTailer: ingest_orphan failed for %s",
@@ -1081,14 +1390,23 @@ class OwnedClaudeJsonlTailer:
         # primary producer for fork events; these rows are durable
         # backup only.
         try:
-            from event_journal import FORK_BACKUP_SOURCE, publish_event
-            await publish_event(
-                session_id=self.root_id,
-                context_id=self.agent_sid,
-                event_type="agent_message",
-                data=enriched,
-                source=FORK_BACKUP_SOURCE,
+            from event_journal import FORK_BACKUP_SOURCE, publish_event_sync
+            token = self._ensure_owner_token()
+            if token is None:
+                return
+            accepted, _ = await asyncio.to_thread(
+                session_manager.run_if_owner,
+                token,
+                lambda: publish_event_sync(
+                    session_id=self.root_id,
+                    context_id=self.agent_sid,
+                    event_type="agent_message",
+                    data=enriched,
+                    source=FORK_BACKUP_SOURCE,
+                ),
             )
+            if not accepted:
+                self._owner_revoked()
         except Exception:
             logger.exception(
                 "OwnedClaudeJsonlTailer: ingest failed for %s",
@@ -1098,14 +1416,33 @@ class OwnedClaudeJsonlTailer:
     def _on_cursor(self, line_count: int) -> None:
         """Persist `processed_line_by_sid[agent_sid] = line_count` so a
         subsequent acquire (e.g. after backend restart) starts past the
-        already-ingested prefix instead of re-reading the whole file."""
+        already-ingested prefix instead of re-reading the whole file.
+        `note_jsonl_append` is a cheap in-memory update, done inline; the
+        actual disk/session-store write hands off to
+        `cursor_ledger_worker` so this callback (called synchronously
+        from the tailer's read loop) never blocks on I/O."""
+        n = int(line_count)
+        from orchs.jsonl_helpers import note_jsonl_append
+        note_jsonl_append(self.jsonl_path, n)
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        cursor_ledger_worker.note(self._cursor_key, lambda n=n: self._persist_cursor(n))
+
+    def _persist_cursor(self, line_count: int) -> None:
         try:
-            session_manager.advance_processed_lines(
-                self.app_session_id,
-                self.agent_sid,
-                int(line_count),
-                bump_updated_at=False,
+            token = self._ensure_owner_token()
+            if token is None:
+                return
+            accepted, _ = session_manager.run_if_owner(
+                token,
+                lambda: session_manager.advance_processed_lines(
+                    self.app_session_id,
+                    self.agent_sid,
+                    int(line_count),
+                    bump_updated_at=False,
+                ),
             )
+            if not accepted:
+                self._owner_revoked()
         except Exception:
             logger.exception(
                 "OwnedClaudeJsonlTailer: cursor persist failed for %s",
@@ -1115,6 +1452,10 @@ class OwnedClaudeJsonlTailer:
     def acquire(self) -> None:
         self._refcount += 1
         if self._tailer is None:
+            token = self._ensure_owner_token()
+            if token is None:
+                self._refcount = max(0, self._refcount - 1)
+                return
             self._tailer = ClaudeJsonlTailer(
                 path=self.jsonl_path,
                 start_offset=self.start_offset,
@@ -1134,9 +1475,16 @@ class OwnedClaudeJsonlTailer:
         self._refcount = max(0, self._refcount - 1)
         if self._refcount == 0 and self._tailer is not None:
             self._tailer.stop()
+            from cursor_ledger_worker import worker as cursor_ledger_worker
+            cursor_ledger_worker.flush_now(self._cursor_key)
             t = self._task
             self._tailer = None
             self._task = None
+            if self._unsubscribe_owner_revoked is not None:
+                self._unsubscribe_owner_revoked()
+                self._unsubscribe_owner_revoked = None
+            self._owner_token = None
+            self._owner_retired = False
             return t
         return None
 
@@ -1194,9 +1542,10 @@ class _Subscriber:
             if seq < self.next_seq:
                 return
             if seq > self.next_seq:
-                await self._fill_gap(seq - 1)
-            await self._send(frame)
-            self.next_seq = seq + 1
+                if not await self._fill_gap(seq - 1):
+                    return
+            if await self._send(frame):
+                self.next_seq = seq + 1
 
     async def catch_up_to(self, target_seq: int) -> None:
         """Synchronously send every missing event up to and including
@@ -1207,35 +1556,66 @@ class _Subscriber:
                 return
             await self._fill_gap(target_seq)
 
-    async def _fill_gap(self, until_seq: int) -> None:
+    async def _fill_gap(self, until_seq: int) -> bool:
         """Read events.jsonl from `next_seq..until_seq` filtered by sid,
         send each. Caller MUST hold `_lock`."""
         from event_journal import event_journal_reader
-        events, _, _ = await asyncio.to_thread(
-            event_journal_reader.read_events,
-            self.root_id,
-            after_seq=self.next_seq - 1,
-            limit=10_000,
-            sid_filter=self.app_session_id,
-        )
-        for e in events:
-            seq = e.get("seq")
-            if not isinstance(seq, int) or seq > until_seq:
+        replayed = 0
+        rejected = 0
+        boundary_reached = False
+        started = time.perf_counter()
+        while self.next_seq <= until_seq:
+            events, _, has_more = await asyncio.to_thread(
+                event_journal_reader.read_events,
+                self.root_id,
+                after_seq=self.next_seq - 1,
+                limit=10_000,
+                sid_filter=self.app_session_id,
+            )
+            if not events:
                 break
-            frame = BetterAgentJsonlTailer._entry_to_ws_frame(e)
-            if frame is None:
-                continue
-            await self._send(frame)
-            self.next_seq = seq + 1
+            for e in events:
+                seq = e.get("seq")
+                if not isinstance(seq, int):
+                    rejected = 1
+                    break
+                if seq > until_seq:
+                    boundary_reached = True
+                    break
+                frame = BetterAgentJsonlTailer._entry_to_ws_frame(e)
+                if frame is None:
+                    self.next_seq = seq + 1
+                    continue
+                if not await self._send(frame):
+                    rejected = 1
+                    break
+                self.next_seq = seq + 1
+                replayed += 1
+            if rejected:
+                break
+            if boundary_reached:
+                break
+            if not has_more:
+                break
+        perf.record(
+            "ws.replay.gap_fill",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        perf.record_count("ws.replay.frames", replayed)
+        if rejected:
+            perf.record_count("ws.replay.rejected")
+        return not rejected
 
-    async def _send(self, frame: dict) -> None:
+    async def _send(self, frame: dict) -> bool:
         try:
-            await self.ws_callback(frame)
+            accepted = await self.ws_callback(frame)
+            return accepted is not False
         except Exception:
             logger.exception(
                 "Subscriber: ws_callback raised for sid=%s",
                 self.app_session_id,
             )
+            return False
 
 
 class BetterAgentJsonlTailer:

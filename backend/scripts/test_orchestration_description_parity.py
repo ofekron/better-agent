@@ -20,8 +20,8 @@ import tempfile
 
 # Isolate state dir BEFORE importing backend modules (project rule).
 import _test_home
-_test_home.isolate("bc_desc_parity_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_test_home.isolate("bc_desc_parity_")
 
 import orchestration_tool_descriptions as otd  # noqa: E402
 import runner  # noqa: E402
@@ -30,8 +30,12 @@ import communicate_mcp  # noqa: E402
 
 # tool name -> (shared constant, [substrings that MUST survive any edit])
 SPEC = {
-    "mssg": (otd.MSSG_DESCRIPTION, ["BLOCK", "joins your turn"]),
-    "ask": (otd.ASK_DESCRIPTION, ["WAIT", "fork", "synchronous"]),
+    "mssg": (otd.MSSG_DESCRIPTION, ["backend accepts", "final report"]),
+    "ask": (
+        otd.ASK_DESCRIPTION,
+        ["wait_and_grab_last_assistant_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork",
+         "delegate_to_session"],
+    ),
     "delegate_task": (
         otd.DELEGATE_TASK_DESCRIPTION,
         ["DETACHED", "does NOT hold your turn", "delegate_to_session"],
@@ -39,6 +43,14 @@ SPEC = {
     "create_session": (otd.CREATE_SESSION_DESCRIPTION, ["STANDALONE", "create_worker"]),
     "create_sub_session": (otd.CREATE_SUB_SESSION_DESCRIPTION, ["hidden"]),
     "create_worker": (otd.CREATE_WORKER_DESCRIPTION, ["TEAM", "approval"]),
+    "ensure_named_worker": (
+        otd.ENSURE_NAMED_WORKER_DESCRIPTION,
+        ["Idempotently", "singleton", "STABLE, REUSABLE"],
+    ),
+    "list_available_provider_models": (
+        otd.LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
+        ["available models", "reasoning efforts", "optional fuzzy"],
+    ),
 }
 
 # The `_`-prefixed alias each runner imports must BE the same object (no fork).
@@ -49,6 +61,8 @@ _CLAUDE_ALIASES = {
     "create_session": runner._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner._CREATE_WORKER_DESCRIPTION,
+    "ensure_named_worker": runner._ENSURE_NAMED_WORKER_DESCRIPTION,
+    "list_available_provider_models": runner._LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
 }
 _CODEX_ALIASES = {
     "mssg": runner_codex._MSSG_DESCRIPTION,
@@ -57,6 +71,8 @@ _CODEX_ALIASES = {
     "create_session": runner_codex._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner_codex._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner_codex._CREATE_WORKER_DESCRIPTION,
+    "ensure_named_worker": runner_codex._ENSURE_NAMED_WORKER_DESCRIPTION,
+    "list_available_provider_models": runner_codex._LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
 }
 
 

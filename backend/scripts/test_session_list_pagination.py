@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 import tempfile
+import time
+import types
 from pathlib import Path
 
 import _test_home
@@ -30,11 +32,37 @@ HEADERS = {"Authorization": f"Bearer {auth.create_token('test')}"}
 def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
-        shutil.rmtree(sessions_dir)
+        for attempt in range(5):
+            try:
+                shutil.rmtree(sessions_dir)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
     session_store._fork_index.clear()
     session_store._index_loaded = False
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
+    session_store._metadata_search_cache.clear()
+    session_store._metadata_text_cache = ()
+    session_store._metadata_text_cache_version = -1
+    session_store._metadata_text_by_id_cache = {}
+    session_store._metadata_text_by_id_cache_version = -1
+    session_store._metadata_trigram_index = {}
+    session_store._metadata_trigram_index_version = -1
+    main._sessions_list_response_cache.clear()
+    main._session_summaries_response_cache.clear()
+    main._remote_sessions_cache.clear()
+    main._remote_sessions_cache_version = 0
+    with session_search_index._lock:
+        session_search_index._close_writer_connection_locked()
+    session_search_index._close_readonly_connection()
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    session_search_index._index_generation += 1
+    session_search_index._published_generation = session_search_index._index_generation
+    session_search_index._published_generation_at = time.monotonic()
     index_path = Path(_TMP_HOME) / "session_search_index.sqlite3"
     index_path.unlink(missing_ok=True)
 
@@ -55,6 +83,7 @@ def _record(sid: str, updated_at: str, pinned: bool = False) -> dict:
         "created_at": "2026-06-16T00:00:00+00:00",
         "updated_at": updated_at,
         "source": "cli",
+        "user_initiated": True,
         "pinned": pinned,
     }
 
@@ -82,7 +111,15 @@ def _write_events(sid: str, *texts: str) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
     with open(session_dir / "events.jsonl", "w") as f:
         for text in texts:
-            f.write(json.dumps({"data": {"text": text}}) + "\n")
+            f.write(json.dumps({
+                "type": "agent_message",
+                "data": {
+                    "message": {
+                        "role": "user",
+                        "content": text,
+                    },
+                },
+            }) + "\n")
     session_search_index.rebuild_from_disk()
 
 
@@ -106,6 +143,63 @@ def test_paginates_after_global_sort(client: TestClient) -> bool:
         and body.get("has_more") is True
     )
     print(f"{PASS if ok else FAIL} /api/sessions paginates after pinned/updated sort")
+    return ok
+
+
+def test_default_list_preserves_summary_order_without_resort(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("old", "2026-06-16T00:00:00+00:00"))
+    _write(_record("new", "2026-06-18T00:00:00+00:00"))
+    _write(_record("pinned-old", "2026-06-15T00:00:00+00:00", pinned=True))
+
+    original = main._filter_sort_sessions_for_list
+    original_prefs = main._session_list_user_prefs
+
+    def fail_full_sort(*_args, **_kwargs):
+        raise AssertionError("default session list should preserve summary order")
+
+    main._filter_sort_sessions_for_list = fail_full_sort
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    try:
+        response = client.get("/api/sessions?offset=1&limit=1", headers=HEADERS)
+    finally:
+        main._filter_sort_sessions_for_list = original
+        main._session_list_user_prefs = original_prefs
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions presorted fast path status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = ids == ["new"] and body.get("total") == 3
+    print(f"{PASS if ok else FAIL} /api/sessions default list preserves summary order")
+    return ok
+
+
+def test_default_list_uses_indexed_summary_lookup(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("old", "2026-06-16T00:00:00+00:00"))
+    _write(_record("new", "2026-06-18T00:00:00+00:00"))
+
+    original_loader = session_store._load_summary_for_requested_id
+    original_prefs = main._session_list_user_prefs
+
+    def fail_disk_fallback(_sid: str):
+        raise AssertionError("default session list should not fallback-load summaries")
+
+    session_store._load_summary_for_requested_id = fail_disk_fallback
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    try:
+        response = client.get("/api/sessions?offset=0&limit=1", headers=HEADERS)
+    finally:
+        session_store._load_summary_for_requested_id = original_loader
+        main._session_list_user_prefs = original_prefs
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions indexed summary lookup status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = ids == ["new"] and body.get("total") == 2
+    print(f"{PASS if ok else FAIL} /api/sessions default list uses indexed summary lookup")
     return ok
 
 
@@ -242,14 +336,25 @@ def test_search_content_filters_before_pagination(client: TestClient) -> bool:
     _write_events("content-old", "needle", "needle")
     _write(_record("miss", "2026-06-21T00:00:00+00:00"))
 
-    response = client.get(
-        "/api/sessions?search=needle&search_fields=content,title&offset=1&limit=1",
-        headers=HEADERS,
-    )
+    response = None
+    body = {}
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=content,title&offset=1&limit=1",
+            headers=HEADERS,
+        )
+        if response.status_code != 200:
+            break
+        body = response.json()
+        if body.get("total") == 3:
+            break
+        time.sleep(0.05)
+    if response is None:
+        raise AssertionError("list response was not attempted")
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions search pagination status {response.status_code}")
         return False
-    body = response.json()
     ids = [session["id"] for session in body.get("sessions", [])]
     ok = (
         ids == ["metadata-new"]
@@ -290,6 +395,255 @@ def test_search_avoids_full_sidebar_list(client: TestClient) -> bool:
     return ok
 
 
+def test_simple_search_skips_generic_filter_sort(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "older-hit",
+        "2026-06-18T00:00:00+00:00",
+        name="needle title needle",
+    ))
+    _write(_record_with(
+        "newer-hit",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    _write(_record("miss", "2026-06-21T00:00:00+00:00"))
+
+    original = main._filter_sort_page_for_list
+    original_prefs = main._session_list_user_prefs
+
+    def fail_filter_sort(*_args, **_kwargs):
+        raise AssertionError("simple search should page ranked score results directly")
+
+    main._filter_sort_page_for_list = fail_filter_sort
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    try:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=title&offset=1&limit=1",
+            headers=HEADERS,
+        )
+    finally:
+        main._filter_sort_page_for_list = original
+        main._session_list_user_prefs = original_prefs
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions simple search page status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = (
+        ids == ["newer-hit"]
+        and body.get("total") == 2
+        and body.get("has_more") is False
+        and body.get("sessions", [{}])[0].get("search_score") == 1
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions simple search skips filter sort")
+    return ok
+
+
+def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "matched",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    first = client.get(
+        "/api/sessions?search=needle&search_fields=title",
+        headers=HEADERS,
+    )
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions first cached search status {first.status_code}")
+        return False
+
+    original = main._build_local_sessions_page_for_list
+
+    def fail_recompute(*_args, **_kwargs):
+        raise AssertionError("identical session search should use response cache")
+
+    main._build_local_sessions_page_for_list = fail_recompute
+    try:
+        second = client.get(
+            "/api/sessions?search=needle&search_fields=title",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions repeated search recomputed page")
+        return False
+    finally:
+        main._build_local_sessions_page_for_list = original
+
+    ids = [session["id"] for session in second.json().get("sessions", [])]
+    ok = second.status_code == 200 and ids == ["matched"]
+    print(f"{PASS if ok else FAIL} /api/sessions repeated search uses response cache")
+    return ok
+
+
+def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "open-a",
+        "2026-06-20T00:00:00+00:00",
+        name="open a",
+    ))
+    session_store.wait_for_summary_index(1.0, min_published=1)
+    deadline = time.monotonic() + 1.0
+    version = session_store.summary_index_version()
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        current = session_store.summary_index_version()
+        if current == version:
+            break
+        version = current
+
+    first = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries first status {first.status_code}")
+        return False
+
+    original = main._decorate_local_sidebar_sessions
+    original_lookup = main._local_session_summaries_by_ids
+
+    def fail_decorate(*_args, **_kwargs):
+        raise AssertionError("identical summaries request should use response cache")
+
+    def fail_lookup(*_args, **_kwargs):
+        raise AssertionError("identical summaries request should skip summary lookup")
+
+    main._decorate_local_sidebar_sessions = fail_decorate
+    main._local_session_summaries_by_ids = fail_lookup
+    try:
+        second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
+    finally:
+        main._decorate_local_sidebar_sessions = original
+        main._local_session_summaries_by_ids = original_lookup
+    if second.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries cached status {second.status_code}")
+        return False
+    ok = first.json() == second.json()
+    print(f"{PASS if ok else FAIL} /api/sessions/summaries repeated request uses cache")
+    return ok
+
+
+def test_session_summaries_include_sidebar_hidden_open_tabs(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "hidden-open",
+        "2026-06-20T00:00:00+00:00",
+        name="hidden open",
+        last_opened_at="2026-06-20T00:00:01+00:00",
+        working_mode="prompt_engineering",
+        working_mode_meta={"parent_session_id": "parent"},
+    ))
+    session_store.wait_for_summary_index(1.0, min_published=1)
+
+    summaries = client.get("/api/sessions/summaries?ids=hidden-open", headers=HEADERS)
+    if summaries.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries hidden status {summaries.status_code}")
+        return False
+    returned_ids = [s.get("id") for s in summaries.json().get("sessions", [])]
+
+    listing = client.get("/api/sessions", headers=HEADERS)
+    if listing.status_code != 200:
+        print(f"{FAIL} /api/sessions hidden status {listing.status_code}")
+        return False
+    listed_ids = [s.get("id") for s in listing.json().get("sessions", [])]
+    ok = returned_ids == ["hidden-open"] and "hidden-open" not in listed_ids
+    print(f"{PASS if ok else FAIL} /api/sessions/summaries includes sidebar-hidden open tab")
+    return ok
+
+
+def test_repeated_content_session_search_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("matched", "2026-06-20T00:00:00+00:00"))
+    _write_events("matched", "needle body")
+    first = client.get(
+        "/api/sessions?search=needle&search_fields=content",
+        headers=HEADERS,
+    )
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions first cached content search status {first.status_code}")
+        return False
+
+    deadline = time.monotonic() + 2.0
+    content_ready = False
+    while time.monotonic() < deadline:
+        if session_search_index.has_cached_result(
+            "needle",
+            main._session_search_candidate_limit(0, 50),
+        ):
+            content_ready = True
+            break
+        time.sleep(0.05)
+    if not content_ready:
+        print(f"{FAIL} /api/sessions content search cache did not warm")
+        return False
+    warm = client.get(
+        "/api/sessions?search=needle&search_fields=content",
+        headers=HEADERS,
+    )
+    if warm.status_code != 200:
+        print(f"{FAIL} /api/sessions warm content search status {warm.status_code}")
+        return False
+
+    original = main._build_local_sessions_page_for_list
+
+    def fail_recompute(*_args, **_kwargs):
+        raise AssertionError("identical content session search should use response cache")
+
+    main._build_local_sessions_page_for_list = fail_recompute
+    try:
+        second = client.get(
+            "/api/sessions?search=needle&search_fields=content",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions repeated content search recomputed page")
+        return False
+    finally:
+        main._build_local_sessions_page_for_list = original
+
+    ids = [session["id"] for session in second.json().get("sessions", [])]
+    ok = second.status_code == 200 and ids == ["matched"]
+    print(f"{PASS if ok else FAIL} /api/sessions repeated content search uses response cache")
+    return ok
+
+
+def test_search_paginates_without_full_sort(client: TestClient) -> bool:
+    _reset_home()
+    for index in range(8):
+        _write(_record_with(
+            f"match-{index}",
+            f"2026-06-2{index}T00:00:00+00:00",
+            name="needle title",
+        ))
+
+    original = main._filter_sort_sessions_for_list
+
+    def fail_full_sort(*_args, **_kwargs):
+        raise AssertionError("search should select the requested page without full sort")
+
+    main._filter_sort_sessions_for_list = fail_full_sort
+    try:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=title&limit=2",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions search used full sort")
+        return False
+    finally:
+        main._filter_sort_sessions_for_list = original
+
+    body = response.json()
+    ok = (
+        response.status_code == 200
+        and body.get("total") == 8
+        and len(body.get("sessions") or []) == 2
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions search paginates without full sort")
+    return ok
+
+
 def test_search_index_cache_invalidates_on_write() -> bool:
     _reset_home()
     _write(_record("first", "2026-06-20T00:00:00+00:00"))
@@ -308,23 +662,150 @@ def test_search_index_cache_invalidates_on_write() -> bool:
     finally:
         session_search_index._candidate_scores = original
 
-    _write(_record("second", "2026-06-21T00:00:00+00:00"))
-    _write_events("second", "needle")
+    generation_before_write = session_search_index.generation()
+    session_search_index._apply_rows([("second", "needle")])
+    generation_during_write_burst = session_search_index.generation()
     stale_during_write_burst = session_search_index.search("needle", limit=10)
     original_stale_seconds = session_search_index._SEARCH_CACHE_STALE_SECONDS
+    original_published_at = session_search_index._published_generation_at
     session_search_index._SEARCH_CACHE_STALE_SECONDS = 0
+    session_search_index._published_generation_at = 0
     try:
+        session_search_index._apply_rows([("third", "needle")])
+        generation_after_stale_window = session_search_index.generation()
         refreshed = session_search_index.search("needle", limit=10)
     finally:
         session_search_index._SEARCH_CACHE_STALE_SECONDS = original_stale_seconds
+        session_search_index._published_generation_at = original_published_at
     ids = {row["session_id"] for row in refreshed}
     ok = (
         [row["session_id"] for row in first] == ["first"]
         and [row["session_id"] for row in cached] == ["first"]
+        and generation_during_write_burst == generation_before_write
+        and generation_after_stale_window != generation_before_write
         and [row["session_id"] for row in stale_during_write_burst] == ["first"]
-        and ids == {"first", "second"}
+        and ids == {"first", "second", "third"}
     )
     print(f"{PASS if ok else FAIL} session search cache invalidates on write")
+    return ok
+
+
+def test_metadata_search_warms_trigram_candidates_off_path() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "match-title",
+        "2026-06-20T00:00:00+00:00",
+        name="alpha unique needle",
+    ))
+    _write(_record_with(
+        "match-first-prompt",
+        "2026-06-19T00:00:00+00:00",
+        messages=[{
+            "id": "u1",
+            "role": "user",
+            "content": "first prompt has unique needle",
+            "timestamp": "2026-06-19T00:00:00+00:00",
+        }],
+    ))
+    _write(_record_with(
+        "miss",
+        "2026-06-18T00:00:00+00:00",
+        name="totally unrelated",
+        messages=[{
+            "id": "u1",
+            "role": "user",
+            "content": "nothing relevant",
+            "timestamp": "2026-06-18T00:00:00+00:00",
+        }],
+    ))
+
+    original_rows = session_store._metadata_search_rows
+    row_calls = 0
+
+    def counted_rows():
+        nonlocal row_calls
+        row_calls += 1
+        return original_rows()
+
+    session_store._metadata_search_rows = counted_rows
+    try:
+        first = session_store.grep_session_scores("unique needle")
+        second = session_store.grep_session_scores("unique needle")
+    finally:
+        session_store._metadata_search_rows = original_rows
+    deadline = time.monotonic() + 1.0
+    while (
+        session_store._metadata_trigram_index_version != session_store.search_metadata_version()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+
+    ok = (
+        set(first) == {"match-title", "match-first-prompt"}
+        and second == first
+        and row_calls >= 1
+        and session_store._metadata_trigram_index_version == session_store.search_metadata_version()
+    )
+    print(f"{PASS if ok else FAIL} metadata search warms trigram candidates off path")
+    return ok
+
+
+def test_metadata_trigram_search_preserves_substring_behavior() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "substring",
+        "2026-06-20T00:00:00+00:00",
+        name="prefixabcsuffix",
+    ))
+    _write(_record_with(
+        "spaced",
+        "2026-06-19T00:00:00+00:00",
+        name="prefix abc suffix",
+    ))
+
+    scores = session_store.grep_session_scores("xabcs", {session_store.SEARCH_FIELD_TITLE})
+    ok = scores == {"substring": 1}
+    print(f"{PASS if ok else FAIL} metadata trigram search preserves substring behavior")
+    return ok
+
+
+def test_warm_metadata_search_scores_only_candidate_rows() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "needle",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    _write(_record_with(
+        "miss",
+        "2026-06-19T00:00:00+00:00",
+        name="unrelated title",
+    ))
+
+    first = session_store.grep_session_scores("needle", {session_store.SEARCH_FIELD_TITLE})
+    deadline = time.monotonic() + 1.0
+    while (
+        session_store._metadata_trigram_index_version != session_store.search_metadata_version()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    session_store._metadata_search_cache.clear()
+
+    original_rows = session_store._metadata_search_rows
+
+    def fail_rows():
+        raise AssertionError("warm candidate search must not rebuild all metadata rows")
+
+    session_store._metadata_search_rows = fail_rows
+    try:
+        second = session_store.grep_session_scores("needle", {session_store.SEARCH_FIELD_TITLE})
+    except AssertionError:
+        second = {}
+    finally:
+        session_store._metadata_search_rows = original_rows
+
+    ok = first == {"needle": 1} and second == first
+    print(f"{PASS if ok else FAIL} warm metadata search scores only candidate rows")
     return ok
 
 
@@ -349,11 +830,18 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
         pinned=True,
     ))
 
-    response = client.post(
-        "/api/sessions/keep/unpin-others",
-        headers=HEADERS,
-        json={"project_path": "/tmp/project-a"},
+    original = main._local_sessions_for_sidebar
+    main._local_sessions_for_sidebar = lambda: (_ for _ in ()).throw(
+        AssertionError("unpin-others must not build the decorated sidebar list")
     )
+    try:
+        response = client.post(
+            "/api/sessions/keep/unpin-others",
+            headers=HEADERS,
+            json={"project_path": "/tmp/project-a"},
+        )
+    finally:
+        main._local_sessions_for_sidebar = original
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions unpin-others status {response.status_code}")
         return False
@@ -376,6 +864,63 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
         and updated_by_id.get("other-project") == "2026-06-17T00:00:00+00:00"
     )
     print(f"{PASS if ok else FAIL} /api/sessions unpin-others ignores backend filters")
+    return ok
+
+
+def test_new_session_defaults_to_unpinned_but_empty_sorts_first(client: TestClient) -> bool:
+    _reset_home()
+    older_pinned = _record("older-pinned", "2026-06-19T00:00:00+00:00", pinned=True)
+    older_pinned["messages"] = [{"role": "user", "content": "already started"}]
+    _write(older_pinned)
+
+    response = client.post(
+        "/api/sessions",
+        headers=HEADERS,
+        json={"orchestration_mode": "native", "cwd": "/tmp/test-session-pagination"},
+    )
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions create status {response.status_code}")
+        return False
+    created = response.json()
+    listing = client.get("/api/sessions?offset=0&limit=10", headers=HEADERS).json()
+    ids = [session["id"] for session in listing.get("sessions", [])]
+    by_id = {session["id"]: session for session in listing.get("sessions", [])}
+    ok = (
+        created.get("pinned") is False
+        and by_id.get(created.get("id"), {}).get("pinned") is False
+        # Empty sessions still sort above pinned non-empty sessions, so the
+        # newly-created session stays visible without becoming sticky forever.
+        and ids[:2] == [created.get("id"), "older-pinned"]
+    )
+    print(f"{PASS if ok else FAIL} new sessions default unpinned but empty sorts first")
+    return ok
+
+
+def test_last_opened_sort_repages_after_open_projection(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "opened-old",
+        "2026-06-20T00:00:00+00:00",
+        last_opened_at="2026-06-01T00:00:00+00:00",
+        messages=[{"id": "u-old", "role": "user", "content": "old", "timestamp": "2026-06-20T00:00:00+00:00"}],
+    ))
+    _write(_record_with(
+        "opened-newer",
+        "2026-06-19T00:00:00+00:00",
+        last_opened_at="2026-06-03T00:00:00+00:00",
+        messages=[{"id": "u-newer", "role": "user", "content": "newer", "timestamp": "2026-06-19T00:00:00+00:00"}],
+    ))
+
+    before = client.get("/api/sessions?offset=0&limit=1&sort_by=last_opened_at", headers=HEADERS)
+    session_store.update_last_opened_projection("opened-old", "2026-06-04T00:00:00+00:00")
+    after = client.get("/api/sessions?offset=0&limit=1&sort_by=last_opened_at", headers=HEADERS)
+    if before.status_code != 200 or after.status_code != 200:
+        print(f"{FAIL} /api/sessions last-opened sort status before={before.status_code} after={after.status_code}")
+        return False
+    before_ids = [session["id"] for session in before.json().get("sessions", [])]
+    after_ids = [session["id"] for session in after.json().get("sessions", [])]
+    ok = before_ids == ["opened-newer"] and after_ids == ["opened-old"]
+    print(f"{PASS if ok else FAIL} /api/sessions last-opened projection invalidates paging order")
     return ok
 
 
@@ -406,6 +951,49 @@ def test_pin_endpoint_unpins_specific_session(client: TestClient) -> bool:
         and updated_by_id.get("specific") == "2026-06-19T00:00:00+00:00"
     )
     print(f"{PASS if ok else FAIL} /api/sessions pin endpoint unpins one session")
+    return ok
+
+
+def test_topbar_pin_endpoint_lists_pinned_sessions(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "topbar",
+        "2026-06-19T00:00:00+00:00",
+        topbar_pinned=False,
+    ))
+    _write(_record_with(
+        "normal",
+        "2026-06-18T00:00:00+00:00",
+        topbar_pinned=False,
+    ))
+
+    response = client.put(
+        "/api/sessions/topbar/topbar-pin",
+        headers=HEADERS,
+        json={"pinned": True},
+    )
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions topbar-pin status {response.status_code}")
+        return False
+    listing = client.get("/api/sessions/topbar-pinned", headers=HEADERS)
+    if listing.status_code != 200:
+        print(f"{FAIL} /api/sessions/topbar-pinned status {listing.status_code}")
+        return False
+    sessions = listing.json().get("sessions", [])
+    by_id = {session["id"]: session for session in sessions}
+    updated = client.get("/api/sessions?offset=0&limit=10", headers=HEADERS).json()
+    updated_by_id = {
+        session["id"]: session.get("updated_at")
+        for session in updated.get("sessions", [])
+    }
+    ok = (
+        response.json().get("topbar_pinned") is True
+        and [session.get("id") for session in sessions] == ["topbar"]
+        and by_id["topbar"].get("topbar_pinned") is True
+        and isinstance(by_id["topbar"].get("topbar_pinned_at"), str)
+        and updated_by_id.get("topbar") == "2026-06-19T00:00:00+00:00"
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions topbar pin lists pinned sessions")
     return ok
 
 
@@ -440,6 +1028,36 @@ def test_sidebar_strips_heavy_working_mode_meta(client: TestClient) -> bool:
     return ok
 
 
+def test_session_list_source_filter_user_awareness(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("human", "2026-06-18T00:00:00+00:00"))
+    system = _record("system", "2026-06-19T00:00:00+00:00")
+    system["source"] = "internal"
+    system["user_initiated"] = False
+    _write(system)
+
+    user_resp = client.get("/api/sessions?sources=user", headers=HEADERS)
+    system_resp = client.get("/api/sessions?sources=system", headers=HEADERS)
+    internal_resp = client.get("/api/sessions?sources=internal", headers=HEADERS)
+    if user_resp.status_code != 200 or system_resp.status_code != 200 or internal_resp.status_code != 200:
+        print(
+            f"{FAIL} /api/sessions source-awareness status "
+            f"user={user_resp.status_code} system={system_resp.status_code} "
+            f"internal={internal_resp.status_code}"
+        )
+        return False
+    user_ids = {s.get("id") for s in user_resp.json().get("sessions") or []}
+    system_ids = {s.get("id") for s in system_resp.json().get("sessions") or []}
+    internal_ids = {s.get("id") for s in internal_resp.json().get("sessions") or []}
+    ok = user_ids == {"human"} and system_ids == {"system"} and internal_ids == {"system"}
+    print(
+        f"{PASS if ok else FAIL} /api/sessions source filter distinguishes "
+        f"user-aware vs system-aware"
+        f"{'' if ok else f' — user={user_ids} system={system_ids} internal={internal_ids}'}"
+    )
+    return ok
+
+
 def test_session_list_does_not_schedule_snapshot_prewarm(client: TestClient) -> bool:
     _reset_home()
     _write(_record("old", "2026-06-16T00:00:00+00:00"))
@@ -453,21 +1071,99 @@ def test_session_list_does_not_schedule_snapshot_prewarm(client: TestClient) -> 
     return ok
 
 
+def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool:
+    _reset_home()
+    for index in range(3):
+        _write(_record(
+            f"local-{index}",
+            f"2026-06-2{index}T00:00:00+00:00",
+        ))
+    remote = [
+        {
+            "id": f"remote-{index}",
+            "name": f"remote-{index}",
+            "updated_at": "2026-06-19T00:00:00+00:00",
+            "created_at": "2026-06-19T00:00:00+00:00",
+        }
+        for index in range(100)
+    ]
+    main._remote_sessions_cache["node-a"] = (time.monotonic(), remote)
+    main._remote_sessions_cache_version += 1
+
+    fake_node_store = types.SimpleNamespace(
+        connected_worker_node_ids_snapshot=lambda: (1, ("node-a",)),
+    )
+    original_node_store = sys.modules.get("node_store")
+    original_enabled = main._machine_nodes_enabled_cached
+    original_prefs = main._session_list_user_prefs
+    copied_lengths: list[int] = []
+    original_copy = main._copy_remote_sessions
+
+    def tracking_copy(sessions, *, limit=None):
+        copied = original_copy(sessions, limit=limit)
+        if limit is not None:
+            copied_lengths.append(len(copied))
+        return copied
+
+    sys.modules["node_store"] = fake_node_store
+    main._machine_nodes_enabled_cached = lambda: True
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    main._copy_remote_sessions = tracking_copy
+    try:
+        response = client.get("/api/sessions?offset=0&limit=2", headers=HEADERS)
+    finally:
+        main._copy_remote_sessions = original_copy
+        main._session_list_user_prefs = original_prefs
+        main._machine_nodes_enabled_cached = original_enabled
+        if original_node_store is None:
+            sys.modules.pop("node_store", None)
+        else:
+            sys.modules["node_store"] = original_node_store
+    if response.status_code != 200:
+        print(f"{FAIL} connected /api/sessions capped remote status {response.status_code}")
+        return False
+    body = response.json()
+    ok = (
+        body.get("total") == 103
+        and len(body.get("sessions") or []) == 2
+        and copied_lengths
+        and max(copied_lengths) <= 2
+    )
+    print(f"{PASS if ok else FAIL} connected /api/sessions caps remote cache copy")
+    return ok
+
+
 def main_run() -> int:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     try:
         ok = True
         ok = test_paginates_after_global_sort(client) and ok
+        ok = test_default_list_preserves_summary_order_without_resort(client) and ok
+        ok = test_default_list_uses_indexed_summary_lookup(client) and ok
         ok = test_selected_session_does_not_override_pagination(client) and ok
         ok = test_filters_before_pagination(client) and ok
         ok = test_file_edit_mode_filters_before_pagination(client) and ok
         ok = test_search_content_filters_before_pagination(client) and ok
         ok = test_search_avoids_full_sidebar_list(client) and ok
+        ok = test_simple_search_skips_generic_filter_sort(client) and ok
+        ok = test_repeated_session_search_uses_response_cache(client) and ok
+        ok = test_repeated_session_summaries_uses_response_cache(client) and ok
+        ok = test_session_summaries_include_sidebar_hidden_open_tabs(client) and ok
+        ok = test_repeated_content_session_search_uses_response_cache(client) and ok
+        ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
+        ok = test_metadata_search_warms_trigram_candidates_off_path() and ok
+        ok = test_metadata_trigram_search_preserves_substring_behavior() and ok
+        ok = test_warm_metadata_search_scores_only_candidate_rows() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
+        ok = test_new_session_defaults_to_unpinned_but_empty_sorts_first(client) and ok
+        ok = test_last_opened_sort_repages_after_open_projection(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok
+        ok = test_topbar_pin_endpoint_lists_pinned_sessions(client) and ok
         ok = test_sidebar_strips_heavy_working_mode_meta(client) and ok
+        ok = test_session_list_source_filter_user_awareness(client) and ok
         ok = test_session_list_does_not_schedule_snapshot_prewarm(client) and ok
+        ok = test_connected_first_page_caps_remote_cache_copy(client) and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

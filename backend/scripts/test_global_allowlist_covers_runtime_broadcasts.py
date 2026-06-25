@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -56,12 +57,16 @@ ALLOWLIST = Coordinator.GLOBAL_EVENT_ALLOWLIST
 SCANNED_FILES = [
     Path(_BACKEND) / "main.py",
     Path(_BACKEND) / "startup_tasks.py",
+    Path(_BACKEND) / "scheduler.py",
     Path(_BACKEND) / "session_ws_broadcaster.py",
     Path(_BACKEND) / "orchestrator.py",
     Path(_BACKEND) / "run_recovery.py",
     Path(_BACKEND) / "provider_config_sync_api.py",
     Path(_BACKEND) / "project_structure_edit_session.py",
     Path(_BACKEND) / "extension_api.py",
+    Path(_BACKEND) / "session_search.py",
+    Path(_BACKEND) / "task_assessor.py",
+    Path(_BACKEND) / "task_runner.py",
 ]
 
 # f-strings whose interpolations CANNOT be statically enumerated from
@@ -74,7 +79,7 @@ FSTRING_EXPANSIONS: dict[str, list[str]] = {
     # session_manager.py:486-492; the only call sites at
     # session_manager.py:484 and :490 pass literal "started" and
     # "finished".
-    "main.py:2533 f'session_processing_{kind}'": [
+    "main.py:_emit_session_processing f'session_processing_{kind}'": [
         "session_processing_started",
         "session_processing_finished",
     ],
@@ -84,13 +89,21 @@ FSTRING_EXPANSIONS: dict[str, list[str]] = {
 # to only produce allowlisted types in practice. Adding a new entry
 # REQUIRES a one-line audit explanation.
 KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
-    "main.py:679": (
+    "orchestrator.py:broadcast_global": (
+        "broadcast_global delegates its already-public event_type to the canonical "
+        "schedule_global validation path"
+    ),
+    "main.py:_on_node_registration": (
         "_on_node_registration receives only node_registration_requested "
         "or node_registration_resolved from node_link.set_registration_listener"
     ),
-    "main.py:5545": (
-        "virtual-session upsert broadcasts either session_metadata_updated "
-        "for existing sessions or session_created for new sessions"
+    "main.py:_broadcast_install": (
+        "_broadcast_install is registered as provider_setup callback; provider_setup "
+        "emits only provider_install_progress/provider_install_finished"
+    ),
+    "session_search.py:_broadcast_global_later.<locals>._run": (
+        "_broadcast_global_later is module-local and all call sites pass literal "
+        "Ask session event types verified by the literal-site scan"
     ),
     # `_dispatch` is the generic fan-out used by SessionWSBroadcaster's
     # typed mapping. The payload's `"type"` field is hard-coded in the
@@ -98,7 +111,7 @@ KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
     # `on_change` and `_dispatch` callers); every literal is in
     # the allowlist by construction. The dispatcher is dead-end
     # plumbing — typing it dynamically here is OK.
-    "session_ws_broadcaster.py:512": (
+    "session_ws_broadcaster.py:_dispatch": (
         "_dispatch fed by typed on_change mapping; payload['type'] is "
         "always a literal in the mapping construction"
     ),
@@ -123,19 +136,39 @@ def _enumerate_fstring(node: ast.JoinedStr) -> str:
     return "f'" + "".join(parts) + "'"
 
 
-def _collect_calls(tree: ast.Module) -> list[tuple[int, ast.expr]]:
+def _function_qualname(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> str:
+    names: list[str] = []
+    cur = node
+    while cur in parents:
+        cur = parents[cur]
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.append(cur.name)
+    if not names:
+        return "<module>"
+    return ".<locals>.".join(reversed(names))
+
+
+def _collect_calls(tree: ast.Module) -> list[tuple[int, str, ast.expr]]:
     """Find every `XXX.broadcast_global(first_arg, ...)` call site."""
-    found: list[tuple[int, ast.expr]] = []
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    found: list[tuple[int, str, ast.expr]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         if not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr != "broadcast_global":
+        if node.func.attr not in {"broadcast_global", "schedule_global"}:
             continue
         if not node.args:
             continue
-        found.append((node.lineno, node.args[0]))
+        found.append((node.lineno, _function_qualname(node, parents), node.args[0]))
     return found
 
 
@@ -157,7 +190,10 @@ def _run() -> bool:
             text = p.read_text()
         except OSError:
             continue
-        if "broadcast_global(" in text and "def broadcast_global" not in text:
+        if (
+            ("broadcast_global(" in text and "def broadcast_global" not in text)
+            or ("schedule_global(" in text and "def schedule_global" not in text)
+        ):
             extra_callers.append(str(p.relative_to(backend_dir)))
     results.append(
         ("no unscanned `broadcast_global(` callers",
@@ -172,13 +208,26 @@ def _run() -> bool:
             continue
         src = fp.read_text()
         tree = ast.parse(src, filename=str(fp))
-        for lineno, arg in _collect_calls(tree):
-            site = f"{fp.name}:{lineno}"
+        for lineno, qualname, arg in _collect_calls(tree):
+            site = f"{fp.name}:{qualname}"
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 if arg.value not in ALLOWLIST:
                     bad.append(
                         f"{site} → literal {arg.value!r} not in allowlist"
                     )
+                continue
+            if (
+                isinstance(arg, ast.IfExp)
+                and isinstance(arg.body, ast.Constant)
+                and isinstance(arg.body.value, str)
+                and isinstance(arg.orelse, ast.Constant)
+                and isinstance(arg.orelse.value, str)
+            ):
+                for value in (arg.body.value, arg.orelse.value):
+                    if value not in ALLOWLIST:
+                        bad.append(
+                            f"{site} → ternary literal {value!r} not in allowlist"
+                        )
                 continue
             if isinstance(arg, ast.JoinedStr):
                 template = _enumerate_fstring(arg)
@@ -256,6 +305,20 @@ def _run() -> bool:
          not bcast_missing,
          f"missing: {bcast_missing}"))
 
+    frontend_types = Path(_BACKEND).parent / "frontend" / "src" / "types.ts"
+    frontend_source = frontend_types.read_text()
+    union_start = frontend_source.index("export type WSEventType =")
+    union_end = frontend_source.index("export interface WSEvent", union_start)
+    frontend_wire_types = set(re.findall(
+        r'\|\s*"([^"]+)"',
+        frontend_source[union_start:union_end],
+    ))
+    frontend_missing = sorted(bcast_types - frontend_wire_types)
+    results.append(
+        ("every SessionWSBroadcaster type is frontend-compatible",
+         not frontend_missing,
+         f"missing: {frontend_missing}"))
+
     # 5) Specific sanity: the two types added this session are present.
     results.append(
         ("`models_catalog_changed` in allowlist",
@@ -276,8 +339,20 @@ def _run() -> bool:
         ("`session_marker_changed` in allowlist",
          "session_marker_changed" in ALLOWLIST, "missing"))
     results.append(
+        ("`session_user_input_changed` in allowlist",
+         "session_user_input_changed" in ALLOWLIST, "missing"))
+    results.append(
         ("`message_auto_retry_changed` in allowlist",
          "message_auto_retry_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_content_updated` in allowlist",
+         "message_content_updated" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_continuation_changed` in allowlist",
+         "message_continuation_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_run_meta_changed` in allowlist",
+         "message_run_meta_changed" in ALLOWLIST, "missing"))
 
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:

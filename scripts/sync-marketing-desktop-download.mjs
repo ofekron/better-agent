@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
-const MARKETING_DMG = "marketing/better-agent/downloads/BetterAgent-macOS-arm64.dmg";
-const CHECKSUMS = "marketing/better-agent/downloads/SHA256SUMS.txt";
-const INDEX = "marketing/better-agent/index.html";
 const SOURCE_DMG = "desktop/dist/BetterAgent.dmg";
 const VERSION_FILE = "desktop/_version.py";
+
+// Marketing sources live in the nested private checkout when present;
+// a plain marketing/ dir is the standalone fallback.
+export function marketingDir(root = ROOT) {
+  const privateDir = join(root, "better-agent-private", "marketing", "better-agent");
+  if (existsSync(privateDir)) {
+    return privateDir;
+  }
+  return join(root, "marketing", "better-agent");
+}
 
 export function desktopVersion(root = ROOT) {
   const source = readFileSync(join(root, VERSION_FILE), "utf8");
@@ -24,18 +31,26 @@ export function desktopVersion(root = ROOT) {
 export function syncMarketingDesktopDownload(root = ROOT) {
   const version = desktopVersion(root);
   const source = join(root, SOURCE_DMG);
-  const target = join(root, MARKETING_DMG);
+  if (!existsSync(source)) {
+    return { skipped: true, reason: `${SOURCE_DMG} is missing`, version };
+  }
+  const marketing = marketingDir(root);
+  const indexPath = join(marketing, "index.html");
+  if (!existsSync(indexPath)) {
+    return { skipped: true, reason: `${indexPath} is missing`, version };
+  }
+  const target = join(marketing, "downloads", "BetterAgent-macOS-arm64.dmg");
+  mkdirSync(dirname(target), { recursive: true });
   copyFileSync(source, target);
 
   const bytes = readFileSync(target);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  writeFileSync(join(root, CHECKSUMS), `${sha256}  BetterAgent-macOS-arm64.dmg\n`);
+  writeFileSync(join(marketing, "downloads", "SHA256SUMS.txt"), `${sha256}  BetterAgent-macOS-arm64.dmg\n`);
 
-  const indexPath = join(root, INDEX);
   const index = readFileSync(indexPath, "utf8");
   const linkPattern = /downloads\/BetterAgent-macOS-arm64\.dmg\?v=[^"]+/g;
   if (!linkPattern.test(index)) {
-    throw new Error(`${INDEX} does not reference the macOS DMG`);
+    throw new Error(`${indexPath} does not reference the macOS DMG`);
   }
   const next = index.replace(
     linkPattern,
@@ -47,5 +62,9 @@ export function syncMarketingDesktopDownload(root = ROOT) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const result = syncMarketingDesktopDownload(process.cwd());
+  if (result.skipped) {
+    console.log(`marketing desktop download skipped: ${result.reason}`);
+    process.exit(0);
+  }
   console.log(`marketing desktop download synced: ${result.version} ${result.sha256}`);
 }

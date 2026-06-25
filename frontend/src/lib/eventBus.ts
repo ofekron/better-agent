@@ -31,6 +31,20 @@ export interface BusEventMap {
     unread_count: number;
     last_seen_event_uid?: string | null;
   };
+  // A turn ended in an unrecoverable error (has_error true) or the dot was
+  // retired by a view-ack / successful turn (has_error false). Consumed by
+  // the registry + status badge to render the red error dot.
+  session_error_changed: {
+    session_id: string;
+    has_error: boolean;
+  };
+  // A request_user_input prompt is pending/resolved for a session. The backend
+  // sends the authoritative pending count, so badges converge even if multiple
+  // input requests overlap.
+  session_user_input_changed: {
+    session_id: string;
+    pending_user_input_count: number;
+  };
   // An extension attention marker on a session changed. `marker` null
   // clears that extension's marker.
   session_marker_changed: {
@@ -56,16 +70,13 @@ export interface BusEventMap {
   session_created: { session: Session };
   session_deleted: { session_id: string };
   session_renamed: { session_id: string; name: string };
-  // A runner started/stopped babysitter-lingering — background shells /
-  // monitors outlive the turn. Consumed by the session-view strip.
-  run_lingering: {
-    app_session_id: string;
-    run_id: string;
-    lingering: boolean;
-  };
   run_state: {
     app_session_id: string;
     runs: unknown[];
+  };
+  turn_start: {
+    app_session_id?: string;
+    session_id?: string;
   };
   // The session's schedule list changed; payload IS the snapshot.
   schedules_updated: {
@@ -79,7 +90,23 @@ export interface BusEventMap {
     path: string;
     cwd: string;
   };
+  // Global ping — any schedule mutated; refetch GET /api/schedules.
+  schedules_changed: Record<string, unknown>;
   extensions_changed: Record<string, unknown>;
+  // Remote-extension update projection changed; refetch GET /api/extensions/updates.
+  extension_updates_changed: {
+    available: string[];
+  };
+  testape_session_state: {
+    session_id: string;
+    active: boolean;
+  };
+  // A session row drag started/ended in the sidebar. Pure transient UI
+  // fact — published so extensions (e.g. the agent board) can reveal a
+  // drop surface while a session is being dragged. Carries the session id
+  // on start; end carries nothing.
+  session_drag_start: { session_id: string; name?: string };
+  session_drag_end: Record<string, never>;
 }
 
 type Handler<T> = (payload: T) => void;

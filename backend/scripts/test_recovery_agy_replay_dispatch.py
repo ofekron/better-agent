@@ -225,6 +225,7 @@ def main() -> None:
         test_agy_recovery_with_events()
         test_agy_recovery_missing_events_file()
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
     if failures:

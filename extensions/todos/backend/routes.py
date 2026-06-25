@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 from better_agent_sdk import BetterAgentError, Client
 
-from backend.extractor import extract_tasks_from_normalized, extract_todos_from_normalized
+from todo_projection import extract_tasks_from_normalized, extract_todos_from_normalized
 
 
 TODO_FIELDS = ("current_todos", "current_tasks")

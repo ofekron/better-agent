@@ -10,10 +10,15 @@ import tempfile
 import time
 from pathlib import Path
 
+from live_llm_test_guard import require_live_llm_tests
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def main() -> None:
+    if not require_live_llm_tests("live Codex app-server steering integration"):
+        return
+
     with tempfile.TemporaryDirectory(prefix="bc-codex-steer-") as home:
         run_dir = Path(home) / "runs" / "test-run"
         run_dir.mkdir(parents=True)

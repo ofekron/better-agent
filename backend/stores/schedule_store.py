@@ -11,6 +11,7 @@ Schema migrations are NOT supported: on version mismatch we log loudly
 and return an empty store. Wipe `schedules.json` to start fresh.
 """
 
+import copy
 import json
 import logging
 import threading
@@ -32,6 +33,7 @@ MIN_INTERVAL_SECONDS = 60
 MAX_HORIZON = timedelta(days=365)
 
 _lock = threading.Lock()
+_data_cache: tuple[tuple[int, int], dict] | None = None
 
 
 def _path() -> Path:
@@ -42,10 +44,23 @@ def _empty() -> dict:
     return {"version": SCHEMA_VERSION, "schedules": []}
 
 
+def _fingerprint() -> tuple[int, int]:
+    try:
+        st = _path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _read() -> dict:
+    global _data_cache
     path = _path()
     if not path.exists():
         return _empty()
+    fingerprint = _fingerprint()
+    cached = _data_cache
+    if cached is not None and cached[0] == fingerprint:
+        return copy.deepcopy(cached[1])
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -63,11 +78,14 @@ def _read() -> dict:
         )
         return _empty()
     raw.setdefault("schedules", [])
+    _data_cache = (fingerprint, copy.deepcopy(raw))
     return raw
 
 
 def _write(data: dict) -> None:
+    global _data_cache
     write_json(_path(), data)
+    _data_cache = (_fingerprint(), copy.deepcopy(data))
 
 
 def _parse_iso(value) -> datetime:
@@ -89,12 +107,15 @@ def create(
     kind: str,
     fire_at: Optional[str] = None,
     interval_seconds: Optional[int] = None,
+    source_task_id: Optional[str] = None,
 ) -> dict:
     """Validate and persist one schedule. Raises ValueError on any
     invalid input — callers surface the message to the tool/API caller.
     """
     if not isinstance(app_session_id, str) or not app_session_id:
         raise ValueError("app_session_id required")
+    if source_task_id is not None and not isinstance(source_task_id, str):
+        raise ValueError("source_task_id must be a string")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt required")
     if len(prompt) > MAX_PROMPT_LEN:
@@ -132,6 +153,8 @@ def create(
         "created_at": now.isoformat(),
         "last_fired_at": None,
     }
+    if source_task_id:
+        record["source_task_id"] = source_task_id
     with _lock:
         data = _read()
         per_session = [
@@ -144,6 +167,13 @@ def create(
         data["schedules"].append(record)
         _write(data)
     return record
+
+
+def list_all() -> list[dict]:
+    """Every schedule across all sessions, sorted by next fire time."""
+    with _lock:
+        data = _read()
+    return sorted(data["schedules"], key=lambda s: s.get("fire_at") or "")
 
 
 def list_for_session(app_session_id: str) -> list[dict]:

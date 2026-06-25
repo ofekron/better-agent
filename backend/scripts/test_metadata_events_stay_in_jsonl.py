@@ -85,6 +85,9 @@ def _run() -> bool:
         orchestration_mode="native", source="cli",
     )
     sid = sess["id"]
+    # This test locks the metadata/render-tree pipeline, not the
+    # agent-rename permission gate — opt in explicitly.
+    session_manager.set_agent_rename_allowed(sid, True)
     strategy = get_strategy("native")
     scaffold = strategy.build_assistant_scaffold()
     scaffold["id"] = "msg-1"

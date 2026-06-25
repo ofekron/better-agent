@@ -27,6 +27,7 @@ import type { Session } from "../src/types";
 
 const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
 const SESSION_LIST = /\/api\/sessions\?/;
+const SESSION_DELETE = /\/api\/sessions\/[^/?]+$/;
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   const now = new Date().toISOString();
@@ -43,13 +44,14 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
-type Resolver = (body: unknown) => void;
+type Resolver = (body: unknown, status?: number) => void;
 interface FetchGate {
   /** Records every URL fetch was called with. */
   readonly urls: string[];
+  readonly inits: (RequestInit | undefined)[];
   /** Resolve the OLDEST pending fetch for paths matching `pattern`
    *  with the given JSON body. Throws if none is pending. */
-  resolve(pattern: RegExp, body: unknown): void;
+  resolve(pattern: RegExp, body: unknown, status?: number): void;
   /** True when at least one fetch is parked waiting on a manual
    *  resolve. */
   hasPending(pattern: RegExp): boolean;
@@ -70,10 +72,11 @@ function installFetchGate(opts: {
 }): FetchGate {
   const realFetch = globalThis.fetch;
   const urls: string[] = [];
+  const inits: (RequestInit | undefined)[] = [];
   const pending: { pattern: RegExp; resolver: Resolver }[] = [];
 
   const wrapper = vi.fn(
-    async (input: RequestInfo | URL): Promise<Response> => {
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url =
         typeof input === "string"
           ? input
@@ -81,15 +84,16 @@ function installFetchGate(opts: {
           ? input.toString()
           : input.url;
       urls.push(url);
+      inits.push(init);
       opts.onCall?.(url);
       if (opts.hold.test(url)) {
         return new Promise<Response>((res) => {
           pending.push({
             pattern: opts.hold,
-            resolver: (body) =>
+            resolver: (body, status = 200) =>
               res(
                 new Response(JSON.stringify(body), {
-                  status: 200,
+                  status,
                   headers: { "content-type": "application/json" },
                 }),
               ),
@@ -110,7 +114,8 @@ function installFetchGate(opts: {
 
   return {
     urls,
-    resolve(pattern, body) {
+    inits,
+    resolve(pattern, body, status = 200) {
       const idx = pending.findIndex((p) => pattern.source === p.pattern.source);
       if (idx < 0) {
         throw new Error(
@@ -118,7 +123,7 @@ function installFetchGate(opts: {
         );
       }
       const [{ resolver }] = pending.splice(idx, 1);
-      resolver(body);
+      resolver(body, status);
     },
     hasPending(pattern) {
       return pending.some((p) => pattern.source === p.pattern.source);
@@ -196,6 +201,179 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     expect(result.current.currentSession?.id).toBe("b");
     expect(result.current.currentSession?.messages).toHaveLength(1);
+  });
+
+  it("pinning a selected session updates the current tree and sidebar row", async () => {
+    const a = makeSession({ id: "a", name: "Alpha", pinned: false });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: (url) => (
+        url.endsWith("/api/sessions/a/pin")
+          ? { id: "a", pinned: true }
+          : { sessions: [a] }
+      ),
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, a);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.togglePin("a", true);
+    });
+
+    expect(result.current.currentSession?.pinned).toBe(true);
+    expect(result.current.sessions.find((s) => s.id === "a")?.pinned).toBe(true);
+  });
+
+  it("unpinning other sessions updates a selected affected session", async () => {
+    const a = makeSession({ id: "a", name: "Alpha", pinned: true });
+    const b = makeSession({ id: "b", name: "Beta", pinned: true });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: (url) => (
+        url.endsWith("/api/sessions/a/unpin-others")
+          ? { id: "a", unpinned_ids: ["b"], count: 1 }
+          : { sessions: [a, b] }
+      ),
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id).sort()).toEqual(["a", "b"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("b");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, b);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.unpinOtherSessions("a");
+    });
+
+    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.currentSession?.pinned).toBe(false);
+    expect(result.current.sessions.find((s) => s.id === "b")?.pinned).toBe(false);
+  });
+
+  it("does not abort slow selected-session fetches with the offline timeout", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+
+    const detailIndex = gate.urls.findIndex((url) => SESSION_FETCH.test(url));
+    expect(detailIndex).toBeGreaterThanOrEqual(0);
+    expect(gate.inits[detailIndex]?.signal).toBeUndefined();
+    expect(result.current.sessionLoadError).toBeNull();
+    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
+  });
+
+  it("removes a deleted session before the DELETE round-trip resolves", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const b = makeSession({ id: "b", name: "Beta" });
+    gate = installFetchGate({
+      hold: SESSION_DELETE,
+      defaultBody: (url) => {
+        if (SESSION_FETCH.test(url)) return a;
+        return { sessions: [a, b] };
+      },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+    });
+    await act(async () => {
+      await result.current.selectSession("a");
+    });
+    expect(result.current.currentSession?.id).toBe("a");
+
+    let deletion: Promise<void>;
+    await act(async () => {
+      deletion = result.current.deleteSession("a");
+      await Promise.resolve();
+    });
+
+    expect(gate.hasPending(SESSION_DELETE)).toBe(true);
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+    expect(result.current.currentSession).toBeNull();
+
+    await act(async () => {
+      gate!.resolve(SESSION_DELETE, { deleted: true });
+      await deletion!;
+    });
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+  });
+
+  it("repairs optimistic deletion when the backend rejects the delete", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const b = makeSession({ id: "b", name: "Beta" });
+    gate = installFetchGate({
+      hold: SESSION_DELETE,
+      defaultBody: (url) => {
+        if (SESSION_FETCH.test(url)) return a;
+        return { sessions: [a, b] };
+      },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+    });
+    await act(async () => {
+      await result.current.selectSession("a");
+    });
+    expect(result.current.currentSession?.id).toBe("a");
+
+    let deletion: Promise<void>;
+    await act(async () => {
+      deletion = result.current.deleteSession("a");
+      await Promise.resolve();
+    });
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+    expect(result.current.currentSession).toBeNull();
+
+    await act(async () => {
+      gate!.resolve(SESSION_DELETE, { detail: "nope" }, 500);
+      await expect(deletion!).rejects.toThrow("nope");
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+      expect(result.current.currentSession?.id).toBe("a");
+    });
   });
 
   it("composes same-tick functional metadata updates from the latest session state", async () => {
@@ -538,6 +716,34 @@ describe("useSession.selectSession — optimistic swap", () => {
       expect(sessionListUrls.at(-1)).toContain("search_fields=title");
       expect(sessionListUrls.at(-1)).not.toContain("content");
       expect(sessionListUrls.at(-1)).not.toContain("first_prompt");
+    });
+  });
+
+  it("omits search fields from session-list requests when search is empty", async () => {
+    const a = makeSession({ id: "a", name: "Search title" });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      result.current.setSessionListFilters({
+        search: "",
+        searchFields: ["content", "title", "first_prompt"],
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      const sessionListUrls = gate!.urls.filter((url) => url.includes("/api/sessions?"));
+      expect(sessionListUrls.at(-1)).not.toContain("search=");
+      expect(sessionListUrls.at(-1)).not.toContain("search_fields=");
     });
   });
 

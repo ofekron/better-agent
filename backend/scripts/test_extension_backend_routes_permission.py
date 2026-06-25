@@ -94,7 +94,7 @@ def test_backend_routes_permission_gates_spec() -> None:
 
 
 def _shipped_manifest_paths() -> list[Path]:
-    roots = [REPO_ROOT / "extensions", REPO_ROOT / "better-agent-private" / "extensions"]
+    roots = [REPO_ROOT / "extensions"]
     paths: list[Path] = []
     for root in roots:
         if root.is_dir():

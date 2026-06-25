@@ -6,8 +6,10 @@ must be identical whether the env var is set or unset.
 
 Checks:
   1. bypass=1 + loopback REST -> 401
-  2. bypass=1 + remote REST   -> 401
-  3. bypass=1 + loopback WS   -> close 1008
+  2. bypass=1 + valid bearer /api/auth/me -> bearer user
+  3. bypass=1 + remote REST   -> 401
+  4. bypass=1 + loopback WS   -> close 1008
+  5. live auth code has no bypass helper/env lookup
 
 Run with:
     cd backend && .venv/bin/python scripts/test_auth_bypass_loopback_only.py
@@ -31,6 +33,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from starlette.testclient import TestClient, WebSocketDisconnect  # noqa: E402
+import auth  # noqa: E402
 import main  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -38,6 +41,8 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 _LOOPBACK = TestClient(main.app, client=("127.0.0.1", 50000))
 _REMOTE = TestClient(main.app, client=("203.0.113.7", 50000))  # TEST-NET-3
+_BEARER_USER = "bearer-user"
+_BEARER_TOKEN = auth.create_token(_BEARER_USER)
 
 
 def _sessions_status(client: TestClient) -> int:
@@ -46,6 +51,16 @@ def _sessions_status(client: TestClient) -> int:
 
 def _me_status(client: TestClient) -> int:
     return client.get("/api/auth/me").status_code
+
+
+def _me_bearer_username(client: TestClient) -> str | None:
+    response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {_BEARER_TOKEN}"},
+    )
+    if response.status_code != 200:
+        return None
+    return response.json().get("username")
 
 
 def _ws_close_code(client: TestClient) -> int | None:
@@ -74,6 +89,13 @@ def _run() -> bool:
         f"got {me_local}",
     ))
 
+    bearer_user = _me_bearer_username(TestClient(main.app, client=("127.0.0.1", 50001)))
+    results.append((
+        "bypass=1 + valid bearer /api/auth/me -> bearer user",
+        bearer_user == _BEARER_USER,
+        f"got {bearer_user!r}",
+    ))
+
     s_remote = _sessions_status(_REMOTE)
     results.append((
         "bypass=1 + remote REST -> 401",
@@ -86,6 +108,23 @@ def _run() -> bool:
         "bypass=1 + loopback WS -> close 1008",
         ws_code == 1008,
         f"got {ws_code}",
+    ))
+
+    auth_source = os.path.join(_BACKEND, "auth.py")
+    routes_source = os.path.join(_BACKEND, "auth_routes.py")
+    live_auth_source = (
+        open(auth_source, encoding="utf-8").read()
+        + "\n"
+        + open(routes_source, encoding="utf-8").read()
+    )
+    has_dead_bypass = (
+        "is_test_auth_bypass_request" in live_auth_source
+        or "BETTER_CLAUDE_TEST_AUTH_BYPASS" in live_auth_source
+    )
+    results.append((
+        "live auth code has no bypass helper/env lookup",
+        not has_dead_bypass,
+        "dead bypass symbol still present",
     ))
 
     passed = sum(1 for _, ok, _ in results if ok)

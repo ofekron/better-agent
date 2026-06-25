@@ -18,9 +18,11 @@ file being broker-write-only + the consent_id-only execute contract.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -32,6 +34,9 @@ EXPIRY_HOURS = 24
 PRUNE_AFTER_DAYS = 7
 
 _ID_RE = re.compile(r"[A-Za-z0-9_\-]{1,64}")
+_pending_cache_lock = threading.Lock()
+_pending_cache: tuple[int, list[dict]] | None = None
+_pending_cache_version = 0
 
 
 def _dir() -> Path:
@@ -46,6 +51,58 @@ def _path(consent_id: str) -> Path:
     if not _ID_RE.fullmatch(consent_id):
         raise ValueError(f"invalid consent_id: {consent_id!r}")
     return _dir() / f"{consent_id}.json"
+
+
+def _iter_consent_paths() -> list[Path]:
+    if not _dir().exists():
+        return []
+    return list(_dir().glob("*.json"))
+
+
+def _copy_record(record: dict) -> dict:
+    return copy.deepcopy(record)
+
+
+def _invalidate_pending_cache() -> None:
+    global _pending_cache, _pending_cache_version
+    with _pending_cache_lock:
+        _pending_cache = None
+        _pending_cache_version += 1
+
+
+def _pending_snapshot() -> list[dict]:
+    global _pending_cache
+    while True:
+        with _pending_cache_lock:
+            version = _pending_cache_version
+            cached = _pending_cache
+            if cached is not None and cached[0] == version:
+                return [_copy_record(item) for item in cached[1]]
+        records: list[dict] = []
+        try:
+            paths = _iter_consent_paths()
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if rec.get("status") == "pending":
+                records.append(rec)
+        records.sort(key=lambda r: r.get("created_at", ""))
+        with _pending_cache_lock:
+            if version != _pending_cache_version:
+                continue
+            _pending_cache = (version, [_copy_record(item) for item in records])
+            return records
+
+
+def _reset_cache_for_tests() -> None:
+    global _pending_cache, _pending_cache_version
+    with _pending_cache_lock:
+        _pending_cache = None
+        _pending_cache_version = 0
 
 
 def create(
@@ -87,6 +144,7 @@ def create(
         os.write(fd, json.dumps(record, indent=2).encode("utf-8"))
     finally:
         os.close(fd)
+    _invalidate_pending_cache()
     return record
 
 
@@ -134,21 +192,10 @@ def public_view(record: dict) -> dict:
 
 
 def list_pending(*, app_session_id: Optional[str] = None) -> list[dict]:
-    if not _dir().exists():
-        return []
-    out: list[dict] = []
-    for path in _dir().glob("*.json"):
-        try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if rec.get("status") != "pending":
-            continue
-        if app_session_id is not None and rec.get("app_session_id") != app_session_id:
-            continue
-        out.append(rec)
-    out.sort(key=lambda r: r.get("created_at", ""))
-    return out
+    records = _pending_snapshot()
+    if app_session_id is None:
+        return records
+    return [rec for rec in records if rec.get("app_session_id") == app_session_id]
 
 
 def _expired(rec: dict) -> bool:
@@ -203,6 +250,7 @@ def _transition_locked(
                 f.seek(0)
                 f.truncate()
                 f.write(json.dumps(rec, indent=2))
+                _invalidate_pending_cache()
                 return rec, "ok"
         finally:
             portable_lock.unlock(fd)
@@ -259,6 +307,7 @@ def revoke(consent_id: str) -> tuple[Optional[dict], str]:
                 f.seek(0)
                 f.truncate()
                 f.write(json.dumps(rec, indent=2))
+                _invalidate_pending_cache()
                 return rec, "ok"
         finally:
             portable_lock.unlock(fd)
@@ -328,6 +377,7 @@ def delete(consent_id: str) -> bool:
         return False
     try:
         path.unlink()
+        _invalidate_pending_cache()
         return True
     except OSError:
         return False
@@ -345,4 +395,6 @@ def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
                 deleted += 1
         except OSError:
             continue
+    if deleted:
+        _invalidate_pending_cache()
     return deleted

@@ -1,6 +1,6 @@
 """Render-tree message stubbing for lazy event fetch (Tier 1).
 
-Collapses COMPLETED, non-latest assistant messages to a lightweight
+Collapses COMPLETED assistant messages to a lightweight
 stub on the heavy read paths (REST snapshot, WS replay, older-message
 loading). The full events are fetched on demand when the user expands
 a turn, via `session_manager.get_message_full` /
@@ -32,6 +32,8 @@ _NON_RENDER_TYPES = frozenset({
 })
 
 STUB_TAIL = 25
+_PANEL_ANCHOR_CACHE = "_panel_anchor_cache"
+_STUB_ALWAYS_INCLUDE_TYPES = frozenset({"steer_prompt"})
 
 
 def primary_events(msg: dict) -> list:
@@ -51,6 +53,113 @@ def _worker_events(worker: dict) -> list:
     return worker.get("events") or []
 
 
+# MCP tool short names (suffix after the last `__`) that spawn a panel 1:1
+# in the SAME assistant message they fire in. `create_worker` is excluded:
+# it's approval-gated and its worker panel appears later via a separate
+# delegation (ask/delegate), so its tool_use has no same-message panel and
+# would desync the positional match.
+_DELEGATION_TOOL_SHORT_NAMES = frozenset({
+    "ask",
+    "mssg",
+    "delegate_task",
+    "create_session",
+    "create_sub_session",
+})
+
+
+def _tool_short_name(name: str) -> str:
+    idx = name.rfind("__")
+    return name if idx == -1 else name[idx + 2:]
+
+
+def _delegation_tool_uses(manager_events: list) -> list:
+    """Delegation tool_use blocks in firing order, each tagged with the
+    index of the event entry that holds it (parallel asks in one entry
+    share that index)."""
+    out: list = []
+    for entry_index, ev in enumerate(manager_events):
+        if not isinstance(ev, dict) or ev.get("type") != "agent_message":
+            continue
+        data = ev.get("data")
+        if not isinstance(data, dict) or data.get("type") != "assistant":
+            continue
+        message = data.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if not isinstance(name, str):
+                continue
+            short = _tool_short_name(name)
+            if short in _DELEGATION_TOOL_SHORT_NAMES:
+                out.append((entry_index, short))
+    return out
+
+
+def _panel_matches_tool(short: str, worker: dict) -> bool:
+    kind = worker.get("panel_kind")
+    run_mode = worker.get("run_mode")
+    if short == "create_sub_session":
+        return kind == "sub_session_created"
+    if short == "create_session":
+        return kind == "session_created"
+    if short == "ask":
+        return run_mode in ("team_ask", "fork", "team_message")
+    if short in ("mssg", "delegate_task"):
+        return run_mode == "team_message"
+    return False
+
+
+def _derive_panel_anchors(manager_events: list, workers: list) -> dict:
+    """delegation_id -> anchor index right after the triggering tool_use
+    entry. Mirrors frontend `derivePanelAnchors`: panels (in firing order)
+    consume compatible delegation tool_use blocks positionally; unmatched
+    panels (e.g. Codex native subagents) fall back to stored `insert_at`.
+    The backend-stamped `insert_at` is racy (captured before the tool_use
+    is tail-appended), so the derived position is authoritative when found."""
+    tool_uses = _delegation_tool_uses(manager_events)
+    anchors: dict = {}
+    cursor = 0
+    for worker, _index in workers:
+        if cursor < len(tool_uses) and _panel_matches_tool(tool_uses[cursor][1], worker):
+            anchors[worker.get("delegation_id")] = tool_uses[cursor][0] + 1
+            cursor += 1
+    return anchors
+
+
+def _panel_anchor_cache_key(manager_events: list, workers: list) -> tuple:
+    return (
+        len(manager_events),
+        tuple(
+            (
+                worker.get("delegation_id"),
+                worker.get("panel_kind"),
+                worker.get("run_mode"),
+            )
+            for worker, _index in workers
+        ),
+    )
+
+
+def invalidate_panel_anchor_cache(msg: dict) -> None:
+    msg.pop(_PANEL_ANCHOR_CACHE, None)
+
+
+def _panel_anchors(msg: dict, manager_events: list, workers: list) -> dict:
+    key = _panel_anchor_cache_key(manager_events, workers)
+    cached = msg.get(_PANEL_ANCHOR_CACHE)
+    if isinstance(cached, dict) and cached.get("key") == key:
+        anchors = cached.get("anchors")
+        if isinstance(anchors, dict):
+            return anchors
+    anchors = _derive_panel_anchors(manager_events, workers)
+    msg[_PANEL_ANCHOR_CACHE] = {"key": key, "anchors": anchors}
+    return anchors
+
+
 def timeline_events(msg: dict) -> list:
     manager_events = primary_events(msg)
     workers = []
@@ -66,14 +175,18 @@ def timeline_events(msg: dict) -> list:
     if not workers:
         return _renderable(manager_events)
 
+    anchors = _panel_anchors(msg, manager_events, workers)
+
+    def _anchor_of(worker: dict):
+        derived = anchors.get(worker.get("delegation_id"))
+        if isinstance(derived, (int, float)):
+            return derived
+        stored = worker.get("insert_at")
+        return stored if isinstance(stored, (int, float)) else float("inf")
+
     ordered = sorted(
         workers,
-        key=lambda item: (
-            item[0].get("insert_at")
-            if isinstance(item[0].get("insert_at"), (int, float))
-            else float("inf"),
-            item[1],
-        ),
+        key=lambda item: (_anchor_of(item[0]), item[1]),
     )
     out = []
     manager_index = 0
@@ -82,9 +195,7 @@ def timeline_events(msg: dict) -> list:
         out.extend(_renderable(events))
 
     for worker, _index in ordered:
-        insert_at = worker.get("insert_at")
-        if not isinstance(insert_at, (int, float)):
-            insert_at = float("inf")
+        insert_at = _anchor_of(worker)
         stop = (
             len(manager_events)
             if insert_at == float("inf")
@@ -102,18 +213,30 @@ def renderable_count(msg: dict) -> int:
     return len(timeline_events(msg))
 
 
+def stub_preview_events(rendered: list, tail: int) -> list:
+    tail_events = rendered[-tail:] if tail > 0 else []
+    tail_ids = {id(e) for e in tail_events}
+    pinned = [
+        e for e in rendered
+        if isinstance(e, dict)
+        and e.get("type") in _STUB_ALWAYS_INCLUDE_TYPES
+        and id(e) not in tail_ids
+    ]
+    return pinned + tail_events
+
+
 def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     """Compute `{event_count, last_events}` from a msg's timeline.
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
     rendered = timeline_events(msg)
-    return {"event_count": len(rendered), "last_events": rendered[-tail:]}
+    return {"event_count": len(rendered), "last_events": stub_preview_events(rendered, tail)}
 
 
 def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:
     """Compute a stub from an explicit primary events list."""
     rendered = _renderable(events)
-    return {"event_count": len(rendered), "last_events": rendered[-tail:]}
+    return {"event_count": len(rendered), "last_events": stub_preview_events(rendered, tail)}
 
 
 def message_output_text(msg: dict) -> str:
@@ -124,9 +247,7 @@ def message_output_text(msg: dict) -> str:
 
 def latest_assistant_id(msgs: list) -> Optional[str]:
     """Id of the most-recent assistant message in a node's message list.
-    Max by `seq`; falls back to last-in-order when seqs are absent. This
-    msg is kept FULL (auto-expanded on the frontend); all earlier
-    assistant msgs are stubbed."""
+    Max by `seq`; falls back to last-in-order when seqs are absent."""
     latest_id: Optional[str] = None
     latest_seq: Optional[int] = None
     for m in msgs:
@@ -146,6 +267,7 @@ def _empty_event_lists(msg: dict) -> None:
     if isinstance(msg.get("events"), list):
         msg["events"] = []
     msg.pop("_uid_idx", None)
+    invalidate_panel_anchor_cache(msg)
     for w in msg.get("workers") or []:
         if isinstance(w, dict):
             if isinstance(w.get("events"), list):

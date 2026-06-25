@@ -173,3 +173,10 @@ def write_credentials(username: str, password: str) -> None:
     _kc_set("username", username)
     _kc_set("password_hash", make_password_hash(password))
     _kc_set("session_secret", secrets.token_hex(32))
+
+
+def write_login_credentials(username: str, password: str) -> None:
+    if not username or not password:
+        raise ValueError("username and password must both be non-empty")
+    _kc_set("username", username)
+    _kc_set("password_hash", make_password_hash(password))

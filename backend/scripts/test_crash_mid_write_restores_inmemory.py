@@ -87,7 +87,11 @@ def _run() -> bool:
     # Monkey-patch os.replace to raise during the next write.
     original_replace = os.replace
 
-    def _failing_replace(*a, **kw):
+    session_path = str(session_store._session_path(sid))
+
+    def _failing_replace(src, dst, *a, **kw):
+        if str(dst) != session_path:
+            return original_replace(src, dst, *a, **kw)
         # Restore for any subsequent writes, then raise this once.
         os.replace = original_replace  # type: ignore
         raise OSError("simulated crash mid-write")

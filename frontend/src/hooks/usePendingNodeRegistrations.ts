@@ -1,12 +1,12 @@
 import { useEffect, useReducer } from "react";
 
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import type {
   NodeRegistrationResolvedData,
   PendingNodeRegistration,
 } from "../types";
 
-const MACHINE_NODES_API = `${API}/api/extensions/ofek-dev.machine-nodes/backend`;
+const machineNodesApi = () => extBackendBase("machineNodes");
 
 // Module-level shared state — mirrors useMachines. Every consumer reads
 // the SAME `_state` so N mounts fire ONE pending-node GET, and the
@@ -26,7 +26,7 @@ function _refetch(): Promise<void> {
   if (_inFlight) return _inFlight;
   _inFlight = (async () => {
     try {
-      const r = await fetch(`${MACHINE_NODES_API}/pending_nodes`, {
+      const r = await fetch(`${machineNodesApi()}/pending_nodes`, {
         credentials: "include",
       });
       const data = r.ok ? await r.json() : { pending_nodes: [] };
@@ -90,7 +90,7 @@ if (import.meta.hot) {
 
 export async function approveNodeRegistration(nodeId: string): Promise<void> {
   const r = await fetch(
-    `${MACHINE_NODES_API}/pending_nodes/${encodeURIComponent(nodeId)}/approve`,
+    `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/approve`,
     { method: "POST", credentials: "include" },
   );
   if (!r.ok) {
@@ -105,7 +105,7 @@ export async function approveNodeRegistration(nodeId: string): Promise<void> {
 
 export async function denyNodeRegistration(nodeId: string): Promise<void> {
   const r = await fetch(
-    `${MACHINE_NODES_API}/pending_nodes/${encodeURIComponent(nodeId)}/deny`,
+    `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/deny`,
     { method: "POST", credentials: "include" },
   );
   if (!r.ok) {

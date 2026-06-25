@@ -1,61 +1,87 @@
 # Better Agent
 
-**A local desktop workspace for coding agents.**
+**Run every coding agent. Keep every session.**
 
-Better Agent brings Claude, Codex, Gemini, and compatible local or API-backed
-providers into one interface built for real coding work: local sessions, visible
-tool calls, file context, traces, session history, folder trees, tags, search,
-and browser access from the machines you choose on your local network.
+Claude, Codex, and Gemini in one local workspace — and stop losing sessions to
+closed tabs and dead terminals.
 
-Stop juggling terminal tabs, provider UIs, hidden logs, and one-off sessions.
-Keep the work local, inspectable, and shaped around how you actually build.
+Stop juggling terminal tabs, provider UIs, hidden logs, and throwaway sessions.
+
+*Source-available for non-commercial use — see [License](#license).*
+
+## Quickstart
+
+```bash
+git clone https://github.com/ofekron/better-agent && cd better-agent && ./run.sh
+# First run: pick a username + password (stored in your OS credential store),
+# choose local-only or LAN access, then open the printed URL from any trusted device.
+```
+
+Full prerequisites and platform notes are in [Getting started](#getting-started).
 
 ---
 
 ## Why Better Agent
 
-| You're stuck with… | Better Agent gives you… |
-| --- | --- |
-| Scattered terminals, tabs, and provider UIs | One **hosted local workspace** for projects, sessions, providers, file context, and live output |
-| A coding agent trapped on one screen | **Local-network access** from other trusted devices that can reach your Better Agent backend |
-| Hidden or scattered agent work | **Traceable sessions** with live output, tool calls, and persistent history |
-| One model workflow for every task | **Bring your providers**: Claude, Codex, Gemini, and compatible provider setups |
-| Workspace state spread across tools | **All provider sessions** organized together with projects, folders, tags, and search |
-| A browser-only workflow | **Browser, native desktop, and mobile app** surfaces backed by the same local server |
+**Every provider, one workspace.** A session started with Claude sits next to
+one running on Codex and another on Gemini — one history, one set of projects,
+folders, tags, and search. Pick provider and model per session; nothing about
+your workflow changes.
+
+**Close the laptop — the work continues.** Agents run as detached processes
+that outlive your browser tab, your frontend, even a backend restart. Come back
+to the completed run, with the full trace of what happened while you were gone.
+Crash-recoverable by design: a provider CLI that dies mid-turn is replayed on
+restart and reconciled into the same session, deduplicated — live work and
+recovered work converge to one history.
+
+**Work from anywhere in the house.** The backend runs once on your machine; the
+UI reaches it from your browser, the desktop app, or the mobile app on devices
+you trust. Start a task at your desk, check on it from the couch — and keep the
+backend off untrusted networks; every endpoint is credential-gated.
+
+**A team, not a chatbot.** Fork sessions, delegate work, run agents in
+parallel, and drive the whole thing headlessly from scripts through the
+Integration SDK and CLI.
+
+**Yours, actually.** Sessions, settings, credentials, and data live on your
+machine, gated by credentials in your OS credential store. Better Agent hosts
+nothing — the only optional outbound call is installing a marketplace extension
+from a marketplace you choose.
+
+**See everything your agents do.** Live output, every tool call, file context,
+and full session history in one place — grouped by turns, your prompt alongside
+the agent's answer. No hidden logs, no scrollback archaeology.
+
+## vs. one agent in a terminal
+
+| | One agent in a terminal | Better Agent |
+| --- | --- | --- |
+| Providers | One | Claude + Codex + Gemini, one workspace |
+| Close the laptop | Session dies, or you hope `--resume` works | Detached runner keeps going; full trace on return |
+| From your phone | No | Yes — same backend from mobile, desktop, or browser |
+| Parallel work | Subagents, one provider | Fork + delegate across providers, headless via SDK/CLI |
 
 ---
 
-## Core Repo Powers
+## What's in the box
 
-These are the core Better Agent capabilities in this repository. along with providing
-powerfull extensibility.
-
-- **Local ownership** — backend, frontend, sessions, settings, and app packages
-  run from your machine; Better Agent does not host your workspace data.
-- **LAN-ready hosting** — choose local-only access or bind the backend for
-  trusted local-network devices during setup. all backend endpoints gated by authentication of credentials owned by you, working with your os keychain.
-- **Browser access** — run the backend once and use Better Agent from the
-  browser on your main machine, another computer, or a mobile device on the
-  same trusted network.
-- **Native app options** — use the browser-first app, the packaged macOS/Windows
-  desktop app, or Capacitor mobile apps that point at your Better Agent server.
-- **Provider choice** — Quickly configure the AI accounts and CLIs you want to use, having Better Agent accelrate the process, then pick the provider and model per session while keeping every provider's
-  sessions in one workspace.
-- **Session navigation** — keep last-opened sessions close, switch between
-  active session tabs, and reopen recent work without digging through terminal
-  scrollback.
-- **Folder trees and tags** — arrange sessions into project-specific folder
-  trees, assign tags, and filter by the way the work is actually structured.
-- **Search and advanced search** — filter sessions quickly, then use richer
-  search when names, tags, folders, providers, or remembered context are not
-  enough.
-- **Live agent view** — keep provider output, tool calls, file context, and
-  session history visible in one place. grouped by turns viewing your prompts alongside final agent responses.
-- **Project memory** — sessions are organized by working directory and remain
-  easy to reopen, search, inspect, fork, and continue.
-- **Headless control** — use Better Agent programmatically through the Integration SDK and CLI commands, driving the orchestration layer from scripts and external tools.
-- **Extension surface** — private or marketplace extensions can add specialized
-  workflows on top of the core app without defining the core experience.
+- **Guided provider setup** — connect the AI accounts and CLIs you already
+  have; provider and model picked per session.
+- **Offline-first capture** — type prompts and create sessions even while the
+  backend is unreachable; they queue locally and sync when it's back.
+- **Organization that scales** — project folder trees, tags, session tabs,
+  quick filter, and advanced search across names, tags, folders, providers,
+  and remembered context.
+- **Project memory** — sessions organized by working directory, easy to reopen,
+  fork, and continue.
+- **Every surface** — browser, desktop app (macOS verified; Windows installer
+  provided, not yet validated on a real Windows host), and Capacitor mobile
+  apps, all backed by the same local server.
+- **Extension surface** — private or marketplace extensions add specialized
+  workflows on top of the core app; marketplace artifacts are
+  signature-verified. See [EXTENSIONS.md](EXTENSIONS.md) for authoring your own
+  and installing marketplace ones.
 
 ## Integration SDK
 
@@ -65,9 +91,10 @@ TestApe run out of process, get only the SDK on `PYTHONPATH`, and call
 authenticated core loopback endpoints instead of importing backend modules
 directly.
 
-The public `extensions/` directory includes two powerfull guided examples:
+The public `extensions/` directory includes two guided examples:
 
-- `extensions/ask` — UI to run an agent to search through your sessions to find a best match for a task, moving the task with ease to it to work on.
+- `extensions/ask` — UI that runs an agent to search your sessions for the best
+  match for a task, then moves the task there to continue the work.
 - `extensions/session-bridge` — adds an MCP surface for cross-session search,
   recall, session proposals, and delegated session work through the SDK.
 
@@ -100,7 +127,7 @@ API access is gated after setup:
         local machine or trusted LAN device
                  │  WebSocket + REST
                  ▼
-   FastAPI backend  ──►  per-session Claude Code / Gemini runners (detached)
+   FastAPI backend  ──►  per-session Claude / Codex / Gemini runners (detached)
         │                         │
         │  sessions, projects,    ▼
         │  provider settings, tool output
@@ -118,14 +145,14 @@ Want the deep dive? See the `project-structure` skill at `.claude/skills/project
 
 ## Getting started
 
-**Prerequisites:** macOS (auth uses the login keychain), Python 3 with a `backend/.venv`, Node.js, and a provider CLI such as Claude, Codex, or Gemini. See `INSTALL.md` for the full clean-clone, LAN, desktop, mobile, and reset-auth flow.
+**Prerequisites:** macOS, Linux, or Windows — auth is stored in your OS credential store (macOS Keychain / Windows Credential Manager / Linux Secret Service). On an empty Mac, run `./scripts/bootstrap-macos.sh` after cloning; on an empty Windows machine, run `powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1`. The macOS desktop build is verified; the Windows installer is provided but not yet validated on a real Windows host. See `INSTALL.md` for the full clean-clone, LAN, desktop, mobile, and reset-auth flow.
 
 ```bash
-# One command — builds the frontend, starts the backend on :8000, serves the UI.
+# One command — initializes submodules/deps, builds the frontend, starts the backend.
 ./run.sh
 ```
 
-First run prompts once for a username + password (stored only in your macOS keychain) and asks whether Better Agent should listen only on this computer or on your local network. Open the printed URL from any trusted device that can reach the backend.
+First run prompts once for a username + password (stored only in your OS credential store) and asks whether Better Agent should listen only on this computer or on your local network. The backend defaults to port 18765; override with `BETTER_AGENT_BACKEND_PORT` if needed. Open the printed URL from any trusted device that can reach the backend.
 
 Better Agent can execute commands, read and write files, run provider CLIs, and
 persist session data. Run it only in trusted environments, keep backups, review
@@ -170,9 +197,12 @@ software because commercial rights are reserved. See `LICENSE`.
 See `DISCLAIMER.md` for risk and liability notices, `SECURITY.md` for private
 vulnerability reporting, `TRADEMARKS` for Better Agent branding and marketplace
 naming rules, `NOTICE` for copyright and marketplace trust-root notes, and
-`CONTRIBUTING.md` before submitting changes. See `RELEASE.md` for release
-integrity requirements and `ROADMAP.md` for the public non-commercial roadmap.
+`CONTRIBUTING.md` before submitting changes. Pull requests go to the public
+GitHub repository. See `RELEASE.md` for release integrity requirements and
+`ROADMAP.md` for the public non-commercial roadmap.
 
 ---
 
-**Better Agent — because one agent in a terminal was never going to be enough.**
+**Better Agent — one agent in a terminal was never going to be enough.**
+
+Ready? [`./run.sh`](#quickstart) — your first session is a minute away.

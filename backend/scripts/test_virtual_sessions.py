@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import _test_home
@@ -254,6 +255,22 @@ def test_concurrent_appends_are_not_lost() -> bool:
 
 
 def test_list_all_cache_isolated_and_invalidated() -> bool:
+    source = open(virtual_session_store.__file__, "r", encoding="utf-8").read()
+    list_start = source.index("def _list_summaries(")
+    list_end = source.index("def get(", list_start)
+    list_source = source[list_start:list_end]
+    for timer in (
+        "virtual_sessions.list.load",
+        "virtual_sessions.list.copy_cached",
+        "virtual_sessions.list.project",
+        "virtual_sessions.list.sort",
+        "virtual_sessions.list.cache_copy",
+        "virtual_sessions.list.copy_result",
+    ):
+        if timer not in list_source:
+            print(f"  missing virtual list timer {timer}")
+            return False
+
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     sid = f"virtual:{ext}:cached-list"
     virtual_session_store.upsert(
@@ -293,6 +310,187 @@ def test_list_all_cache_isolated_and_invalidated() -> bool:
         print(f"  cache was not invalidated after append: {third_summary!r}")
         return False
     return True
+
+
+def test_list_recent_copies_only_requested_summaries() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    for index in range(4):
+        virtual_session_store.upsert(
+            ext,
+            {
+                "id": f"virtual:{ext}:recent-{index}",
+                "name": f"Recent {index}",
+                "metadata": {"nested": {"count": index}},
+                "messages": [{"id": f"m-{index}", "role": "user", "content": "one"}],
+            },
+        )
+    first, total = virtual_session_store.list_recent(2)
+    if len(first) != 2:
+        print(f"  expected bounded recent list, got {len(first)}")
+        return False
+    if total < 4:
+        print(f"  expected total to include omitted rows, got {total}")
+        return False
+    first[0]["metadata"]["nested"]["count"] = 99
+    second, _ = virtual_session_store.list_recent(2)
+    if second[0].get("metadata", {}).get("nested", {}).get("count") == 99:
+        print("  caller mutation leaked through list_recent")
+        return False
+    excluded, excluded_total = virtual_session_store.list_recent(
+        10,
+        exclude_id=first[0].get("id"),
+    )
+    if any(session.get("id") == first[0].get("id") for session in excluded):
+        print("  excluded id returned from list_recent")
+        return False
+    if excluded_total != total - 1:
+        print(f"  excluded total mismatch: total={total} excluded={excluded_total}")
+        return False
+    return True
+
+
+def test_list_all_summary_cache_skips_full_payload_copy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:summary-hot-path"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Summary hot path",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before cache test")
+        return False
+    original = virtual_session_store.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and isinstance(value.get("sessions"), dict):
+            raise AssertionError("list_all copied full virtual session store")
+        return original(value)
+
+    virtual_session_store.deepcopy = guarded_deepcopy
+    try:
+        cached = virtual_session_store.list_all()
+    finally:
+        virtual_session_store.deepcopy = original
+    return any(session.get("id") == sid for session in cached)
+
+
+def test_cold_list_all_skips_full_payload_copy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:cold-summary-path"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Cold summary path",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    virtual_session_store._cache_signature = None
+    virtual_session_store._cache_data = None
+    virtual_session_store._summary_cache_signature = None
+    virtual_session_store._summary_cache = None
+    virtual_session_store._summary_cache_fresh_until = 0.0
+    original = virtual_session_store.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and isinstance(value.get("sessions"), dict):
+            raise AssertionError("cold list_all copied full virtual session store")
+        return original(value)
+
+    virtual_session_store.deepcopy = guarded_deepcopy
+    try:
+        listed = virtual_session_store.list_all()
+    finally:
+        virtual_session_store.deepcopy = original
+    return any(session.get("id") == sid for session in listed)
+
+
+def test_list_all_hot_cache_skips_store_load() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:hot-cache"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Hot cache",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before hot-cache test")
+        return False
+    original = virtual_session_store._load_shared_locked
+
+    def fail_load():
+        raise AssertionError("hot cached list_all touched virtual session store")
+
+    virtual_session_store._load_shared_locked = fail_load
+    try:
+        cached = virtual_session_store.list_all()
+    finally:
+        virtual_session_store._load_shared_locked = original
+    return any(session.get("id") == sid for session in cached)
+
+
+def test_list_all_returns_cached_projection_when_store_lock_busy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:busy-lock"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Busy lock",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before busy-lock test")
+        return False
+    if not virtual_session_store._lock.acquire(blocking=False):
+        print("  virtual store lock unexpectedly busy before test")
+        return False
+    try:
+        started = time.perf_counter()
+        cached = virtual_session_store.list_all()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+    finally:
+        virtual_session_store._lock.release()
+    if elapsed_ms > 50.0:
+        print(f"  cached list waited behind busy lock: {elapsed_ms:.2f}ms")
+        return False
+    return any(session.get("id") == sid for session in cached)
+
+
+def test_write_warms_summary_cache_for_recent_list() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:write-warm-cache"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Write warm cache",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    original = virtual_session_store._load_shared_locked
+
+    def fail_load():
+        raise AssertionError("list_recent_cached touched virtual session store after write")
+
+    virtual_session_store._load_shared_locked = fail_load
+    try:
+        cached = virtual_session_store.list_recent_cached(10)
+    finally:
+        virtual_session_store._load_shared_locked = original
+    if cached is None:
+        print("  write did not warm virtual summary cache")
+        return False
+    sessions, _total = cached
+    return any(session.get("id") == sid for session in sessions)
 
 
 def test_sdk_namespaces_short_virtual_ids_for_all_methods() -> bool:
@@ -384,6 +582,11 @@ TESTS = [
     ("metadata size is bounded", test_metadata_size_is_bounded),
     ("concurrent appends are not lost", test_concurrent_appends_are_not_lost),
     ("list_all cache is isolated + invalidated", test_list_all_cache_isolated_and_invalidated),
+    ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
+    ("cold list_all skips full payload copy", test_cold_list_all_skips_full_payload_copy),
+    ("list_all hot cache skips store load", test_list_all_hot_cache_skips_store_load),
+    ("list_all returns cached projection when store lock busy", test_list_all_returns_cached_projection_when_store_lock_busy),
+    ("write warms summary cache for recent list", test_write_warms_summary_cache_for_recent_list),
     ("SDK namespaces short virtual ids for all methods", test_sdk_namespaces_short_virtual_ids_for_all_methods),
     ("internal API rejects extension without session_state", test_internal_api_rejects_extension_without_session_state),
     ("synthetic injection queues normal turn", test_synthetic_injection_queues_normal_turn),

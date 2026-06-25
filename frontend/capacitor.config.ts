@@ -19,6 +19,18 @@ const config: CapacitorConfig = {
     SplashScreen: {
       launchShowDuration: 0,
     },
+    // Manual OTA: the bundled web build is the offline fallback. The
+    // updater service (lib/mobileUpdater.ts) checks the user's own
+    // backend for a newer bundle, downloads + applies it, and calls
+    // notifyAppReady so a broken bundle auto-rolls-back. autoUpdate is
+    // off because capgo's native check/download can't carry our dynamic
+    // bearer token — we drive it from JS instead.
+    CapacitorUpdater: {
+      autoUpdate: false,
+      // If a freshly-applied bundle never calls notifyAppReady within
+      // this window, capgo reverts to the last good bundle.
+      appReadyTimeout: 10000,
+    },
   },
 };
 

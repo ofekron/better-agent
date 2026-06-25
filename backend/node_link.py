@@ -28,19 +28,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
+import threading
+import time
 import uuid
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import HTTPException
 
+import app_version
 import node_registry_store
 import node_store
 import shadow_jsonl
 from node_protocol import PROTOCOL_VERSION
 from stores import pending_node_registrations
-from topology import NodeSpec, load_topology, node_token_optional
+from topology import NodeSpec, load_topology
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +68,27 @@ _node_approval_waiters: dict[str, asyncio.Future] = {}
 # to every open browser WS without importing the coordinator (avoids a
 # circular import). Signature: async (event_type: str, payload: dict).
 _registration_listener: Optional[Callable[[str, dict], Awaitable[None]]] = None
+_MACHINE_NODES_READY_CACHE_TTL_S = 2.0
+_machine_nodes_ready_cache: tuple[float, Optional[str]] = (0.0, None)
+_machine_nodes_ready_lock = threading.Lock()
 
 
 def _machine_nodes_not_ready_reason() -> Optional[str]:
+    global _machine_nodes_ready_cache
     import extension_store
-    return extension_store.runtime_not_ready_message(
-        extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+    if extension_store.extension_id_for_role('machine-nodes') is None:
+        return None
+    now = time.monotonic()
+    with _machine_nodes_ready_lock:
+        checked_at, cached = _machine_nodes_ready_cache
+        if now - checked_at < _MACHINE_NODES_READY_CACHE_TTL_S:
+            return cached
+    reason = extension_store.runtime_not_ready_message(
+        extension_store.extension_id_for_role('machine-nodes')
     )
+    with _machine_nodes_ready_lock:
+        _machine_nodes_ready_cache = (now, reason)
+    return reason
 
 
 def set_registration_listener(cb: Callable[[str, dict], Awaitable[None]]) -> None:
@@ -99,6 +118,46 @@ def _public_rec(rec: dict) -> dict:
     }
 
 
+_public_pending_cache: tuple[int, list[dict]] | None = None
+_public_pending_cache_lock = threading.Lock()
+
+
+def _public_record_expired(record: dict) -> bool:
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) < datetime.now()
+    except (TypeError, ValueError):
+        return False
+
+
+def public_pending_nodes_cached() -> list[dict] | None:
+    version = pending_node_registrations.version()
+    with _public_pending_cache_lock:
+        cached = _public_pending_cache
+        if cached is None or cached[0] != version:
+            return None
+        if any(_public_record_expired(item) for item in cached[1]):
+            return None
+        return [dict(item) for item in cached[1]]
+
+
+def public_pending_nodes() -> list[dict]:
+    global _public_pending_cache
+    cached = public_pending_nodes_cached()
+    if cached is not None:
+        return cached
+    projected = [
+        _public_rec(rec)
+        for rec in pending_node_registrations.list_pending()
+    ]
+    version = pending_node_registrations.version()
+    with _public_pending_cache_lock:
+        _public_pending_cache = (version, [dict(item) for item in projected])
+    return projected
+
+
 def _primary_id() -> str:
     """The primary's node id for the reciprocal handshake. Falls back to
     'primary' when no topology.yaml is present (dynamic-only deployment)."""
@@ -108,41 +167,67 @@ def _primary_id() -> str:
         return "primary"
 
 
-def _resolve_known_spec(node_id: str, presented_secret: str) -> tuple[Optional[NodeSpec], Optional[str]]:
-    """Resolve an ALREADY-KNOWN node (topology-static or registry-dynamic)
-    and verify its secret. Returns (spec, None) on success, (None, reason)
-    on auth failure, or (None, None) if the node is unknown (caller then
-    enters the registration-approval flow)."""
-    # Static nodes declared in topology.yaml authenticate with the shared
-    # BETTER_CLAUDE_NODE_TOKEN (legacy path, unchanged for existing setups).
-    try:
-        topo = load_topology()
-    except Exception:
-        topo = None
+def _authoritative_registered_spec(
+    node_id: str,
+    topo=None,
+) -> tuple[Optional[NodeSpec], Optional[str]]:
+    if topo is None:
+        try:
+            topo = load_topology()
+        except Exception:
+            topo = None
     if topo is not None and node_id in topo.all_nodes():
         spec = topo.all_nodes()[node_id]
         if spec.role != "worker_node":
             return None, f"node {node_id!r} is role={spec.role!r}, not worker_node"
-        legacy = node_token_optional()
-        if not legacy:
-            return None, (
-                f"node {node_id!r} is declared in topology.yaml but no "
-                f"BETTER_CLAUDE_NODE_TOKEN is configured on primary"
-            )
-        if presented_secret != legacy:
-            return None, "bad token"
         return spec, None
+    spec = node_registry_store.to_spec(node_id)
+    if spec is None:
+        return None, "registry record vanished"
+    return spec, None
 
-    # Dynamic nodes approved earlier authenticate with their own secret.
-    if node_registry_store.get(node_id) is not None:
-        if not presented_secret or not node_registry_store.verify_secret(node_id, presented_secret):
-            return None, "bad secret"
-        spec = node_registry_store.to_spec(node_id)
-        if spec is None:
-            return None, "registry record vanished"
-        return spec, None
 
-    return None, None  # unknown → registration flow
+def _resolve_known_spec(node_id: str, presented_secret: str) -> tuple[Optional[NodeSpec], Optional[str]]:
+    """Resolve an ALREADY-KNOWN node and verify its PER-NODE secret.
+    Returns (spec, None) on success, (None, reason) on auth failure, or
+    (None, None) if the node may still enter the registration-approval
+    flow.
+
+    Every node — whether pre-declared in topology.yaml or not —
+    authenticates with its own argon2-hashed secret in
+    `node_registry_store` (trust-on-first-approve). There is NO shared
+    token. topology.yaml is a MANIFEST only: it allowlists which node
+    ids may join and pins each declared node's `cwd_roots` as operator
+    policy (overriding the node's self-report)."""
+    try:
+        topo = load_topology()
+    except Exception:
+        topo = None
+    in_topology = topo is not None and node_id in topo.all_nodes()
+
+    if in_topology and topo.all_nodes()[node_id].role != "worker_node":
+        role = topo.all_nodes()[node_id].role
+        return None, f"node {node_id!r} is role={role!r}, not worker_node"
+
+    # topology.yaml is an allowlist: when it is present, a node id that
+    # is neither declared nor already-approved is rejected outright
+    # (not pended) so a random id can't surf the approval popup.
+    if topo is not None and not in_topology and node_registry_store.get(node_id) is None:
+        return None, f"node {node_id!r} is not declared in topology.yaml"
+
+    # Not yet approved (topology-declared pending first approval, or a
+    # dynamic-only deploy with no topology) → caller runs the approval flow.
+    rec = node_registry_store.get(node_id)
+    if rec is None:
+        return None, None
+    if not presented_secret or not node_registry_store.verify_secret(node_id, presented_secret):
+        return None, "bad secret"
+
+    # cwd_roots authority: a topology-declared node serves the manifest's
+    # roots (operator policy), NOT its self-reported roots, so a
+    # compromised node can't widen its own scope. Dynamic nodes use their
+    # self-reported roots from the registry record.
+    return _authoritative_registered_spec(node_id, topo)
 
 
 async def approve_registration(node_id: str) -> tuple[Optional[dict], str]:
@@ -150,16 +235,26 @@ async def approve_registration(node_id: str) -> tuple[Optional[dict], str]:
     (so future reconnects auto-auth) and, if the node is currently holding
     its WS open, resolve the waiter so it connects immediately. Idempotent
     via the underlying store transition."""
+    try:
+        topo = load_topology()
+    except Exception:
+        topo = None
+    topology_spec = topo.all_nodes().get(node_id) if topo is not None else None
+    if topology_spec is not None and topology_spec.role != "worker_node":
+        raise ValueError(
+            f"node {node_id!r} is role={topology_spec.role!r}, not worker_node"
+        )
+
     rec, reason = pending_node_registrations.approve(node_id)
     if reason != "ok":
         return rec, reason
-    node_registry_store.add(
+    registry_rec = node_registry_store.add(
         node_id=node_id,
         address=rec.get("address") or "",
         cwd_roots=rec.get("cwd_roots") or [],
         secret_hash=rec.get("secret_hash") or "",
     )
-    spec = node_registry_store.to_spec(node_id)
+    spec = topology_spec or node_registry_store.spec_from_record(registry_rec)
     _resolve_waiter(node_id, spec)
     await _emit_registration("node_registration_resolved", {"node_id": node_id, "status": "approved"})
     return rec, "ok"
@@ -266,11 +361,12 @@ def set_dispatchers(*, run_control, event_forward) -> None:
 
 @router.websocket("/api/node/connect")
 async def node_connect(websocket: WebSocket) -> None:
-    # The presented credential is the node's secret. For topology-static
-    # nodes it's the shared BETTER_CLAUDE_NODE_TOKEN; for dynamic nodes
-    # it's their self-generated identity secret. We must accept the socket
-    # to read the handshake (which carries registration metadata) before
-    # we can decide, so unlike the legacy flow the close happens post-accept.
+    # The presented credential is the node's per-node secret (generated by
+    # node_identity, or pinned via BETTER_CLAUDE_NODE_TOKEN on the node).
+    # Every node — topology-declared or dynamic — authenticates the same
+    # way: argon2 verification against node_registry_store. We must accept
+    # the socket to read the handshake (which carries registration
+    # metadata) before we can decide, so the close happens post-accept.
     auth = websocket.headers.get("authorization") or ""
     presented = auth.removeprefix("Bearer ").strip()
 
@@ -285,8 +381,10 @@ async def node_connect(websocket: WebSocket) -> None:
         return
     try:
         handshake = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except (asyncio.TimeoutError, WebSocketDisconnect):
+    except asyncio.TimeoutError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="no handshake")
+        return
+    except WebSocketDisconnect:
         return
 
     if handshake.get("type") != "handshake":
@@ -340,7 +438,15 @@ async def node_connect(websocket: WebSocket) -> None:
         "node_id": _primary_id(),
     })
 
-    conn = await node_store.register(spec, websocket)
+    node_app_version = handshake.get("app_version")
+    if not isinstance(node_app_version, dict):
+        node_app_version = {}
+    conn = await node_store.register(
+        spec,
+        websocket,
+        app_commit_sha=app_version.clean_commit_sha(node_app_version.get("commit_sha")),
+        app_dirty=node_app_version.get("dirty") is True,
+    )
     logger.info("node_link: %s connected", node_id)
 
     # Send resume_stream so the node knows what we already ingested.
@@ -536,10 +642,34 @@ class NodeOffline(RuntimeError):
     """Raised when the target node has no live WS."""
 
 
+def _is_loopback_host(host: object) -> bool:
+    if not isinstance(host, str) or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def connection_allows_credential_sync(conn: node_store.NodeConnection) -> bool:
+    ws = conn.ws
+    scheme = str(getattr(getattr(ws, "url", None), "scheme", "") or "").lower()
+    if scheme == "wss":
+        return True
+    client = getattr(ws, "client", None)
+    host = getattr(client, "host", None)
+    if host is None and isinstance(client, (list, tuple)) and client:
+        host = client[0]
+    return _is_loopback_host(host)
+
+
 async def send_spawn_run(node_id: str, payload: dict) -> None:
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    node_store.assert_node_version_ready(node_id)
     await conn.ws.send_json({"type": "spawn_run", **payload})
 
 
@@ -579,6 +709,8 @@ async def rpc_call(
     params: Optional[dict] = None,
     *,
     timeout: float = 30.0,
+    secure_transport_required: bool = False,
+    version_ready_required: bool = False,
 ) -> Optional[dict]:
     """Send an `rpc_request` to a node and await its `rpc_response`.
 
@@ -590,6 +722,10 @@ async def rpc_call(
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    if secure_transport_required and not connection_allows_credential_sync(conn):
+        raise RuntimeError("provider credential sync requires a WSS or loopback node connection")
+    if version_ready_required:
+        node_store.assert_node_version_ready(node_id)
     request_id = str(uuid.uuid4())
     fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     conn.pending_rpcs[request_id] = fut

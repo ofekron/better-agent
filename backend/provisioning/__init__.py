@@ -11,8 +11,9 @@ engine (`coordinator.run_delegation` / `/api/internal/ask-fork`).
 """
 from provisioning.config import ProvisionedConfig, resolve_config
 from provisioning.dispatch import extract_fork_text
-from provisioning.lifecycle import dirty_reason, ensure_caller, ensure_session
-from provisioning.manager import ProvisionedResult, run, run_sync
+from provisioning.inline_spec import InlineProvisionedSessionSpec, inline_spec_from_payload
+from provisioning.lifecycle import dirty_reason, ensure_caller, ensure_session, expired_reason
+from provisioning.manager import ProvisionedResult, ensure_warm_base, run, run_sync
 from provisioning.spec import (
     DirtyPolicy,
     ProvisionedSessionSpec,
@@ -23,6 +24,7 @@ from provisioning.spec import (
 
 __all__ = [
     "DirtyPolicy",
+    "InlineProvisionedSessionSpec",
     "ProvisionedConfig",
     "ProvisionedResult",
     "ProvisionedSessionSpec",
@@ -30,8 +32,11 @@ __all__ = [
     "dirty_reason",
     "ensure_caller",
     "ensure_session",
+    "ensure_warm_base",
+    "expired_reason",
     "extract_fork_text",
     "get",
+    "inline_spec_from_payload",
     "register",
     "resolve_config",
     "run",

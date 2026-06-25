@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
+import os
 import threading
+import time
 import uuid
 from bisect import bisect_right
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Awaitable, Callable, Optional, Union
 
 import perf
 from event_bus import BusEvent, EventBus, bus
+from event_shape import RENDER_EVENT_TYPES, frontend_events_from_journal_rows
 from event_ingester import event_ingester
 
 EVENT_JOURNAL_EVENT = "event_journal.event"
@@ -30,12 +35,6 @@ EVENT_JOURNAL_TURN_MESSAGE_SET = "event_journal.turn_message_set"
 EVENT_JOURNAL_TURN_FINISHED = "event_journal.turn_finished"
 EVENT_JOURNAL_WRITTEN = "event_journal.written"
 EVENT_JOURNAL_WRITE_FAILED = "event_journal.write_failed"
-RENDER_EVENT_TYPES = frozenset({
-    "agent_message",
-    "manager_event",
-    "steer_prompt",
-    "worker_event",
-})
 # Worker-fork tailer backup rows. Owned by the worker panel, never by a
 # message: excluded from ownership resolution and from every render /
 # message-read attachment path. MUST stay a value no legacy writer ever
@@ -43,6 +42,9 @@ RENDER_EVENT_TYPES = frozenset({
 # sole copy of PRIMARY content and must keep rendering.
 FORK_BACKUP_SOURCE = "fork_backup"
 _event_journal_loop: Optional[asyncio.AbstractEventLoop] = None
+def _session_artifacts_dir(session_id: str) -> Path:
+    import session_store
+    return Path(session_store.session_file_path(session_id)).parent / session_id
 
 @dataclass(frozen=True)
 class MessageOwnership:
@@ -145,7 +147,7 @@ async def publish_event(
 ) -> EventWritten:
     """Publish an event fact and wait for the journal writer acknowledgement."""
     resolved_event_id = event_id or str(uuid.uuid4())
-    if bus_instance is bus and event_journal_writer._bus is not bus:
+    if bus_instance is bus:
         return await event_journal_writer.submit_event_async(Event(
             root_id=session_id,
             sid=context_id or session_id,
@@ -242,8 +244,10 @@ def publish_event_sync(
     if cwd_override is None:
         from session_manager import manager as session_manager
 
-        session = session_manager.get_lite(context_id or session_id) or {}
-        cwd = session.get("cwd")
+        # Only `cwd` is needed. Avoid get_lite()'s full-tree deepcopy: on large
+        # sessions it blocks the event loop for tens of seconds per call, and
+        # this runs on the primary-agent orphan-ingest path (once per CLI line).
+        cwd = session_manager.get_file_ref_context(context_id or session_id)[0]
         cwd_override = cwd if isinstance(cwd, str) else ""
     event = Event(
         root_id=session_id,
@@ -261,38 +265,118 @@ def publish_event_sync(
     return event_journal_writer.submit_event_sync(event, timeout=timeout)
 
 
-class _ShardedExecutor:
-    """Fixed pool of single-thread executors, sharded by root_id.
+class _RootExecutor(concurrent.futures.Executor):
+    def __init__(self, owner: "_KeyedSerialExecutor", root_id: str) -> None:
+        self._owner = owner
+        self._root_id = root_id
 
-    N executors with max_workers=1 each.  root_id is hashed to a bucket so
-    the same root always lands on the same executor (same thread), giving
-    per-root serialization.  Different roots on different buckets run
-    concurrently.  Total thread count is bounded at *pool_size*.
-    """
+    def submit(self, fn, /, *args, **kwargs):
+        return self._owner.submit(self._root_id, fn, *args, **kwargs)
+
+
+class _KeyedSerialExecutor:
+    """Bounded worker pool with FIFO serialization per root."""
 
     def __init__(self, pool_size: int = 8, thread_name_prefix: str = "ejw") -> None:
-        self._pool = [
-            ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"{thread_name_prefix}-{i}",
-            )
-            for i in range(pool_size)
-        ]
-        for i, ex in enumerate(self._pool):
-            perf.register_queue(
-                f"{thread_name_prefix}.shard{i}",
-                lambda ex=ex: ex._work_queue.qsize(),
-            )
+        self._pool_size = pool_size
+        self._pool = ThreadPoolExecutor(
+            max_workers=pool_size,
+            thread_name_prefix=f"{thread_name_prefix}-",
+        )
+        self._lock = threading.Lock()
+        self._drained = threading.Condition(self._lock)
+        self._queues: dict[str, deque[tuple[concurrent.futures.Future, object, tuple, dict]]] = {}
+        self._ready: deque[str] = deque()
+        self._ready_set: set[str] = set()
+        self._active: set[str] = set()
+        self._adapters: dict[str, _RootExecutor] = {}
+        self._pending = 0
+        self._closed = False
+        perf.register_queue(f"{thread_name_prefix}.ready_roots", self.ready_count)
+        perf.register_queue(f"{thread_name_prefix}.pending", self.pending_count)
 
-    def executor(self, root_id: str) -> ThreadPoolExecutor:
-        return self._pool[hash(root_id) % len(self._pool)]
+    def ready_count(self) -> int:
+        with self._lock:
+            return len(self._ready)
 
-    def submit(self, root_id: str, fn, *args, **kwargs):
-        return self.executor(root_id).submit(fn, *args, **kwargs)
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending
+
+    def executor(self, root_id: str) -> concurrent.futures.Executor:
+        with self._lock:
+            adapter = self._adapters.get(root_id)
+            if adapter is None:
+                adapter = _RootExecutor(self, root_id)
+                self._adapters[root_id] = adapter
+            return adapter
+
+    def submit(self, root_id: str, fn, /, *args, **kwargs):
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            queue = self._queues.setdefault(root_id, deque())
+            queue.append((future, fn, args, kwargs))
+            self._pending += 1
+            if root_id not in self._active and root_id not in self._ready_set:
+                self._ready.append(root_id)
+                self._ready_set.add(root_id)
+            self._dispatch_locked()
+        return future
+
+    def _dispatch_locked(self) -> None:
+        while self._ready and len(self._active) < self._pool_size:
+            root_id = self._ready.popleft()
+            self._ready_set.remove(root_id)
+            queue = self._queues[root_id]
+            work = queue.popleft()
+            self._active.add(root_id)
+            try:
+                self._pool.submit(self._run_one, root_id, work)
+            except BaseException as exc:
+                self._active.remove(root_id)
+                self._pending -= 1
+                work[0].set_exception(exc)
+                if queue:
+                    self._ready.append(root_id)
+                    self._ready_set.add(root_id)
+                else:
+                    self._queues.pop(root_id, None)
+                self._drained.notify_all()
+                raise
+
+    def _run_one(self, root_id: str, work: tuple) -> None:
+        future, fn, args, kwargs = work
+        try:
+            if future.set_running_or_notify_cancel():
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as exc:
+                    future.set_exception(exc)
+                else:
+                    future.set_result(result)
+        finally:
+            with self._lock:
+                self._active.remove(root_id)
+                self._pending -= 1
+                queue = self._queues.get(root_id)
+                if queue:
+                    self._ready.append(root_id)
+                    self._ready_set.add(root_id)
+                else:
+                    self._queues.pop(root_id, None)
+                    self._adapters.pop(root_id, None)
+                self._dispatch_locked()
+                self._drained.notify_all()
 
     def shutdown(self, wait: bool = True) -> None:
-        for ex in self._pool:
-            ex.shutdown(wait=wait)
+        del wait
+        with self._lock:
+            self._closed = True
+            while self._pending:
+                self._drained.wait()
+        self._pool.shutdown(wait=True, cancel_futures=False)
 
 
 class EventJournalWriter:
@@ -301,7 +385,7 @@ class EventJournalWriter:
     def __init__(self) -> None:
         self._bus = None
         self._closed = False
-        self._executor = _ShardedExecutor(
+        self._executor = _KeyedSerialExecutor(
             pool_size=8,
             thread_name_prefix="ejw",
         )
@@ -439,9 +523,17 @@ class EventJournalWriter:
             await self._publish_written(written, run_id=event.run_id)
         return written
 
-    def barrier_sync(self, root_id: str, *, timeout: float = 30.0) -> int:
+    def barrier_sync(self, root_id: str, *, timeout: float | None = 30.0) -> int:
         """Wait for prior queued writes and return their durable high-water mark."""
-        future = self._executor.submit(root_id, event_ingester.cursor, root_id)
+        enqueued = time.perf_counter()
+
+        def _cursor() -> int:
+            perf.record(
+                "event_journal.barrier.queue_wait",
+                (time.perf_counter() - enqueued) * 1000,
+            )
+            return event_ingester.cursor(root_id)
+        future = self._executor.submit(root_id, _cursor)
         try:
             return int(future.result(timeout=timeout))
         except concurrent.futures.TimeoutError:
@@ -450,7 +542,15 @@ class EventJournalWriter:
 
     async def barrier(self, root_id: str) -> int:
         """Async writer barrier; writes queued before this call are durable."""
-        future = self._executor.submit(root_id, event_ingester.cursor, root_id)
+        enqueued = time.perf_counter()
+
+        def _cursor() -> int:
+            perf.record(
+                "event_journal.barrier.queue_wait",
+                (time.perf_counter() - enqueued) * 1000,
+            )
+            return event_ingester.cursor(root_id)
+        future = self._executor.submit(root_id, _cursor)
         return int(await asyncio.wrap_future(future))
 
     def reconcile_ownership_sync(
@@ -546,6 +646,16 @@ class EventJournalWriter:
         self._closed = True
         self._executor.shutdown(wait=True)
 
+    def reopen(self) -> None:
+        """Recreate writer threads for a new lifespan in this process."""
+        if not self._closed:
+            return
+        self._executor = _KeyedSerialExecutor(
+            pool_size=8,
+            thread_name_prefix="ejw",
+        )
+        self._closed = False
+
     async def _publish_written(
         self, written: EventWritten, *, run_id: Optional[str] = None,
     ) -> None:
@@ -554,6 +664,7 @@ class EventJournalWriter:
         payload: dict = {
             "event_type": written.event_type,
             "seq": written.seq,
+            "appended": written.seq > 0,
         }
         if written.event_id:
             payload["event_id"] = written.event_id
@@ -859,35 +970,39 @@ class EventJournalWriter:
     def _ensure_ownership_hydrated(self, root_id: str) -> None:
         if root_id in self._ownership_hydrated_roots:
             return
-        ownership_facts_changed = self._hydrate_snapshot_turn_boundaries(root_id)
+        with perf.timed("ejw.ownership_hydrate.snapshot"):
+            ownership_facts_changed = self._hydrate_snapshot_turn_boundaries(root_id)
         after_seq = 0
         while True:
-            rows, next_seq, has_more = event_ingester.read_events(
-                root_id,
-                after_seq=after_seq,
-                limit=10_000,
-            )
-            for row in rows:
-                replay = Event(
-                    root_id=root_id,
-                    sid=str(row.get("sid") or root_id),
-                    event_type=str(row.get("type") or "unknown"),
-                    data=row.get("data") if isinstance(row.get("data"), dict) else {},
-                    source=str(row.get("source") or "journal"),
-                    run_id=row.get("run_id"),
-                    message_id=row.get("msg_id"),
+            with perf.timed("ejw.ownership_hydrate.read"):
+                rows, next_seq, has_more = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=10_000,
                 )
-                ownership_facts_changed = self._record_resolved_event(
-                    replay,
-                    row.get("msg_id"),
-                    journal_seq=int(row.get("seq") or 0) or None,
-                ) or ownership_facts_changed
+            with perf.timed("ejw.ownership_hydrate.replay"):
+                for row in rows:
+                    replay = Event(
+                        root_id=root_id,
+                        sid=str(row.get("sid") or root_id),
+                        event_type=str(row.get("type") or "unknown"),
+                        data=row.get("data") if isinstance(row.get("data"), dict) else {},
+                        source=str(row.get("source") or "journal"),
+                        run_id=row.get("run_id"),
+                        message_id=row.get("msg_id"),
+                    )
+                    ownership_facts_changed = self._record_resolved_event(
+                        replay,
+                        row.get("msg_id"),
+                        journal_seq=int(row.get("seq") or 0) or None,
+                    ) or ownership_facts_changed
             if not has_more or not rows:
                 break
             after_seq = int(rows[-1].get("seq") or after_seq)
         self._ownership_hydrated_roots.add(root_id)
         if ownership_facts_changed:
-            self._resolve_pending_events(root_id)
+            with perf.timed("ejw.ownership_hydrate.resolve_pending"):
+                self._resolve_pending_events(root_id)
 
     def _hydrate_snapshot_turn_boundaries(self, root_id: str) -> bool:
         """Seed historical turn starts from the collapsed session snapshot.
@@ -955,6 +1070,8 @@ class EventJournalWriter:
         parent_tool_use_id = payload.get("parent_tool_use_id")
         if isinstance(parent_tool_use_id, str) and parent_tool_use_id:
             keys.append(("tool", parent_tool_use_id))
+        for tool_use_id in cls._tool_result_tool_use_ids_from_payload(payload):
+            keys.append(("tool", tool_use_id))
         delegate_id = cls._delegate_id(data)
         if delegate_id:
             keys.append(("delegate", delegate_id))
@@ -980,19 +1097,45 @@ class EventJournalWriter:
     @classmethod
     def _tool_use_ids(cls, data: dict) -> list[str]:
         payload = cls._provider_payload(data)
+        return [
+            block["id"]
+            for block in cls._message_content_blocks(payload)
+            if (
+                block.get("type") == "tool_use"
+                and isinstance(block.get("id"), str)
+                and block.get("id")
+            )
+        ]
+
+    @classmethod
+    def _tool_result_tool_use_ids_from_payload(cls, payload: dict) -> list[str]:
+        return [
+            block["tool_use_id"]
+            for block in cls._message_content_blocks(payload, role="user")
+            if (
+                block.get("type") == "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+                and block.get("tool_use_id")
+            )
+        ]
+
+    @staticmethod
+    def _message_content_blocks(
+        payload: dict, *, role: Optional[str] = None,
+    ) -> list[dict]:
         message = payload.get("message")
+        if role and (
+            not isinstance(message, dict)
+            or message.get("role") != role
+        ):
+            return []
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             return []
         return [
-            block["id"]
+            block
             for block in content
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and isinstance(block.get("id"), str)
-                and block.get("id")
-            )
+            if isinstance(block, dict)
         ]
 
     @staticmethod
@@ -1179,21 +1322,95 @@ class EventJournalWriter:
 @dataclass
 class _MessageCacheEntry:
     events: list[dict]
+    frontend_events: Optional[list[dict]]
     byte_start: int
     byte_end: int
     seq_end: int
     res_version: int
+    events_fingerprint: tuple[int, int]
+
+
+DEFAULT_MESSAGE_CACHE_SIZE = 128
 
 
 class EventJournalReader:
     """Runtime source of truth for journal reads and cached projections."""
 
-    def __init__(self, *, message_cache_size: int = 20) -> None:
+    def __init__(self, *, message_cache_size: int = DEFAULT_MESSAGE_CACHE_SIZE) -> None:
         self._message_cache_size = message_cache_size
         self._message_cache: OrderedDict[
             tuple[str, str, str], _MessageCacheEntry
         ] = OrderedDict()
         self._message_cache_lock = threading.RLock()
+
+    @staticmethod
+    def _events_fingerprint(session_id: str) -> tuple[int, int]:
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
+        try:
+            stat = path.stat()
+        except OSError:
+            return (0, 0)
+        return (stat.st_mtime_ns, stat.st_size)
+
+    @staticmethod
+    def _message_projection_path(
+        session_id: str, context_id: str, message_id: str,
+    ) -> Path:
+        key = hashlib.sha256(
+            f"{context_id}\0{message_id}".encode("utf-8", errors="surrogatepass"),
+        ).hexdigest()
+        return _session_artifacts_dir(session_id) / "message_frontend_cache" / f"{key}.json"
+
+    @staticmethod
+    def _projection_matches(cache: dict, cached: _MessageCacheEntry) -> bool:
+        return (
+            cache.get("byte_start") == cached.byte_start
+            and cache.get("byte_end") == cached.byte_end
+            and cache.get("seq_end") == cached.seq_end
+            and cache.get("res_version") == cached.res_version
+            and cached.events_fingerprint[1] >= cached.byte_end
+        )
+
+    def _read_message_projection(
+        self, session_id: str, context_id: str, message_id: str,
+        cached: _MessageCacheEntry,
+    ) -> Optional[list[dict]]:
+        path = self._message_projection_path(session_id, context_id, message_id)
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not self._projection_matches(payload, cached):
+            return None
+        events = payload.get("frontend_events")
+        return events if isinstance(events, list) else None
+
+    def _write_message_projection(
+        self, session_id: str, context_id: str, message_id: str,
+        cached: _MessageCacheEntry, frontend_events: list[dict],
+    ) -> None:
+        path = self._message_projection_path(session_id, context_id, message_id)
+        payload = {
+            "byte_start": cached.byte_start,
+            "byte_end": cached.byte_end,
+            "seq_end": cached.seq_end,
+            "res_version": cached.res_version,
+            "frontend_events": frontend_events,
+        }
+        tmp: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            with tmp.open("w", encoding="utf-8") as file:
+                json.dump(payload, file, separators=(",", ":"))
+            os.replace(tmp, path)
+        except OSError:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
 
     @staticmethod
     def _context_id(
@@ -1246,29 +1463,75 @@ class EventJournalReader:
         worker_id: Optional[str] = None,
         delegate_id: Optional[str] = None,
     ) -> list[dict]:
+        cached = self._ensure_message_cache(
+            session_id,
+            message_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
+        if cached is None:
+            return []
+        return list(cached.events[:limit])
+
+    def _ensure_message_cache(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        fork_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        delegate_id: Optional[str] = None,
+        summary: Optional[dict] = None,
+    ) -> Optional[_MessageCacheEntry]:
         context_id = self._context_id(
             session_id,
             fork_id=fork_id,
             worker_id=worker_id,
             delegate_id=delegate_id,
         )
-        summaries = self.message_event_summaries(
-            session_id,
-            sid_filter=context_id,
-        )
-        summary = summaries.get(message_id)
-        if not summary:
-            return []
-        resolutions = event_ingester.ownership_resolutions(session_id)
-        res_version = len(resolutions)
+        fingerprint = self._events_fingerprint(session_id)
         key = (session_id, context_id, message_id)
+        with self._message_cache_lock:
+            cached = self._message_cache.get(key)
+            if cached is not None and fingerprint == cached.events_fingerprint:
+                self._message_cache.move_to_end(key)
+                return cached
+        if summary is None:
+            summaries_start = time.perf_counter()
+            summaries = self.message_event_summaries(
+                session_id,
+                sid_filter=context_id,
+                msg_ids={message_id},
+            )
+            perf.record(
+                "event_journal.message_cache.summaries",
+                (time.perf_counter() - summaries_start) * 1000,
+            )
+            summary = summaries.get(message_id)
+        else:
+            perf.record("event_journal.message_cache.summary_provided", 1.0)
+        if not summary:
+            return None
+        seq_start = int(summary.get("seq_start") or 0)
+        seq_end = int(summary.get("seq_end") or 0)
+        resolutions_start = time.perf_counter()
+        resolutions = event_ingester.ownership_resolutions_range(
+            session_id,
+            seq_start=seq_start,
+            seq_end=seq_end,
+        )
+        perf.record(
+            "event_journal.message_cache.resolutions",
+            (time.perf_counter() - resolutions_start) * 1000,
+        )
+        res_version = len(resolutions)
         # Effective bounds: summary byte_start/byte_end already span the
         # message's own contiguous run UNION any resolved-in orphan
         # ranges (folded in event_ingester). A single range read + an
         # effective-owner filter reconstructs the message — no full scan.
         byte_start = int(summary.get("byte_start") or 0)
         byte_end = int(summary.get("byte_end") or byte_start)
-        seq_end = int(summary.get("seq_end") or 0)
         with self._message_cache_lock:
             cached = self._message_cache.get(key)
             grow_only = (
@@ -1277,37 +1540,108 @@ class EventJournalReader:
                 and cached.byte_start == byte_start
                 and cached.byte_end <= byte_end
             )
+            if grow_only and cached.byte_end == byte_end:
+                cached.seq_end = seq_end
+                cached.events_fingerprint = fingerprint
+                self._message_cache.move_to_end(key)
+                return cached
             if grow_only and cached.byte_end < byte_end:
                 # Hot streaming path: same span start, no new resolution
                 # — only append the new tail and filter it.
+                read_start = time.perf_counter()
                 cached.events.extend(self._read_owned_range(
                     session_id, message_id,
                     cached.byte_end, byte_end,
                     resolutions=resolutions,
                 ))
+                perf.record(
+                    "event_journal.message_cache.read_grow",
+                    (time.perf_counter() - read_start) * 1000,
+                )
                 cached.byte_end = byte_end
                 cached.seq_end = seq_end
+                cached.events_fingerprint = fingerprint
+                cached.frontend_events = None
             elif not grow_only:
                 # Cold, shrunk, start moved earlier, or a new resolution
                 # landed (which can reassign a mid-span row) — full
                 # effective re-read.
+                read_start = time.perf_counter()
                 events = self._read_owned_range(
                     session_id, message_id,
                     byte_start, byte_end,
                     resolutions=resolutions,
                 )
+                perf.record(
+                    "event_journal.message_cache.read_full",
+                    (time.perf_counter() - read_start) * 1000,
+                )
                 cached = _MessageCacheEntry(
                     events=events,
+                    frontend_events=None,
                     byte_start=byte_start,
                     byte_end=byte_end,
                     seq_end=seq_end,
                     res_version=res_version,
+                    events_fingerprint=fingerprint,
                 )
                 self._message_cache[key] = cached
             self._message_cache.move_to_end(key)
             while len(self._message_cache) > self._message_cache_size:
                 self._message_cache.popitem(last=False)
-            return list(cached.events[:limit])
+            return cached
+
+    def read_message_frontend_events(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        fork_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        delegate_id: Optional[str] = None,
+        summary: Optional[dict] = None,
+    ) -> list[dict]:
+        cached = self._ensure_message_cache(
+            session_id,
+            message_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+            summary=summary,
+        )
+        if cached is None:
+            return []
+        context_id = self._context_id(
+            session_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
+        lock_start = time.perf_counter()
+        with self._message_cache_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            perf.record("event_journal.message_frontend.lock_wait", lock_wait_ms)
+            if cached.frontend_events is None:
+                projected = self._read_message_projection(
+                    session_id, context_id, message_id, cached,
+                )
+                if projected is not None:
+                    cached.frontend_events = projected
+                    return list(projected)
+                source_events = list(cached.events)
+            else:
+                return list(cached.frontend_events)
+        convert_start = time.perf_counter()
+        frontend_events = self._to_frontend_events(source_events)
+        convert_ms = (time.perf_counter() - convert_start) * 1000
+        perf.record("event_journal.message_frontend.convert", convert_ms)
+        with self._message_cache_lock:
+            if cached.frontend_events is None:
+                cached.frontend_events = frontend_events
+                self._write_message_projection(
+                    session_id, context_id, message_id, cached, frontend_events,
+                )
+            return list(cached.frontend_events)
 
     def _read_owned_range(
         self,
@@ -1329,9 +1663,13 @@ class EventJournalReader:
         owning message's context, so filtering by `context_id` here would
         wrongly drop it (matches the former resolved-branch semantics,
         which filtered by msg_id only)."""
-        raw = self._read_raw_range(
-            session_id, byte_start, byte_end, context_id=None,
+        raw = event_ingester.cached_rows_for_byte_range(
+            session_id, byte_start, byte_end,
         )
+        if raw is None:
+            raw = self._read_raw_range(
+                session_id, byte_start, byte_end, context_id=None,
+            )
         out: list[dict] = []
         for row in raw:
             if row.get("type") == "event_ownership_resolved":
@@ -1359,9 +1697,7 @@ class EventJournalReader:
         context_id: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> list[dict]:
-        from paths import ba_home
-
-        path = ba_home() / "sessions" / session_id / "events.jsonl"
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
         if not path.exists() or byte_end <= byte_start:
             return []
         events: list[dict] = []
@@ -1435,15 +1771,16 @@ class EventJournalReader:
     def _read_appended_entries(
         self, session_id: str, byte_offset: int,
     ) -> tuple[list[dict], int]:
-        from paths import ba_home
-
-        path = ba_home() / "sessions" / session_id / "events.jsonl"
-        if not path.exists():
-            return [], byte_offset
-        if path.stat().st_size < byte_offset:
-            byte_offset = 0
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
         entries: list[dict] = []
-        with path.open("rb") as file:
+        try:
+            file = path.open("rb")
+        except FileNotFoundError:
+            return [], byte_offset
+        with file:
+            file.seek(0, os.SEEK_END)
+            if file.tell() < byte_offset:
+                byte_offset = 0
             file.seek(byte_offset)
             while True:
                 line_start = file.tell()
@@ -1476,29 +1813,7 @@ class EventJournalReader:
         # UUID (latest wins).  Without this dedup the native-only path
         # would return every snapshot and the frontend would render
         # triplicated text bubbles.
-        events: list[dict] = []
-        uuid_idx: dict[str, int] = {}
-        for entry in rows:
-            event_type = entry.get("type")
-            if event_type not in RENDER_EVENT_TYPES:
-                continue
-            data = entry.get("data", {})
-            if event_type == "manager_event" and isinstance(data, dict):
-                inner = data.get("event")
-                if isinstance(inner, dict):
-                    ev = inner
-                else:
-                    continue
-            else:
-                ev = {"type": event_type, "data": data}
-            uid = (ev.get("data") or {}).get("uuid") if isinstance(ev, dict) else None
-            if uid and uid in uuid_idx:
-                events[uuid_idx[uid]] = ev
-            else:
-                if uid:
-                    uuid_idx[uid] = len(events)
-                events.append(ev)
-        return events
+        return frontend_events_from_journal_rows(rows)
 
     def read_unattached_events(
         self,
@@ -1532,6 +1847,7 @@ class EventJournalReader:
         worker_id: Optional[str] = None,
         delegate_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        summary: Optional[dict] = None,
     ) -> list[dict]:
         context_id = self._context_id(
             session_id,
@@ -1540,14 +1856,14 @@ class EventJournalReader:
             delegate_id=delegate_id,
         )
         if message_id:
-            rows = self.read_message_events(
+            return self.read_message_frontend_events(
                 session_id,
                 message_id,
                 fork_id=fork_id,
                 worker_id=worker_id,
                 delegate_id=delegate_id,
+                summary=summary,
             )
-            return self._to_frontend_events(rows)
         return self.read_ws_events(session_id, sid_filter=context_id)
 
     def read_events(
@@ -1561,20 +1877,31 @@ class EventJournalReader:
     ) -> tuple[list[dict], int, bool]:
         resolutions = self._ownership_resolutions(root_id)
         if resolutions:
-            rows, _, _ = event_ingester.read_events(
-                root_id,
-                after_seq=after_seq,
-                limit=999_999,
-                sid_filter=sid_filter,
-            )
-            rows = self._apply_ownership_resolutions(rows, resolutions)
+            page_limit = max(limit, 0)
             if msg_id_filter:
-                rows = [
-                    row for row in rows
-                    if row.get("msg_id") == msg_id_filter
-                ]
+                rows, _, _ = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=999_999,
+                    sid_filter=sid_filter,
+                )
+            else:
+                rows, _total, raw_has_more = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=page_limit + 1,
+                    sid_filter=sid_filter,
+                )
+                rows = self._apply_ownership_resolutions(rows, resolutions)
+                total = len(rows)
+                return rows[:page_limit], total, raw_has_more or total > page_limit
+            rows = self._apply_ownership_resolutions(rows, resolutions)
+            rows = [
+                row for row in rows
+                if row.get("msg_id") == msg_id_filter
+            ]
             total = len(rows)
-            return rows[:limit], total, total > limit
+            return rows[:page_limit], total, total > page_limit
         return event_ingester.read_events(
             root_id,
             after_seq=after_seq,
@@ -1673,11 +2000,13 @@ class EventJournalReader:
         root_id: str,
         *,
         sid_filter: Optional[str] = None,
+        msg_ids: Optional[set[str]] = None,
         tail: int = 3,
     ) -> dict[str, dict]:
         return event_ingester.message_event_summaries(
             root_id,
             sid_filter=sid_filter,
+            msg_ids=msg_ids,
             tail=tail,
         )
 

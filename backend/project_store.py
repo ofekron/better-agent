@@ -151,6 +151,8 @@ def _migrate_legacy_or_raise() -> None:
 
 
 _v1_backup_records_cache: list[dict] | None = None
+_deleted_legacy_keys_cache: tuple[tuple[int, int], set[tuple[str, str]]] | None = None
+_list_projects_cache: tuple[tuple[int, int], tuple[int, int], list[dict]] | None = None
 
 
 def _v1_backup_records() -> list[dict]:
@@ -181,11 +183,34 @@ def _read_legacy_deletions() -> list[dict]:
 
 
 def _write_legacy_deletions(rows: list[dict]) -> None:
+    global _deleted_legacy_keys_cache
     write_json(_legacy_deletions_path(), rows)
+    _deleted_legacy_keys_cache = None
+
+
+def _legacy_deletions_fingerprint() -> tuple[int, int]:
+    try:
+        st = _legacy_deletions_path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _projects_fingerprint() -> tuple[int, int]:
+    try:
+        st = _projects_path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _deleted_legacy_keys() -> set[tuple[str, str]]:
     """Paths the user removed — repair must not resurrect them."""
+    global _deleted_legacy_keys_cache
+    fingerprint = _legacy_deletions_fingerprint()
+    cached = _deleted_legacy_keys_cache
+    if cached is not None and cached[0] == fingerprint:
+        return set(cached[1])
     out: set[tuple[str, str]] = set()
     for r in _read_legacy_deletions():
         if not isinstance(r, dict):
@@ -193,6 +218,7 @@ def _deleted_legacy_keys() -> set[tuple[str, str]]:
         norm = _normalize(r.get("path", ""))
         if norm:
             out.add((r.get("node_id") or "primary", norm))
+    _deleted_legacy_keys_cache = (fingerprint, set(out))
     return out
 
 
@@ -252,7 +278,9 @@ def _read_file() -> list[dict]:
 
 
 def _write_file(projects: list[dict]) -> None:
+    global _list_projects_cache
     write_json(_projects_path(), {"version": SCHEMA_VERSION, "projects": projects})
+    _list_projects_cache = None
 
 
 def _normalize(path: str) -> Optional[str]:
@@ -272,8 +300,12 @@ def _seed_from_sessions_if_empty() -> list[dict]:
     if existing or _projects_path().exists():
         return existing
 
+    import session_store
+
     seen: dict[tuple[str, str], dict] = {}
     for s in session_manager.list():
+        if not session_store.should_auto_register_project(s):
+            continue
         cwd = _normalize(s.get("cwd", ""))
         if not cwd:
             continue
@@ -306,12 +338,23 @@ def _seed_from_sessions_if_empty() -> list[dict]:
 def list_projects() -> list[dict]:
     """Return projects sorted by `last_used` descending. Each row
     carries `node_id` so the frontend can group/filter by machine."""
+    global _list_projects_cache
+    projects_fp = _projects_fingerprint()
+    deletions_fp = _legacy_deletions_fingerprint()
+    cached = _list_projects_cache
+    if cached is not None and cached[0] == projects_fp and cached[1] == deletions_fp:
+        return [dict(project) for project in cached[2]]
     projects = (
         _seed_from_sessions_if_empty() if not _projects_path().exists()
         else _read_file()
     )
     projects.sort(key=lambda p: p.get("last_used", ""), reverse=True)
-    return projects
+    _list_projects_cache = (
+        _projects_fingerprint(),
+        _legacy_deletions_fingerprint(),
+        [dict(project) for project in projects],
+    )
+    return [dict(project) for project in projects]
 
 
 def add_project(

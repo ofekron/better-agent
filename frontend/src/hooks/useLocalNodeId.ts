@@ -1,8 +1,8 @@
 import { useEffect, useReducer } from "react";
 
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 
-const MACHINE_NODES_API = `${API}/api/extensions/ofek-dev.machine-nodes/backend`;
+const machineNodesApi = () => extBackendBase("machineNodes");
 
 // Module-level cache — every consumer shares the SAME local id.
 // Single fetch on first hook mount; subsequent mounts read the cached
@@ -19,7 +19,7 @@ function _refetch(): Promise<void> {
   if (_inFlight) return _inFlight;
   _inFlight = (async () => {
     try {
-      const r = await fetch(`${MACHINE_NODES_API}/local_node_id`, {
+      const r = await fetch(`${machineNodesApi()}/local_node_id`, {
         credentials: "include",
       });
       if (!r.ok) {

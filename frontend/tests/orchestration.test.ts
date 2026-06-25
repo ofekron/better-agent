@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fireEvent } from "@testing-library/react";
+import "../src/i18n";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 
@@ -129,7 +130,11 @@ describe("orchestration selector → /selectors PATCH", () => {
     await h.selectSession(session.id);
 
     await h.typeAndSend("ship it");
-    await h.clickByText("Move & send");
+    expect(h.raw.container.textContent).toContain("You sent this to: source");
+    expect(h.raw.container.textContent).toContain("I think you meant to send it to: target");
+    expect(h.raw.container.textContent).toContain("Send to source");
+    expect(h.raw.container.textContent).toContain("Move to target");
+    await h.clickByText("Move to target");
 
     const patches = h.backend.calls.filter(
       (c) => c.method === "PATCH" && c.path === "/api/sessions/fresh/selectors",

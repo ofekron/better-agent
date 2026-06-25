@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import ClassVar, Optional
 
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from provider import build_better_agent_run_env, create_loop_task, runner_argv
+from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
 from proc_control import process_control as _process_control
@@ -93,6 +94,7 @@ class AgyProvider(GeminiProvider):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,
@@ -113,6 +115,7 @@ class AgyProvider(GeminiProvider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         del disallowed_tools, setting_sources
         del supervised, supervisor_agent_session_id, mssg_sender_session_id, is_worker
@@ -123,6 +126,7 @@ class AgyProvider(GeminiProvider):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
         if self.defunct:
             raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
+        self.assert_not_suspended(action="start new runs")
         if reasoning_effort:
             raise NotImplementedError("agy provider does not support reasoning effort.")
         if mode == "team":
@@ -150,7 +154,13 @@ class AgyProvider(GeminiProvider):
             "model": model,
             "session_id": session_id,
             "mode": mode,
+            "source": source or "",
             "app_session_id": app_session_id,
+            "active_capability_ids": [
+                str(cid)
+                for cid in (session_record.get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "backend_url": backend_url or "",
             "internal_token": internal_token or "",
             "provider_id": self.id,
@@ -164,11 +174,14 @@ class AgyProvider(GeminiProvider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=session_record,
+                    worker_record=worker_record,
+                )
             ),
             "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
@@ -226,7 +239,7 @@ class AgyProvider(GeminiProvider):
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"agy-bootstrap-{run_id[:8]}",
@@ -241,7 +254,14 @@ class AgyProvider(GeminiProvider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
+        if no_tools:
+            # No proven tool-disable flag — fail closed rather than run
+            # a tool-capable CLI when the caller demanded text-only.
+            logger.error("AgyProvider.run_headless: no_tools requested but unsupported")
+            return None
         if fork:
             logger.warning("AGY provider ignores fork flag in run_headless")
         agy_bin = resolve_cli_binary("agy")

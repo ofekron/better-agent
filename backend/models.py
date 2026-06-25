@@ -38,10 +38,12 @@ retired model) call `available_models_including_retired()` explicitly.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -61,11 +63,17 @@ logger = logging.getLogger(__name__)
 # the cache list is unioned with these so legacy/special variants
 # survive even when the API drops them.
 _SUBSCRIPTION_ALIASES = [
-    "claude-fable-5[1m]",
+    "best",
+    "fable",
+    "opus",
+    "opus[1m]",
+    "sonnet",
+    "sonnet[1m]",
+    "haiku",
     "claude-fable-5",
     "claude-opus-4-8[1m]",
-    "claude-opus-4-7[1m]",
-    "claude-sonnet-4-6",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
     "claude-haiku-4-5-20251001",
 ]
 
@@ -78,6 +86,8 @@ REFRESH_THRESHOLD_SECONDS = 86400  # 24h — overdue check in refresh_all_due
 # providers added after boot. Single-event-loop + no-await read-check-
 # write makes the lazy path safe; eager pre-warm is belt+suspenders.
 _refresh_locks: dict[str, asyncio.Lock] = {}
+_cache_lock = threading.Lock()
+_cache_by_path: dict[Path, tuple[tuple[int, int], dict]] = {}
 
 
 def _lock_for(pid: str) -> asyncio.Lock:
@@ -97,8 +107,17 @@ def _read_cache(pid: str) -> Optional[dict]:
     """Returns parsed cache dict or None on missing/corrupt/wrong-schema.
     On corruption: logs WARNING and unlinks the file (no silent overwrite)."""
     path = _models_cache_path(pid)
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _cache_lock:
+        cached = _cache_by_path.get(path)
+        if cached is not None and cached[0] == fingerprint:
+            return copy.deepcopy(cached[1])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -108,6 +127,8 @@ def _read_cache(pid: str) -> Optional[dict]:
             pid, e,
         )
         path.unlink(missing_ok=True)
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
     if data.get("schema") != SCHEMA_VERSION or not isinstance(data.get("models"), list):
         logger.warning(
@@ -116,10 +137,14 @@ def _read_cache(pid: str) -> Optional[dict]:
             pid, data.get("schema"), type(data.get("models")).__name__,
         )
         path.unlink(missing_ok=True)
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
     data.setdefault("retired", [])
     data.setdefault("last_refreshed_at", 0.0)
     data.setdefault("last_fetch_state", "ok")
+    with _cache_lock:
+        _cache_by_path[path] = (fingerprint, copy.deepcopy(data))
     return data
 
 
@@ -146,7 +171,16 @@ def _update_cache(
         cur["last_fetch_state"] = last_fetch_state
     cur["last_refreshed_at"] = time.time()
     cur["schema"] = SCHEMA_VERSION
-    write_json(_models_cache_path(pid), cur)
+    path = _models_cache_path(pid)
+    write_json(path, cur)
+    try:
+        stat = path.stat()
+    except OSError:
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
+    else:
+        with _cache_lock:
+            _cache_by_path[path] = ((stat.st_mtime_ns, stat.st_size), copy.deepcopy(cur))
 
 
 def _merge_retired(
@@ -282,6 +316,43 @@ def _fetch_api_models(
     return models
 
 
+def fetch_openai_models(base_url: str, api_key: str) -> list[str]:
+    """List models from an OpenAI-compatible endpoint (GET {base_url}/models).
+
+    Sync HTTP — call only from a worker thread (via asyncio.to_thread).
+    base_url is used verbatim (Sakana/Z.AI/etc. already include the /v1
+    segment), so the endpoint is `{base_url}/models`. Returns [] on any
+    failure so the catalog falls back to the configured default model.
+    """
+    if not base_url or not api_key:
+        return []
+    url = f"{base_url.rstrip('/')}/models"
+    models: list[str] = []
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            r.raise_for_status()
+            for m in r.json().get("data", []):
+                mid = m.get("id")
+                if mid:
+                    models.append(mid)
+    except httpx.HTTPStatusError as e:
+        excerpt = ((e.response.text or "")[:300]).replace("\n", " ")
+        logger.warning(
+            "OpenAI-compatible models fetch HTTP %d from %s: %s",
+            e.response.status_code, url, excerpt,
+        )
+    except Exception as e:
+        logger.warning("Failed to fetch OpenAI-compatible models from %s: %s", url, e)
+    return models
+
+
+def _runtime_kind_for_provider(provider: dict) -> str:
+    if str(provider.get("runner") or "").strip() == "better_agent_runner":
+        return "openai"
+    return provider.get("kind", "claude")
+
+
 def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     """For a provider record, return a zero-arg callable that fetches
     the live model list (sync, intended for `asyncio.to_thread`), or
@@ -298,7 +369,7 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     captured value stays valid. Intentional — we don't want to re-read
     the keychain after the per-provider lock is held.
     """
-    kind = rec.get("kind", "claude")
+    kind = _runtime_kind_for_provider(rec)
     if kind == "claude":
         base_url = rec.get("base_url") or "https://api.anthropic.com"
         mode = rec.get("mode", "subscription")
@@ -313,18 +384,48 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
                 return None
             return lambda: _fetch_api_models(base_url, bearer_token=token)
         return None
+    if kind == "openai":
+        # OpenAI-compatible endpoint (sakana, z.ai, custom): list models via
+        # the standard GET {base_url}/models. BA owns the agent loop; the key
+        # is in the record (api_key mode only).
+        base_url = rec.get("base_url") or ""
+        api_key = rec.get("api_key") or ""
+        if not base_url or not api_key:
+            return None
+        return lambda: fetch_openai_models(base_url, api_key)
     if kind == "gemini":
         from provider_gemini import fetch_gemini_models
         return fetch_gemini_models
     if kind == "codex":
         from provider_codex import fetch_codex_models
         return fetch_codex_models
+    if kind == "fugu":
+        from provider_fugu import fetch_fugu_models
+        return fetch_fugu_models
     if kind == "agy":
         from provider_agy import fetch_agy_models
         return fetch_agy_models
     if kind == "copilot":
         from provider_copilot import fetch_copilot_models
         return fetch_copilot_models
+    if kind == "pi":
+        from provider_pi import fetch_pi_models
+        return fetch_pi_models
+    if kind == "qwen":
+        from provider_qwen import fetch_qwen_models
+        return fetch_qwen_models
+    if kind == "cursor":
+        from provider_cursor import fetch_cursor_models
+        return fetch_cursor_models
+    if kind == "kimi":
+        from provider_kimi import fetch_kimi_models
+        return fetch_kimi_models
+    if kind == "amp":
+        from provider_amp import fetch_amp_models
+        return fetch_amp_models
+    if kind == "opencode":
+        from provider_opencode import fetch_opencode_models
+        return fetch_opencode_models
     return None
 
 
@@ -347,27 +448,48 @@ def _static_cold_start(provider: dict) -> list[str]:
     """Cold-start data when no cache exists. Subscription Claude →
     `_SUBSCRIPTION_ALIASES`. Gemini → curated `GEMINI_MODELS`. Other
     cases → []. Explicit kind+mode pairing — no implicit fallthrough."""
-    kind = provider.get("kind", "claude")
+    kind = _runtime_kind_for_provider(provider)
     if kind == "gemini":
         from provider_gemini import GEMINI_MODELS
         return list(GEMINI_MODELS)
     if kind == "codex":
         from provider_codex import CODEX_MODELS
         return list(CODEX_MODELS)
+    if kind == "fugu":
+        from provider_fugu import FUGU_MODELS
+        return list(FUGU_MODELS)
     if kind == "agy":
         from provider_agy import AGY_MODELS
         return list(AGY_MODELS)
     if kind == "copilot":
         from provider_copilot import COPILOT_MODELS
         return list(COPILOT_MODELS)
+    if kind == "pi":
+        from provider_pi import PI_MODELS
+        return list(PI_MODELS)
+    if kind == "qwen":
+        from provider_qwen import QWEN_MODELS
+        return list(QWEN_MODELS)
+    if kind == "cursor":
+        from provider_cursor import CURSOR_MODELS
+        return list(CURSOR_MODELS)
+    if kind == "kimi":
+        from provider_kimi import KIMI_MODELS
+        return list(KIMI_MODELS)
+    if kind == "amp":
+        from provider_amp import AMP_MODELS
+        return list(AMP_MODELS)
+    if kind == "opencode":
+        from provider_opencode import OPENCODE_MODELS
+        return list(OPENCODE_MODELS)
     if kind == "claude" and provider.get("mode", "subscription") == "subscription":
         return list(_SUBSCRIPTION_ALIASES)
     return []
 
 
-def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
+def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, dict | None]:
     """Single source of truth for `_models_for` + `models_catalog`.
-    Returns `(active_models, retired_ids, has_cache)`.
+    Returns `(active_models, retired_ids, has_cache, cache_record)`.
 
     Semantics:
     - Cache present → use cache. For subscription Claude, also union
@@ -382,10 +504,11 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
         [r["id"] for r in (cached.get("retired") or [])] if cached else []
     )
 
+    kind = _runtime_kind_for_provider(provider)
     static_seed = _static_cold_start(provider) if not has_cache else []
     if has_cache:
         if (
-            provider.get("kind") == "claude"
+            kind == "claude"
             and provider.get("mode", "subscription") == "subscription"
         ):
             models = _dedupe_preserve_order(
@@ -396,17 +519,26 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
     else:
         models = static_seed
 
-    return models, cached_retired, has_cache
+    return models, cached_retired, has_cache, cached
 
 
 def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     """Cache-only read. Never makes an HTTP call. See `_read_catalog_models`
-    for per-kind semantics."""
+    for per-kind semantics. The configured `default_model` is always unioned
+    in so the selector is never empty before/without a successful fetch (e.g.
+    a fresh openai provider whose first /models fetch hasn't run yet)."""
     custom = list(provider.get("custom_models") or [])
-    models, retired_ids, _has_cache = _read_catalog_models(provider)
+    models, retired_ids, _has_cache, _cached = _read_catalog_models(provider)
     if include_retired:
         models = models + retired_ids
-    return models + custom
+    default_model = provider.get("default_model") or ""
+    seed = []
+    if default_model:
+        known = set(models + custom + retired_ids)
+        kind = _runtime_kind_for_provider(provider)
+        if kind != "codex" or not _cached or default_model in known:
+            seed = [default_model]
+    return _dedupe_preserve_order(models + custom + seed)
 
 
 def available_models(provider_id: Optional[str] = None) -> list[str]:
@@ -476,8 +608,7 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
             "last_refreshed_at": 0.0,
         }
     custom = list(rec.get("custom_models") or [])
-    models, retired, has_cache = _read_catalog_models(rec)
-    cached = _read_cache(rec["id"]) if has_cache else None
+    models, retired, has_cache, cached = _read_catalog_models(rec)
 
     if cached is not None:
         state = cached.get("last_fetch_state") or "ok"
@@ -511,6 +642,9 @@ async def refresh_one(pid: str) -> Optional[dict]:
     is not refreshable right now: Gemini CLI not installed, Claude
     subscription Keychain entry missing, api_key empty, etc.
     """
+    import config_store
+    if config_store.provider_suspended(pid):
+        return None
     rec = get_provider_with_key(pid)
     if not rec:
         return None
@@ -587,6 +721,8 @@ async def refresh_all_due(threshold_seconds: int = REFRESH_THRESHOLD_SECONDS):
     now = time.time()
     state = list_providers()
     for rec_public in state.get("providers", []):
+        if rec_public.get("suspended"):
+            continue
         pid = rec_public["id"]
         # Threshold check FIRST — cheap (disk read of small JSON).
         # `_resolve_refresh_fetch` may shell out to `security` /

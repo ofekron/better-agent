@@ -22,7 +22,11 @@ if _BACKEND not in sys.path:
 
 from event_bus import BusEvent, bus  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
-from event_bus_subscribers import register_default_subscribers  # noqa: E402
+from event_bus_subscribers import (  # noqa: E402
+    await_session_content_projection,
+    register_default_subscribers,
+    shutdown_session_content_projection,
+)
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -45,6 +49,9 @@ async def _run() -> bool:
         sid, {"id": msg_id, "role": "assistant", "content": "", "events": []},
     )
 
+    # Combined suites can exercise application shutdown before rebinding.
+    # Registration must reopen the singleton projection drainer.
+    shutdown_session_content_projection()
     register_default_subscribers()
 
     await bus.publish(BusEvent(
@@ -62,6 +69,7 @@ async def _run() -> bool:
             },
         },
     ))
+    await await_session_content_projection(sid)
 
     rows = event_journal_reader.read_message_events(sid, msg_id)
     lite = session_manager.get_lite(sid) or {}
@@ -82,6 +90,32 @@ async def _run() -> bool:
         msg.get("content") == "bus projected text",
         "session projection updates from journal written ack",
         str(msg),
+    ) and ok
+    await bus.publish(BusEvent(
+        type="agent_message",
+        root_id=sid,
+        sid=sid,
+        msg_id=msg_id,
+        payload={
+            "uuid": "bus-owned-second",
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "second"}]},
+        },
+    ))
+    await await_session_content_projection(sid)
+    ordered = session_manager.get(sid) or {}
+    ordered_msg = next(
+        (m for m in (ordered.get("messages") or []) if m.get("id") == msg_id),
+        {},
+    )
+    event_uuids = [
+        (event.get("data") or {}).get("uuid")
+        for event in ordered_msg.get("events") or []
+    ]
+    ok = _check(
+        event_uuids == ["bus-owned", "bus-owned-second"],
+        "projection barrier preserves journal order",
+        str(event_uuids),
     ) and ok
     return ok
 

@@ -71,7 +71,7 @@ def _ws_chat_url(port: int) -> str:
     return base
 
 
-# ── ANSI palette (borrowed from trace_cli.py) ────────────────────
+# ── ANSI palette ─────────────────────────────────────────────────
 
 DIM = "\033[2m"
 BOLD = "\033[1m"
@@ -504,6 +504,7 @@ class Backend:
         mode: str,
         renderer: Renderer,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         cli_prompt: Optional[str] = None,
         known_worker_registry_cwds: Optional[dict[str, str]] = None,
     ) -> str:
@@ -527,7 +528,11 @@ class ClientBackend(Backend):
 
     async def start(self) -> None:
         import websockets
-        self._ws = await websockets.connect(_ws_chat_url(self.port))
+        self._ws = await websockets.connect(
+            _ws_chat_url(self.port),
+            max_size=None,
+            ping_timeout=None,
+        )
 
     def set_worker_creation_policy(self, session_id: str, policy: str) -> None:
         req = urllib.request.Request(
@@ -549,6 +554,7 @@ class ClientBackend(Backend):
         mode: str,
         renderer: Renderer,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         cli_prompt: Optional[str] = None,
         known_worker_registry_cwds: Optional[dict[str, str]] = None,
     ) -> str:
@@ -563,6 +569,7 @@ class ClientBackend(Backend):
             "images": [],
             "cli_prompt": cli_prompt,
             "disallowed_tools": disallowed_tools,
+            "disabled_builtin_extensions": disabled_builtin_extensions,
             "known_worker_registry_cwds": known_worker_registry_cwds,
             "backend_url": f"http://127.0.0.1:{self.port}",
         }))
@@ -682,6 +689,7 @@ async def _drive_turn(
     cwd: str,
     mode: str,
     disallowed_tools: Optional[list[str]] = None,
+    disabled_builtin_extensions: Optional[list[str]] = None,
     cli_prompt: Optional[str] = None,
     known_worker_registry_cwds: Optional[dict[str, str]] = None,
 ) -> str:
@@ -720,6 +728,7 @@ async def _drive_turn(
             mode=mode,
             renderer=renderer,
             disallowed_tools=disallowed_tools,
+            disabled_builtin_extensions=disabled_builtin_extensions,
             cli_prompt=cli_prompt,
             known_worker_registry_cwds=known_worker_registry_cwds,
         )
@@ -841,6 +850,13 @@ def _parse_args() -> argparse.Namespace:
         help="Disallow a provider tool for this CLI turn. May be repeated.",
     )
     p.add_argument(
+        "--disabled-builtin-extension",
+        action="append",
+        dest="disabled_builtin_extensions",
+        default=[],
+        help="Disable a built-in/runtime extension for this CLI turn. May be repeated.",
+    )
+    p.add_argument(
         "--known-workers-file",
         help=(
             "JSON file containing the exact worker list to render in "
@@ -922,6 +938,7 @@ async def _async_main(args: argparse.Namespace) -> int:
                 cwd=cwd,
                 mode=mode,
                 disallowed_tools=args.disallowed_tools or None,
+                disabled_builtin_extensions=args.disabled_builtin_extensions or None,
                 cli_prompt=_build_cli_prompt_override(
                     session=session,
                     cwd=cwd,

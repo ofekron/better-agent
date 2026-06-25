@@ -13,6 +13,7 @@ import os
 import time
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +23,41 @@ _JSONL_PATH_CACHE: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
 _JSONL_PATH_NEGATIVE_TTL_S = 5.0
 _JSONL_INDEX_TTL_S = 5.0
 _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
-_RUN_STATE_INDEX: tuple[str, float, dict[str, Path]] | None = None
+_CLAUDE_PATH_INDEX_LOCK = threading.Lock()
+_RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
+_JSONL_LINE_COUNT_LOCK = threading.Lock()
+_JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
+_JSONL_LINE_COUNT_INFLIGHT: dict[str, threading.Lock] = {}
+_JSONL_PATH_REVISIONS: dict[str, int] = {}
+_JSONL_PATH_LINE_COUNTS: dict[str, int] = {}
+_MISSING_JSONL_WARNING_TTL_S = 60.0
+_MISSING_JSONL_WARNED_AT: dict[tuple[str, str, str], float] = {}
+
+
+def note_jsonl_append(path: Path, line_count: int) -> None:
+    key = str(path)
+    count = int(line_count)
+    with _JSONL_LINE_COUNT_LOCK:
+        if _JSONL_PATH_LINE_COUNTS.get(key) == count:
+            return
+        _JSONL_PATH_LINE_COUNTS[key] = count
+        _JSONL_PATH_REVISIONS[key] = _JSONL_PATH_REVISIONS.get(key, 0) + 1
+
+
+def notify_jsonl_appended(path: Path) -> None:
+    key = str(path)
+    with _JSONL_LINE_COUNT_LOCK:
+        _JSONL_PATH_REVISIONS[key] = _JSONL_PATH_REVISIONS.get(key, 0) + 1
+
+
+def path_revision(path: Path) -> int:
+    with _JSONL_LINE_COUNT_LOCK:
+        return _JSONL_PATH_REVISIONS.get(str(path), 0)
+
+
+def path_revision_token(paths: tuple[str, ...]) -> tuple[tuple[str, int], ...]:
+    with _JSONL_LINE_COUNT_LOCK:
+        return tuple((path, _JSONL_PATH_REVISIONS.get(path, 0)) for path in paths)
 
 
 def _claude_projects_dir() -> Path:
@@ -101,63 +136,87 @@ def _claude_path_index() -> dict[str, Path]:
         cached_key, ts, cached = _CLAUDE_PATH_INDEX
         if cached_key == key and now - ts < _JSONL_INDEX_TTL_S:
             return cached
+    if not _CLAUDE_PATH_INDEX_LOCK.acquire(blocking=False):
+        if _CLAUDE_PATH_INDEX is not None:
+            cached_key, _ts, cached = _CLAUDE_PATH_INDEX
+            if cached_key == key:
+                return cached
+        with _CLAUDE_PATH_INDEX_LOCK:
+            if _CLAUDE_PATH_INDEX is None:
+                return {}
+            cached_key, _ts, cached = _CLAUDE_PATH_INDEX
+            return cached if cached_key == key else {}
     indexed: dict[str, Path] = {}
     try:
-        for path in projects.glob("*/*.jsonl"):
-            indexed.setdefault(path.stem, path)
-    except OSError:
-        indexed = {}
-    _CLAUDE_PATH_INDEX = (key, now, indexed)
-    return indexed
+        try:
+            for path in projects.glob("*/*.jsonl"):
+                indexed.setdefault(path.stem, path)
+        except OSError:
+            indexed = {}
+        _CLAUDE_PATH_INDEX = (key, now, indexed)
+        return indexed
+    finally:
+        _CLAUDE_PATH_INDEX_LOCK.release()
 
 
-def _run_state_index() -> dict[str, Path]:
-    global _RUN_STATE_INDEX
+def _run_state_cache_get(root_key: str, agent_sid: str) -> tuple[bool, Optional[Path]]:
+    now = time.monotonic()
+    cached = _RUN_STATE_PATH_CACHE.get((root_key, agent_sid))
+    if cached is None:
+        return False, None
+    ts, path = cached
+    if path is None:
+        if now - ts < _JSONL_PATH_NEGATIVE_TTL_S:
+            return True, None
+        _RUN_STATE_PATH_CACHE.pop((root_key, agent_sid), None)
+        return False, None
+    if path.exists():
+        return True, path
+    _RUN_STATE_PATH_CACHE.pop((root_key, agent_sid), None)
+    return False, None
+
+
+def _run_state_cache_put(root_key: str, agent_sid: str, path: Optional[Path]) -> Optional[Path]:
+    _RUN_STATE_PATH_CACHE[(root_key, agent_sid)] = (time.monotonic(), path)
+    return path
+
+
+def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    from runs_dir import state_files_for_sid
+    return state_files_for_sid(root, agent_sid)
+
+
+def _run_state_path_for_sid(agent_sid: str) -> Optional[Path]:
     try:
         from runs_dir import runs_root
     except Exception:
-        return {}
+        return None
     root = runs_root()
     key = str(root)
-    now = time.monotonic()
-    if _RUN_STATE_INDEX is not None:
-        cached_key, ts, cached = _RUN_STATE_INDEX
-        if cached_key == key and now - ts < _JSONL_INDEX_TTL_S:
-            return cached
-    if not root.exists():
-        _RUN_STATE_INDEX = (key, now, {})
-        return {}
-    newest: dict[str, tuple[float, Path]] = {}
-    try:
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
-            state_path = child / "state.json"
-            if not state_path.exists():
-                continue
-            try:
-                st = json.loads(state_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            sid = st.get("session_id")
-            if not sid:
-                continue
-            jp_str = st.get("jsonl_path")
-            candidate = Path(jp_str) if jp_str else child / "session_events.jsonl"
-            if not candidate.exists():
-                continue
-            try:
-                mt = state_path.stat().st_mtime
-            except OSError:
-                mt = 0.0
-            current = newest.get(str(sid))
-            if current is None or (mt, str(candidate)) > (current[0], str(current[1])):
-                newest[str(sid)] = (mt, candidate)
-    except OSError:
-        newest = {}
-    indexed = {sid: path for sid, (_, path) in newest.items()}
-    _RUN_STATE_INDEX = (key, now, indexed)
-    return indexed
+    cached_hit, cached = _run_state_cache_get(key, agent_sid)
+    if cached_hit:
+        return cached
+    if not root.is_dir():
+        return _run_state_cache_put(key, agent_sid, None)
+    newest: tuple[float, Path] | None = None
+    for state_path in _state_files_for_sid(root, agent_sid):
+        try:
+            st = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(st.get("session_id") or "") != agent_sid:
+            continue
+        jp_str = st.get("jsonl_path")
+        candidate = Path(jp_str) if jp_str else state_path.parent / "session_events.jsonl"
+        if not candidate.exists():
+            continue
+        try:
+            mt = state_path.stat().st_mtime
+        except OSError:
+            mt = 0.0
+        if newest is None or (mt, str(candidate)) > (newest[0], str(newest[1])):
+            newest = (mt, candidate)
+    return _run_state_cache_put(key, agent_sid, newest[1] if newest is not None else None)
 
 
 def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
@@ -199,29 +258,38 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
     # multiple run dirs, so we collect ALL matches and return the
     # newest (by state.json mtime) — that's the most-recent turn whose
     # events.jsonl the supervisor / replay actually wants.
-    run_index = _run_state_index()
-    run_path = run_index.get(agent_sid)
+    run_path = _run_state_path_for_sid(agent_sid)
     if run_path is not None and run_path.exists():
         return _cache_existing_path(agent_sid, run_path)
-    # Silent ingestion failure made visible: no provider's jsonl could be
-    # located for this sid, so the tailer/strategy will read nothing and
-    # events for this turn never ingest. Surface it so encoded-cwd mismatches
-    # (common on Windows) and missing run-state are findable in the log. The
-    # negative cache (5s TTL) keeps this to ~once per sid per window, not spam.
+    _warn_missing_jsonl(cwd, agent_sid, encoded_path, claude_index)
+    _cache_missing_path(agent_sid)
+    return None
+
+
+def _warn_missing_jsonl(
+    cwd: str,
+    agent_sid: str,
+    encoded_path: Optional[Path],
+    claude_index: dict[str, Path],
+) -> None:
+    key = _cache_key(agent_sid)
+    now = time.monotonic()
+    last = _MISSING_JSONL_WARNED_AT.get(key)
+    if last is not None and now - last < _MISSING_JSONL_WARNING_TTL_S:
+        return
+    _MISSING_JSONL_WARNED_AT[key] = now
     log.warning(
         "ingestion: no jsonl located for agent_sid=%s cwd=%r — tried "
-        "encoded_cwd=%s (exists=%s); claude index=%d entries, run-state index=%d "
+        "encoded_cwd=%s (exists=%s); claude index=%d entries, run-state path cache=%d "
         "entries under projects=%s. Events for this sid will NOT ingest.",
         agent_sid,
         cwd,
         encoded_path,
         bool(encoded_path is not None and encoded_path.exists()),
         len(claude_index),
-        len(run_index),
+        len(_RUN_STATE_PATH_CACHE),
         _claude_projects_dir(),
     )
-    _cache_missing_path(agent_sid)
-    return None
 
 
 def compute_jsonl_read_path(
@@ -265,13 +333,42 @@ def compute_jsonl_read_path(
 
 
 def count_jsonl_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
     try:
-        with path.open("rb") as f:
-            return sum(1 for _ in f)
+        stat = path.stat()
     except OSError:
         return 0
+    fingerprint = (int(stat.st_mtime_ns), int(stat.st_size), int(getattr(stat, "st_ino", 0)))
+    key = str(path)
+    with _JSONL_LINE_COUNT_LOCK:
+        cached = _JSONL_LINE_COUNT_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        path_lock = _JSONL_LINE_COUNT_INFLIGHT.get(key)
+        if path_lock is None:
+            path_lock = threading.Lock()
+            _JSONL_LINE_COUNT_INFLIGHT[key] = path_lock
+    with path_lock:
+        with _JSONL_LINE_COUNT_LOCK:
+            cached = _JSONL_LINE_COUNT_CACHE.get(key)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+        try:
+            with path.open("rb") as f:
+                count = sum(1 for _ in f)
+        except OSError:
+            return 0
+        with _JSONL_LINE_COUNT_LOCK:
+            _JSONL_LINE_COUNT_CACHE[key] = (fingerprint, count)
+            if len(_JSONL_LINE_COUNT_INFLIGHT) > 512:
+                active = {
+                    cache_key
+                    for cache_key in _JSONL_LINE_COUNT_CACHE
+                }
+                for lock_key in list(_JSONL_LINE_COUNT_INFLIGHT):
+                    if lock_key not in active:
+                        _JSONL_LINE_COUNT_INFLIGHT.pop(lock_key, None)
+        note_jsonl_append(path, count)
+        return count
 
 
 def jsonl_byte_size(path: Optional[Path]) -> int:

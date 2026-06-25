@@ -112,6 +112,59 @@ async def _run() -> bool:
         f"get() called {counts['get']}x on the hot path (expected 0)",
     ))
 
+    cursor_tailer = OwnedClaudeJsonlTailer(
+        root_id="root-t",
+        app_session_id="app-t",
+        agent_sid="worker-fork-sid",
+        jsonl_path=Path(_TMP_HOME) / "dummy.jsonl",
+        start_offset=0,
+    )
+    persisted: list[int] = []
+    cursor_tailer._persist_cursor = persisted.append  # type: ignore[method-assign]
+
+    # `_on_cursor` now hands persistence to the global cursor_ledger_worker,
+    # which processes one write per key at a time on its own thread. Force
+    # that worker into a controlled in-flight state on this tailer's key
+    # BEFORE bursting cursor advances, so "coalesced" is a deterministic
+    # assertion instead of a race against the worker thread's own
+    # scheduling latency.
+    import threading
+    from cursor_ledger_worker import worker as cursor_ledger_worker
+    block_started = threading.Event()
+    release_block = threading.Event()
+
+    def _block_write() -> None:
+        block_started.set()
+        release_block.wait(2.0)
+
+    cursor_ledger_worker.note(cursor_tailer._cursor_key, _block_write)
+    block_started.wait(2.0)
+
+    for n in range(1, 10):
+        cursor_tailer._on_cursor(n)
+    results.append((
+        "small cursor advances are coalesced",
+        persisted == [],
+        f"persisted={persisted!r}",
+    ))
+    release_block.set()
+
+    class _FakeTailer:
+        def stop(self) -> None:
+            return None
+
+    cursor_tailer._refcount = 1
+    cursor_tailer._tailer = _FakeTailer()  # type: ignore[assignment]
+    cursor_tailer._task = asyncio.create_task(asyncio.sleep(0))
+    task = cursor_tailer.release()
+    if task is not None:
+        await task
+    results.append((
+        "release flushes pending cursor",
+        persisted == [9],
+        f"persisted={persisted!r}",
+    ))
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL

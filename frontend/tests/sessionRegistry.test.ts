@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { eventBus } from "../src/lib/eventBus";
-import { sessionRegistry } from "../src/lib/sessionRegistry";
+import {
+  sessionRegistry,
+  statusRankOf,
+  statusRankForRow,
+} from "../src/lib/sessionRegistry";
 
 /**
  * Reducer-level tests for the singleton sessionRegistry.
@@ -30,6 +34,7 @@ type SessionRow = {
   node_id?: string;
   is_running?: boolean;
   unread_count?: number;
+  pending_user_input_count?: number;
 };
 
 function stubSessionsResponse(sessions: SessionRow[]) {
@@ -89,6 +94,42 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
   });
 
+  it("turn_start marks a seeded file-editing session running before run_state", () => {
+    const sid = "file-edit-running";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+
+    eventBus.publish("turn_start", { app_session_id: sid });
+
+    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+  });
+
+  it("turn_start does not materialize unknown sessions", () => {
+    eventBus.publish("turn_start", { app_session_id: "unknown-file-edit" });
+
+    expect(sessionRegistry.getSession("unknown-file-edit").is_running).toBe(false);
+  });
+
+  it("testape_session_state updates testape_active for the matching sid", () => {
+    const sid = "sess-testape-1";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
+    eventBus.publish("testape_session_state", {
+      session_id: sid,
+      active: true,
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(true);
+    eventBus.publish("testape_session_state", {
+      session_id: sid,
+      active: false,
+    });
+    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
+  });
+
   it("session_unread_changed updates unread_count", () => {
     const sid = "sess-unread-1";
     eventBus.publish("session_created", {
@@ -110,6 +151,45 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).unread_count).toBe(0);
   });
 
+  it("session_user_input_changed updates pending input count", () => {
+    const sid = "sess-input-1";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_user_input_changed", {
+      session_id: sid,
+      pending_user_input_count: 2,
+    });
+    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(2);
+    eventBus.publish("session_user_input_changed", {
+      session_id: sid,
+      pending_user_input_count: 0,
+    });
+    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(0);
+  });
+
+  it("turn_start clears the live error indication for that session", () => {
+    const sid = "sess-error-clear";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_error_changed", {
+      session_id: sid,
+      has_error: true,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(sessionRegistry.getSession(sid).has_error).toBe(true);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(6);
+
+    eventBus.publish("turn_start", { app_session_id: sid });
+
+    expect(sessionRegistry.getSession(sid).has_error).toBe(false);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+    eventBus.publish("run_state", { app_session_id: sid, runs: [] });
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
+  });
+
   it("session_deleted drops the sid's cached meta", () => {
     const sid = "sess-doomed";
     eventBus.publish("session_created", {
@@ -128,7 +208,13 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(a).toEqual({
       is_running: false,
       unread_count: 0,
+      pending_user_input_count: 0,
       monitoring_state: "stopped",
+      markers: {},
+      testape_active: false,
+      has_error: false,
+      current_todos: [],
+      current_tasks: [],
     });
   });
 
@@ -347,6 +433,19 @@ describe("sessionRegistry — project aggregates", () => {
     });
   });
 
+  it("testape_active counts toward running_count even when monitoring_state is stopped", async () => {
+    // A session with a TestApe run active (but no agent turn in flight)
+    // is "running in testape" — the project badge must show 1.
+    await bootstrapWith([
+      { id: "ta", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+    ]);
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
+    eventBus.publish("testape_session_state", { session_id: "ta", active: true });
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+    eventBus.publish("testape_session_state", { session_id: "ta", active: false });
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
+  });
+
   it("session_created is idempotent — second created for same sid is a no-op", () => {
     eventBus.publish("session_created", {
       session: { id: "dup", cwd: "/p", is_running: true, unread_count: 2 },
@@ -428,5 +527,104 @@ describe("sessionRegistry — bootstrap mechanics", () => {
     await bootstrapWith([]);
     expect(sessionRegistry.getSession("preboot").is_running).toBe(true);
     expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+  });
+});
+
+describe("status rank (mirror of backend _session_status_rank)", () => {
+  const m = (tag: string) => ({ ext: { color: "#x", tooltip: "t", tag } });
+
+  it("buckets: 6 error, 5 needs-user, 4 new, 3 open-todo, 2 running, 1 done, 0 none", () => {
+    expect(statusRankOf({ has_error: true })).toBe(6);
+    expect(statusRankOf({ monitoring_state: "active" })).toBe(2);
+    expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(2);
+    expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(5);
+    expect(statusRankOf({ pending_user_input_count: 1 })).toBe(5);
+    expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(5);
+    expect(statusRankOf({ unread_count: 2 })).toBe(4);
+    expect(statusRankOf({ monitoring_state: "active", unread_count: 2 })).toBe(2);
+    expect(statusRankOf({ current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
+    expect(statusRankOf({ current_tasks: [{ content: "A", status: "in_progress" }] })).toBe(3);
+    expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
+    expect(statusRankOf({ monitoring_state: "idle" })).toBe(0);
+    expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(5);
+    expect(statusRankOf({ monitoring_state: "active", current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
+    expect(statusRankOf({ monitoring_state: "active", unread_count: 2, current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
+    // classification by TAG, not color — untagged marker is inert
+    expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
+  });
+
+  it("statusRankForRow prefers the live registry over the row snapshot", async () => {
+    await resetRegistry();
+    const sid = "rank-live";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "active",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    // Row snapshot claims stopped, but the live registry says active → live wins.
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+
+    eventBus.publish("session_metadata_updated", {
+      session_id: sid,
+      patch: { current_todos: [{ content: "A", status: "pending" }] },
+    });
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(3);
+  });
+
+  it("statusRankForRow falls back to row fields when the sid is unseeded", async () => {
+    await resetRegistry();
+    expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(2);
+    expect(statusRankForRow({ id: "deep-page-input", pending_user_input_count: 1 })).toBe(5);
+    expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(4);
+    expect(statusRankForRow({ id: "deep-page-4", current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
+    expect(statusRankForRow({ id: "deep-page-3" })).toBe(0);
+  });
+
+  it("seedFromRows fills missing sids without clobbering fresher live state", async () => {
+    await resetRegistry();
+    const sid = "seed-1";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "active",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    // A staler page row for the SAME sid must NOT downgrade the live entry…
+    sessionRegistry.seedFromRows([
+      { id: sid, monitoring_state: "stopped", cwd: "/p", node_id: "primary" },
+      { id: "seed-new", monitoring_state: "active", cwd: "/p", node_id: "primary" },
+    ]);
+    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    // …but a brand-new sid IS materialized from the page row.
+    expect(sessionRegistry.getSession("seed-new").is_running).toBe(true);
+  });
+
+  // Regression for #185: <SessionStatusBadge> → useSessionMeta →
+  // useSyncExternalStore infinite-looped ("getSnapshot should be cached").
+  // applyRoutedDelta's update path dropped `testape_active`, leaving it
+  // undefined; getSession cached `!!undefined` (false) but compared it
+  // against the raw `undefined` on the next call, so the cache missed
+  // every time and getSnapshot returned a fresh object each render.
+  it("getSession returns a stable reference after a routed delta (#185)", async () => {
+    await resetRegistry();
+    const sid = "sess-cache-invariant";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    // session_unread_changed routes through applyRoutedDelta's update
+    // path — the one that used to drop testape_active.
+    eventBus.publish("session_unread_changed", {
+      session_id: sid,
+      unread_count: 3,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    const a = sessionRegistry.getSession(sid);
+    const b = sessionRegistry.getSession(sid);
+    expect(a).toBe(b); // SAME reference — cache invariant holds
+    expect(a.testape_active).toBe(false);
   });
 });

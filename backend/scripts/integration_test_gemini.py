@@ -30,8 +30,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import extension_store  # noqa: E402
 import httpx
 import itsdangerous
+from live_llm_test_guard import require_live_llm_tests  # noqa: E402
 import uvicorn
 import websockets
 
@@ -90,6 +92,9 @@ def _mint_session_cookie() -> str:
 
 
 async def main() -> int:
+    if not require_live_llm_tests("live Gemini CLI provider integration"):
+        return 0
+
     ba_home = tempfile.mkdtemp(prefix="bc-int-gemini-home-")
     os.environ["BETTER_CLAUDE_HOME"] = ba_home
     os.environ["BETTER_AGENT_HOME"] = ba_home
@@ -274,7 +279,7 @@ async def main() -> int:
                 failures += 1
 
             r = await client.post(
-                f"/api/extensions/ofek-dev.prompt-engineer/backend/sessions/{sid}/prompt-engineer",
+                f"/api/extensions/{extension_store.extension_id_for_role('prompt-engineer')}/backend/sessions/{sid}/prompt-engineer",
                 json={"draft": "x", "mode": "fork"},
             )
             if r.status_code == 400:

@@ -46,10 +46,7 @@ test-results/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
 
-# Internal agent instructions — not for public release
-/AGENTS.md
-/CLAUDE.md
-/GEMINI.md
+# Internal agent sync backups — not for public release
 /CLAUDE.md.bc-sync-backup.sha256
 /GEMINI.md.bc-sync-backup.sha256
 
@@ -58,7 +55,9 @@ test-results/
 /.agents/
 /.claude/
 /.gemini/
-/.githooks/
+/.githooks/*
+!/.githooks/pre-commit
+!/.githooks/pre-push
 /marketing/
 /skills-lock.json
 
@@ -68,3 +67,10 @@ test-results/
 /PROMPT_remove_persistent_runner.md
 /SPEC_DIVERGENCES.md
 /todo-ios.md
+testape
+run_results.txt
+frontend/.dist-refresh-4807
+
+# Added by ggshield
+.cache_ggshield
+.claude-zai/

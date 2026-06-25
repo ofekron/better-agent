@@ -13,6 +13,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from paths import ba_home  # noqa: E402
+import session_store  # noqa: E402
 from stores import session_fork_store, worker_store  # noqa: E402
 
 
@@ -107,12 +108,110 @@ def test_remove_worker_is_global() -> None:
     )
 
 
+def test_worker_count_neutral_writes_do_not_refresh_session_summaries() -> None:
+    calls = 0
+    original = session_store._refresh_all_worker_summaries
+
+    def record_refresh() -> None:
+        nonlocal calls
+        calls += 1
+
+    session_store._refresh_all_worker_summaries = record_refresh
+    try:
+        worker_store.upsert_worker("/repo/a", "worker-refresh", "native", "agent-1")
+        check(calls == 1, "adding a worker refreshes summary worker_count")
+
+        worker_store.upsert_worker("/repo/a", "worker-refresh", "native", "agent-2")
+        worker_store.touch_worker("/repo/a", "worker-refresh")
+        worker_store.enqueue_pool_task("review", {"id": "task-1"})
+        worker_store.pop_pool_task("review", "task-1")
+        worker_store.set_fork("/repo/a", "caller-refresh", "worker-refresh", "fork-refresh")
+        worker_store.touch_fork("/repo/a", "caller-refresh", "worker-refresh")
+        worker_store.clear_fork("/repo/a", "caller-refresh", "worker-refresh")
+        check(calls == 1, "count-neutral worker writes do not refresh summaries")
+
+        worker_store.remove_worker("/repo/a", "worker-refresh")
+        check(calls == 2, "removing a worker refreshes summary worker_count")
+    finally:
+        session_store._refresh_all_worker_summaries = original
+
+
+def test_worker_count_hot_cache_skips_fingerprint() -> None:
+    worker_store.upsert_worker("/repo/a", "worker-hot-count", "native", "agent-hot")
+    calls = 0
+    original_fingerprint = worker_store._file_fingerprint
+
+    def counted_fingerprint():
+        nonlocal calls
+        calls += 1
+        return original_fingerprint()
+
+    worker_store._file_fingerprint = counted_fingerprint
+    try:
+        first = worker_store.worker_count("")
+        second = worker_store.worker_count("")
+        check(first == second, "hot worker count changed")
+        check(calls == 1, f"hot worker count re-fingerprinted registry: {calls}")
+    finally:
+        worker_store._file_fingerprint = original_fingerprint
+        worker_store.remove_worker("/repo/a", "worker-hot-count")
+
+
+def test_worker_registry_path_is_cached() -> None:
+    worker_store._workers_dir_cache = None
+    calls = 0
+    original_ba_home = worker_store.ba_home
+
+    def counted_ba_home():
+        nonlocal calls
+        calls += 1
+        return original_ba_home()
+
+    worker_store.ba_home = counted_ba_home
+    try:
+        first = worker_store._path()
+        second = worker_store._path()
+        check(first == second, "worker registry path changed")
+        check(calls == 1, f"worker registry path resolved repeatedly: {calls}")
+    finally:
+        worker_store.ba_home = original_ba_home
+        worker_store._workers_dir_cache = None
+
+
+def test_worker_registry_read_cache_is_fingerprinted_and_isolated() -> None:
+    worker_store.upsert_worker("/repo/a", "worker-read-cache", "native", "agent-read-cache")
+    original_read_text = worker_store.Path.read_text
+    calls = 0
+
+    def counted_read_text(path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_read_text(path, *args, **kwargs)
+
+    worker_store.Path.read_text = counted_read_text
+    try:
+        first = worker_store._read()
+        first["workers"].append({"agent_session_id": "mutated"})
+        second = worker_store._read()
+        check(calls == 0, f"hot registry read touched disk: {calls}")
+        check(
+            all(w.get("agent_session_id") != "mutated" for w in second.get("workers", [])),
+            "registry cache leaked caller mutation",
+        )
+    finally:
+        worker_store.Path.read_text = original_read_text
+        worker_store.remove_worker("/repo/a", "worker-read-cache")
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
         test_global_forks_ignore_cwd()
         test_session_fork_store_uses_neutral_session_keyword()
         test_remove_worker_is_global()
+        test_worker_count_neutral_writes_do_not_refresh_session_summaries()
+        test_worker_count_hot_cache_skips_fingerprint()
+        test_worker_registry_read_cache_is_fingerprinted_and_isolated()
         print("ALL PASS")
         return 0
     finally:

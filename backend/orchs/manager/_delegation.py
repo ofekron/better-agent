@@ -12,8 +12,11 @@ back as `worker_event` frames.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +24,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from event_bus import BusEvent, bus
 from i18n import t
+import llm_call_log
 import perf
 from orchs.jsonl_helpers import (
     compute_jsonl_path,
@@ -44,6 +48,152 @@ if TYPE_CHECKING:
     from orchestrator import Coordinator
 
 logger = logging.getLogger(__name__)
+
+
+def _jsonl_line_has_final_text(raw: bytes, expected: str) -> bool:
+    try:
+        entry = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return False
+    if entry.get("isSidechain"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and block.get("text") == expected
+        for block in content
+    )
+
+
+def _final_text_line_end(path: Path, start: int, expected: str) -> Optional[int]:
+    last_match_end: Optional[int] = None
+    offset = start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break
+                line_end = offset + len(raw)
+                if _jsonl_line_has_final_text(raw, expected):
+                    last_match_end = line_end
+                offset = line_end
+    except OSError:
+        return None
+    return last_match_end
+
+
+def _delegation_event_is_tool_activity(event: dict) -> bool:
+    data = event.get("data") if isinstance(event, dict) else None
+    if not isinstance(data, dict):
+        return False
+    message = data.get("message")
+    content = data.get("content")
+    if isinstance(message, dict):
+        content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    return any(
+        isinstance(block, dict)
+        and str(block.get("type") or "") in {"tool_use", "tool_result"}
+        for block in blocks
+    )
+
+
+def _delegation_event_has_final_answer(event: dict) -> bool:
+    try:
+        from event_shape import has_final_answer_event
+
+        return has_final_answer_event([event])
+    except Exception:
+        data = event.get("data") if isinstance(event, dict) else None
+        return isinstance(data, dict) and data.get("final_answer") is True
+
+
+async def _durable_provider_output_drained(
+    run_dir: Path,
+    complete_payload: dict,
+    start_offset: int = 0,
+) -> bool:
+    state_path = run_dir / "backend_state.json"
+    try:
+        state = await asyncio.to_thread(
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+    jsonl_path_value = state.get("jsonl_path")
+    if not isinstance(jsonl_path_value, str) or not jsonl_path_value:
+        return False
+    jsonl_path = Path(jsonl_path_value)
+
+    processed_byte = state.get("processed_byte")
+    if processed_byte is not None:
+        try:
+            size = await asyncio.to_thread(lambda: jsonl_path.stat().st_size)
+            expected_final_text = complete_payload.get("final_assistant_text")
+            if isinstance(expected_final_text, str) and expected_final_text:
+                line_end = await asyncio.to_thread(
+                    _final_text_line_end,
+                    jsonl_path,
+                    start_offset,
+                    expected_final_text,
+                )
+                return (
+                    line_end is not None
+                    and int(processed_byte) >= max(size, line_end)
+                )
+            return int(processed_byte) >= size
+        except (OSError, TypeError, ValueError):
+            return False
+
+    processed_line = state.get("processed_line")
+    if processed_line is not None:
+        try:
+            line_count = await asyncio.to_thread(count_jsonl_lines, jsonl_path)
+            return int(processed_line) >= line_count
+        except (OSError, TypeError, ValueError):
+            return False
+
+    return False
+
+
+async def _wait_for_provider_complete_event(provider_rs: object) -> StreamEvent:
+    run_dir = provider_rs.run_dir
+    complete_path = run_dir / "complete.json"
+    while True:
+        exists = await asyncio.to_thread(complete_path.exists)
+        payload = None
+        if exists:
+            from runs_dir import read_best_complete
+
+            payload = await asyncio.to_thread(read_best_complete, run_dir)
+        complete_task = getattr(provider_rs, "complete_task", None)
+        complete_task_finished = (
+            complete_task is not None
+            and complete_task.done()
+        )
+        if exists and isinstance(payload, dict) and (
+            complete_task_finished
+            or await _durable_provider_output_drained(
+                run_dir,
+                payload,
+                int(
+                    getattr(
+                        getattr(provider_rs, "tailer", None),
+                        "start_offset",
+                        0,
+                    ) or 0
+                ),
+            )
+        ):
+            return StreamEvent("complete", payload)
+        await asyncio.sleep(0.1)
 
 
 async def _compute_jsonl_read_path_off_loop(
@@ -73,6 +223,43 @@ def delegate_error_payload(
     }
 
 
+async def _cleanup_ephemeral_delegate_fork(
+    *,
+    app_session_id: str,
+    worker_agent_session_id: str,
+    fork_agent_session_id: Optional[str],
+    fork_agent_sid: Optional[str],
+    ephemeral: bool,
+) -> None:
+    if (
+        not ephemeral
+        or not fork_agent_session_id
+        or fork_agent_session_id == worker_agent_session_id
+    ):
+        return
+
+    def _cleanup() -> None:
+        if fork_agent_sid:
+            fork = session_manager.get(fork_agent_session_id)
+            cursor = int(
+                ((fork or {}).get("processed_line_by_sid") or {}).get(fork_agent_sid)
+                or 0
+            )
+            if cursor > 0:
+                session_manager.advance_processed_lines(
+                    app_session_id,
+                    fork_agent_sid,
+                    cursor,
+                    bump_updated_at=False,
+                )
+        session_manager.delete(fork_agent_session_id)
+
+    try:
+        await asyncio.to_thread(_cleanup)
+    except Exception:
+        logger.exception("ephemeral delegate fork cleanup failed")
+
+
 def missing_parent_should_run_direct(run_mode: str, worker_session: dict) -> bool:
     return bool(worker_session.get("bare_config") and run_mode != "fork")
 
@@ -83,6 +270,26 @@ def _append_candidate_cwd(candidates: list[str], cwd: Optional[str]) -> None:
     resolved = str(Path(cwd).expanduser().resolve())
     if resolved not in candidates:
         candidates.append(resolved)
+
+
+def _clear_stale_worker_records(
+    session_cwd_candidates: list[str],
+    worker_session_id: str,
+) -> list[str]:
+    for candidate_cwd in session_cwd_candidates:
+        worker_store.remove_worker(candidate_cwd, worker_session_id)
+    return session_fork_store.clear_forks_for_session_everywhere(worker_session_id)
+
+
+def _find_worker_record(
+    session_cwd_candidates: list[str],
+    worker_session_id: str,
+) -> Optional[tuple[str, dict]]:
+    for candidate_cwd in session_cwd_candidates:
+        candidate_record = worker_store.get_worker(candidate_cwd, worker_session_id)
+        if candidate_record is not None:
+            return (candidate_record.get("cwd") or candidate_cwd, candidate_record)
+    return None
 
 
 def _session_registry_cwd_candidates(
@@ -138,7 +345,10 @@ def lock_for_delegation(
     caller_agent_session_id: str,
     worker_agent_session_id: str,
     run_mode: str,
+    ephemeral: bool = False,
 ) -> asyncio.Lock:
+    if ephemeral:
+        return asyncio.Lock()
     if run_mode == "direct":
         return coordinator.pair_locks.setdefault(
             ("direct-worker", worker_agent_session_id),
@@ -156,6 +366,8 @@ async def run_delegation(
     worker_description: str,
     model: str,
     cwd: str,
+    provider_id: str = "",
+    reasoning_effort: str = "",
     justification: Optional[str] = None,
     proposed_orchestration_mode: Optional[str] = None,
     client_delegation_id: Optional[str] = None,
@@ -165,6 +377,7 @@ async def run_delegation(
     ephemeral: bool = False,
     machine_completion: bool = False,
     provision_prompt: Optional[str] = None,
+    provisioned_tool_profile: str = "",
     include_events: bool = False,
 ) -> dict:
     """Run a worker for one delegate tool call.
@@ -222,7 +435,7 @@ async def run_delegation(
     # server-minted id when called without one (legacy callers).
     delegation_id = client_delegation_id or f"del_{uuid.uuid4().hex[:10]}"
     instructions_preview = instructions[:2000]
-    delegation_status_store.write_status(
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="resolving",
         app_session_id=app_session_id,
@@ -244,7 +457,7 @@ async def run_delegation(
     # Step 1: resolve the target Better Agent session (or get approval for a new worker).
     # ------------------------------------------------------
     if worker_session_id is None:
-        caller_session = session_manager.get(app_session_id)
+        caller_session = await asyncio.to_thread(session_manager.get, app_session_id)
         worker_creation_policy = (
             (caller_session or {}).get("worker_creation_policy") or "ask"
         )
@@ -279,6 +492,13 @@ async def run_delegation(
             or "primary"
         )
         if worker_creation_policy == "approve":
+            effective_provider_id = provider_id
+            if not effective_provider_id:
+                effective_provider = await asyncio.to_thread(
+                    coordinator.provider_for_session,
+                    app_session_id,
+                )
+                effective_provider_id = effective_provider.id
             approved = await spawn_approved_worker(
                 coordinator,
                 cwd=cwd,
@@ -289,7 +509,7 @@ async def run_delegation(
                 cancel_event=cancel_event,
                 delegation_id=delegation_id,
                 app_session_id=app_session_id,
-                provider_id=coordinator.provider_for_session(app_session_id).id,
+                provider_id=effective_provider_id,
                 node_id=effective_node_id,
             )
         else:
@@ -342,15 +562,15 @@ async def run_delegation(
     # ------------------------------------------------------
     # Step 2: load the target Better Agent session + its live parent sid.
     # ------------------------------------------------------
-    worker_session = session_manager.get(worker_session_id)
+    worker_session = await asyncio.to_thread(session_manager.get, worker_session_id)
     if worker_session is None:
         # Stale registry — clean up any candidate records and report.
-        for candidate_cwd in session_cwd_candidates:
-            worker_store.remove_worker(candidate_cwd, worker_session_id)
-        _safe_delete_forks(
-            session_fork_store.clear_forks_for_session_everywhere(worker_session_id),
-            "delete orphan delegate-fork BC %s failed",
+        stale_forks = await asyncio.to_thread(
+            _clear_stale_worker_records,
+            session_cwd_candidates,
+            worker_session_id,
         )
+        _safe_delete_forks(stale_forks, "delete orphan delegate-fork BC %s failed")
         await coordinator.broadcast_workers_changed(None)
         return delegate_error_payload(
             worker_session_id, worker_description,
@@ -364,12 +584,13 @@ async def run_delegation(
         (session_cwd_candidates[0] if session_cwd_candidates else cwd)
     )
     worker_record = None
-    for candidate_cwd in session_cwd_candidates:
-        candidate_record = worker_store.get_worker(candidate_cwd, worker_session_id)
-        if candidate_record is not None:
-            worker_cwd = candidate_record.get("cwd") or candidate_cwd
-            worker_record = candidate_record
-            break
+    worker_record_result = await asyncio.to_thread(
+        _find_worker_record,
+        session_cwd_candidates,
+        worker_session_id,
+    )
+    if worker_record_result is not None:
+        worker_cwd, worker_record = worker_record_result
     worker_record = worker_record or {}
     mode = worker_record.get("orchestration_mode") or worker_session.get(
         "orchestration_mode"
@@ -382,7 +603,10 @@ async def run_delegation(
         worker_session.get("name") or worker_description or t("session.untitled_worker")
     )
     if run_mode != "direct" and hasattr(coordinator, "provider_for_session"):
-        fork_provider = coordinator.provider_for_session(worker_session_id)
+        fork_provider = await asyncio.to_thread(
+            coordinator.provider_for_session,
+            worker_session_id,
+        )
         if fork_provider is not None and not getattr(fork_provider, "supports_fork", True):
             return delegate_error_payload(
                 worker_session_id,
@@ -409,6 +633,7 @@ async def run_delegation(
                         cancel_event=init_cancel_event,
                         ws_callback=ws_callback,
                         provision_prompt=provision_prompt,
+                        provisioned_tool_profile=provisioned_tool_profile,
                     )
             finally:
                 coordinator.init_cancel_events.pop(worker_session_id, None)
@@ -417,9 +642,15 @@ async def run_delegation(
                     worker_session_id, worker_description,
                     t("delegation.worker_no_claude_session", worker_session_id=worker_session_id, mode=mode),
                 )
-            session_manager.set_agent_sid(worker_session_id, mode, live_parent_sid)
+            await asyncio.to_thread(
+                session_manager.set_agent_sid,
+                worker_session_id,
+                mode,
+                live_parent_sid,
+            )
             if worker_record:
-                worker_store.upsert_worker(
+                await asyncio.to_thread(
+                    worker_store.upsert_worker,
                     cwd=worker_cwd,
                     agent_session_id=worker_session_id,
                     orchestration_mode=mode,
@@ -431,7 +662,8 @@ async def run_delegation(
         # Refresh the worker_store record + invalidate any forks
         # whose recorded parent sid doesn't match the live one.
         # Preserve the worker's node_id binding when refreshing.
-        worker_store.upsert_worker(
+        await asyncio.to_thread(
+            worker_store.upsert_worker,
             cwd=worker_cwd,
             agent_session_id=worker_session_id,
             orchestration_mode=mode,
@@ -443,6 +675,8 @@ async def run_delegation(
     # Use the target Better Agent session's own model so a registered worker
     # with one model isn't silently coerced to the manager's.
     worker_model = worker_session.get("model") or model
+    worker_provider_id = worker_session.get("provider_id") or provider_id
+    worker_reasoning_effort = worker_session.get("reasoning_effort") or reasoning_effort
     started_at = datetime.now(timezone.utc).isoformat()
     # Inline position in the manager stream where this delegation occurs:
     # the count of manager events already on the in-flight assistant
@@ -461,6 +695,9 @@ async def run_delegation(
         "started_at": started_at,
         "insert_at": insert_at,
         "orchestration_mode": mode,
+        "provider_id": worker_provider_id,
+        "model": worker_model,
+        "reasoning_effort": worker_reasoning_effort,
         "run_mode": run_mode,
         "is_new": False,
         "instructions_preview": instructions_preview,
@@ -482,6 +719,10 @@ async def run_delegation(
         "panel_kind": "worker",
         "started_at": started_at,
         "insert_at": insert_at,
+        "orchestration_mode": mode,
+        "provider_id": worker_provider_id,
+        "model": worker_model,
+        "reasoning_effort": worker_reasoning_effort,
         "is_new": False,
         "instructions_preview": instructions_preview,
         "events": [],
@@ -513,7 +754,7 @@ async def run_delegation(
     # to render a per-panel "running" badge.
     in_flight_aid = coordinator.turn_manager.current_assistant_msgs.get(app_session_id)
     worker_run_id = f"worker-{delegation_id}"
-    delegation_status_store.write_status(
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="queued",
         worker_session_id=worker_session_id,
@@ -522,7 +763,8 @@ async def run_delegation(
         run_mode=run_mode,
         cwd=worker_cwd,
     )
-    coordinator.turn_manager.run_state_add(
+    await asyncio.to_thread(
+        coordinator.turn_manager.run_state_add,
         app_session_id,
         run_id=worker_run_id,
         kind="worker",
@@ -532,7 +774,7 @@ async def run_delegation(
     await coordinator.turn_manager.emit_run_state(app_session_id)
     try:
         lock = lock_for_delegation(
-            coordinator, app_session_id, worker_session_id, run_mode,
+            coordinator, app_session_id, worker_session_id, run_mode, ephemeral,
         )
         wait_started = perf.stamp_enq()
         async with lock:
@@ -547,6 +789,7 @@ async def run_delegation(
                 instructions=instructions,
                 instructions_preview=instructions_preview,
                 worker_agent_session_id=worker_session_id,
+                worker_session=worker_session,
                 worker_description=display_description,
                 worker_orchestration_mode=mode,
                 worker_parent_claude_sid=live_parent_sid,
@@ -559,6 +802,9 @@ async def run_delegation(
                 ephemeral=ephemeral,
                 machine_completion=machine_completion,
                 include_events=include_events,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
+                provisioned_tool_profile=provisioned_tool_profile,
             )
     finally:
         new_depth = coordinator.active_delegations.get(app_session_id, 1) - 1
@@ -566,7 +812,11 @@ async def run_delegation(
             coordinator.active_delegations.pop(app_session_id, None)
         else:
             coordinator.active_delegations[app_session_id] = new_depth
-        coordinator.turn_manager.run_state_remove(app_session_id, worker_run_id)
+        await asyncio.to_thread(
+            coordinator.turn_manager.run_state_remove,
+            app_session_id,
+            worker_run_id,
+        )
         try:
             await coordinator.turn_manager.emit_run_state(app_session_id)
         except Exception:
@@ -585,6 +835,7 @@ async def run_delegation_locked(
     instructions: str,
     instructions_preview: str,
     worker_agent_session_id: str,
+    worker_session: dict,
     worker_description: str,
     worker_orchestration_mode: str,
     worker_parent_claude_sid: Optional[str],
@@ -597,6 +848,9 @@ async def run_delegation_locked(
     ephemeral: bool = False,
     machine_completion: bool = False,
     include_events: bool = False,
+    provider_id: str = "",
+    reasoning_effort: str = "",
+    provisioned_tool_profile: str = "",
 ) -> dict:
     """Inner worker-run body — runs under the per-(caller, worker) lock.
 
@@ -615,9 +869,8 @@ async def run_delegation_locked(
     # Route via the read-path helper so remote-pinned workers resolve
     # to primary's shadow file instead of a non-existent local path.
     with perf.timed("delegate.resolve_fork_inputs"):
-        worker_session_for_path = session_manager.get(worker_agent_session_id)
         parent_jsonl = await _compute_jsonl_read_path_off_loop(
-            cwd, worker_parent_claude_sid, worker_session_for_path,
+            cwd, worker_parent_claude_sid, worker_session,
         )
         parent_line_count_now = (
             await asyncio.to_thread(count_jsonl_lines, parent_jsonl)
@@ -625,7 +878,12 @@ async def run_delegation_locked(
         )
         fork_record = (
             None if run_mode == "direct" or ephemeral else
-            session_fork_store.get_fork_record(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.get_fork_record,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
         )
     needs_fork: bool
     resume_sid: Optional[str]
@@ -634,14 +892,14 @@ async def run_delegation_locked(
     if fork_record is not None:
         fork_agent_session_id = fork_record.get("fork_agent_session_id")
         fork_bc = (
-            session_manager.get(fork_agent_session_id)
+            await asyncio.to_thread(session_manager.get, fork_agent_session_id)
             if fork_agent_session_id else None
         )
 
     if run_mode == "direct":
         needs_fork = False
         resume_sid = worker_parent_claude_sid
-        fork_bc = worker_session_for_path
+        fork_bc = worker_session
         fork_agent_session_id = worker_agent_session_id
     elif ephemeral:
         needs_fork = True
@@ -651,7 +909,12 @@ async def run_delegation_locked(
         needs_fork = True
         resume_sid = worker_parent_claude_sid
         if fork_record is not None:
-            session_fork_store.clear_fork(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.clear_fork,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
     else:
         recorded_parent = fork_bc.get("forked_from_agent_sid")
         recorded_count = int(fork_bc.get("parent_line_count_at_fork") or 0)
@@ -668,10 +931,15 @@ async def run_delegation_locked(
             # the worker_store mapping, and mint a fresh fork off the
             # current head.
             try:
-                session_manager.delete(fork_agent_session_id)
+                await asyncio.to_thread(session_manager.delete, fork_agent_session_id)
             except Exception:
                 logger.exception("invalidating stale fork Better Agent session failed")
-            session_fork_store.clear_fork(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.clear_fork,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
             needs_fork = True
             resume_sid = worker_parent_claude_sid
             fork_bc = None
@@ -685,7 +953,8 @@ async def run_delegation_locked(
     # arrives. Empty messages — the fork is a thread, not a chat copy.
     if needs_fork:
         with perf.timed("delegate.create_delegate_fork"):
-            fork_bc = session_manager.create_delegate_fork(
+            fork_bc = await asyncio.to_thread(
+                session_manager.create_delegate_fork,
                 parent_agent_session_id=worker_agent_session_id,
                 caller_agent_session_id=app_session_id,
                 parent_agent_sid_at_fork=worker_parent_claude_sid,
@@ -719,21 +988,19 @@ async def run_delegation_locked(
     worker_backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
     worker_internal_token = coordinator.internal_token
 
-    provider = coordinator.provider_for_session(worker_agent_session_id)
-    provider_run_config = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("provider_run_config") or None
-    capability_contexts = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("capability_contexts") or None
-    reasoning_effort = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("reasoning_effort")
+    provider = await asyncio.to_thread(
+        coordinator.provider_for_run,
+        worker_agent_session_id,
+        provider_id,
+    )
+    provider_run_config = worker_session.get("provider_run_config") or None
+    capability_contexts = worker_session.get("capability_contexts") or None
+    reasoning_effort = reasoning_effort or worker_session.get("reasoning_effort")
     if machine_completion:
         worker_prompt = instructions
     else:
         from orchs.manager import bootstrap as manager_bootstrap
-        manager_session = session_manager.get(app_session_id) or {}
+        manager_session = await asyncio.to_thread(session_manager.get, app_session_id) or {}
         worker_prompt = "\n\n".join([
             manager_bootstrap.format_team_context(
                 cwd=cwd,
@@ -748,8 +1015,21 @@ async def run_delegation_locked(
     try:
         with perf.timed("delegate.provider_start_run"):
             import startup_recovery_gate
-            await startup_recovery_gate.wait_for_recovery_ready()
-            provider.start_run(
+            with perf.timed("delegate.provider_start_run.recovery_gate"):
+                await startup_recovery_gate.wait_for_recovery_ready()
+            if getattr(provider, "suspended", False):
+                raise RuntimeError("provider is suspended")
+            # Offload the synchronous spawn body (session-manager reads in
+            # _build_input_payload, input.json write, Popen) to a worker
+            # thread — parity with turn_manager's top-level spawn path.
+            # Without this, get_fields blocks on the per-root lock and
+            # freezes the asyncio event loop for tens of seconds, hanging
+            # the whole app during worker delegations.
+            with perf.timed("delegate.provider_start_run.flush_pending_persists"):
+                await asyncio.to_thread(session_manager.flush_pending_persists)
+            with perf.timed("delegate.provider_start_run.provider_call"):
+                await asyncio.to_thread(
+                    provider.start_run,
                 run_id=run_id,
                 prompt=worker_prompt,
                 cwd=cwd,
@@ -771,7 +1051,8 @@ async def run_delegation_locked(
                 provider_run_config=provider_run_config,
                 capability_contexts=capability_contexts,
                 target_message_id=target_message_id,
-            )
+                    provisioned_tool_profile=provisioned_tool_profile,
+                )
     except Exception:
         # start_run failed — no runner to cancel, no run_id to track.
         raise
@@ -781,22 +1062,32 @@ async def run_delegation_locked(
     # consumers can verify liveness.
     provider_rs = provider._runs.get(run_id)
     if provider_rs and provider_rs.popen.pid:
-        delegation_status_store.write_status(
+        await delegation_status_store.write_status_async(
             delegation_id,
             status="running",
             worker_run_id=worker_run_id,
             provider_run_id=run_id,
             provider_run_dir=str(provider_rs.run_dir),
+            provider_id=provider.id,
             worker_pid=provider_rs.popen.pid,
             worker_agent_session_id=worker_agent_session_id,
             run_mode=run_mode,
             cwd=cwd,
             pre_run_fork_bytes=pre_run_fork_bytes,
         )
-        coordinator.turn_manager.run_state_set_pid(
-            app_session_id, worker_run_id, provider_rs.popen.pid,
+        await asyncio.to_thread(
+            coordinator.turn_manager.run_state_set_pid,
+            app_session_id,
+            worker_run_id,
+            provider_rs.popen.pid,
         )
         await coordinator.turn_manager.emit_run_state(app_session_id)
+        current_status = await asyncio.to_thread(
+            delegation_status_store.read_status,
+            delegation_id,
+        )
+        if isinstance(current_status, dict) and current_status.get("cancel_requested") is True:
+            cancel_event.set()
 
     def _remove_run_id() -> None:
         """Remove `run_id` from the per-session active list; drop the
@@ -813,16 +1104,31 @@ async def run_delegation_locked(
     cancelled = False
     run_started = perf.stamp_enq()
     first_event_seen = False
+    run_started_at = time.perf_counter()
+    first_event_ms: Optional[float] = None
+    first_tool_ms: Optional[float] = None
+    final_answer_ms: Optional[float] = None
+    terminal_event_ms: Optional[float] = None
+
+    durable_complete_task: Optional[asyncio.Task[StreamEvent]] = None
+    if provider_rs is not None:
+        durable_complete_task = asyncio.create_task(
+            _wait_for_provider_complete_event(provider_rs),
+            name=f"delegate-complete-{run_id[:8]}",
+        )
 
     try:
         with perf.timed("delegate.event_drain"):
             while True:
                 get_task = asyncio.create_task(queue.get())
                 cancel_task = asyncio.create_task(cancel_event.wait())
+                wait_tasks: list[asyncio.Task] = [get_task, cancel_task]
+                if durable_complete_task is not None:
+                    wait_tasks.append(durable_complete_task)
                 event_wait_started = perf.stamp_enq()
                 try:
                     done, _ = await asyncio.wait(
-                        [get_task, cancel_task], return_when=asyncio.FIRST_COMPLETED
+                        wait_tasks, return_when=asyncio.FIRST_COMPLETED
                     )
                 finally:
                     for t in (get_task, cancel_task):
@@ -844,10 +1150,18 @@ async def run_delegation_locked(
                     break
 
                 perf.record_lag("delegate.queue_event_wait", event_wait_started)
-                event: StreamEvent = get_task.result()
+                if get_task in done:
+                    event = get_task.result()
+                elif durable_complete_task is not None and durable_complete_task in done:
+                    event = durable_complete_task.result()
+                    if not get_task.done():
+                        get_task.cancel()
+                else:
+                    event = get_task.result()
                 if not first_event_seen:
                     perf.record_lag("delegate.to_first_event", run_started)
                     first_event_seen = True
+                    first_event_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                 event_dict = {"type": event.type, "data": event.data}
                 if not _is_synthetic_event(event_dict):
                     collected.append(event_dict)
@@ -860,148 +1174,163 @@ async def run_delegation_locked(
             # and uuid-dedups. Mirrors the rule that the primary
             # `msg.events` only mutates via `apply_event`.
 
-                if event.type == "session_discovered":
-                    perf.record_lag("delegate.to_session_discovered", run_started)
-                    disc = event.data.get("session_id")
-                    if disc:
-                        if run_mode == "direct" and fork_agent_sid is None:
-                            fork_agent_sid = disc
-                            try:
-                                session_manager.set_agent_sid(
-                                    worker_agent_session_id,
-                                    mode=worker_orchestration_mode,
-                                    agent_sid=disc,
-                                )
-                                if session_is_registered_worker:
-                                    worker_store.upsert_worker(
-                                        cwd=cwd,
-                                        agent_session_id=worker_agent_session_id,
-                                        orchestration_mode=worker_orchestration_mode,
+                with perf.timed("delegate.event_process"):
+                    if event.type == "session_discovered":
+                        perf.record_lag("delegate.to_session_discovered", run_started)
+                        disc = event.data.get("session_id")
+                        if disc:
+                            if run_mode == "direct" and fork_agent_sid is None:
+                                fork_agent_sid = disc
+                                try:
+                                    await asyncio.to_thread(
+                                        session_manager.set_agent_sid,
+                                        worker_agent_session_id,
+                                        mode=worker_orchestration_mode,
                                         agent_sid=disc,
-                                        node_id=(worker_session_for_path or {}).get("node_id") or "primary",
                                     )
-                            except Exception:
-                                logger.exception("direct worker sid persist failed")
-                        if needs_fork and fork_agent_sid is None:
-                            fork_agent_sid = disc
-                            # ORDER MATTERS — the panel mutation below is what
-                            # makes the fork discoverable to native_files_manager
-                            # via cold-seed (any WS subscriber attaching at this
-                            # point will read the panel and open a tailer at the
-                            # CURRENT prep-skip cursor). Therefore the prep-skip
-                            # MUST be written BEFORE the panel exposes the fork.
-                            # Skip parent-inherited lines (the worker's
-                            # one-time prep turn) so the per-pair fork's
-                            # tailer doesn't re-emit them — the prep is
-                            # surfaced live via worker_prep_event frames
-                            # instead, rendered in a collapsible block.
-                            if parent_line_count_now > 0:
+                                    if session_is_registered_worker:
+                                        await asyncio.to_thread(
+                                            worker_store.upsert_worker,
+                                            cwd=cwd,
+                                            agent_session_id=worker_agent_session_id,
+                                            orchestration_mode=worker_orchestration_mode,
+                                            agent_sid=disc,
+                                            node_id=(worker_session_for_path or {}).get("node_id") or "primary",
+                                        )
+                                except Exception:
+                                    logger.exception("direct worker sid persist failed")
+                            if needs_fork and fork_agent_sid is None:
+                                fork_agent_sid = disc
+                                # ORDER MATTERS — the panel mutation below is what
+                                # makes the fork discoverable to native_files_manager
+                                # via cold-seed (any WS subscriber attaching at this
+                                # point will read the panel and open a tailer at the
+                                # CURRENT prep-skip cursor). Therefore the prep-skip
+                                # MUST be written BEFORE the panel exposes the fork.
+                                # Skip parent-inherited lines (the worker's
+                                # one-time prep turn) so the per-pair fork's
+                                # tailer doesn't re-emit them — the prep is
+                                # surfaced live via worker_prep_event frames
+                                # instead, rendered in a collapsible block.
+                                if parent_line_count_now > 0:
+                                    try:
+                                        await asyncio.to_thread(
+                                            session_manager.advance_processed_lines,
+                                            fork_agent_session_id, disc,
+                                            int(parent_line_count_now),
+                                            bump_updated_at=False,
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "advance_processed_lines on fork BC failed"
+                                        )
                                 try:
-                                    session_manager.advance_processed_lines(
-                                        fork_agent_session_id, disc,
-                                        int(parent_line_count_now),
-                                        bump_updated_at=False,
+                                    await asyncio.to_thread(
+                                        session_manager.set_agent_sid,
+                                        fork_agent_session_id,
+                                        mode=worker_orchestration_mode,
+                                        agent_sid=disc,
                                     )
                                 except Exception:
-                                    logger.exception(
-                                        "advance_processed_lines on fork BC failed"
+                                    logger.exception("set_agent_sid on fork BC failed")
+                                # Now expose the fork on the parent panel.
+                                try:
+                                    # Use the read-path helper so remote-pinned
+                                    # forks resolve to the shadow path on primary.
+                                    jp_now = await _compute_jsonl_read_path_off_loop(
+                                        cwd, disc, fork_bc
                                     )
-                            try:
-                                session_manager.set_agent_sid(
-                                    fork_agent_session_id,
-                                    mode=worker_orchestration_mode,
-                                    agent_sid=disc,
-                                )
-                            except Exception:
-                                logger.exception("set_agent_sid on fork BC failed")
-                            # Now expose the fork on the parent panel.
-                            try:
-                                # Use the read-path helper so remote-pinned
-                                # forks resolve to the shadow path on primary.
-                                jp_now = await _compute_jsonl_read_path_off_loop(
-                                    cwd, disc, fork_bc
-                                )
-                                delegation_status_store.write_status(
-                                    delegation_id,
-                                    status="running",
-                                    fork_agent_sid=disc,
-                                    fork_agent_session_id=fork_agent_session_id,
-                                    jsonl_path=str(jp_now) if jp_now else None,
-                                    new_byte_offset=pre_run_fork_bytes + 1,
-                                )
-                                panel["fork_agent_sid"] = disc
-                                panel["fork_agent_session_id"] = fork_agent_session_id
-                                panel["jsonl_path"] = (
-                                    str(jp_now) if jp_now else None
-                                )
-                                panel["new_byte_offset"] = pre_run_fork_bytes + 1
-                            except Exception:
-                                logger.exception("eager panel jsonl meta failed")
-                            # Publish the fork as a tail target. Both the cold-
-                            # seed path (reads panel) and the live path (reads
-                            # this event) see the post-prep-skip cursor on the
-                            # fork BC record.
-                            if panel.get("jsonl_path"):
-                                try:
-                                    await bus.publish(BusEvent(
-                                        type="native_files.fork_target",
-                                        root_id=session_manager._root_id_for(
-                                            app_session_id) or "",
-                                        sid=app_session_id,
-                                        payload={
-                                            "parent_app_session_id": app_session_id,
-                                            "fork_agent_sid": disc,
-                                            "fork_agent_session_id": fork_agent_session_id,
-                                            "jsonl_path": panel["jsonl_path"],
-                                        },
-                                        persist=False,
-                                    ))
-                                except Exception:
-                                    logger.exception("fork_target publish failed")
-                            if not ephemeral:
-                                try:
-                                    session_fork_store.set_fork(
-                                        cwd=cwd,
-                                        caller_agent_session_id=app_session_id,
-                                        session_agent_session_id=worker_agent_session_id,
+                                    await delegation_status_store.write_status_async(
+                                        delegation_id,
+                                        status="running",
+                                        fork_agent_sid=disc,
                                         fork_agent_session_id=fork_agent_session_id,
+                                        jsonl_path=str(jp_now) if jp_now else None,
+                                        new_byte_offset=pre_run_fork_bytes + 1,
                                     )
+                                    panel["fork_agent_sid"] = disc
+                                    panel["fork_agent_session_id"] = fork_agent_session_id
+                                    panel["jsonl_path"] = (
+                                        str(jp_now) if jp_now else None
+                                    )
+                                    panel["new_byte_offset"] = pre_run_fork_bytes + 1
                                 except Exception:
-                                    logger.exception("eager fork persist failed")
-                        elif run_mode == "direct" and disc == fork_agent_sid:
-                            try:
-                                jp_now = await _compute_jsonl_read_path_off_loop(
-                                    cwd, disc, fork_bc
+                                    logger.exception("eager panel jsonl meta failed")
+                                # Publish the fork as a tail target. Both the cold-
+                                # seed path (reads panel) and the live path (reads
+                                # this event) see the post-prep-skip cursor on the
+                                # fork BC record.
+                                if panel.get("jsonl_path"):
+                                    try:
+                                        root_id = await asyncio.to_thread(
+                                            session_manager._root_id_for,
+                                            app_session_id,
+                                        )
+                                        await bus.publish(BusEvent(
+                                            type="native_files.fork_target",
+                                            root_id=root_id or "",
+                                            sid=app_session_id,
+                                            payload={
+                                                "parent_app_session_id": app_session_id,
+                                                "fork_agent_sid": disc,
+                                                "fork_agent_session_id": fork_agent_session_id,
+                                                "jsonl_path": panel["jsonl_path"],
+                                            },
+                                            persist=False,
+                                        ))
+                                    except Exception:
+                                        logger.exception("fork_target publish failed")
+                                if not ephemeral:
+                                    try:
+                                        await asyncio.to_thread(
+                                            session_fork_store.set_fork,
+                                            cwd=cwd,
+                                            caller_agent_session_id=app_session_id,
+                                            session_agent_session_id=worker_agent_session_id,
+                                            fork_agent_session_id=fork_agent_session_id,
+                                        )
+                                    except Exception:
+                                        logger.exception("eager fork persist failed")
+                            elif run_mode == "direct" and disc == fork_agent_sid:
+                                try:
+                                    jp_now = await _compute_jsonl_read_path_off_loop(
+                                        cwd, disc, fork_bc
+                                    )
+                                    await delegation_status_store.write_status_async(
+                                        delegation_id,
+                                        status="running",
+                                        fork_agent_sid=disc,
+                                        fork_agent_session_id=fork_agent_session_id,
+                                        jsonl_path=str(jp_now) if jp_now else None,
+                                        new_byte_offset=pre_run_fork_bytes + 1,
+                                    )
+                                    panel["fork_agent_sid"] = disc
+                                    panel["fork_agent_session_id"] = fork_agent_session_id
+                                    panel["jsonl_path"] = (
+                                        str(jp_now) if jp_now else None
+                                    )
+                                    panel["new_byte_offset"] = pre_run_fork_bytes + 1
+                                except Exception:
+                                    logger.exception("direct panel jsonl meta failed")
+                            elif not needs_fork and disc != fork_agent_sid:
+                                logger.warning(
+                                    "delegation: resume sid mismatch — expected %s, "
+                                    "got %s",
+                                    fork_agent_sid, disc,
                                 )
-                                delegation_status_store.write_status(
-                                    delegation_id,
-                                    status="running",
-                                    fork_agent_sid=disc,
-                                    fork_agent_session_id=fork_agent_session_id,
-                                    jsonl_path=str(jp_now) if jp_now else None,
-                                    new_byte_offset=pre_run_fork_bytes + 1,
-                                )
-                                panel["fork_agent_sid"] = disc
-                                panel["fork_agent_session_id"] = fork_agent_session_id
-                                panel["jsonl_path"] = (
-                                    str(jp_now) if jp_now else None
-                                )
-                                panel["new_byte_offset"] = pre_run_fork_bytes + 1
-                            except Exception:
-                                logger.exception("direct panel jsonl meta failed")
-                        elif not needs_fork and disc != fork_agent_sid:
-                            logger.warning(
-                                "delegation: resume sid mismatch — expected %s, "
-                                "got %s",
-                                fork_agent_sid, disc,
-                            )
-                await ws_callback({"type": "worker_event", "data": {
-                    "delegation_id": delegation_id,
-                    "event": event_dict,
-                }})
+                with perf.timed("delegate.worker_event_callback"):
+                    await ws_callback({"type": "worker_event", "data": {
+                        "delegation_id": delegation_id,
+                        "event": event_dict,
+                    }})
 
+                if first_tool_ms is None and _delegation_event_is_tool_activity(event_dict):
+                    first_tool_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
+                if final_answer_ms is None and _delegation_event_has_final_answer(event_dict):
+                    final_answer_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                 if event.type in ("complete", "error"):
                     perf.record_lag("delegate.to_terminal_event", run_started)
+                    terminal_event_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                     break
     except Exception:
         # Never-kill: a backend-side read error must NOT terminate the
@@ -1009,6 +1338,11 @@ async def run_delegation_locked(
         # watcher reaps it when its process exits.
         _remove_run_id()
         raise
+    finally:
+        if durable_complete_task is not None and not durable_complete_task.done():
+            durable_complete_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await durable_complete_task
 
     # ---- Result assembly ---------------------------------------
     with perf.timed("delegate.result_assembly"):
@@ -1086,10 +1420,42 @@ async def run_delegation_locked(
         "total_bytes_now": total_bytes_now,
         "token_usage": token_usage,
         "sdk_output": complete_data.get("sdk_output"),
+        "timings_ms": {
+            "runner_enqueue_to_first_event": first_event_ms,
+            "runner_enqueue_to_first_tool": first_tool_ms,
+            "runner_enqueue_to_final_answer": final_answer_ms,
+            "runner_enqueue_to_terminal_event": terminal_event_ms,
+        },
     }
     if include_events:
         result_payload["events"] = collected
-    delegation_status_store.write_status(
+    try:
+        await asyncio.to_thread(
+            llm_call_log.append_call,
+            source="worker_delegation",
+            reason=worker_description or "delegation",
+            provider_id=provider.id,
+            provider_kind=provider.KIND,
+            provider_name=provider.record.get("name"),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            app_session_id=worker_agent_session_id,
+            provider_session_id=fork_agent_sid,
+            run_id=run_id,
+            prompt=instructions,
+            token_usage=token_usage,
+            success=success,
+            error=error,
+            metadata={
+                "manager_session_id": app_session_id,
+                "delegation_id": delegation_id,
+                "run_mode": run_mode,
+                "ephemeral": ephemeral,
+            },
+        )
+    except Exception:
+        logger.exception("failed to append worker llm call log")
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="complete",
         result=result_payload,
@@ -1102,16 +1468,16 @@ async def run_delegation_locked(
 
     # (ii) worker-inner terminal — single bus emit through
     # `TurnManager._publish_terminal_lifecycle` so every
-    # `lifecycle.turn_*` subscriber (rearranger and any future
-    # observer) sees the worker turn end. Pre-cutover this fact was
-    # invisible on the bus; only the parent manager turn's terminal
-    # fired. Worker turns are independent units of work and the
-    # rearranger should react to them — under the per-session lock
-    # this collapses safely (no fan-out explosion).
+    # `lifecycle.turn_*` subscriber sees the worker turn end.
+    # Pre-cutover this fact was invisible on the bus; only the parent
+    # manager turn's terminal fired. Worker turns are independent units
+    # of work — under the per-session lock this collapses safely
+    # (no fan-out explosion).
     await coordinator.turn_manager._publish_terminal_lifecycle(
         "complete" if success else "stopped",
         app_session_id=app_session_id,
         reason="worker_inner",
+        provider_kind=provider.KIND,
     )
 
     # Update the eagerly-attached panel in-place. Its `events` array
@@ -1124,6 +1490,14 @@ async def run_delegation_locked(
     if fork_agent_sid:
         panel["fork_agent_sid"] = fork_agent_sid
     panel["token_usage"] = token_usage
+
+    await _cleanup_ephemeral_delegate_fork(
+        app_session_id=app_session_id,
+        worker_agent_session_id=worker_agent_session_id,
+        fork_agent_session_id=fork_agent_session_id,
+        fork_agent_sid=fork_agent_sid,
+        ephemeral=ephemeral,
+    )
 
     # Clean up run_id from active list now that the worker completed.
     _remove_run_id()

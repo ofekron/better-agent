@@ -27,16 +27,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 import threading
-
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-running-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-running-")
 
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -74,6 +73,7 @@ def _bound_coord() -> "Coordinator":
     `main.py` does at module load (`bind_running_check`)."""
     coord = Coordinator()
     session_manager.bind_running_check(coord.is_running)
+    session_manager.bind_monitoring_check(coord.turn_manager.monitoring_state)
     return coord
 
 
@@ -170,12 +170,85 @@ def test_active_pidless_turn_survives_prune() -> None:
     print(f"{PASS} active_pidless_turn_survives_prune")
 
 
+def test_new_pidless_worker_survives_before_pid_attach() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(sid, run_id="worker-race", kind="worker", target_message_id=None)
+
+    pruned = coord._prune_dead_entries(sid)
+    assert pruned is False, "new pidless worker must survive initial prune window"
+
+    coord.run_state_set_pid(sid, "worker-race", os.getpid())
+    runs = coord.get_run_state(sid)
+    assert runs and runs[0].get("pid") == os.getpid(), (
+        f"pid update did not attach to worker run_state: {runs}"
+    )
+    coord.run_state_remove(sid, "worker-race")
+    print(f"{PASS} new_pidless_worker_survives_before_pid_attach")
+
+
+def test_duplicate_worker_run_id_updates_existing_entry() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(
+        sid,
+        run_id="worker-same",
+        kind="worker",
+        target_message_id="msg-1",
+        delegation_id="del-1",
+    )
+    coord.run_state_add(
+        sid,
+        run_id="worker-same",
+        kind="worker",
+        target_message_id="msg-1",
+        delegation_id="del-1",
+        pid=os.getpid(),
+    )
+    runs = coord.get_run_state(sid)
+    assert len(runs) == 1, f"duplicate worker run_id must not append: {runs}"
+    assert runs[0].get("pid") == os.getpid(), f"pid not updated: {runs}"
+    coord.run_state_remove(sid, "worker-same")
+    print(f"{PASS} duplicate_worker_run_id_updates_existing_entry")
+
+
+def test_audit_running_discrepancy_records_state_layers() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(
+        sid,
+        run_id="audit-run",
+        kind="native",
+        target_message_id=None,
+        pid=os.getpid(),
+    )
+
+    records = coord.turn_manager.audit_running_discrepancies()
+    matching = [r for r in records if r.get("sid") == sid[:8]]
+    assert len(matching) == 1, f"expected one audit record for {sid}: {records}"
+
+    record = matching[0]
+    assert record["live_is_running"] is True, record
+    assert record["cached_is_running"] is False, record
+    assert record["live_monitoring"] == "idle", record
+    assert record["cached_monitoring"] == "stopped", record
+    assert "cached!=live" in record["reasons"], record
+    assert "cached_monitoring!=live" in record["reasons"], record
+    assert record["runs"][0]["pid_alive"] is True, record
+
+    coord.run_state_remove(sid, "audit-run")
+    print(f"{PASS} audit_running_discrepancy_records_state_layers")
+
+
 def main() -> int:
     try:
         test_run_start_fires_running_true()
         test_multiple_runs_single_fire()
         test_worker_fork_does_not_set_running()
         test_active_pidless_turn_survives_prune()
+        test_new_pidless_worker_survives_before_pid_attach()
+        test_duplicate_worker_run_id_updates_existing_entry()
+        test_audit_running_discrepancy_records_state_layers()
         print("ALL PASSED")
         return 0
     except AssertionError as e:

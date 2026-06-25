@@ -14,6 +14,7 @@ ba_home = _test_home.isolate("bc-disabled-tools-")
 
 try:
     import config_store
+    import extension_store
     import runner_codex
     import runner_gemini
 
@@ -29,12 +30,15 @@ try:
     assert disabled == ["ask", "create_session", "create_sub_session", "delegate_task", "mssg"]
     assert config_store.get_disabled_builtin_tools() == disabled
     disabled_extensions = config_store.set_disabled_builtin_extensions([
-        "ofek-dev.requirements",
-        "unknown",
-        "ofek-dev.team-orchestration",
-        "ofek-dev.requirements",
+        extension_store.extension_id_for_role('requirements'),
+        "bad extension id",
+        extension_store.extension_id_for_role('team-orchestration'),
+        extension_store.extension_id_for_role('requirements'),
     ])
-    assert disabled_extensions == ["ofek-dev.requirements", "ofek-dev.team-orchestration"]
+    assert disabled_extensions == [
+        extension_store.extension_id_for_role('requirements'),
+        extension_store.extension_id_for_role('team-orchestration'),
+    ]
     assert config_store.get_disabled_builtin_extensions() == disabled_extensions
 
     assert runner_codex._disabled_builtin_tools({

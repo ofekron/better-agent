@@ -29,6 +29,7 @@ ROLLUP_SECS = 60.0
 
 _lock = threading.Lock()
 _stats: dict[str, dict] = defaultdict(lambda: {"n": 0, "ms_sum": 0.0, "ms_max": 0.0})
+_counts: dict[str, dict] = defaultdict(lambda: {"n": 0, "total": 0, "max": 0})
 _queue_gauges: dict[str, Callable[[], int]] = {}
 
 _rollup_task: Optional[asyncio.Task] = None
@@ -41,6 +42,15 @@ def record(name: str, ms: float) -> None:
         s["ms_sum"] += ms
         if ms > s["ms_max"]:
             s["ms_max"] = ms
+
+
+def record_count(name: str, value: int = 1) -> None:
+    with _lock:
+        counter = _counts[name]
+        counter["n"] += 1
+        counter["total"] += value
+        if value > counter["max"]:
+            counter["max"] = value
 
 
 @contextmanager
@@ -106,19 +116,17 @@ class LaggedQueue(asyncio.Queue):
         super().__init__(*args, **kwargs)
         self._perf_name = _perf_name
 
-    def put_nowait(self, item):
-        super().put_nowait((time.perf_counter(), item))
+    # Override the low-level _put/_get hooks, NOT the public put/get/
+    # put_nowait/get_nowait: asyncio.Queue.get() delegates to self.get_nowait()
+    # and asyncio.Queue.put() to self.put_nowait(), so overriding the public
+    # methods double-processes (super().get() returns the already-unwrapped
+    # bare item, then `stamp, item = <item>` mis-parses it). _put/_get are the
+    # single internal choke point every code path funnels through.
+    def _put(self, item):
+        super()._put((time.perf_counter(), item))
 
-    async def put(self, item):
-        await super().put((time.perf_counter(), item))
-
-    def get_nowait(self):
-        stamp, item = super().get_nowait()
-        record_lag(self._perf_name, stamp)
-        return item
-
-    async def get(self):
-        stamp, item = await super().get()
+    def _get(self):
+        stamp, item = super()._get()
         record_lag(self._perf_name, stamp)
         return item
 
@@ -127,7 +135,9 @@ def flush() -> None:
     """Snapshot + reset stats, then emit one aggregated log line."""
     with _lock:
         snap = {k: dict(v) for k, v in _stats.items()}
+        count_snap = {k: dict(v) for k, v in _counts.items()}
         _stats.clear()
+        _counts.clear()
 
     depth_lines: list[str] = []
     for qname in sorted(_queue_gauges):
@@ -137,7 +147,7 @@ def flush() -> None:
             continue
         depth_lines.append(f"  q.{qname} depth={depth}")
 
-    if not snap and not depth_lines:
+    if not snap and not count_snap and not depth_lines:
         return
 
     op_lines: list[str] = []
@@ -149,6 +159,12 @@ def flush() -> None:
         avg = total / n if n else 0.0
         op_lines.append(
             f"  {k} n={n} avg={avg:.2f}ms max={mx:.2f}ms total={total:.1f}ms"
+        )
+    for k in sorted(count_snap):
+        counter = count_snap[k]
+        op_lines.append(
+            f"  {k} samples={counter['n']} count_total={counter['total']} "
+            f"count_max={counter['max']}"
         )
 
     body = "\n".join(op_lines + depth_lines)

@@ -18,12 +18,15 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import uuid
 from types import SimpleNamespace
@@ -39,10 +42,18 @@ if _BACKEND not in sys.path:
 
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
-from provider import create_loop_task  # noqa: E402
-from provider_codex import CodexProvider, RunState  # noqa: E402
-from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
+from paths import ba_home  # noqa: E402
+from provider import schedule_loop_task  # noqa: E402
+from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
+from codex_usage import token_usage_from_codex_usage  # noqa: E402
+from event_shape import extract_output_text as _extract_output_text  # noqa: E402
+from codex_normalize import _normalize_mcp_tool_completed  # noqa: E402
+from runner_codex import _post_loopback_sync  # noqa: E402
+from codex_native import CodexRolloutNormalizer  # noqa: E402
+import turn_manager as turn_manager_mod  # noqa: E402
+from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
 from run_recovery import (  # noqa: E402
+    _codex_replay_bound,
     _integrate_one,
     _last_assistant,
     _replay_and_apply,
@@ -84,6 +95,13 @@ def _make_turn_failed_event(message: str = "turn failed hard") -> dict:
     }
 
 
+def _make_task_complete_event() -> dict:
+    return {
+        "type": "event_msg",
+        "payload": {"type": "task_complete"},
+    }
+
+
 def _seed_codex_run(
     *,
     app_sid: str,
@@ -93,11 +111,12 @@ def _seed_codex_run(
     complete: bool,
     target_message_id: str | None = None,
     write_jsonl_path: bool = True,
+    run_id: str | None = None,
 ) -> str:
     """Synthesize a codex run dir: native rollout jsonl + codex_stderr.log
     (NOT gemini_stderr.log) + state/backend_state. `pid` is stamped as
     runner_pid; `complete` controls whether complete.json exists."""
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,7 +289,11 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
         def __init__(self) -> None:
             self.active_run_ids = {}
 
-        def run_state_add(self, app_sid, *, run_id, kind, target_message_id, pid):
+        def run_state_add(
+            self, app_sid, *, run_id, kind, target_message_id, pid,
+            foreground_status=None, background_work_ids=None,
+            activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+        ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
         def run_state_remove(self, app_sid, run_id):
@@ -359,7 +382,11 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
         def __init__(self) -> None:
             self.active_run_ids = {}
 
-        def run_state_add(self, app_sid, *, run_id, kind, target_message_id, pid):
+        def run_state_add(
+            self, app_sid, *, run_id, kind, target_message_id, pid,
+            foreground_status=None, background_work_ids=None,
+            activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+        ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
         def run_state_remove(self, app_sid, run_id):
@@ -398,6 +425,7 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
                 }).encode() + b"\n")
                 child_start = f.tell()
                 f.write(json.dumps(_make_assistant_text_event("child live after restart")).encode() + b"\n")
+                f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
             backend_state_path = run_dir / "backend_state.json"
             backend_state = json.loads(backend_state_path.read_text(encoding="utf-8"))
             source_key = f"call_agent_{child_sid}"
@@ -554,6 +582,24 @@ def test_dead_wrapper_ignores_malformed_usage_values() -> bool:
     return True
 
 
+def test_codex_usage_normalizer_zeros_malformed_live_values() -> bool:
+    usage = token_usage_from_codex_usage({
+        "input_tokens": True,
+        "output_tokens": -5,
+        "cached_input_tokens": "9",
+    })
+    expected = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+    }
+    if usage != expected:
+        print(f"  expected malformed live usage to zero, got {usage!r}")
+        return False
+    return True
+
+
 def test_dead_wrapper_uses_rollout_terminal_failure() -> bool:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
@@ -688,26 +734,186 @@ def test_loopback_post_retries_transient_reset() -> bool:
     return True
 
 
-def test_create_loop_task_from_worker_thread() -> bool:
+def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
+    import runner_codex
+
+    token_file = ba_home() / "internal_token"
+    token_file.write_text("disk-token", encoding="utf-8")
+    runner_codex._token_cache["token"] = None
+    runner_codex._token_cache["mtime"] = 0.0
+    seen_tokens: list[str | None] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    original_urlopen = runner_codex.urllib.request.urlopen
+
+    def fake_urlopen(req, *_args, **_kwargs):
+        token = req.headers.get("X-internal-token")
+        seen_tokens.append(token)
+        if token == "spawn-token":
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+        return _Resp()
+
+    try:
+        runner_codex.urllib.request.urlopen = fake_urlopen
+        res = _post_loopback_sync(
+            {"x": 1},
+            backend_url="http://127.0.0.1:8000",
+            internal_token="spawn-token",
+            url_path="/api/internal/ask",
+            timeout_s=10,
+        )
+    finally:
+        runner_codex.urllib.request.urlopen = original_urlopen
+
+    if res != {"success": True}:
+        print(f"  expected success response, got {res!r}")
+        return False
+    if seen_tokens != ["spawn-token", "disk-token"]:
+        print(f"  expected spawn then disk token, got {seen_tokens!r}")
+        return False
+    return True
+
+
+def test_loopback_post_surfaces_http_error_detail() -> bool:
+    import runner_codex
+
+    original_urlopen = runner_codex.urllib.request.urlopen
+
+    def fake_urlopen(req, *_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b'{"detail":"no idle worker in target_worker_pool"}'),
+        )
+
+    try:
+        runner_codex.urllib.request.urlopen = fake_urlopen
+        try:
+            _post_loopback_sync(
+                {"x": 1},
+                backend_url="http://127.0.0.1:8000",
+                internal_token="token",
+                url_path="/api/internal/ask",
+                timeout_s=10,
+            )
+        except RuntimeError as exc:
+            if str(exc) != "HTTP 409: no idle worker in target_worker_pool":
+                print(f"  unexpected error: {exc!r}")
+                return False
+            return True
+        print("  expected HTTP error detail to be surfaced")
+        return False
+    finally:
+        runner_codex.urllib.request.urlopen = original_urlopen
+
+
+def test_schedule_loop_task_from_worker_thread() -> bool:
     async def main() -> bool:
         loop = asyncio.get_running_loop()
+        done = threading.Event()
 
-        async def marker() -> str:
-            return "ok"
+        async def marker() -> None:
+            done.set()
 
-        task = await asyncio.to_thread(
-            create_loop_task,
+        await asyncio.to_thread(
+            schedule_loop_task,
             loop,
             marker(),
-            name="test-create-loop-task-worker",
+            name="test-schedule-loop-task-worker",
         )
-        result = await task
-        if result != "ok":
-            print(f"  expected ok task result, got {result!r}")
+        if not done.wait(timeout=2.0):
+            print("  scheduled coro never ran on the loop")
             return False
         return True
 
     return asyncio.run(main())
+
+
+def test_schedule_loop_task_no_block_under_loop_lag() -> bool:
+    """Regression: scheduling the bootstrap coro from a worker thread must
+    NOT synchronously wait for the event loop. The old create_loop_task did
+    future.result(timeout=5) and raised TimeoutError — killing the whole
+    turn — whenever the loop could not service a call_soon within 5s. With
+    the loop deliberately held, scheduling must still return immediately.
+    """
+    loop = asyncio.new_event_loop()
+    hold = threading.Event()      # freed by the test to release the loop
+    holding = threading.Event()   # set once the loop has entered the hold
+    scheduled = threading.Event()  # set by the scheduled coro when it runs
+
+    def occupy_loop() -> None:
+        holding.set()
+        hold.wait(10.0)
+
+    def run_loop() -> None:
+        loop.call_soon(occupy_loop)
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+
+    async def marker() -> None:
+        scheduled.set()
+
+    result: dict = {}
+
+    def schedule_from_worker() -> None:
+        # Hard happens-before: confirm the loop is actually held before
+        # scheduling, closing the call_soon vs call_soon_threadsafe race.
+        if not holding.wait(timeout=2.0):
+            result["error"] = "loop never entered hold"
+            return
+        start = time.monotonic()
+        try:
+            schedule_loop_task(
+                loop, marker(), name="test-schedule-under-lag",
+            )
+        except BaseException as exc:  # noqa: BLE001 — surface pre-fix TimeoutError
+            result["error"] = repr(exc)
+            return
+        result["elapsed"] = time.monotonic() - start
+
+    worker = threading.Thread(target=schedule_from_worker)
+    worker.start()
+    worker.join(timeout=3.0)
+    try:
+        if worker.is_alive():
+            print("  scheduling worker blocked on the held loop (pre-fix hang)")
+            return False
+        if "error" in result:
+            print(f"  scheduling raised (pre-fix behavior): {result['error']}")
+            return False
+        elapsed = result.get("elapsed", 99.0)
+        if elapsed >= 1.0:
+            print(f"  scheduling blocked worker {elapsed:.3f}s; expected immediate return")
+            return False
+        hold.set()
+        if not scheduled.wait(timeout=2.0):
+            print("  scheduled coro never ran after loop released")
+            return False
+        return True
+    finally:
+        hold.set()  # release occupy_loop so the loop can service stop
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2.0)
+        loop.close()
 
 
 def test_codex_mcp_string_error_normalizes() -> bool:
@@ -721,6 +927,209 @@ def test_codex_mcp_string_error_normalizes() -> bool:
         print(f"  expected string error content, got {text!r}")
         return False
     return True
+
+
+def test_codex_dead_runner_replay_preserves_tool_result_structure() -> bool:
+    app_sid, asst_id = _seed_session_with_streaming_assistant()
+    codex_sid = str(uuid.uuid4())
+    run_id = _seed_codex_run(
+        app_sid=app_sid,
+        codex_sid=codex_sid,
+        pid=0,
+        events=[
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_shell",
+                    "arguments": "{\"cmd\":\"printf secret-tool-output\"}",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_shell",
+                    "output": "secret-tool-output",
+                },
+            },
+            _make_assistant_text_event("final answer only"),
+        ],
+        complete=True,
+        target_message_id=asst_id,
+    )
+
+    events = read_codex_run_rollout_events(runs_root() / run_id)
+    if not any(
+        block.get("type") == "tool_result"
+        for event in events
+        for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
+        if isinstance(block, dict)
+    ):
+        print("  replay did not preserve tool_result blocks")
+        return False
+    output = _extract_output_text(events)
+    if "secret-tool-output" in output:
+        print(f"  tool result leaked into assistant output text: {output!r}")
+        return False
+    if "final answer only" not in output:
+        print(f"  assistant text missing from replay output: {output!r}")
+        return False
+    return True
+
+
+def test_codex_replay_dedup_allows_mutated_same_uuid() -> bool:
+    partial = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "uuid": "same-uuid",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
+        },
+    }
+    exact_duplicate = json.loads(json.dumps(partial))
+    updated = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "uuid": "same-uuid",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "final"}]},
+        },
+    }
+
+    missing = _missing_event_dicts([partial], [exact_duplicate, updated])
+    if missing != [updated]:
+        print(f"  expected only mutated same-uuid update, got {missing!r}")
+        return False
+    return True
+
+
+def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
+    class _UserPromptManager:
+        def get_in_flight_lifecycle_msg_id(self, _sid):
+            return None
+
+    class _FakeCodexProvider:
+        KIND = "codex"
+        id = "codex-test"
+
+        def __init__(self, app_sid: str, codex_sid: str) -> None:
+            self._runs = {}
+            self.app_sid = app_sid
+            self.codex_sid = codex_sid
+
+        def start_run(self, **kwargs) -> None:
+            _seed_codex_run(
+                app_sid=self.app_sid,
+                codex_sid=self.codex_sid,
+                pid=0,
+                events=[
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": "call_shell",
+                            "arguments": "{\"cmd\":\"printf hidden-tool-output\"}",
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call_shell",
+                            "output": "hidden-tool-output",
+                        },
+                    },
+                    _make_assistant_text_event("visible final answer"),
+                    _make_turn_completed_event(),
+                ],
+                complete=True,
+                run_id=kwargs["run_id"],
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+        async def is_running_off_loop(self, _run_id: str) -> bool:
+            return False
+
+    class _Coordinator:
+        def __init__(self, provider) -> None:
+            self.internal_token = "token"
+            self.user_prompt_manager = _UserPromptManager()
+            self._session_cancelled = {}
+            self._provider = provider
+
+        def provider_for_run(self, *_args, **_kwargs):
+            return self._provider
+
+        def provider_for_session(self, *_args, **_kwargs):
+            return self._provider
+
+    async def _run() -> bool:
+        sess = session_manager.create(
+            name="dead-runner-replay",
+            model="gpt-5.5",
+            cwd="/tmp",
+            orchestration_mode="native",
+        )
+        app_sid = sess["id"]
+        codex_sid = str(uuid.uuid4())
+        provider = _FakeCodexProvider(app_sid, codex_sid)
+        tm = TurnManager(_Coordinator(provider))
+        ws_events: list[dict] = []
+
+        async def ws_callback(event: dict) -> None:
+            ws_events.append(event)
+
+        original_runtime = turn_manager_mod.runtime_skill_contexts
+        original_audit = turn_manager_mod.extension_audit_context
+        original_instructions = turn_manager_mod.extension_user_instruction_contexts
+        turn_manager_mod.runtime_skill_contexts = lambda *_args, **_kwargs: []
+        turn_manager_mod.extension_audit_context = lambda *_args, **_kwargs: []
+        turn_manager_mod.extension_user_instruction_contexts = lambda *_args, **_kwargs: []
+        try:
+            result = await tm._drive_cli_run(
+                prompt="do it",
+                cwd="/tmp",
+                model="gpt-5.5",
+                session_id=codex_sid,
+                ws_callback=ws_callback,
+                app_session_id=app_sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id=str(uuid.uuid4()),
+                lifecycle_msg_id=str(uuid.uuid4()),
+            )
+        finally:
+            turn_manager_mod.runtime_skill_contexts = original_runtime
+            turn_manager_mod.extension_audit_context = original_audit
+            turn_manager_mod.extension_user_instruction_contexts = original_instructions
+        events = result.get("events") or []
+        if result.get("success") is not True:
+            print(f"  expected success result, got {result!r}")
+            return False
+        if not any(
+            block.get("type") == "tool_result"
+            for event in events
+            for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
+            if isinstance(block, dict)
+        ):
+            print(f"  result events missing structured tool_result: {events!r}")
+            return False
+        output = _extract_output_text(events)
+        if "hidden-tool-output" in output or "visible final answer" not in output:
+            print(f"  bad extracted output: {output!r}")
+            return False
+        if not any(event.get("type") == "agent_message" for event in ws_events):
+            print(f"  replayed events were not emitted through ws_callback: {ws_events!r}")
+            return False
+        return True
+
+    return asyncio.run(_run())
 
 
 def test_codex_replay_includes_child_subagent_panel_events() -> bool:
@@ -756,10 +1165,25 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reviewer"
+        f.write(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("parent history")).encode() + b"\n")
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "response_item",
+            "payload": {"type": "reasoning", "summary": ["parent reasoning"]},
+        }).encode() + b"\n")
+        f.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         child_start = f.tell()
         f.write(json.dumps(_make_assistant_text_event("child answer")).encode() + b"\n")
@@ -815,7 +1239,7 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     return ok
 
 
-def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> bool:
+def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = "019eea6e-18bb-74f2-9e6c-2446ec215861"
@@ -828,47 +1252,27 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
                 "type": "response_item",
                 "payload": {
                     "type": "function_call",
-                    "name": "wait_agent",
-                    "call_id": "call_yq2iLLugCLpXkKvlXu6EL0qz",
-                    "arguments": json.dumps({
-                        "targets": [child_sid],
-                        "timeout_ms": 300000,
-                    }),
+                    "name": "spawn_agent",
+                    "call_id": "call_agent",
+                    "arguments": json.dumps({"message": "review"}),
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_agent",
+                    "agent_thread_id": child_sid,
+                    "agent_path": "/root/reviewer",
+                    "kind": "started",
                 },
             },
             {
                 "type": "response_item",
                 "payload": {
                     "type": "function_call_output",
-                    "call_id": "call_yq2iLLugCLpXkKvlXu6EL0qz",
-                    "output": json.dumps({
-                        "status": {
-                            child_sid: {
-                                "completed": "`backend/native_files_manager.py`: SEND BACK."
-                            },
-                        },
-                        "timed_out": False,
-                    }),
-                },
-            },
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": (
-                            "<subagent_notification>\n"
-                            + json.dumps({
-                                "agent_path": child_sid,
-                                "status": {
-                                    "completed": "`backend/native_files_manager.py`: SEND BACK."
-                                },
-                            })
-                            + "\n</subagent_notification>"
-                        ),
-                    }],
+                    "call_id": "call_agent",
+                    "output": json.dumps({"task_name": "/root/reviewer"}),
                 },
             },
         ],
@@ -878,10 +1282,21 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reviewer"
+        f.write(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("parent history")).encode() + b"\n")
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("child answer")).encode() + b"\n")
     backend_state_path = run_dir / "backend_state.json"
@@ -897,7 +1312,7 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
         events, _ = _replay_from_codex_rollout(run_dir)
     finally:
         codex_native.resolve_rollout_path = orig_resolve  # type: ignore
-    delegation_id = f"codex_subagent_call_yq2iLLugCLpXkKvlXu6EL0qz_{child_sid}"
+    delegation_id = f"codex_subagent_call_agent_{child_sid}"
     worker_starts = [
         e for e in events
         if e.get("type") == "worker_start"
@@ -927,6 +1342,19 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
             claude_sid=parent_sid,
             sess=sess,
             last_asst=last_asst,
+            msg_id=asst_id,
+        )
+        hydrated_once = session_manager.get(app_sid) or {}
+        hydrated_asst = next(
+            m for m in hydrated_once.get("messages", []) if m.get("id") == asst_id
+        )
+        _replay_and_apply(
+            persist_sid=app_sid,
+            run_id=run_id,
+            mode="native",
+            claude_sid=parent_sid,
+            sess=hydrated_once,
+            last_asst=hydrated_asst,
             msg_id=asst_id,
         )
     finally:
@@ -1006,9 +1434,20 @@ def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reused"
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
+        f.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         f.write(json.dumps({
             "type": "response_item",
@@ -1142,7 +1581,7 @@ def test_codex_provider_child_setup_persists_source_and_starts_panel() -> bool:
     return asyncio.run(_run())
 
 
-def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
+def test_codex_provider_starts_child_panel_from_v2_activity() -> bool:
     async def _run() -> bool:
         parent_sid = str(uuid.uuid4())
         child_sid = str(uuid.uuid4())
@@ -1161,11 +1600,21 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
                 },
             }).encode() + b"\n")
             f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_agent",
+                    "agent_thread_id": child_sid,
+                    "agent_path": "/root/reviewer",
+                    "kind": "started",
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps({
                 "type": "response_item",
                 "payload": {
                     "type": "function_call_output",
                     "call_id": "call_agent",
-                    "output": json.dumps({"agent_id": child_sid}),
+                    "output": json.dumps({"task_name": "/root/reviewer"}),
                 },
             }).encode() + b"\n")
         with child_path.open("wb") as f:
@@ -1207,6 +1656,7 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
         try:
             task = asyncio.create_task(provider._bootstrap_run(rs))
             saw_panel = False
+            saw_child_event = False
             deadline = asyncio.get_running_loop().time() + 2
             while asyncio.get_running_loop().time() < deadline:
                 try:
@@ -1215,6 +1665,9 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
                     continue
                 if event.type == "worker_start":
                     saw_panel = True
+                if event.type == "worker_event" and "child answer" in json.dumps(event.data):
+                    saw_child_event = True
+                if saw_panel and saw_child_event:
                     break
             if rs.tailer is not None:
                 rs.tailer.stop()
@@ -1225,14 +1678,538 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
         finally:
             codex_native.resolve_rollout_path_polled = original_resolve
             provider._cleanup_run(run_dir.name)
-        if not saw_panel:
-            print("  spawn_agent result did not start a child panel")
-        return saw_panel
+        source_key = f"call_agent_{child_sid}"
+        source = rs.child_sources.get(source_key) or {}
+        ok = (
+            saw_panel
+            and saw_child_event
+            and len(rs.child_sources) == 1
+            and source.get("parent_tool_use_id") == "call_agent"
+            and source.get("agent_id") == child_sid
+        )
+        if not ok:
+            print(f"  panel={saw_panel} child={saw_child_event} sources={rs.child_sources!r}")
+        return ok
+
+    return asyncio.run(_run())
+
+
+def test_codex_provider_waits_for_child_terminal_before_complete() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            start_byte = f.tell()
+
+        class _Popen:
+            pid = os.getpid()
+
+            def poll(self):
+                return None
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=_Popen(),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_agent_{child_sid}"
+        delegation_id = f"codex_subagent_{source_key}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_agent",
+            "jsonl_path": str(child_path),
+            "start_byte": start_byte,
+            "processed_byte_offset": start_byte,
+            "delegation_id": delegation_id,
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        provider._runs[run_dir.name] = rs
+        await provider._ensure_child_tailer(
+            rs,
+            source_key,
+            child_sid,
+            rs.child_sources[source_key],
+            {"type": "user"},
+        )
+        watch = asyncio.create_task(provider._watch_complete(rs))
+
+        async def append_child_terminal() -> None:
+            await asyncio.sleep(0.35)
+            with child_path.open("ab") as f:
+                f.write(json.dumps(_make_assistant_text_event("late child final")).encode() + b"\n")
+                f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+
+        append_task = asyncio.create_task(append_child_terminal())
+        (run_dir / "complete.json").write_text(json.dumps({
+            "success": True,
+            "session_id": "parent",
+            "error": None,
+            "token_usage": None,
+        }), encoding="utf-8")
+        events: list = []
+        try:
+            deadline = asyncio.get_running_loop().time() + 3
+            while asyncio.get_running_loop().time() < deadline:
+                event = await asyncio.wait_for(queue.get(), timeout=0.5)
+                events.append(event)
+                if event.type == "complete":
+                    break
+            await asyncio.wait_for(watch, timeout=3)
+            await append_task
+        finally:
+            append_task.cancel()
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
+            provider._cleanup_run(run_dir.name)
+
+        complete_index = next(
+            (index for index, event in enumerate(events) if event.type == "complete"),
+            -1,
+        )
+        worker_index = next(
+            (
+                index
+                for index, event in enumerate(events)
+                if event.type == "worker_event"
+                and "late child final" in json.dumps(event.data)
+            ),
+            -1,
+        )
+        ok = worker_index >= 0 and complete_index > worker_index
+        if not ok:
+            print(f"  events={events!r}")
+        return ok
+
+    return asyncio.run(_run())
+
+
+def test_codex_provider_reuses_processed_child_terminal_on_complete() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            start_byte = f.tell()
+            f.write(json.dumps(_make_assistant_text_event("processed child final")).encode() + b"\n")
+            f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+            processed_byte = f.tell()
+
+        class _Popen:
+            pid = os.getpid()
+
+            def poll(self):
+                return None
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=_Popen(),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_agent_{child_sid}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_agent",
+            "jsonl_path": str(child_path),
+            "start_byte": start_byte,
+            "processed_byte_offset": processed_byte,
+            "delegation_id": f"codex_subagent_{source_key}",
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        provider._runs[run_dir.name] = rs
+        await provider._ensure_child_tailer(
+            rs,
+            source_key,
+            child_sid,
+            rs.child_sources[source_key],
+            {"type": "user"},
+        )
+        watch = asyncio.create_task(provider._watch_complete(rs))
+        (run_dir / "complete.json").write_text(json.dumps({
+            "success": True,
+            "session_id": "parent",
+            "error": None,
+            "token_usage": None,
+        }), encoding="utf-8")
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=1)
+            while event.type != "complete":
+                event = await asyncio.wait_for(queue.get(), timeout=1)
+            await asyncio.wait_for(watch, timeout=1)
+        finally:
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
+            provider._cleanup_run(run_dir.name)
+        return True
+
+    return asyncio.run(_run())
+
+
+def test_codex_provider_parent_failure_does_not_wait_for_child_terminal() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            start_byte = f.tell()
+
+        class _Popen:
+            pid = os.getpid()
+
+            def poll(self):
+                return None
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=_Popen(),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_agent_{child_sid}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_agent",
+            "jsonl_path": str(child_path),
+            "start_byte": start_byte,
+            "processed_byte_offset": start_byte,
+            "delegation_id": f"codex_subagent_{source_key}",
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        provider._runs[run_dir.name] = rs
+        await provider._ensure_child_tailer(
+            rs,
+            source_key,
+            child_sid,
+            rs.child_sources[source_key],
+            {"type": "user"},
+        )
+        watch = asyncio.create_task(provider._watch_complete(rs))
+        (run_dir / "complete.json").write_text(json.dumps({
+            "success": False,
+            "session_id": "parent",
+            "error": "parent failed",
+            "token_usage": None,
+        }), encoding="utf-8")
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=1)
+            while event.type != "complete":
+                event = await asyncio.wait_for(queue.get(), timeout=1)
+            await asyncio.wait_for(watch, timeout=1)
+        finally:
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
+            provider._cleanup_run(run_dir.name)
+        return event.data.get("success") is False
+
+    return asyncio.run(_run())
+
+
+def test_codex_provider_cancel_unblocks_child_join() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            start_byte = f.tell()
+
+        class _Popen:
+            pid = os.getpid()
+
+            def poll(self):
+                return 0
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=_Popen(),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_agent_{child_sid}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_agent",
+            "jsonl_path": str(child_path),
+            "start_byte": start_byte,
+            "processed_byte_offset": start_byte,
+            "delegation_id": f"codex_subagent_{source_key}",
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        provider._runs[run_dir.name] = rs
+        await provider._ensure_child_tailer(
+            rs,
+            source_key,
+            child_sid,
+            rs.child_sources[source_key],
+            {"type": "user"},
+        )
+        watch = asyncio.create_task(provider._watch_complete(rs))
+        (run_dir / "complete.json").write_text(json.dumps({
+            "success": True,
+            "session_id": "parent",
+            "error": None,
+            "token_usage": None,
+        }), encoding="utf-8")
+
+        async def cancel_later() -> None:
+            await asyncio.sleep(0.35)
+            provider.cancel_run(run_dir.name)
+
+        cancel_task = asyncio.create_task(cancel_later())
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=2)
+            while event.type != "complete":
+                event = await asyncio.wait_for(queue.get(), timeout=2)
+            await asyncio.wait_for(watch, timeout=2)
+            await cancel_task
+        finally:
+            cancel_task.cancel()
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
+            provider._cleanup_run(run_dir.name)
+        return event.data.get("success") is False and event.data.get("error") == "cancelled"
+
+    return asyncio.run(_run())
+
+
+def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="test")
+    events = normalizer.normalize_event({
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_reasoning",
+            "message": "Need inspect before editing.",
+        },
+    })
+    if len(events) != 1:
+        print(f"  expected one event, got {events!r}")
+        return False
+    content = ((events[0].get("message") or {}).get("content") or [])
+    block = content[0] if content and isinstance(content[0], dict) else {}
+    ok = (
+        events[0].get("type") == "assistant"
+        and block.get("type") == "thinking"
+        and block.get("thinking") == "Need inspect before editing."
+        and "text" not in block
+    )
+    if not ok:
+        print(f"  bad reasoning event: {events!r}")
+    return ok
+
+
+def test_codex_nonlatest_replay_bound_is_safe() -> bool:
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+    first_dir = runs_root() / first_id
+    second_dir = runs_root() / second_id
+    try:
+        first_dir.mkdir(parents=True)
+        second_dir.mkdir(parents=True)
+        rollout = first_dir / "shared.jsonl"
+        first_line = json.dumps(_make_assistant_text_event("first")) + "\n"
+        second_line = json.dumps(_make_assistant_text_event("second")) + "\n"
+        rollout.write_text(first_line + second_line, encoding="utf-8")
+        boundary = len(first_line.encode())
+        for run_dir, start in ((first_dir, 0), (second_dir, boundary)):
+            (run_dir / "state.json").write_text(json.dumps({
+                "jsonl_path": str(rollout),
+                "pre_query_byte_offset": start,
+            }), encoding="utf-8")
+        first = {"run_id": first_id, "provider_kind": "codex"}
+        second = {"run_id": second_id, "provider_kind": "codex"}
+        if _codex_replay_bound(first, second) != boundary:
+            return False
+        (second_dir / "state.json").write_text(json.dumps({
+            "jsonl_path": str(rollout),
+            "pre_query_byte_offset": str(boundary),
+        }), encoding="utf-8")
+        if _codex_replay_bound(first, second) is not None:
+            return False
+        (second_dir / "state.json").write_text("[]", encoding="utf-8")
+        if _codex_replay_bound(first, second) is not None:
+            return False
+        other = second_dir / "other.jsonl"
+        other.write_text(second_line, encoding="utf-8")
+        (second_dir / "state.json").write_text(json.dumps({
+            "jsonl_path": str(other),
+            "pre_query_byte_offset": 0,
+        }), encoding="utf-8")
+        return _codex_replay_bound(first, second) is None
+    finally:
+        shutil.rmtree(first_dir, ignore_errors=True)
+        shutil.rmtree(second_dir, ignore_errors=True)
+
+
+def test_codex_provider_recovers_nested_child_sources_from_processed_history() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        grandchild_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        grandchild_path = run_dir / "grandchild-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            child_start = f.tell()
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "call_id": "call_grandchild",
+                    "arguments": json.dumps({"message": "nested review"}),
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_grandchild",
+                    "agent_thread_id": grandchild_sid,
+                    "agent_path": "/root/child/grandchild",
+                    "kind": "started",
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+        with grandchild_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": "/root/child/grandchild",
+                }}}},
+            }).encode() + b"\n")
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "agent_message",
+                    "recipient": "/root/child/grandchild",
+                    "content": "nested prompt",
+                },
+            }).encode() + b"\n")
+            grandchild_start = f.tell()
+            f.write(json.dumps(_make_assistant_text_event("nested answer")).encode() + b"\n")
+            f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=SimpleNamespace(pid=os.getpid()),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_child_{child_sid}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_child",
+            "jsonl_path": str(child_path),
+            "start_byte": child_start,
+            "processed_byte_offset": child_path.stat().st_size,
+            "delegation_id": f"codex_subagent_{source_key}",
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        import codex_native
+        original_resolve = codex_native.resolve_rollout_path_polled
+
+        async def fake_resolve(thread_id: str, **_kwargs):
+            if thread_id == grandchild_sid:
+                return grandchild_path
+            return child_path if thread_id == child_sid else None
+
+        codex_native.resolve_rollout_path_polled = fake_resolve
+        try:
+            await provider._ensure_child_tailer(
+                rs,
+                source_key,
+                child_sid,
+                rs.child_sources[source_key],
+                None,
+            )
+            await provider._wait_child_setup(rs)
+            for tailer in rs.child_tailers.values():
+                await tailer.drain_available()
+            queued = []
+            while not queue.empty():
+                queued.append(queue.get_nowait())
+        finally:
+            codex_native.resolve_rollout_path_polled = original_resolve
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            for task in rs.child_tailer_tasks.values():
+                task.cancel()
+            await asyncio.gather(*rs.child_tailer_tasks.values(), return_exceptions=True)
+
+        nested_sources = [
+            source for source in rs.child_sources.values()
+            if source.get("agent_id") == grandchild_sid
+        ]
+        nested_text = json.dumps([event.data for event in queued])
+        ok = (
+            len(nested_sources) == 1
+            and nested_sources[0].get("parent_source_key") == source_key
+            and nested_sources[0].get("start_byte") == grandchild_start
+            and "nested answer" in nested_text
+        )
+        if not ok:
+            print(f"  sources={rs.child_sources!r} queued={nested_text[:500]}")
+        return ok
 
     return asyncio.run(_run())
 
 
 TESTS = [
+    ("codex nonlatest replay bound is safe", test_codex_nonlatest_replay_bound_is_safe),
     ("codex live orphan is emitted (not skipped)", test_live_orphan_is_emitted_not_skipped),
     ("codex replay reads native rollout jsonl", test_codex_replay_reads_native_rollout_jsonl),
     ("codex live recovery streams rollout events before complete", test_live_recovery_streams_rollout_events_before_complete),
@@ -1240,17 +2217,30 @@ TESTS = [
     ("dead codex wrapper uses rollout terminal complete", test_dead_wrapper_uses_rollout_terminal_complete),
     ("dead codex wrapper resolves missing jsonl path", test_dead_wrapper_resolves_missing_jsonl_path),
     ("dead codex wrapper ignores malformed usage values", test_dead_wrapper_ignores_malformed_usage_values),
+    ("codex usage normalizer zeros malformed live values", test_codex_usage_normalizer_zeros_malformed_live_values),
     ("dead codex wrapper uses rollout terminal failure", test_dead_wrapper_uses_rollout_terminal_failure),
     ("dead codex wrapper without terminal fails closed", test_dead_wrapper_without_terminal_still_fails_closed),
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
-    ("provider bootstrap task schedules from worker thread", test_create_loop_task_from_worker_thread),
+    ("codex loopback POST retries disk token after forbidden", test_loopback_post_retries_disk_token_after_forbidden),
+    ("codex loopback POST surfaces HTTP error detail", test_loopback_post_surfaces_http_error_detail),
+    ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
+    ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),
     ("codex MCP string error normalizes", test_codex_mcp_string_error_normalizes),
+    ("codex dead-runner replay preserves tool result structure", test_codex_dead_runner_replay_preserves_tool_result_structure),
+    ("codex replay dedup allows mutated same uuid", test_codex_replay_dedup_allows_mutated_same_uuid),
+    ("turn manager dead runner replays codex rollout events", test_turn_manager_dead_runner_replays_codex_rollout_events),
     ("codex replay includes child subagent panel events", test_codex_replay_includes_child_subagent_panel_events),
-    ("codex replay derives missing child sources from actual wait shape", test_codex_replay_derives_missing_child_sources_from_actual_wait_shape),
+    ("codex replay derives missing child sources from v2 activity", test_codex_replay_derives_missing_child_sources_from_v2_activity),
     ("codex replay splits reused child by parent tool call", test_codex_replay_splits_reused_child_by_parent_tool_call),
     ("codex provider child setup persists source and starts panel", test_codex_provider_child_setup_persists_source_and_starts_panel),
-    ("codex provider starts child panel from spawn result", test_codex_provider_starts_child_panel_from_spawn_result),
+    ("codex provider starts child panel from v2 activity", test_codex_provider_starts_child_panel_from_v2_activity),
+    ("codex provider waits for child terminal before complete", test_codex_provider_waits_for_child_terminal_before_complete),
+    ("codex provider reuses processed child terminal on complete", test_codex_provider_reuses_processed_child_terminal_on_complete),
+    ("codex provider parent failure does not wait for child terminal", test_codex_provider_parent_failure_does_not_wait_for_child_terminal),
+    ("codex provider cancel unblocks child join", test_codex_provider_cancel_unblocks_child_join),
+    ("codex provider recovers nested child sources from processed history", test_codex_provider_recovers_nested_child_sources_from_processed_history),
+    ("codex event_msg.agent_reasoning renders as thinking", test_codex_event_msg_agent_reasoning_renders_as_thinking),
 ]
 
 
@@ -1269,6 +2259,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     print(f"all {len(TESTS)} tests passed" if not failed

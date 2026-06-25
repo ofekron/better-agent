@@ -27,6 +27,7 @@ FAILURES: list[str] = []
 
 _ROUTES = (
     "import os\n"
+    "from pathlib import Path\n"
     "from fastapi import APIRouter\n"
     "_count = 0\n"
     "def create_router(ctx):\n"
@@ -37,6 +38,16 @@ _ROUTES = (
     "    def bump():\n"
     "        global _count; _count += 1\n"
     "        return {'count': _count}\n"
+    "    @r.post('/exit-once')\n"
+    "    def exit_once():\n"
+    "        marker = Path(__file__).with_name('exit-once.marker')\n"
+    "        if not marker.exists():\n"
+    "            marker.write_text('1', encoding='utf-8')\n"
+    "            os._exit(0)\n"
+    "        return {'ok': True, 'pid': os.getpid()}\n"
+    "    @r.post('/exit-never-retry')\n"
+    "    def exit_never_retry():\n"
+    "        os._exit(0)\n"
     "    return r\n"
 )
 
@@ -56,7 +67,13 @@ def _seed() -> None:
         "manifest": {
             "kind": extension_store.MANIFEST_KIND, "id": "ofek.persist", "name": "P",
             "version": "1.0.0", "description": "", "surfaces": ["backend_feature"],
-            "entrypoints": {"backend": "backend/routes.py", "frontend": "", "mcp": [], "provider_capabilities": []},
+            "entrypoints": {
+                "backend": "backend/routes.py",
+                "frontend": "",
+                "mcp": [],
+                "provider_capabilities": [],
+                "backend_retry_on_exit": ["exit-once"],
+            },
             "permissions": {"backend_routes": True},
             "marketplace": {"product_id": "", "subscription_required": False, "entitlement_url": ""},
         },
@@ -101,9 +118,17 @@ def main() -> None:
 
         # Crash recovery: kill the live process, next request restarts it.
         handle = L._PERSISTENT_PROCS["ofek.persist"]
-        handle.proc.kill()
+        handle.channel.proc.kill()
         r4 = client.get("/api/extensions/ofek.persist/backend/pid")
         check(r4.status_code == 200, "request succeeds after process crash (auto-restart)")
+
+        r5 = client.post("/api/extensions/ofek.persist/backend/exit-once")
+        check(r5.status_code == 200 and r5.json().get("ok") is True,
+              "declared backend_retry_on_exit route retries once after mid-request process exit")
+
+        r6 = client.post("/api/extensions/ofek.persist/backend/exit-never-retry")
+        check(r6.status_code == 500,
+              "undeclared route keeps fail-closed process-exit behavior")
     finally:
         L.shutdown_persistent_backends()
         from shutil import rmtree

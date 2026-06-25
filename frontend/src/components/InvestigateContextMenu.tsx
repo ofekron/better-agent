@@ -1,10 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
+import { useTranslation } from "react-i18next";
 import type { PastedImage } from "./InputArea";
-import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
+import { useMobileActionSheet, isMobileViewport, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
+import { copyToClipboard } from "../utils/clipboard";
 import Icon from "./Icon";
 
 /** Long-press on a non-text target (image, video) → action sheet.
@@ -16,6 +18,20 @@ function isMediaTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLImageElement || target instanceof HTMLVideoElement
   );
+}
+
+function isNativeTextSelectionTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (FORM_TAG_NAMES.has(target.tagName)) return true;
+  return Boolean(target.closest("p, pre, code, blockquote, li, h1, h2, h3, h4, h5, h6"));
+}
+
+function isMobileLongPressTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest("[data-mobile-context-owner]")) return false;
+  if (isMediaTarget(target)) return true;
+  return !isNativeTextSelectionTarget(target);
 }
 
 export interface InvestigationData {
@@ -125,10 +141,12 @@ const MENU_W = 200;
 const MENU_PAD = 16;
 
 export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeSessionCwd, children }: Props) {
+  const { t } = useTranslation();
   const [desktopItems, setDesktopItems] = useState<ActionItem[] | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const ownerRef = useRef<HTMLDivElement>(null);
   const clickPosRef = useRef<{ x: number; y: number }>(null!);
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
@@ -137,10 +155,17 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
   const { show: showSheet } = useMobileActionSheet();
 
-  // Long-press state refs.
-  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressFiredRef = useRef(false);
-  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressGestureRef = useRef<{
+    target: HTMLElement;
+    touchIdentifier: number;
+    x: number;
+    y: number;
+    sessionId: string | undefined;
+    messageElement: HTMLElement | null;
+    messageId: string | null;
+    messageClassName: string | null;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
 
   // Close desktop menu on click outside or Escape.
   useEffect(() => {
@@ -219,7 +244,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         });
       }
 
-      // Copy ID — available on any message.
+      // Copy message/session ids from any message.
       const msgEl = target.closest("[data-message-id]") as HTMLElement | null;
       if (msgEl) {
         const messageId = msgEl.getAttribute("data-message-id")!;
@@ -230,9 +255,9 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         if (cwd) parts.push(cwd);
         items.push({
           id: "copy-id",
-          label: "Copy ID",
+          label: t("session.copyAction"),
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => navigator.clipboard.writeText(parts.join(" ")).catch(() => {}),
+          onClick: () => void copyToClipboard(parts.join(" ")),
         });
       }
 
@@ -261,7 +286,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
           label: "Copy",
           icon: <Icon name="clipboard" size={14} />,
           onClick: () => {
-            navigator.clipboard.writeText(text).catch(() => {});
+            void copyToClipboard(text);
             sel.removeAllRanges();
           },
         });
@@ -287,7 +312,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
       return items;
     },
-    [handleInvestigate],
+    [handleInvestigate, t],
   );
 
   // Desktop right-click → show custom floating toolbar WITHOUT suppressing
@@ -321,61 +346,111 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
   );
 
   // Mobile long-press detection via touch events.
-  // Listeners are always attached; each handler gates on isMobileViewport()
+  // Listeners are always attached; each handler gates on touch capability
   // at call time so viewport resizes are handled reactively without
   // re-mounting the effect.
   useEffect(() => {
+    const cancelLongPress = () => {
+      const gesture = longPressGestureRef.current;
+      longPressGestureRef.current = null;
+      if (gesture?.timer !== null && gesture?.timer !== undefined) {
+        clearTimeout(gesture.timer);
+      }
+    };
+
     const handleTouchStart = (e: TouchEvent) => {
-      if (!isMobileViewport()) return;
-      // Media-only gate: long-press on text MUST fall through to the
-      // browser's native selection so the user can actually select text.
-      if (!isMediaTarget(e.target)) return;
+      if (e.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      if (!isTouchInteractionViewport()) {
+        cancelLongPress();
+        return;
+      }
+      if (!isMobileLongPressTarget(e.target)) {
+        cancelLongPress();
+        return;
+      }
 
       const touch = e.touches[0];
-      touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
-      longPressFiredRef.current = false;
+      const target = e.target as HTMLElement;
+      if (!touch) return;
+      const messageElement = target.closest("[data-message-id]") as HTMLElement | null;
 
-      longPressTimerRef.current = setTimeout(() => {
-        longPressFiredRef.current = true;
-        const target = e.target as HTMLElement;
+      cancelLongPress();
+      const gesture: NonNullable<typeof longPressGestureRef.current> = {
+        target,
+        touchIdentifier: touch.identifier,
+        x: touch.clientX,
+        y: touch.clientY,
+        sessionId: activeSessionIdRef.current,
+        messageElement,
+        messageId: messageElement?.getAttribute("data-message-id") ?? null,
+        messageClassName: messageElement?.className ?? null,
+        timer: null,
+      };
+      gesture.timer = setTimeout(() => {
+        if (longPressGestureRef.current !== gesture) return;
+        longPressGestureRef.current = null;
+        if (!isTouchInteractionViewport()) return;
+        if (!gesture.target.isConnected) return;
+        if (!ownerRef.current?.contains(gesture.target)) return;
+        if (!isMobileLongPressTarget(gesture.target)) return;
+        if (activeSessionIdRef.current !== gesture.sessionId) return;
+        const messageElement = gesture.target.closest("[data-message-id]") as HTMLElement | null;
+        if (messageElement !== gesture.messageElement) return;
+        if (messageElement?.getAttribute("data-message-id") !== gesture.messageId) return;
+        if ((messageElement?.className ?? null) !== gesture.messageClassName) return;
 
-        if (FORM_TAG_NAMES.has(target.tagName)) return;
-        if (target.closest(".modal-overlay")) return;
+        if (FORM_TAG_NAMES.has(gesture.target.tagName)) return;
+        if (gesture.target.closest(".modal-overlay")) return;
 
-        const pos = touchStartPosRef.current!;
-        const items = buildActions(target, pos.x, pos.y);
+        const items = buildActions(gesture.target, gesture.x, gesture.y);
         if (items.length === 0) return;
 
         showSheet(items);
       }, LONG_PRESS_MS);
+      longPressGestureRef.current = gesture;
     };
 
     const handleTouchMove = (e: TouchEvent) => {
-      if (!touchStartPosRef.current) return;
-      const touch = e.touches[0];
-      const dx = touch.clientX - touchStartPosRef.current.x;
-      const dy = touch.clientY - touchStartPosRef.current.y;
+      const gesture = longPressGestureRef.current;
+      if (!gesture) return;
+      if (e.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      const touch = Array.from(e.touches).find(
+        (candidate) => candidate.identifier === gesture.touchIdentifier,
+      );
+      if (!touch) {
+        cancelLongPress();
+        return;
+      }
+      const dx = touch.clientX - gesture.x;
+      const dy = touch.clientY - gesture.y;
       if (Math.sqrt(dx * dx + dy * dy) > MOVE_THRESHOLD) {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        cancelLongPress();
       }
     };
 
-    const handleTouchEnd = () => {
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = null;
+    const handleTouchFinish = (e: TouchEvent) => {
+      const gesture = longPressGestureRef.current;
+      if (!gesture) return;
+      if (!e.changedTouches?.length) {
+        cancelLongPress();
+        return;
       }
-      longPressFiredRef.current = false;
-      touchStartPosRef.current = null;
+      const finishedGesture = Array.from(e.changedTouches).some(
+        (touch) => touch.identifier === gesture.touchIdentifier,
+      );
+      if (finishedGesture) cancelLongPress();
     };
 
-    // Suppress native context menu on mobile ONLY for media targets.
+    // Suppress native context menu only where the app owns long-press.
     const suppressNative = (e: Event) => {
-      if (!isMobileViewport()) return;
-      if (!isMediaTarget(e.target)) return;
+      if (!isTouchInteractionViewport()) return;
+      if (!isMobileLongPressTarget(e.target)) return;
       const target = e.target as HTMLElement;
       if (FORM_TAG_NAMES.has(target.tagName)) return;
       if (target.closest(".modal-overlay")) return;
@@ -384,15 +459,17 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
     document.addEventListener("touchstart", handleTouchStart, { passive: true });
     document.addEventListener("touchmove", handleTouchMove, { passive: true });
-    document.addEventListener("touchend", handleTouchEnd, { passive: true });
+    document.addEventListener("touchend", handleTouchFinish, { passive: true });
+    document.addEventListener("touchcancel", handleTouchFinish, { passive: true });
     document.addEventListener("contextmenu", suppressNative, true);
 
     return () => {
       document.removeEventListener("touchstart", handleTouchStart);
       document.removeEventListener("touchmove", handleTouchMove);
-      document.removeEventListener("touchend", handleTouchEnd);
+      document.removeEventListener("touchend", handleTouchFinish);
+      document.removeEventListener("touchcancel", handleTouchFinish);
       document.removeEventListener("contextmenu", suppressNative, true);
-      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      cancelLongPress();
     };
   }, [buildActions, showSheet]);
 
@@ -403,7 +480,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
   useBackButtonDismiss(desktopItems !== null, closeDesktopMenu);
 
   return (
-    <div onContextMenu={handleContextMenu} style={{ display: "contents" }}>
+    <div ref={ownerRef} onContextMenu={handleContextMenu} style={{ display: "contents" }}>
       {children}
 
       {/* Unified floating context menu (desktop). */}

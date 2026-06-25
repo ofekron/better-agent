@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -55,7 +57,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester, EventIngester  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
-from jsonl_tailer import OwnedClaudeJsonlTailer  # noqa: E402
+from jsonl_tailer import ClaudeJsonlTailer, OwnedClaudeJsonlTailer  # noqa: E402
 from paths import ba_home  # noqa: E402
 from auth_test_helpers import authenticate_client  # noqa: E402
 
@@ -361,6 +363,65 @@ async def test_offline_catchup_and_restart_dedup() -> bool:
     return True
 
 
+async def test_claude_tailer_rewinds_oversized_cursor() -> bool:
+    jsonl = Path(_TMP_HOME) / "rewind" / f"{uuid.uuid4()}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    line = {
+        "type": "assistant",
+        "uuid": str(uuid.uuid4()),
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "rewound"}]},
+    }
+    raw = json.dumps(line) + "\n"
+    jsonl.write_text(raw, encoding="utf-8")
+
+    seen: list[dict] = []
+    cursors: list[int] = []
+    tailer = ClaudeJsonlTailer(
+        path=jsonl,
+        start_offset=len(raw) + 1000,
+        dispatch=seen.append,
+        on_cursor_advance=cursors.append,
+    )
+    task = asyncio.create_task(tailer.run())
+    try:
+        for _ in range(100):
+            if seen:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        tailer.stop()
+        await task
+
+    if not seen:
+        print("  oversized cursor did not rewind/read current file")
+        return False
+    if seen[0].get("uuid") != line["uuid"]:
+        print(f"  wrong event after rewind: {seen[0]!r}")
+        return False
+    if not cursors or cursors[0] != 0:
+        print(f"  cursor reset was not reported first: {cursors!r}")
+        return False
+    if cursors[-1] != len(raw):
+        print(f"  cursor did not advance to current file size: {cursors!r}")
+        return False
+
+    owned = OwnedClaudeJsonlTailer(
+        root_id="root",
+        app_session_id="app",
+        agent_sid="agent",
+        jsonl_path=jsonl,
+        start_offset=len(raw) + 1000,
+    )
+    persisted: list[int] = []
+    owned._persist_cursor = persisted.append  # type: ignore[method-assign]
+    owned._on_cursor(0)
+    if persisted != [0]:
+        print(f"  owned cursor did not persist reset: {persisted!r}")
+        return False
+    return True
+
+
 # ─── (e) torn-tail recovery ────────────────────────────────────────────
 async def test_torn_tail_recovery_both_variants() -> bool:
     # Use a fresh ingester to bypass the singleton's open handle cache.
@@ -447,6 +508,47 @@ async def test_broadcast_global_allowlist_enforced() -> bool:
     return True
 
 
+async def test_broadcast_global_does_not_wait_for_slow_client() -> bool:
+    coordinator = Coordinator()
+    release_slow = asyncio.Event()
+    slow_started = asyncio.Event()
+    fast_seen: list[dict] = []
+
+    async def slow_cb(event: dict) -> None:
+        slow_started.set()
+        await release_slow.wait()
+
+    async def fast_cb(event: dict) -> None:
+        fast_seen.append(event)
+
+    coordinator.register_global_ws(slow_cb)
+    coordinator.register_global_ws(fast_cb)
+
+    t0 = time.perf_counter()
+    await coordinator.broadcast_global("provider_changed", {"x": 1})
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    if elapsed_ms > 50.0:
+        print(f"  broadcast_global waited {elapsed_ms:.1f}ms for callbacks")
+        release_slow.set()
+        await asyncio.sleep(0)
+        return False
+
+    for _ in range(10):
+        if fast_seen and slow_started.is_set():
+            break
+        await asyncio.sleep(0)
+    release_slow.set()
+    await asyncio.sleep(0)
+
+    if not fast_seen:
+        print("  fast callback did not receive broadcast")
+        return False
+    if fast_seen[-1].get("type") != "provider_changed":
+        print(f"  wrong event: {fast_seen[-1]!r}")
+        return False
+    return True
+
+
 # ─── (g) broadcast_session ingests per-session events ──────────────────
 async def test_broadcast_session_persists_event() -> bool:
     sid = _seed_session()
@@ -489,6 +591,132 @@ async def test_broadcast_session_persists_event() -> bool:
     return True
 
 
+async def test_broadcast_session_ignores_closed_journal_error() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    original = event_journal.publish_event
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    async def closed_writer(**_kwargs: object) -> int:
+        raise event_journal.EventJournalWriteError("event journal writer is closed")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.publish_event = closed_writer
+    try:
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": []},
+            source="test.closed_journal",
+        )
+    finally:
+        event_journal.publish_event = original
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if errors:
+        print(f"  closed writer logged error: {errors[-1].getMessage()}")
+        return False
+    return True
+
+
+async def test_broadcast_session_logs_other_journal_errors() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    original = event_journal.publish_event
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    async def broken_writer(**_kwargs: object) -> int:
+        raise event_journal.EventJournalWriteError("simulated journal failure")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.publish_event = broken_writer
+    try:
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": []},
+            source="test.journal_failure",
+        )
+    finally:
+        event_journal.publish_event = original
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if not errors:
+        print("  non-closed journal failure did not log an error")
+        return False
+    return True
+
+
+async def test_broadcast_session_uses_async_journal_without_sync_timeout() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    root_id = session_manager._root_id_for(sid) or sid
+    test_uuid = str(uuid.uuid4())
+    original_async = event_journal.event_journal_writer.submit_event_async
+    original_sync = event_journal.publish_event_sync
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    async def delayed_async(event):
+        await asyncio.sleep(0.05)
+        return await original_async(event)
+
+    def forbidden_sync(**_kwargs: object) -> int:
+        raise TimeoutError("sync journal timeout path used")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.event_journal_writer.submit_event_async = delayed_async
+    event_journal.publish_event_sync = forbidden_sync
+    try:
+        start = time.perf_counter()
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": [], "uuid": test_uuid},
+            source="test.async_journal",
+        )
+        elapsed = time.perf_counter() - start
+    finally:
+        event_journal.event_journal_writer.submit_event_async = original_async
+        event_journal.publish_event_sync = original_sync
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if errors:
+        print(f"  async journal path logged error: {errors[-1].getMessage()}")
+        return False
+    if elapsed < 0.04:
+        print("  async journal path returned before delayed write completed")
+        return False
+    events = _read_events(root_id)
+    if not any((e.get("data") or {}).get("uuid") == test_uuid for e in events):
+        print("  async journal path did not persist delayed run_state")
+        return False
+    return True
+
+
 TESTS = [
     ("(a) REST command_received persists into events.jsonl",
      test_command_received_appears_in_events_jsonl),
@@ -498,12 +726,22 @@ TESTS = [
      test_tailer_halts_on_dispatch_failure_and_dedupes),
     ("(d) offline catch-up + restart dedup",
      test_offline_catchup_and_restart_dedup),
+    ("(d2) Claude tailer rewinds oversized persisted byte cursor",
+     test_claude_tailer_rewinds_oversized_cursor),
     ("(e) torn-tail recovery (both variants)",
      test_torn_tail_recovery_both_variants),
     ("(f) broadcast_global allowlist enforced",
      test_broadcast_global_allowlist_enforced),
+    ("(f2) broadcast_global does not wait for slow WS clients",
+     test_broadcast_global_does_not_wait_for_slow_client),
     ("(g) broadcast_session persists supervisor/run_state/rewind events",
      test_broadcast_session_persists_event),
+    ("(g2) broadcast_session ignores closed journal during shutdown",
+     test_broadcast_session_ignores_closed_journal_error),
+    ("(g3) broadcast_session still logs non-shutdown journal failures",
+     test_broadcast_session_logs_other_journal_errors),
+    ("(g4) broadcast_session uses async journal without sync timeout",
+     test_broadcast_session_uses_async_journal_without_sync_timeout),
 ]
 
 

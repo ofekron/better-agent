@@ -82,6 +82,32 @@ async def _run() -> int:
     check(hooks[0]["enabled"] is True, "hook defaults to enabled")
     check(hooks[0]["timeout_seconds"] == 2.0, "timeout normalizes to float")
 
+    original_json_loads = hook_store.json.loads
+    loads = {"count": 0}
+
+    def counted_loads(*args, **kwargs):
+        loads["count"] += 1
+        return original_json_loads(*args, **kwargs)
+
+    hook_store._state_cache = None
+    hook_store.json.loads = counted_loads
+    try:
+        first = hook_store.list_hooks()
+        second = hook_store.list_hooks()
+        check(loads["count"] == 1, "hook list reuses parsed config on hot reads")
+        first[0]["name"] = "mutated"
+        check(second[0]["name"] == "capture hook", "hook list returns isolated cached data")
+        hook_store.upsert_hook({
+            **second[0],
+            "name": "updated hook",
+        })
+        after_write_loads = loads["count"]
+        third = hook_store.list_hooks()
+        check(loads["count"] == after_write_loads, "hook write refreshes parsed cache")
+        check(third[0]["name"] == "updated hook", "hook cache reflects writes")
+    finally:
+        hook_store.json.loads = original_json_loads
+
     meta: list[BusEvent] = []
 
     async def record_meta(ev: BusEvent) -> None:

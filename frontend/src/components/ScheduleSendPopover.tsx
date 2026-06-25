@@ -54,6 +54,32 @@ export function ScheduleSendPopover({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const handleDragPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest(".schedule-popover-close")) return;
+    dragState.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: dragOffset.x,
+      origY: dragOffset.y,
+    };
+    setDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const handleDragPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragState.current) return;
+    const { startX, startY, origX, origY } = dragState.current;
+    setDragOffset({ x: origX + (e.clientX - startX), y: origY + (e.clientY - startY) });
+  };
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragState.current) return;
+    dragState.current = null;
+    setDragging(false);
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
 
   // Close on outside click / Escape, like the other composer popovers.
   useEffect(() => {
@@ -107,8 +133,19 @@ export function ScheduleSendPopover({
       data-testid="schedule-popover"
       role="dialog"
       aria-label={t("schedule.title")}
+      style={{
+        transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)`,
+        transition: dragging ? "none" : undefined,
+      }}
     >
-      <div className="schedule-popover-header">
+      <div
+        className="schedule-popover-header"
+        data-testid="schedule-popover-drag-handle"
+        onPointerDown={handleDragPointerDown}
+        onPointerMove={handleDragPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
         <Icon name="clock" size={14} />
         <span>{t("schedule.title")}</span>
         <button

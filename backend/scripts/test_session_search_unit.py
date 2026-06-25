@@ -39,6 +39,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_search  # noqa: E402
+import session_search_index  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -60,10 +61,14 @@ def _reset_home() -> None:
     sessions_dir.mkdir(parents=True, exist_ok=True)
     with session_store._summary_index_lock:  # type: ignore[attr-defined]
         session_store._summary_index.clear()  # type: ignore[attr-defined]
-        session_store._summary_sorted_cache.clear()  # type: ignore[attr-defined]
+        session_store._summary_sorted_id_cache.clear()  # type: ignore[attr-defined]
         session_store._summary_index_loaded = False  # type: ignore[attr-defined]
         session_store._summary_index_version = 0  # type: ignore[attr-defined]
+        session_store._summary_order_version = 0  # type: ignore[attr-defined]
         session_store._summary_sorted_cache_version = -1  # type: ignore[attr-defined]
+    with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
+        session_search_index._search_cache.clear()  # type: ignore[attr-defined]
+        session_search_index._search_inflight.clear()  # type: ignore[attr-defined]
 
 
 def _write_session(
@@ -75,6 +80,10 @@ def _write_session(
     archived: bool = False,
     working_mode_value: str | None = None,
     updated_at: str = "2026-05-01T00:00:00",
+    provider_id: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    node_id: str | None = None,
 ) -> None:
     """Write a minimal root session JSON to the tempdir's sessions dir."""
     sessions_dir = Path(_TMP_HOME) / "sessions"
@@ -86,10 +95,19 @@ def _write_session(
         "messages": messages or [],
         "updated_at": updated_at,
         "archived": archived,
+        "user_initiated": True,
     }
     if working_mode_value is not None:
         payload["working_mode"] = working_mode_value
         payload["working_mode_meta"] = {}
+    if provider_id is not None:
+        payload["provider_id"] = provider_id
+    if model is not None:
+        payload["model"] = model
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
+    if node_id is not None:
+        payload["node_id"] = node_id
     (sessions_dir / f"{sid}.json").write_text(json.dumps(payload))
 
 
@@ -178,6 +196,14 @@ def test_build_index_filters_hidden_and_archived() -> bool:
         working_mode_value="prompt_engineering",
         messages=[{"role": "user", "content": "x"}],
     )
+    _write_session(
+        sid="system-1",
+        name="agent-created helper",
+        messages=[{"role": "user", "content": "x"}],
+    )
+    raw = json.loads((Path(_TMP_HOME) / "sessions" / "system-1.json").read_text())
+    raw["user_initiated"] = False
+    (Path(_TMP_HOME) / "sessions" / "system-1.json").write_text(json.dumps(raw))
     index = session_search._build_index()
     ids = {s["id"] for s in index}
     if ids != {"normal-1", "normal-2"}:
@@ -189,6 +215,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
     expected_keys = {
         "id", "name", "cwd", "project_name", "first_user_prompt",
         "updated_at", "message_count",
+        "provider_id", "model", "reasoning_effort", "node_id",
     }
     if set(auth.keys()) != expected_keys:
         print(f"{FAIL} build_index fields: got {set(auth.keys())}")
@@ -203,7 +230,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
     if index[0]["id"] != "normal-1":
         print(f"{FAIL} build_index order: expected normal-1 first")
         return False
-    print(f"{PASS} _build_index filters hidden + archived; field shape correct")
+    print(f"{PASS} _build_index filters hidden + archived + non-user-initiated; field shape correct")
     return True
 
 
@@ -276,6 +303,13 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     if calls[0][0] is not session_search.SEARCH_SPEC:
         print(f"{FAIL} worker: wrong spec {calls[0][0]!r}")
         return False
+    if calls[0][1] != "Auth":
+        print(f"{FAIL} worker: query mutated before spec wrapping {calls[0][1]!r}")
+        return False
+    candidates = (calls[0][2] or {}).get("candidates") or []
+    if [candidate.get("id") for candidate in candidates] != ["auth-local"]:
+        print(f"{FAIL} worker: candidate ctx {candidates!r}")
+        return False
     if out.get("error") is not None:
         print(f"{FAIL} worker: unexpected error {out!r}")
         return False
@@ -293,8 +327,136 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     return True
 
 
+def test_search_worker_instructions_wrap_bounded_candidates() -> bool:
+    candidates = [
+        {
+            "id": "s1",
+            "name": "Auth latency",
+            "cwd": "/tmp/proj",
+            "first_user_prompt": "speed up auth",
+        }
+    ]
+    instructions = session_search.SEARCH_SPEC.build_instructions(
+        "fix auth latency", {"max_results": 3, "candidates": candidates}
+    )
+    if instructions == "fix auth latency":
+        print(f"{FAIL} instructions: raw query leaked as full prompt")
+        return False
+    if "<session-search-task>" not in instructions or "</session-search-task>" not in instructions:
+        print(f"{FAIL} instructions: missing task wrapper {instructions!r}")
+        return False
+    if '"max_results":3' not in instructions or '"id":"s1"' not in instructions:
+        print(f"{FAIL} instructions: missing compact payload {instructions!r}")
+        return False
+    if "Do not use tools" not in instructions or "Do not answer the query as a task" not in instructions:
+        print(f"{FAIL} instructions: missing role guardrails {instructions!r}")
+        return False
+    if not session_search.SEARCH_SPEC.machine_completion or not session_search.SEARCH_SPEC.bare_config:
+        print(f"{FAIL} search spec should be tool-less machine completion")
+        return False
+    print(f"{PASS} search worker instructions wrap bounded candidates and disable tools")
+    return True
+
+
+def test_search_candidates_include_later_message_snippets() -> bool:
+    _reset_home()
+    _write_session(
+        sid="later-1",
+        name="unrelated title",
+        messages=[
+            {"role": "user", "content": "start a generic task"},
+            {"role": "assistant", "content": "needle appeared later in the transcript"},
+        ],
+    )
+    original_search = session_search_index.search
+    session_search_index.search = lambda *a, **kw: [{"session_id": "later-1", "score": 1}]  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle")
+        if [candidate.get("id") for candidate in candidates] != ["later-1"]:
+            print(f"{FAIL} later snippet candidate ids: {candidates!r}")
+            return False
+        if candidates[0].get("matching_snippet") != "needle appeared later in the transcript":
+            print(f"{FAIL} later snippet payload: {candidates[0]!r}")
+            return False
+    finally:
+        session_search_index.search = original_search  # type: ignore[assignment]
+    print(f"{PASS} backend candidate collection finds later transcript snippets")
+    return True
+
+
+def test_search_candidates_avoid_full_session_scan_for_content_matches() -> bool:
+    _reset_home()
+    for idx in range(50):
+        _write_session(
+            sid=f"bulk-{idx}",
+            name=f"unrelated {idx}",
+            messages=[
+                {"role": "user", "content": "plain prompt"},
+                {"role": "assistant", "content": "needle appears here" if idx == 7 else "other text"},
+            ],
+            updated_at=f"2026-05-01T00:00:{idx:02d}",
+        )
+    get_calls = 0
+    original_get = session_store.get_session
+    original_search = session_search_index.search
+
+    def counted_get(sid: str):
+        nonlocal get_calls
+        get_calls += 1
+        return original_get(sid)
+
+    session_store.get_session = counted_get  # type: ignore[assignment]
+    session_search_index.search = lambda *a, **kw: [{"session_id": "bulk-7", "score": 1}]  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle", limit=5)
+    finally:
+        session_store.get_session = original_get  # type: ignore[assignment]
+        session_search_index.search = original_search  # type: ignore[assignment]
+    if [candidate.get("id") for candidate in candidates] != ["bulk-7"]:
+        print(f"{FAIL} content-index candidate ids: {candidates!r}")
+        return False
+    if get_calls > 5:
+        print(f"{FAIL} content-index candidate search loaded too many sessions: {get_calls}")
+        return False
+    print(f"{PASS} content candidate search avoids full session hydration scan")
+    return True
+
+
+def test_search_candidates_bound_content_index_wait() -> bool:
+    _reset_home()
+    for idx in range(3):
+        _write_session(
+            sid=f"slow-{idx}",
+            name=f"unrelated {idx}",
+            messages=[{"role": "user", "content": "plain prompt"}],
+        )
+    seen_waits: list[float | None] = []
+    original_search = session_search_index.search
+
+    def fake_search(*_args, **kwargs):
+        seen_waits.append(kwargs.get("max_wait_seconds"))
+        return []
+
+    session_search_index.search = fake_search  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle", limit=5)
+    finally:
+        session_search_index.search = original_search  # type: ignore[assignment]
+    ok = (
+        candidates == []
+        and seen_waits == [session_search._SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS]
+    )
+    print(
+        f"{PASS if ok else FAIL} content-index candidate search uses bounded wait "
+        f"-- waits={seen_waits}",
+    )
+    return ok
+
+
 def test_run_search_sessions_worker_parse_failed() -> bool:
     """A worker reply with no usable JSON maps to error=parse_failed."""
+    _reset_home()
+    _write_session(sid="live-1", messages=[{"role": "user", "content": "anything"}])
     from provisioning.manager import ProvisionedResult
 
     async def _fake_run(spec, query, ctx=None, *, model=None):
@@ -322,8 +484,24 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
     return True
 
 
+def test_worker_parser_uses_last_valid_json_object() -> bool:
+    text = (
+        "I considered this malformed note first: {not json}\n"
+        "{\"ignored\": true}\n"
+        "{\"session_ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
+    )
+    parsed = session_search._parse_worker_result(text)
+    if parsed != {"session_ids": ["live-1"], "reasoning": "matched {brace}"}:
+        print(f"{FAIL} parser last valid object: got {parsed!r}")
+        return False
+    print(f"{PASS} parser accepts final valid JSON object after brace noise")
+    return True
+
+
 def test_run_search_sessions_worker_timeout() -> bool:
     """A dispatch timeout maps to error=timeout."""
+    _reset_home()
+    _write_session(sid="live-1", messages=[{"role": "user", "content": "anything"}])
     import asyncio as _asyncio
 
     async def _hang(spec, query, ctx=None, *, model=None):
@@ -453,19 +631,379 @@ def test_ask_error_message_mapping() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Entry point
+# Provider / model / node filters
 # ──────────────────────────────────────────────────────────────────────
+
+
+def test_build_index_exposes_filter_fields() -> bool:
+    """The index now carries provider/model/reasoning_effort/node_id so
+    filters can match against them (node_id defaults to "primary")."""
+    _reset_home()
+    _write_session(
+        sid="s-openai",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="openai",
+        model="gpt-4o",
+        reasoning_effort="high",
+        node_id="laptop",
+    )
+    _write_session(
+        sid="s-default",
+        messages=[{"role": "user", "content": "x"}],
+    )
+    by_id = {s["id"]: s for s in session_search._build_index()}
+    if by_id["s-openai"]["provider_id"] != "openai":
+        print(f"{FAIL} index provider_id: {by_id['s-openai']['provider_id']!r}")
+        return False
+    if by_id["s-openai"]["model"] != "gpt-4o":
+        print(f"{FAIL} index model: {by_id['s-openai']['model']!r}")
+        return False
+    if by_id["s-openai"]["reasoning_effort"] != "high":
+        print(f"{FAIL} index reasoning_effort: {by_id['s-openai']['reasoning_effort']!r}")
+        return False
+    if by_id["s-openai"]["node_id"] != "laptop":
+        print(f"{FAIL} index node_id: {by_id['s-openai']['node_id']!r}")
+        return False
+    # node_id defaults to "primary" when not explicitly set on the session.
+    if by_id["s-default"]["node_id"] != "primary":
+        print(f"{FAIL} index default node_id: {by_id['s-default']['node_id']!r}")
+        return False
+    print(f"{PASS} _build_index exposes provider/model/effort/node fields")
+    return True
+
+
+def test_validate_proposed_applies_filters() -> bool:
+    """validate_proposed keeps only ids whose index entry matches every
+    non-empty filter; filtered-out ids are dropped even when they exist."""
+    _reset_home()
+    _write_session(
+        sid="claude-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="claude",
+        model="claude-sonnet-4-5",
+    )
+    _write_session(
+        sid="openai-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="openai",
+        model="gpt-4o",
+    )
+    # provider filter narrows to claude only
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "claude"},
+    )
+    if out != ["claude-1"]:
+        print(f"{FAIL} filter provider_id: got {out!r}")
+        return False
+    # model filter narrows to openai only
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"model": "gpt-4o"},
+    )
+    if out != ["openai-1"]:
+        print(f"{FAIL} filter model: got {out!r}")
+        return False
+    # combined filter: provider + model that nothing matches
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "claude", "model": "gpt-4o"},
+    )
+    if out != []:
+        print(f"{FAIL} filter combined no-match: got {out!r}")
+        return False
+    # empty filter values are ignored (acts like no filter)
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "", "model": None},
+    )
+    if set(out) != {"claude-1", "openai-1"}:
+        print(f"{FAIL} filter empty-ignored: got {out!r}")
+        return False
+    print(f"{PASS} validate_proposed applies provider/model filters")
+    return True
+
+
+def test_run_search_sessions_short_circuits_empty_candidates() -> bool:
+    """When backend candidate collection finds no likely match,
+    run_search_sessions_session returns an empty result WITHOUT dispatching
+    the worker."""
+    _reset_home()
+    _write_session(
+        sid="claude-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="claude",
+    )
+    dispatched: list = []
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        dispatched.append((spec, query, ctx))
+        return None
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session(
+                "anything unmatched",
+            )
+        )
+    finally:
+        session_search.provisioning.run = original
+    if dispatched:
+        print(f"{FAIL} short-circuit: worker was dispatched {dispatched!r}")
+        return False
+    if out.get("session_ids") != [] or out.get("error") is not None:
+        print(f"{FAIL} short-circuit: got {out!r}")
+        return False
+    print(f"{PASS} empty candidate set short-circuits (no dispatch)")
+    return True
+
+
+def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> bool:
+    """With an active filter the worker receives only matching candidate
+    payloads, and the worker's output is post-validated so any filtered-out id
+    it returns is dropped."""
+    _reset_home()
+    _write_session(
+        sid="match-1",
+        name="match target",
+        messages=[{"role": "user", "content": "match auth"}],
+        provider_id="claude",
+    )
+    _write_session(
+        sid="other-1",
+        name="match other",
+        messages=[{"role": "user", "content": "match auth"}],
+        provider_id="openai",
+    )
+
+    captured: dict = {}
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        captured["query"] = query
+        captured["ctx"] = ctx or {}
+        # Worker (mis)behaves: returns a filtered-out id alongside a match.
+        return type("_R", (), {
+            "value": {
+                "session_ids": ["other-1", "match-1"],
+                "reasoning": "r",
+            },
+        })()
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session(
+                "match", provider_id="claude",
+            )
+        )
+    finally:
+        session_search.provisioning.run = original
+    if captured.get("query") != "match":
+        print(f"{FAIL} query should stay raw until spec wrapping: {captured.get('query')!r}")
+        return False
+    candidate_ids = [row.get("id") for row in (captured.get("ctx") or {}).get("candidates", [])]
+    if candidate_ids != ["match-1"]:
+        print(f"{FAIL} bounded filtered candidates: {candidate_ids!r}")
+        return False
+    # Post-validation dropped the filtered-out id the worker returned.
+    if out.get("session_ids") != ["match-1"]:
+        print(f"{FAIL} post-validate: got {out.get('session_ids')!r}")
+        return False
+    print(f"{PASS} filter bounds worker candidates + post-validates output")
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Lean content index: only conversation text is indexed, not event blobs.
+# Regression for the multi-GB bloated FTS index that made content search
+# take seconds.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _reset_search_index_db() -> None:
+    """Drop any persisted FTS db + pooled connections + caches so the next
+    rebuild starts clean under the temp home."""
+    with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
+        session_search_index._search_cache.clear()  # type: ignore[attr-defined]
+        session_search_index._search_inflight.clear()  # type: ignore[attr-defined]
+    session_search_index._close_readonly_connection()  # type: ignore[attr-defined]
+    with session_search_index._lock:  # type: ignore[attr-defined]
+        session_search_index._close_writer_connection_locked()  # type: ignore[attr-defined]
+        session_search_index._delete_db_files()  # type: ignore[attr-defined]
+
+
+def _write_events_file(sid: str, entries: list[dict]) -> None:
+    """Write a session's events.jsonl, plus the root JSON that always
+    precedes it in production (rebuild_from_disk discovers sessions via
+    session_store._session_json_files(), which enumerates root JSON files,
+    not event directories)."""
+    _write_session(sid=sid)
+    sessions_dir = Path(_TMP_HOME) / "sessions"
+    sess_dir = sessions_dir / sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    with (sess_dir / "events.jsonl").open("w", encoding="utf-8") as h:
+        for entry in entries:
+            h.write(json.dumps(entry) + "\n")
+
+
+def test_event_text_extracts_only_conversation_text() -> bool:
+    cases = [
+        # assistant text block -> indexed
+        (
+            {"type": "agent_message", "data": {"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "needle in reply"}],
+            }}},
+            "needle in reply",
+            "assistant text block indexed",
+        ),
+        # tool_use -> only the name, not the (huge) input
+        (
+            {"type": "agent_message", "data": {"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Edit",
+                             "input": {"path": "/x.py", "content": "BLOAT" * 1000}}],
+            }}},
+            "Edit",
+            "tool_use name indexed without input",
+        ),
+        # tool_result -> skipped entirely
+        (
+            {"type": "agent_message", "data": {"type": "user", "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "HUGE FILE DUMP"}],
+            }}},
+            "",
+            "tool_result skipped",
+        ),
+        # worker_complete / run_state / worker_event -> no searchable text
+        (
+            {"type": "worker_complete", "data": {"sdk_output": "needle", "events": []}},
+            "",
+            "worker_complete skipped",
+        ),
+        (
+            {"type": "run_state", "data": {"runs": [{"needle": 1}]}},
+            "",
+            "run_state skipped",
+        ),
+        (
+            {"type": "worker_event", "data": {"event": {"data": {"text": "needle"}}}},
+            "",
+            "worker_event skipped",
+        ),
+        # non-(user/assistant) agent_message subtype (last-prompt) -> skipped
+        (
+            {"type": "agent_message", "data": {"type": "last-prompt", "lastPrompt": "needle"}},
+            "",
+            "last-prompt subtype skipped",
+        ),
+    ]
+    for entry, expected, label in cases:
+        got = session_search_index._event_text(entry)
+        if expected:
+            if expected not in got:
+                print(f"{FAIL} event_text[{label}]: expected to contain {expected!r} in {got!r}")
+                return False
+            if "BLOAT" in got or "FILE DUMP" in got:
+                print(f"{FAIL} event_text[{label}]: bloat leaked into {got!r}")
+                return False
+        elif got != "":
+            print(f"{FAIL} event_text[{label}]: expected empty, got {got!r}")
+            return False
+    # tool_use input must never leak even when name is kept
+    tool = session_search_index._event_text(cases[1][0])
+    if "BLOAT" in tool or "/x.py" in tool:
+        print(f"{FAIL} event_text: tool input leaked: {tool!r}")
+        return False
+    print(f"{PASS} _event_text indexes conversation text + tool names, skips bloat")
+    return True
+
+
+def test_event_text_caps_per_event_length() -> bool:
+    long_text = "z" * 50_000
+    entry = {"type": "agent_message", "data": {"type": "assistant", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": long_text}],
+    }}}
+    got = session_search_index._event_text(entry)
+    if len(got) != session_search_index._INDEX_TEXT_PER_EVENT_LIMIT:  # type: ignore[attr-defined]
+        print(f"{FAIL} cap: len={len(got)} want={session_search_index._INDEX_TEXT_PER_EVENT_LIMIT}")
+        return False
+    print(f"{PASS} _event_text caps per-event text length")
+    return True
+
+
+def test_rebuild_indexes_needle_skips_bloat_and_stamps_schema() -> bool:
+    _reset_home()
+    _reset_search_index_db()
+    unique_bloat = "zzbloatchecken72761"  # appears ONLY inside a worker_complete blob
+    _write_events_file("sess-lean", [
+        {"type": "agent_message", "data": {"type": "assistant", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "we found the leanneedle here"}],
+        }}},
+        {"type": "worker_complete", "data": {
+            "sdk_output": unique_bloat * 500, "events": [{"x": unique_bloat}],
+        }},
+        {"type": "run_state", "data": {"runs": [{"label": unique_bloat}]}},
+    ])
+    session_search_index.rebuild_from_disk()
+
+    # Conversation term is found.
+    hits = {h["session_id"] for h in session_search_index.search("leanneedle", limit=10)}
+    if hits != {"sess-lean"}:
+        print(f"{FAIL} rebuild: leanneedle hits={hits}")
+        return False
+    # Bloat token that exists only inside worker_complete/run_state is NOT found.
+    bloat_hits = session_search_index.search(unique_bloat, limit=10)
+    if bloat_hits:
+        print(f"{FAIL} rebuild: bloat leaked into index: {bloat_hits!r}")
+        return False
+    # Schema stamped -> no rebuild needed now.
+    if session_search_index.needs_rebuild():
+        print(f"{FAIL} rebuild: needs_rebuild=True after fresh rebuild")
+        return False
+    # Forcing a stale user_version flips needs_rebuild back to True.
+    conn = session_search_index._connect()  # type: ignore[attr-defined]
+    try:
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+    if not session_search_index.needs_rebuild():
+        print(f"{FAIL} rebuild: needs_rebuild=False on stale schema version")
+        return False
+    print(f"{PASS} rebuild_from_disk indexes conversation, skips bloat, stamps schema version")
+    return True
+
+
+
 
 
 def main_run() -> int:
     tests = [
         test_extract_first_user_prompt_shapes,
         test_build_index_filters_hidden_and_archived,
+        test_build_index_exposes_filter_fields,
         test_validate_proposed_drops_unknown,
+        test_validate_proposed_applies_filters,
         test_run_search_sessions_uses_provisioned_worker,
+        test_search_worker_instructions_wrap_bounded_candidates,
+        test_search_candidates_include_later_message_snippets,
+        test_search_candidates_avoid_full_session_scan_for_content_matches,
+        test_search_candidates_bound_content_index_wait,
         test_run_search_sessions_worker_parse_failed,
+        test_worker_parser_uses_last_valid_json_object,
         test_run_search_sessions_worker_timeout,
+        test_run_search_sessions_short_circuits_empty_candidates,
+        test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
         test_empty_query_returns_empty_query_error,
+        test_event_text_extracts_only_conversation_text,
+        test_event_text_caps_per_event_length,
+        test_rebuild_indexes_needle_skips_bloat_and_stamps_schema,
         test_parse_failed_is_not_an_error_bubble,
         test_ask_error_message_mapping,
         test_rest_endpoint_rejects_empty_query,

@@ -16,6 +16,7 @@ _test_home.isolate("bc-test-dt-router-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config_store
+import session_search
 from orchestrator import Coordinator
 from session_manager import manager as session_manager
 
@@ -37,7 +38,7 @@ def _make_coord(
     coord = Coordinator()
     submit_calls: list[dict] = []
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         submit_calls.append({"sid": sid, "params": params})
         return params["_queued_id"]
 
@@ -64,6 +65,172 @@ def test_target_bypass_dispatches_directly_no_create():
     assert join_calls == [], "dispatch must be detached (no turn-join)"
     assert submit_calls[0]["sid"] == target["id"]
     assert submit_calls[0]["params"]["app_session_id"] == target["id"]
+
+
+def test_target_bypass_rejects_sender_session():
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+
+    for run_mode in ("direct", "fork"):
+        try:
+            asyncio.run(coord.run_delegate_task(
+                sender_session_id=sender["id"],
+                task="self target",
+                target_session_id=sender["id"],
+                model="m",
+                cwd="/repo",
+                run_mode=run_mode,
+            ))
+        except ValueError as exc:
+            assert "must not be the sender_session_id" in str(exc)
+        else:
+            raise AssertionError(
+                f"delegate_task must fail closed on explicit self-target in {run_mode}"
+            )
+
+    assert join_calls == []
+    assert submit_calls == []
+
+
+def test_target_bypass_uses_delegation_task_model_preference():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, submit_calls = _make_coord(
+        model="caller-model",
+        provider_id=provider_id,
+    )
+    config_store.set_delegate_task_policy("auto")
+    original = config_store.get_internal_llm_assignments()
+    config_store.set_internal_llm_assignments({
+        **original,
+        "delegation_task": {"provider_id": provider_id, "model": "task-model"},
+    })
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="tangent",
+            target_session_id=target["id"],
+            cwd="/repo",
+        ))
+    finally:
+        config_store.set_internal_llm_assignments(original)
+
+    assert res["success"] is True
+    assert submit_calls[0]["params"]["provider_id"] == provider_id
+    assert submit_calls[0]["params"]["model"] == "task-model"
+    assert submit_calls[0]["params"]["allow_model_override"] is True
+
+
+def test_target_bypass_fork_mode_dispatches_to_internal_fork():
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+    session_manager.get_ref(target["id"])["agent_session_id"] = "provider-thread"
+
+    res = asyncio.run(coord.run_delegate_task(
+        sender_session_id=sender["id"],
+        task="review receiver",
+        target_session_id=target["id"],
+        model="m",
+        cwd="/repo",
+        run_mode="fork",
+    ))
+
+    assert res["success"] is True
+    assert res["run_mode"] == "fork"
+    assert res["forked_from_session_id"] == target["id"]
+    assert res["target_session_id"] != target["id"]
+    fork = session_manager.get(res["target_session_id"])
+    assert fork is not None
+    assert fork["kind"] == "delegate_task_fork"
+    assert fork["user_initiated"] is False
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == res["target_session_id"]
+    assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_fork_mode_requires_explicit_target():
+    coord, sender, _join_calls, _submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+
+    try:
+        asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="review receiver",
+            model="m",
+            cwd="/repo",
+            run_mode="fork",
+        ))
+    except ValueError as exc:
+        assert "requires target_session_id" in str(exc)
+    else:
+        raise AssertionError("run_mode=fork without target_session_id must fail closed")
+
+
+def test_auto_route_default_searches_globally_but_creates_with_sender_provider():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+        reasoning_effort="low",
+    )
+    config_store.set_delegate_task_policy("auto")
+    captured: dict = {}
+
+    async def fake_search(query, **kwargs):
+        captured["query"] = query
+        captured["provider_id"] = kwargs.get("provider_id")
+        return {"session_ids": []}
+
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = fake_search  # type: ignore[assignment]
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="global route candidate",
+            cwd="/repo",
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search  # type: ignore[assignment]
+
+    assert res["success"] is True
+    assert res["created_session"] is True
+    assert captured == {"query": "global route candidate", "provider_id": None}
+    created = session_manager.get(res["target_session_id"])
+    assert created["provider_id"] == provider_id
+    assert created["model"] == "sender-model"
+    assert submit_calls[0]["params"]["provider_id"] == provider_id
+
+
+def test_auto_route_search_uses_delegate_provider_filter():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+    )
+    config_store.set_delegate_task_policy("auto")
+    captured: dict = {}
+
+    async def fake_search(query, **kwargs):
+        captured["query"] = query
+        captured["provider_id"] = kwargs.get("provider_id")
+        return {"session_ids": []}
+
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = fake_search  # type: ignore[assignment]
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="brand new tangent",
+            cwd="/repo",
+            provider_id=provider_id,
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search  # type: ignore[assignment]
+
+    assert res["success"] is True
+    assert captured == {"query": "brand new tangent", "provider_id": provider_id}
+    assert submit_calls[0]["params"]["provider_id"] == provider_id
 
 
 def test_always_new_creates_session_and_dispatches():
@@ -247,11 +414,14 @@ def test_auto_with_no_search_result_creates_session(monkeypatch=None):
         reasoning_effort="low",
     )
     config_store.set_delegate_task_policy("auto")
-    session_search.search = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": []})  # type: ignore
-
-    res = asyncio.run(coord.run_delegate_task(
-        sender_session_id=sender["id"], task="nothing fits", model="m", cwd="/repo",
-    ))
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": []})  # type: ignore
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"], task="nothing fits", model="m", cwd="/repo",
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search
     assert res["success"] is True
     assert res["created_session"] is True  # no suggestion → created
     assert res["created_sub_session"] is True
@@ -262,3 +432,61 @@ def test_auto_with_no_search_result_creates_session(monkeypatch=None):
     assert join_calls == []
     assert submit_calls[0]["sid"] == res["target_session_id"]
     assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_auto_search_result_ignores_caller_and_creates_sub_session():
+    import session_search
+
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, join_calls, submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+        reasoning_effort="low",
+    )
+    config_store.set_delegate_task_policy("auto")
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": [sender["id"]]})  # type: ignore
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="self-looking task",
+            cwd="/repo",
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search
+
+    assert res["success"] is True
+    assert res["target_session_id"] != sender["id"]
+    assert res["created_session"] is True
+    assert res["created_sub_session"] is True
+    created = session_manager.get(res["target_session_id"])
+    assert created["kind"] == "sub_session"
+    assert created["parent_session_id"] == sender["id"]
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == res["target_session_id"]
+    assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_auto_search_result_skips_caller_and_uses_next_existing_session():
+    import session_search
+
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": [sender["id"], target["id"]]})  # type: ignore
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="existing target task",
+            cwd="/repo",
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search
+
+    assert res["success"] is True
+    assert res["target_session_id"] == target["id"]
+    assert res["created_session"] is False
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == target["id"]
+    assert submit_calls[0]["params"]["app_session_id"] == target["id"]

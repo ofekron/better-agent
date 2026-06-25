@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   compactLinkLabel,
   isAbsolutePath,
   linkifyFilePaths,
+  markdownLinkifyComponents,
   parseMarkdownFileHref,
+  sessionLinkMarker,
+  sessionMarkersToMarkdown,
 } from "../src/utils/linkifyFilePaths";
 
 // Regression lock for the Windows file-ref bug: handleOpenFilePanel
@@ -105,7 +110,102 @@ describe("linkifyFilePaths", () => {
     );
 
     expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-icon");
+    expect(html).toContain('title="runner.py:963"');
     expect(html).not.toContain("[backend/runner.py]");
     expect(html).not.toContain("(runner.py:963)");
+  });
+
+  it("collapses raw markdown file links even without a file panel callback", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("see [backend/runner.py](runner.py:963)"),
+    );
+
+    expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain('role="link"');
+    expect(html).not.toContain("[backend/runner.py]");
+    expect(html).not.toContain("(runner.py:963)");
+  });
+
+  it("opens compact file links through the file panel callback", () => {
+    const opened: Array<{ path: string; line?: number }> = [];
+    render(
+      createElement(
+        "div",
+        null,
+        linkifyFilePaths("see [backend/runner.py](runner.py:963)", (path, focus) => {
+          opened.push({ path, line: focus?.startLine });
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "runner.py:963" }));
+
+    expect(opened).toEqual([{ path: "runner.py", line: 963 }]);
+  });
+
+  it("renders markdown file anchors as static chips without a file panel callback", () => {
+    const Anchor = markdownLinkifyComponents().a;
+    const html = renderToStaticMarkup(
+      createElement(Anchor, { href: "runner.py:963" }, "backend/runner.py"),
+    );
+
+    expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain('role="link"');
+    expect(html).not.toContain("<a ");
+  });
+
+  it("renders media file links as static chips when no file panel callback exists", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("see [diagram](assets/diagram.png:7)"),
+    );
+
+    expect(html).toContain("diagram.png:7");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain("[diagram]");
+    expect(html).not.toContain("(assets/diagram.png:7)");
+  });
+
+  it("preserves visible newlines after compact file links", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("[runner.py](runner.py:1)\n\nnext"),
+    );
+
+    expect(html).toContain("runner.py:1");
+    expect(html).toContain("</span><br/><br/>next");
+  });
+
+  it("preserves visible newlines around clickable compact file links", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("before\n[runner.py](runner.py:1)\nafter", () => undefined),
+    );
+
+    expect(html).toContain("before<br/><span");
+    expect(html).toContain("</span><br/>after");
+  });
+
+  it("renders Better Agent session markers as smart session links", () => {
+    const marker = sessionLinkMarker("session-abcdef", "Linked Session");
+    const html = renderToStaticMarkup(linkifyFilePaths(`open ${marker}`));
+
+    expect(marker).toBe("[[ba-session:session-abcdef|Linked%20Session]]");
+    expect(html).toContain("Linked Session · sess");
+    expect(html).not.toContain("[[ba-session:");
+  });
+
+  it("converts session markers for markdown renderers", () => {
+    expect(sessionMarkersToMarkdown(sessionLinkMarker("session-abcdef", "Linked Session")))
+      .toBe("[Linked Session · sess](/s/session-abcdef)");
+  });
+
+  it("opens the session route when a smart session link is clicked", () => {
+    window.history.pushState(null, "", "/");
+    render(createElement("div", null, linkifyFilePaths(sessionLinkMarker("session-abcdef", "Linked Session"))));
+
+    fireEvent.click(screen.getByRole("link", { name: "Linked Session · sess" }));
+
+    expect(window.location.pathname).toBe("/s/session-abcdef");
   });
 });

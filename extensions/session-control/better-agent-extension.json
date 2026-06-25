@@ -1,0 +1,40 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.session-control",
+  "name": "Session Control",
+  "version": "0.1.0",
+  "description": "Let the agent control its own session: switch model/provider, or continue in a fresh provider subprocess under the same session.",
+  "surfaces": [
+    "runtime_mcp"
+  ],
+  "entrypoints": {
+    "mcp": [
+      {
+        "name": "better-agent-session-control",
+        "python": "mcp/server.py",
+        "args": [],
+        "env": {},
+        "user_facing": true,
+        "bare_allowed": false,
+        "requires_backend_auth": true,
+        "predicate": {
+          "equals": {
+            "mode": "native"
+          },
+          "not_equals": {
+            "app_session_id": "ask-singleton",
+            "working_mode": "search_worker"
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {
+    "session_state": true,
+    "capabilities": [
+      "session-control.selectors.set",
+      "session-control.continue-fresh"
+    ]
+  },
+  "marketplace": {}
+}

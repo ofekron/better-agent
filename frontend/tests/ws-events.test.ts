@@ -137,65 +137,6 @@ describe("WebSocket event handling", () => {
     h.unmount();
   });
 
-  it("rearranger_state echoes enabled flag onto the session", async () => {
-    const session = makeSession();
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    h.emit({
-      type: "rearranger_state",
-      data: { app_session_id: session.id, enabled: true },
-    });
-    await h.flush();
-
-    // The Tree button only shows when rearranger is enabled.
-    const treeBtn = Array.from(h.$$("button")).find((b) =>
-      /Tree/.test(b.textContent ?? ""),
-    );
-    expect(treeBtn).toBeDefined();
-    h.unmount();
-  });
-
-  it("rearranger_updated patches the session without crashing", async () => {
-    const session = makeSession({ rearranger_enabled: true });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    h.emit({
-      type: "rearranger_updated",
-      data: {
-        app_session_id: session.id,
-        tree: {
-          root: {
-            title: "Goal",
-            summary: "",
-            level: 0,
-            children: [],
-          },
-        },
-        rearranger_session_id: "rs-1",
-        last_message_count: 4,
-        rearranger_stats: {
-          call_count: 1,
-          total_cost_usd: 0,
-          token_usage: {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-          },
-        },
-        token_usage_total: null,
-        token_usage_last: null,
-      },
-    });
-    await h.flush();
-
-    // No crash, chat still rendered.
-    expect(h.toJSON().chat.visible).toBe(true);
-    h.unmount();
-  });
-
   it("dropping the WS closes connection and the reconnect timer fires no immediate frames", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });

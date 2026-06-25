@@ -23,21 +23,21 @@ describe("useOfflineQueue", () => {
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
   });
 
-  it("replaces merged session actions without changing global order", () => {
+  it("keeps repeated session actions in send order", () => {
     const { result } = renderHook(() => useOfflineQueue());
 
     act(() => {
       result.current.enqueue(entry("a", "a1"));
       result.current.enqueue(entry("b", "b1"));
-      result.current.replaceBySession("a", entry("a", "a2", "merged"));
+      result.current.enqueue(entry("a", "a2"));
     });
 
-    expect(result.current.getAll().map((item) => item.clientId)).toEqual(["a2", "b1"]);
+    expect(result.current.getAll().map((item) => item.clientId)).toEqual(["a1", "b1", "a2"]);
     expect(
       JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]").map(
         (item: OfflinePromptEntry) => item.clientId,
       ),
-    ).toEqual(["a2", "b1"]);
+    ).toEqual(["a1", "b1", "a2"]);
   });
 
   it("removes an acked action only when both session and client id match", () => {

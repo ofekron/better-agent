@@ -23,6 +23,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from turn_helpers import _is_transient_error  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+import session_store  # noqa: E402
 import user_prefs  # noqa: E402
 
 failures: list[str] = []
@@ -62,6 +64,9 @@ class _StubCoordinator:
         self.hard_cancelled.append(run_id)
         return True
 
+    def provider_for_run(self, sid: str, provider_id=None):
+        return self.provider_for_session(sid)
+
     async def broadcast_session(
         self, *args, **kwargs,
     ) -> None:
@@ -75,7 +80,14 @@ class _UPM:
 
 
 class _RetryProvider:
-    def __init__(self, outcomes: list[dict]) -> None:
+    def __init__(
+        self,
+        outcomes: list[dict],
+        *,
+        id: str = "codex",
+        emit_discovered: bool = False,
+        reset_seconds: float = 0.5,
+    ) -> None:
         self._runs: dict = {}
         self.outcomes = outcomes
         self.prompts: list[str] = []
@@ -83,6 +95,9 @@ class _RetryProvider:
         self.continuation_chains: list[list[str] | None] = []
         self.cancelled: list[str] = []
         self.KIND = "codex"
+        self.id = id
+        self._emit_discovered = emit_discovered
+        self.reset_seconds = reset_seconds
 
     def start_run(self, **kw):
         self.prompts.append(kw["prompt"])
@@ -92,15 +107,36 @@ class _RetryProvider:
         queue = kw["queue"]
         idx = len(self.prompts) - 1
         payload = self.outcomes[idx]
+        context_usage = payload.get("context_usage")
         self._runs[run_id] = type(
             "RunState",
             (),
             {"popen": type("Popen", (), {"pid": os.getpid()})()},
         )()
 
+        if self._emit_discovered and payload.get("session_id"):
+            kw["loop"].call_soon_threadsafe(
+                queue.put_nowait,
+                type("E", (), {
+                    "type": "session_discovered",
+                    "data": {"session_id": payload["session_id"]},
+                })(),
+            )
+        if isinstance(context_usage, dict):
+            kw["loop"].call_soon_threadsafe(
+                queue.put_nowait,
+                type("E", (), {
+                    "type": "context_usage",
+                    "data": context_usage,
+                })(),
+            )
+        complete_payload = {
+            k: v for k, v in payload.items()
+            if k != "context_usage"
+        }
         kw["loop"].call_soon_threadsafe(
             queue.put_nowait,
-            type("E", (), {"type": "complete", "data": payload})(),
+            type("E", (), {"type": "complete", "data": complete_payload})(),
         )
 
     def is_running(self, run_id: str) -> bool:
@@ -110,7 +146,7 @@ class _RetryProvider:
         self.cancelled.append(run_id)
 
     def parse_rate_limit(self, error, events):
-        return datetime.now(timezone.utc) + timedelta(seconds=30)
+        return datetime.now(timezone.utc) + timedelta(seconds=self.reset_seconds)
 
 
 def test_noop_cancel_does_not_leak_session_cancelled() -> None:
@@ -307,6 +343,119 @@ def test_drive_cli_run_pre_spawn_guard() -> None:
     check("result is cancelled-failure", result.get("success") is False)
 
 
+def test_native_non_user_turn_gets_loopback_credentials() -> None:
+    print("T5b native non-user turn gets loopback credentials")
+    c = _StubCoordinator()
+    tm = TurnManager(c)
+    sid = session_manager.create(name="team-target", cwd="/tmp", model="sonnet")["id"]
+    captured: list[dict] = []
+
+    class _Provider:
+        KIND = "codex"
+        _runs: dict = {}
+
+        def start_run(self, **kw):
+            captured.append(kw)
+            kw["loop"].call_soon_threadsafe(
+                kw["queue"].put_nowait,
+                type("E", (), {
+                    "type": "complete",
+                    "data": {"success": True, "session_id": None, "token_usage": None},
+                })(),
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+    c.provider_for_session = lambda _sid: _Provider()
+    c.user_prompt_manager = _UPM()
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="reply to sender",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            user_initiated=False,
+            turn_run_id="turn-loopback",
+        )
+
+    result = asyncio.run(_go())
+    check("result success", result.get("success") is True)
+    check("provider spawned", len(captured) == 1)
+    backend_url = str(captured[0].get("backend_url") or "")
+    check(
+        "loopback backend_url forwarded",
+        backend_url.startswith("http://localhost:") or backend_url.startswith("http://127.0.0.1:"),
+    )
+    check("internal_token forwarded", captured[0].get("internal_token") == "test-token")
+
+
+def test_drive_cli_run_flushes_target_before_spawn() -> None:
+    print("T5c _drive_cli_run flushes target assistant before provider spawn")
+    c = _StubCoordinator()
+    tm = TurnManager(c)
+    sid = session_manager.create(name="durable-target", cwd="/tmp", model="sonnet")["id"]
+    from orchs import get_strategy
+    assistant = get_strategy("native").build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, assistant)
+    tm.current_assistant_msgs[sid] = assistant
+    durable_checks: list[bool] = []
+
+    class _Provider:
+        KIND = "codex"
+        _runs: dict = {}
+
+        def start_run(self, **kw):
+            target_message_id = kw.get("target_message_id")
+            root = session_store.get_root_tree(sid) or {}
+            durable_checks.append(
+                any(
+                    m.get("id") == target_message_id
+                    for m in root.get("messages") or []
+                )
+            )
+            kw["loop"].call_soon_threadsafe(
+                kw["queue"].put_nowait,
+                type("E", (), {
+                    "type": "complete",
+                    "data": {"success": True, "session_id": None, "token_usage": None},
+                })(),
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+    c.provider_for_session = lambda _sid: _Provider()
+    c.user_prompt_manager = _UPM()
+
+    async def _ws(_e):
+        pass
+
+    result = asyncio.run(tm._drive_cli_run(
+        prompt="p",
+        cwd="/tmp",
+        model="sonnet",
+        session_id=None,
+        ws_callback=_ws,
+        app_session_id=sid,
+        cancel_event=asyncio.Event(),
+        session_id_field="agent_session_id",
+        mode="native",
+        turn_run_id="turn-durable-target",
+    ))
+    check("result success", result.get("success") is True)
+    check("target assistant durable before start_run", durable_checks == [True])
+
+
 def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
     print("T6 rate-limit retry wait stays active and stop-cancellable")
     c = _StubCoordinator()
@@ -402,8 +551,72 @@ def test_rate_limit_retry_spawns_once_then_emits_terminal() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_rate_limit_wait_uses_reset_or_one_minute_fallback() -> None:
+    print("T7a rate-limit wait uses parsed reset or one-minute fallback")
+    fallback = turn_manager_mod._rate_limit_wait_seconds(None)
+    long_reset = datetime.now(timezone.utc) + timedelta(hours=2)
+    parsed = turn_manager_mod._rate_limit_wait_seconds(long_reset)
+    check("fallback is one minute", 59 <= fallback <= 61)
+    check("parsed reset is not capped to ten minutes", parsed > 7000)
+
+
+def test_rate_limit_wait_can_continue_immediately() -> None:
+    print("T7b rate-limit wait can continue immediately")
+    session = session_manager.create(name="rate-limit-continue", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    c = _StubCoordinator()
+    provider = _RetryProvider([
+        {
+            "success": False,
+            "error": "rate_limit",
+            "session_id": "agent-rate-limited",
+            "token_usage": None,
+        },
+        {
+            "success": True,
+            "session_id": "agent-continued",
+            "token_usage": {"input_tokens": 1},
+        },
+    ], reset_seconds=30)
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        ev = asyncio.Event()
+        tm.cancel_events[sid] = ev
+        task = asyncio.create_task(tm._drive_cli_run(
+            prompt="p",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=ev,
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-rl-continue",
+        ))
+        await asyncio.sleep(0.2)
+        landed = tm.request_immediate_continuation(
+            sid,
+            "p",
+            reason="rate_limit_provider_switch",
+        )
+        result = await asyncio.wait_for(task, timeout=3)
+        return {"landed": landed, **result}
+
+    result = asyncio.run(_go())
+    check("immediate continuation landed", result.get("landed") is True)
+    check("turn succeeds after continuation", result.get("success") is True)
+    check("fresh prompt is continuation-wrapped", "Previous provider session ids: agent-rate-limited" in provider.prompts[-1])
+
+
 def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
-    print("T7b forced context overflow starts fresh continuation")
+    print("T7c forced context overflow starts fresh continuation")
     user_prefs.set_context_strategy("continuation")
     session = session_manager.create(name="forced-overflow", cwd="/tmp", model="sonnet")
     sid = session["id"]
@@ -443,6 +656,103 @@ def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
     check("chain persisted old provider sid", fresh.get("continuation_chain") == ["old-provider"])
     check("runner received continuation chain", provider.continuation_chains == [["old-provider"]])
     check("prompt wrapped as continuation", "Previous provider session ids: old-provider" in provider.prompts[0])
+    check("result success", result.get("success") is True)
+
+
+def test_context_continuation_start_runs_off_loop() -> None:
+    print("T7c continuation start runs off loop")
+    user_prefs.set_context_strategy("continuation")
+    session = session_manager.create(name="off-loop-continuation", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    provider = _RetryProvider([{
+        "success": True,
+        "session_id": "fresh-provider-off-loop",
+        "token_usage": {"input_tokens": 1},
+    }])
+    c = _StubCoordinator()
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+    tm.force_context_overflow_once(sid)
+    loop_thread: dict[str, int] = {}
+    start_threads: list[int] = []
+    session_get_threads: list[int] = []
+    provider_threads: list[int] = []
+    strategy_threads: list[int] = []
+    original_get = session_manager.get
+    original_start = turn_manager_mod.start_continuation_for
+    original_strategy = user_prefs.get_context_strategy
+
+    def _recording_get(*args, **kwargs):
+        session_get_threads.append(threading.get_ident())
+        return original_get(*args, **kwargs)
+
+    def _recording_start(*args, **kwargs):
+        start_threads.append(threading.get_ident())
+        return original_start(*args, **kwargs)
+
+    def _recording_provider_for_session(_sid):
+        provider_threads.append(threading.get_ident())
+        return provider
+
+    def _recording_strategy():
+        strategy_threads.append(threading.get_ident())
+        return original_strategy()
+
+    c.provider_for_session = _recording_provider_for_session
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        loop_thread["id"] = threading.get_ident()
+        return await tm._drive_cli_run(
+            prompt="continue off loop",
+            cwd="/tmp",
+            model="sonnet",
+            session_id="old-provider-off-loop",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-continuation-off-loop",
+        )
+
+    try:
+        session_manager.get = _recording_get
+        turn_manager_mod.start_continuation_for = _recording_start
+        user_prefs.get_context_strategy = _recording_strategy
+        result = asyncio.run(_go())
+    finally:
+        session_manager.get = original_get
+        turn_manager_mod.start_continuation_for = original_start
+        user_prefs.get_context_strategy = original_strategy
+
+    check("continuation start observed", len(start_threads) == 1)
+    check(
+        "session reads off event loop",
+        bool(session_get_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in session_get_threads
+        ),
+    )
+    check(
+        "continuation start off event loop",
+        bool(start_threads) and start_threads[0] != loop_thread.get("id"),
+    )
+    check(
+        "provider resolution off event loop",
+        bool(provider_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in provider_threads
+        ),
+    )
+    check(
+        "context strategy reads off event loop",
+        bool(strategy_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in strategy_threads
+        ),
+    )
+    check("provider spawned once", len(provider.prompts) == 1)
+    check("real spawn is fresh", provider.session_ids == [None])
     check("result success", result.get("success") is True)
 
 
@@ -492,6 +802,134 @@ def test_codex_context_fill_preempts_native_compaction() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
+    print("T7c2 codex context usage persists then preempts next turn")
+    user_prefs.set_context_strategy("continuation")
+    session = session_manager.create(name="codex-usage-preempt", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    provider = _RetryProvider([
+        {
+            "success": True,
+            "session_id": "old-provider-usage",
+            "token_usage": {"input_tokens": 1},
+            "context_usage": {
+                "context_window": 1000,
+                "context_tokens": 950,
+            },
+        },
+        {
+            "success": True,
+            "session_id": "fresh-provider-usage",
+            "token_usage": {"input_tokens": 1},
+        },
+    ])
+    c = _StubCoordinator()
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _first() -> dict:
+        return await tm._drive_cli_run(
+            prompt="fill context",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-codex-usage-1",
+        )
+
+    async def _second() -> dict:
+        return await tm._drive_cli_run(
+            prompt="next turn should preempt",
+            cwd="/tmp",
+            model="sonnet",
+            session_id="old-provider-usage",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-codex-usage-2",
+        )
+
+    first = asyncio.run(_first())
+    after_first = session_manager.get(sid) or {}
+    second = asyncio.run(_second())
+    fresh = session_manager.get(sid) or {}
+    check("first result success", first.get("success") is True)
+    check("context window persisted", after_first.get("context_window") == 1000)
+    check("context tokens persisted", after_first.get("context_tokens") == 950)
+    check("provider spawned twice total", len(provider.prompts) == 2)
+    check("second real spawn is fresh", provider.session_ids[-1] is None)
+    check("chain persisted usage provider sid", fresh.get("continuation_chain") == ["old-provider-usage"])
+    check("runner received usage continuation chain", provider.continuation_chains[-1] == ["old-provider-usage"])
+    check("second result success", second.get("success") is True)
+
+
+def test_lazy_selector_change_continuation() -> None:
+    print("T7d lazy selector change continuation")
+    session = session_manager.create(name="lazy-selector", cwd="/tmp", model="sonnet", provider_id="prov-a")
+    sid = session["id"]
+
+    # Simulate a successful previous run that set last_active_provider_id and last_active_model
+    session_manager.set_agent_sid(sid, "native", "old-provider-sid", provider_id="prov-a", model="sonnet")
+
+    # Change session selectors (provider/model) to simulate user action
+    session_manager.set_selectors(sid, provider_id="prov-b", model="haiku")
+
+    provider = _RetryProvider(
+        [{
+            "success": True,
+            "session_id": "fresh-provider-b",
+            "token_usage": {"input_tokens": 1},
+        }],
+        id="prov-b",
+        emit_discovered=True,
+    )
+    c = _StubCoordinator()
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="continue on new model",
+            cwd="/tmp",
+            model="haiku",
+            session_id="old-provider-sid",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-lazy-selector",
+        )
+
+    result = asyncio.run(_go())
+    fresh = session_manager.get(sid) or {}
+    check("provider spawned once", len(provider.prompts) == 1)
+    check("real spawn is fresh", provider.session_ids == [None])
+    check(
+        "chain persisted old provider sid",
+        fresh.get("continuation_chain") == ["old-provider-sid"],
+    )
+    check("runner received continuation chain", provider.continuation_chains == [["old-provider-sid"]])
+    check("prompt contains provider change msg", "Session provider or model changed" in provider.prompts[0])
+    check("last active provider updated", fresh.get("last_active_provider_id") == "prov-b")
+    check("last active model updated", fresh.get("last_active_model") == "haiku")
+    check("result success", result.get("success") is True)
+
+
 def test_wait_for_clear_runs_blocks_then_releases() -> None:
     print("T8 wait_for_clear_runs barrier")
     tm = TurnManager(_StubCoordinator())
@@ -522,10 +960,17 @@ def main() -> int:
     test_prune_stale_retrying_pidless_run_is_retained()
     test_codex_initialize_timeout_is_not_transient()
     test_drive_cli_run_pre_spawn_guard()
+    test_native_non_user_turn_gets_loopback_credentials()
+    test_drive_cli_run_flushes_target_before_spawn()
     test_rate_limit_wait_keeps_turn_active_and_cancellable()
     test_rate_limit_retry_spawns_once_then_emits_terminal()
+    test_rate_limit_wait_uses_reset_or_one_minute_fallback()
+    test_rate_limit_wait_can_continue_immediately()
     test_forced_context_overflow_retries_as_fresh_continuation()
+    test_context_continuation_start_runs_off_loop()
     test_codex_context_fill_preempts_native_compaction()
+    test_codex_context_usage_persists_then_preempts_next_turn()
+    test_lazy_selector_change_continuation()
     test_wait_for_clear_runs_blocks_then_releases()
     print()
     if failures:

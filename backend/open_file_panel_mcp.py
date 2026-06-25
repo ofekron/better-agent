@@ -103,7 +103,28 @@ def request_user_input_response(
     try:
         return _post_user_input({
             "app_session_id": _env_required("BETTER_CLAUDE_APP_SESSION_ID"),
+            "kind": "input",
             "questions": questions,
+            "timeout_seconds": timeout_seconds,
+        })
+    except urllib.error.HTTPError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def request_user_approval_response(
+    prompt: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return {"success": False, "error": "`prompt` is required"}
+    try:
+        return _post_user_input({
+            "app_session_id": _env_required("BETTER_CLAUDE_APP_SESSION_ID"),
+            "kind": "approval",
+            "prompt": prompt,
             "timeout_seconds": timeout_seconds,
         })
     except urllib.error.HTTPError as exc:
@@ -137,10 +158,10 @@ def start_file_discussion_response(
 
 def build_server() -> FastMCP:
     server = FastMCP(
-        "open-file-panel",
+        "ui",
         instructions=(
             "Communicate with the user from an active Better Agent session. "
-            "Open files in the UI or ask bounded questions when user input is required."
+            "Open files in the UI, ask bounded questions, or request explicit approval."
         ),
     )
 
@@ -168,6 +189,13 @@ def build_server() -> FastMCP:
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         return request_user_input_response(questions, timeout_seconds)
+
+    @server.tool()
+    def request_user_approval(
+        prompt: str,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        return request_user_approval_response(prompt, timeout_seconds)
 
     if os.environ.get("BETTER_CLAUDE_FILE_EDITING") == "1":
         @server.tool()

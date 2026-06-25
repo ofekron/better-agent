@@ -180,17 +180,39 @@ def detect_login_state(
     url: if given (loopback only), the adapter navigates there before detecting;
          otherwise the adapter's current page is inspected.
     """
+    if url:
+        _assert_loopback(url)
+
     if not adapter_id:
         adapters = list_web_adapters(fs_url)
         if not adapters:
             return LoginState(
                 "unknown", False, "", reason="no connected TestApe web adapter"
             )
-        adapter_id = adapters[0][0]
+        last_error: Exception | None = None
+        for candidate_id, _name in adapters:
+            try:
+                return _detect_login_state_for_adapter(candidate_id, url, fs_url)
+            except Exception as exc:  # noqa: BLE001 - stale TestApe adapters are skipped in auto mode
+                last_error = exc
+                logger.warning(
+                    "skipping unusable TestApe web adapter %s: %s",
+                    candidate_id,
+                    exc,
+                )
+        reason = "no usable connected TestApe web adapter"
+        if last_error is not None:
+            reason = f"{reason}: {last_error}"
+        return LoginState("unknown", False, "", reason=reason)
 
-    if url:
-        _assert_loopback(url)
+    return _detect_login_state_for_adapter(adapter_id, url, fs_url)
 
+
+def _detect_login_state_for_adapter(
+    adapter_id: str,
+    url: str | None,
+    fs_url: str,
+) -> LoginState:
     with _web_session(adapter_id, fs_url) as web:
         if url:
             web.navigate(url)

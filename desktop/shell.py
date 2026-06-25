@@ -20,6 +20,7 @@ import threading
 import webview
 
 import updater
+from notifications import DesktopNotificationApi
 from supervisor import BackendSupervisor
 from updater import start_background_check
 
@@ -165,7 +166,11 @@ def main() -> int:
             ),
         )
     else:
-        window = webview.create_window("Better Agent", local_url)
+        window = webview.create_window(
+            "Better Agent",
+            local_url,
+            js_api=DesktopNotificationApi(),
+        )
 
     def _on_closing() -> None:
         # Runs on the GUI thread when the window is closing. The confirm

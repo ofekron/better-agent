@@ -12,12 +12,37 @@ import time
 import json
 import os
 import base64
+import random
 import urllib.error
 import urllib.request
 from typing import Any
 
 _LONG_TIMEOUT = 24 * 60 * 60
 _UNSET = object()
+
+# Bounded jittered-exponential backoff for connection-refused/URLError
+# retries (e.g. a call landing in core's restart window). HTTPError (a
+# real 4xx/5xx from a live core) is never retried.
+_RETRY_BACKOFF: tuple[float, ...] = (0.1, 1.0, 5.0, 15.0, 30.0)
+_RETRY_JITTER = 0.3
+
+
+def _urlopen_with_retry(request: "urllib.request.Request", *, timeout: float) -> bytes:
+    last_exc: urllib.error.URLError | None = None
+    for i, base in enumerate(_RETRY_BACKOFF):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as exc:
+            last_exc = exc
+            if i + 1 == len(_RETRY_BACKOFF):
+                break
+            jitter = 1.0 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER)
+            time.sleep(base * jitter)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _agent_env_name(name: str) -> str:
@@ -86,8 +111,7 @@ class Client:
             headers=self._headers(),
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
+            raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise BetterAgentError(_http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
@@ -104,8 +128,7 @@ class Client:
             headers=self._headers(),
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
+            raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise BetterAgentError(_http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
@@ -114,6 +137,30 @@ class Client:
             return json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise BetterAgentError("core returned a non-JSON response") from exc
+
+    # ── right panel ──────────────────────────────────────────────────
+    def set_right_panel(
+        self,
+        *,
+        open: bool | None = None,
+        tab: str | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Open/close the right panel and/or switch its active tab.
+
+        ``tab`` must match a valid tab id registered in core
+        (e.g. ``"files"``, ``"canvas"``, ``"screen"``)."""
+        sid = session_id or self.app_session_id
+        if not sid:
+            raise BetterAgentError("set_right_panel requires app_session_id")
+        body: dict[str, Any] = {}
+        if open is not None:
+            body["open"] = bool(open)
+        if tab is not None:
+            body["tab"] = tab
+        if not body:
+            raise BetterAgentError("set_right_panel requires at least one of open/tab")
+        return self._post(f"/api/internal/sessions/{sid}/right-panel", body, timeout=10.0)
 
     # ── team definitions / runtime teams ─────────────────────────────
     def list_team_definitions(self) -> dict[str, Any]:
@@ -332,6 +379,21 @@ class Client:
             timeout=timeout,
         )
 
+    def create_inline_provisioned_session(
+        self,
+        inline_spec: dict[str, Any],
+        query: str = "",
+        ctx: dict[str, Any] | None = None,
+        *,
+        timeout: float = _LONG_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Run one provisioned-session fork for an extension-owned inline spec."""
+        return self._post(
+            "/api/internal/provisioned-sessions",
+            {"inline_spec": inline_spec, "query": query, "ctx": ctx or {}},
+            timeout=timeout,
+        )
+
     # ── extension settings ────────────────────────────────────────────
     def get_settings(self) -> dict[str, Any]:
         """Read this extension's own declared settings (manifest
@@ -347,13 +409,43 @@ class Client:
         self,
         key: str,
         *,
+        keys: list[str] | None = None,
+        op: str = "",
         release: bool = False,
+        renew: bool = False,
+        validate: bool = False,
+        reattach: bool = False,
+        owned: bool = False,
         holder_token: str = "",
+        timeout_seconds: float | int | None = None,
+        lease_seconds: float | int | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "key": key,
+            "op": op,
+            "release": release,
+            "renew": renew,
+            "validate": validate,
+            "reattach": reattach,
+            "owned": owned,
+            "holder_token": holder_token,
+            "owner": {
+                "app_session_id": self.app_session_id,
+                "cwd": self.cwd,
+                "provider_id": self.provider_id,
+                "source": "better_agent_sdk.Client.lock_ops",
+            },
+        }
+        if keys is not None:
+            body["keys"] = keys
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
         return self._post(
             "/api/internal/coordination/lock-ops",
-            {"key": key, "release": release, "holder_token": holder_token},
-            timeout=10.0,
+            body,
+            timeout=max(10.0, float(timeout_seconds or 0) + 5.0),
         )
 
     # ── session bridge ────────────────────────────────────────────────
@@ -381,6 +473,9 @@ class Client:
         display_prompt: str = "",
         source: str = "",
         client_id: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
         timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
         return self._post(
@@ -394,6 +489,9 @@ class Client:
                 "client_id": client_id,
                 "run_mode": run_mode,
                 "approval": approval,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=timeout,
         )
@@ -484,6 +582,8 @@ class Client:
         tag_ids: list[str] | None = None,
         add_tag_ids: list[str] | None = None,
         remove_tag_ids: list[str] | None = None,
+        tag_source: str = "",
+        sync_tag_source: str = "",
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"session_id": session_id}
         if folder_id is not _UNSET:
@@ -494,10 +594,21 @@ class Client:
             payload["add_tag_ids"] = add_tag_ids
         if remove_tag_ids is not None:
             payload["remove_tag_ids"] = remove_tag_ids
+        if tag_source:
+            payload["tag_source"] = tag_source
+        if sync_tag_source:
+            payload["sync_tag_source"] = sync_tag_source
         return self._post(
             "/api/internal/session-organization/update-session",
             payload,
             timeout=10.0,
+        )
+
+    def auto_tagging_action(self, action: str, **payload: Any) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/auto-tagging",
+            {"action": action, **payload},
+            timeout=30.0,
         )
 
     # ── provisioned-session discovery ─────────────────────────────────
@@ -526,6 +637,40 @@ class Client:
         self, event_type: str, data: dict[str, Any] | None = None, *, session_id: str = ""
     ) -> dict[str, Any]:
         return self.broadcast_session_event(event_type, data, session_id=session_id)
+
+    # ── task/routine outputs ─────────────────────────────────────────
+    def publish_task_output(
+        self,
+        task_id: str,
+        *,
+        title: str,
+        file_path: str = "",
+        content: str = "",
+        content_type: str = "text/html",
+        kind: str = "artifact",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/task-outputs",
+            {
+                "action": "publish",
+                "task_id": task_id,
+                "title": title,
+                "file_path": file_path,
+                "content": content,
+                "content_type": content_type,
+                "kind": kind,
+                "session_id": session_id or self.app_session_id,
+            },
+            timeout=30.0,
+        )
+
+    def list_task_outputs(self, task_id: str, *, limit: int = 50) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/task-outputs",
+            {"action": "list", "task_id": task_id, "limit": limit},
+            timeout=10.0,
+        )
 
     # ── extension-scoped storage ─────────────────────────────────────
     def storage_get(self, key: str) -> dict[str, Any]:
@@ -787,6 +932,8 @@ class Client:
         reasoning_effort: str = "",
         cwd: str = "",
         node_id: str = "",
+        disallowed_tools: list[str] | None = None,
+        disabled_builtin_extensions: list[str] | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/api/internal/create-sub-session",
@@ -798,7 +945,16 @@ class Client:
                 "reasoning_effort": reasoning_effort,
                 "cwd": cwd or self.cwd,
                 "node_id": node_id,
+                "disallowed_tools": disallowed_tools,
+                "disabled_builtin_extensions": disabled_builtin_extensions,
             },
+            timeout=10.0,
+        )
+
+    def resolve_internal_llm(self, task_key: str) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/extension-internal-llm/resolve",
+            {"task_key": task_key},
             timeout=10.0,
         )
 
@@ -813,6 +969,7 @@ class Client:
         reasoning_effort: str = "",
         sub_session: bool = True,
         cwd: str = "",
+        run_mode: str = "direct",
     ) -> dict[str, Any]:
         """Smart delegation router — resolves a target (auto-route or create)
         and dispatches fire-and-forget."""
@@ -827,6 +984,7 @@ class Client:
                 "reasoning_effort": reasoning_effort,
                 "sub_session": sub_session,
                 "cwd": cwd or self.cwd,
+                "run_mode": run_mode,
             },
             timeout=30.0,
         )
@@ -888,7 +1046,7 @@ class Client:
         LLM result, not a managed turn. Fresh run by default; pass ``fork`` or
         ``resume_sid``/``session_id`` to continue/fork an existing session.
         Requires ``spawn_runs``. Used by externalized lifecycle extensions
-        (e.g. rearranger) that need a raw result without touching the render tree."""
+        that need a raw result without touching the render tree."""
         payload: dict[str, Any] = {"prompt": prompt, "fork": fork}
         if cwd or self.cwd:
             payload["cwd"] = cwd or self.cwd
@@ -901,29 +1059,68 @@ class Client:
         return self._post("/api/internal/headless-run", payload, timeout=(timeout or 60.0) + 30.0)
 
     def ask(
-        self, target_session_id: str, message: str, *, ask_id: str = "", timeout: float = _LONG_TIMEOUT
+        self,
+        target_session_id: str = "",
+        message: str = "",
+        *,
+        target_worker_id: str = "",
+        target_worker_pool: str = "",
+        pool_affinity_key: str = "",
+        ask_id: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        mode: str = "wait_and_grab_last_assistant_mssg_in_turn",
+        timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
-        """Send a message to a session and block until its response turn completes."""
+        """Send a message to one session, worker, or worker pool via ask mode."""
         return self._post(
             "/api/internal/ask",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
+                "pool_affinity_key": pool_affinity_key,
                 "message": message,
                 "ask_id": ask_id,
+                "mode": mode,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=timeout,
         )
 
-    def mssg(self, target_session_id: str, message: str) -> dict[str, Any]:
-        """Send a fire-and-forget message to a session (target's completion
-        joins the sender's turn)."""
+    def mssg(
+        self,
+        target_session_id: str = "",
+        message: str = "",
+        *,
+        target_worker_id: str = "",
+        target_worker_pool: str = "",
+        pool_affinity_key: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        collapse_key: str = "",
+        collapse_policy: str = "",
+    ) -> dict[str, Any]:
+        """Send a fire-and-forget message to one session, worker, or worker pool."""
         return self._post(
             "/api/internal/mssg",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
+                "pool_affinity_key": pool_affinity_key,
                 "message": message,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "collapse_key": collapse_key,
+                "collapse_policy": collapse_policy,
             },
             timeout=30.0,
         )
@@ -978,7 +1175,25 @@ class Client:
             "/api/internal/user-input/request",
             {
                 "app_session_id": self.app_session_id,
+                "kind": "input",
                 "questions": questions,
+                "timeout_seconds": timeout_seconds,
+            },
+            timeout=timeout_seconds or 24 * 60 * 60,
+        )
+
+    def request_user_approval(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/user-input/request",
+            {
+                "app_session_id": self.app_session_id,
+                "kind": "approval",
+                "prompt": prompt,
                 "timeout_seconds": timeout_seconds,
             },
             timeout=timeout_seconds or 24 * 60 * 60,
@@ -988,71 +1203,36 @@ class Client:
         """Read the internal-LLM task→model assignments (app settings)."""
         return self._get("/api/settings/internal-llm", timeout=10.0)
 
-    # ── verb-preserving loopback (generic proxies) ───────────────────
-    def request_internal(
+    def invoke_capability(
         self,
-        method: str,
-        path: str,
-        *,
-        body: bytes | None = None,
-        query: str = "",
-        timeout: float = 60.0,
-    ) -> tuple[int, bytes]:
-        """Verb-preserving raw loopback to a core ``/api/internal/*`` endpoint.
-
-        Unlike :meth:`call_internal` (POST-only, JSON in/out, body merged with
-        ``app_session_id``), this preserves the HTTP method and query string and
-        passes the raw body through untouched — for generic frontend proxies that
-        forward arbitrary methods (GET/POST/PUT/PATCH/DELETE) to a core internal
-        sub-surface. Reuses this client's base URL, internal-token auth, and
-        extension-id headers so there is one transport. ``path`` MUST start with
-        ``/api/internal/`` (rejected otherwise). Returns ``(status, raw_bytes)``;
-        raises :class:`BetterAgentError` on transport/auth failure.
-        """
-        if not path.startswith("/api/internal/"):
-            raise BetterAgentError("request_internal path must start with /api/internal/")
-        if not self.internal_token:
-            raise BetterAgentError("BETTER_AGENT_INTERNAL_TOKEN or BETTER_CLAUDE_INTERNAL_TOKEN is required")
-        url = self.backend_url + path
-        if query:
-            url = f"{url}?{query}"
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method=method.upper(),
-            headers=self._headers(),
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
-        except urllib.error.URLError as exc:
-            raise BetterAgentError(f"core unreachable: {exc.reason}") from exc
-
-    # ── core loopback substrate ──────────────────────────────────────
-    def call_internal(
-        self,
-        path: str,
-        body: dict[str, Any] | None = None,
+        capability: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
         *,
         timeout: float = 60.0,
     ) -> dict[str, Any]:
-        """POST to a core ``/api/internal/*`` endpoint — the loopback substrate
-        extension-local typed wrappers build on. The shared SDK carries no
-        feature methods; each extension owns its own typed surface on top of
-        this primitive (:meth:`call_extension` reaches another extension's
-        surface). ``app_session_id`` is injected so callers don't repeat it; a
-        value already present in ``body`` wins. ``path`` MUST start with
-        ``/api/internal/`` (rejected otherwise) so an extension addresses only
-        core's internal surface, never an arbitrary URL. ``timeout`` overrides
-        the default for long-running endpoints (e.g. get-requirements).
+        """Invoke one manifest-granted core capability action.
+
+        The public contract intentionally has no HTTP method, path, headers, or
+        query escape hatch. Core derives the extension identity from its token,
+        authorizes the exact ``capability.action`` grant, and validates the
+        payload against that action's schema.
         """
-        if not path.startswith("/api/internal/"):
-            raise BetterAgentError("call_internal path must start with /api/internal/")
-        payload = dict(body or {})
-        payload.setdefault("app_session_id", self.app_session_id)
-        return self._post(path, payload, timeout=timeout)
+        if not isinstance(capability, str) or not capability.strip():
+            raise BetterAgentError("capability must be a non-empty string")
+        if not isinstance(action, str) or not action.strip():
+            raise BetterAgentError("action must be a non-empty string")
+        if payload is not None and not isinstance(payload, dict):
+            raise BetterAgentError("payload must be an object")
+        return self._post(
+            "/api/internal/capabilities/invoke",
+            {
+                "capability": capability.strip(),
+                "action": action.strip(),
+                "payload": dict(payload or {}),
+            },
+            timeout=timeout,
+        )
 
     # ── inter-extension calls ─────────────────────────────────────────
     def call_extension(

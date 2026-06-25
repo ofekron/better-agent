@@ -1,6 +1,6 @@
 const STYLE_ID = "ofek-dev-ask-view-styles";
 const STYLE_TEXT = `
-.ask-group{margin-bottom:24px}
+.ask-group{margin-bottom:16px}
 .ask-group .message-group{margin-bottom:0}
 .ask-group--resolved{opacity:.5;transition:opacity .2s ease}
 .ask-group--resolved .ask-picker-row-actions,.ask-group--resolved .ask-picker-actions{display:none}
@@ -103,11 +103,10 @@ function SessionPicker({ React, context }) {
   const h = React.createElement;
   const askResult = context.askResult || {};
   const [promptExpanded, setPromptExpanded] = useState(false);
-  const matches = useMemo(() => {
-    const byId = new Map();
-    for (const session of Array.isArray(context.allSessions) ? context.allSessions : []) byId.set(session.id, session);
-    return (askResult.session_ids || []).map((sid) => byId.get(sid)).filter(Boolean);
-  }, [askResult, context.allSessions]);
+  const matches = useMemo(
+    () => Array.isArray(askResult.results) ? askResult.results : [],
+    [askResult],
+  );
   const hasPrompt = Boolean(askResult.prompt_preview);
   const createLabel = typeof context.createLabel === "string" ? context.createLabel : undefined;
   const onView = typeof context.onView === "function" ? context.onView : () => {};

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 from i18n import t
 from stores import pending_approvals, worker_store
 from orchs._subprocess_agent import SubprocessAgent
-from provisioning.prompts import render_prompt
+from prompt_templates import render_prompt
 from provider import StreamEvent
 from session_manager import manager as session_manager
 
@@ -120,6 +120,9 @@ async def await_fresh_worker_approval(
                     app_session_id=app_session_id,
                     provider_id=coordinator.provider_for_session(app_session_id).id,
                     node_id=existing.get("node_id") or node_id,
+                    # Reached from await_fresh_worker_approval — the user
+                    # approved this fresh-worker popup, so they are aware.
+                    user_initiated=True,
                 )
             # status == "denied" — emit a creation_failed so any
             # frontend that still has the card showing dismisses
@@ -232,6 +235,8 @@ async def await_fresh_worker_approval(
         app_session_id=app_session_id,
         provider_id=coordinator.provider_for_session(app_session_id).id,
         node_id=node_id,
+        # The user just approved this fresh-worker popup ("ask" policy).
+        user_initiated=True,
     )
 
 
@@ -248,6 +253,7 @@ async def spawn_approved_worker(
     app_session_id: str,
     provider_id: Optional[str] = None,
     node_id: str = "primary",
+    user_initiated: bool = False,
 ) -> Optional[dict]:
     """Spawn the new Better Agent session + init turn for an approved fresh
     worker request. Extracted so the re-entry path (backend
@@ -257,10 +263,15 @@ async def spawn_approved_worker(
     worker's claude jsonl branches off the manager's, so it must
     live under the same `CLAUDE_CONFIG_DIR`. Defaults to the
     currently-active provider when omitted (legacy callers / tests).
+
+    `user_initiated` is True only when the user explicitly approved a
+    fresh-worker popup (the "ask" policy). Under "approve" the worker is
+    spawned automatically with no popup, so the user is not aware of it.
     """
     new_bc = session_manager.create(
         name=description, model=model, cwd=cwd, orchestration_mode=mode,
         provider_id=provider_id, node_id=node_id,
+        user_initiated=user_initiated,
     )
     # Register a cancel event keyed on the new BC id so DELETE
     # /api/workers/{id} during init can short-circuit the spawn —
@@ -334,6 +345,7 @@ async def init_target_agent_session(
     cancel_event: asyncio.Event,
     ws_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
     provision_prompt: Optional[str] = None,
+    provisioned_tool_profile: str = "",
 ) -> Optional[str]:
     """Run a one-time preparation turn to mint a Better Agent session's provider sid
     using the shared SubprocessAgent.init().
@@ -348,10 +360,12 @@ async def init_target_agent_session(
         coordinator,
         model=model,
         prep_prompt=provision_prompt if provision_prompt is not None else render_prompt(
-            "worker_prep.md", {"description": description},
+            "provisioning/worker_prep.md", {"description": description},
         ),
         cancel_event=cancel_event,
         ws_callback=ws_callback,
         mode="native",
         ws_event_prefix="worker",
+        create_provisioning_messages=True,
+        provisioned_tool_profile=provisioned_tool_profile,
     )

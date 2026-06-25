@@ -11,6 +11,7 @@ import {
   createVoiceRecognizer,
   type VoiceRecognizerErrorKind,
 } from "../lib/voiceRecognition";
+import { API } from "../api";
 
 function promptTextareaIsFocused() {
   return document.activeElement instanceof HTMLTextAreaElement
@@ -36,6 +37,18 @@ export function VoiceActivation({
   const [hintKind, setHintKind] = useState<VoiceHintKind>("info");
   const commandStateRef = useRef<VoiceCommandState>({ mode: "idle", buffer: "" });
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeOnBackgroundRef = useRef(true);
+
+  useEffect(() => {
+    fetch(`${API}/api/user-prefs`)
+      .then((r) => r.json())
+      .then((data: { voice_close_on_background?: unknown }) => {
+        if (typeof data.voice_close_on_background === "boolean") {
+          closeOnBackgroundRef.current = data.voice_close_on_background;
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const clearHintTimer = () => {
     if (!hintTimerRef.current) return;
@@ -105,6 +118,10 @@ export function VoiceActivation({
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         startListening();
+        return;
+      }
+      if (closeOnBackgroundRef.current) {
+        setEnabled(false);
         return;
       }
       recognizer.stop();

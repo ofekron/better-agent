@@ -10,7 +10,6 @@ from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-session-auto-delete-")
-os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -20,6 +19,7 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import auth  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
 from paths import ba_home  # noqa: E402
@@ -34,6 +34,7 @@ def _reset_home() -> None:
         path = Path(_TMP_HOME) / name
         if path.exists():
             shutil.rmtree(path)
+    (Path(_TMP_HOME) / "sessions").mkdir(parents=True, exist_ok=True)
     prefs_path = Path(_TMP_HOME) / "user_prefs.json"
     prefs_path.unlink(missing_ok=True)
     session_store._fork_index.clear()
@@ -127,6 +128,7 @@ def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
 
 def main_test() -> int:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
+    client.headers.update({"Authorization": f"Bearer {auth.create_token('session-auto-delete-test')}"})
     tests = [
         ("default never + persistence", test_default_never_and_persistence),
         ("invalid values rejected", test_invalid_values_rejected),

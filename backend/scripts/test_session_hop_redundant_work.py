@@ -34,6 +34,11 @@ steady state instead of O(N-events × N-panes):
      the threadpool, an unrelated coroutine on the event loop still
      gets scheduled within tight latency.
 
+  8. **Subscribe stale-debug probes stay off the normal path**. Replay
+     details are useful when DEBUG is enabled, but the normal reconnect
+     path must not run extra session-manager probes or write INFO logs
+     per subscribe.
+
 Run with:
     cd backend && .venv/bin/python scripts/test_session_hop_redundant_work.py
 """
@@ -49,6 +54,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -122,6 +128,7 @@ def _wire_loop_and_fns(
     *,
     reconcile_fn=None,
     emit_fn=None,
+    reconciled_fn=None,
 ) -> tuple[list, list]:
     """Bind a fresh loop + counter wrappers. Returns
     (reconcile_calls, emit_calls) — both lists you can inspect from
@@ -139,6 +146,9 @@ def _wire_loop_and_fns(
     session_manager.bind_loop(loop)
     session_manager.bind_reconcile_fn(reconcile_fn or _default_reconcile)
     session_manager.bind_processing_emitter(emit_fn or _default_emit)
+    session_manager.bind_reconciled_emitter(
+        reconciled_fn or (lambda root_id: None)
+    )
     return reconcile_calls, emit_calls
 
 
@@ -344,6 +354,114 @@ def test_non_render_orphan_does_not_rebuild_root_events_projection() -> bool:
     return True
 
 
+def test_render_orphan_updates_warm_root_events_projection() -> bool:
+    sid = _fresh_session()
+    first_uid = str(uuid.uuid4())
+    event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": first_uid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "first orphan"}],
+            },
+        },
+        source="test",
+        msg_id=None,
+    )
+    event_ingester.root_events_by_sid(sid)
+    original_read_all = event_ingester._read_all_events_locked
+    try:
+        event_ingester._read_all_events_locked = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("warm root-event projection rebuilt from disk")
+        )
+        uid = str(uuid.uuid4())
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "type": "assistant",
+                "uuid": uid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "warm orphan"}],
+                },
+            },
+            source="test",
+            msg_id=None,
+        )
+        after = event_ingester.root_events_by_sid(sid)
+    finally:
+        event_ingester._read_all_events_locked = original_read_all
+    if uid not in {
+        ((event.get("data") or {}).get("uuid"))
+        for event in after.get(sid, [])
+        if isinstance(event, dict)
+    }:
+        print("  warm root event projection did not include appended orphan")
+        return False
+    return True
+
+
+def test_stamped_event_updates_warm_root_events_projection() -> bool:
+    sid = _fresh_session()
+    uid = str(uuid.uuid4())
+    event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": uid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "orphan"}],
+            },
+        },
+        source="test",
+        msg_id=None,
+    )
+    before = event_ingester.root_events_by_sid(sid)
+    if not before.get(sid):
+        print("  expected orphan before stamped event")
+        return False
+    original_read_all = event_ingester._read_all_events_locked
+    try:
+        event_ingester._read_all_events_locked = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("warm root-event projection rebuilt from disk")
+        )
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "type": "assistant",
+                "uuid": uid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "owned"}],
+                },
+            },
+            source="test",
+            msg_id="asst-owned",
+        )
+        after = event_ingester.root_events_by_sid(sid)
+    finally:
+        event_ingester._read_all_events_locked = original_read_all
+    if any(
+        ((event.get("data") or {}).get("uuid")) == uid
+        for event in after.get(sid, [])
+        if isinstance(event, dict)
+    ):
+        print("  stamped event did not remove matching root orphan")
+        return False
+    return True
+
+
 # ─── 4. Single-flight under concurrent schedules ───────────────────
 
 
@@ -515,29 +633,413 @@ async def test_loop_responsive_during_slow_reconcile() -> bool:
 
 
 def test_ws_replay_cap_at_msg_limit() -> bool:
-    """Mirror of the WS subscribe handler's replay-build logic. The
-    cap MUST hold even when since_seq=0 (cold hop) so the WS payload
-    is bounded independent of `since_seq` or session length.
+    """Mirror of the WS subscribe handler's replay-build logic. Cold
+    replay may include one extra turn initiator when the raw cap cuts
+    through a user→assistant boundary, but it must stay bounded
+    independent of `since_seq` or session length.
 
-    Pre-fix, the WS path delivered every message with `seq >= since_seq`
-    uncapped — a 1000-msg session with `since_seq=0` shipped the full
-    history on every cold hop.
+    A long session with `since_seq=0` must not ship full history on
+    every cold hop.
     """
-    sid = _fresh_session()
-    # Push 200 more user messages so the total exceeds the cap.
+    sess = session_manager.create(
+        name="replay-cap", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
     for i in range(200):
         session_manager.append_user_msg(sid, {
             "id": str(uuid.uuid4()), "role": "user", "content": f"u{i}",
             "events": [], "isStreaming": False,
         })
+        session_manager.append_assistant_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "assistant", "content": f"a{i}",
+            "events": [], "isStreaming": False,
+        })
 
-    sess = session_manager.get(sid)
-    persisted = sess.get("messages") or []
-    since_seq = 0
-    replay = [m for m in persisted if int(m.get("seq", 0)) >= since_seq]
-    replay = replay[-50:]
-    if len(replay) > 50:
-        print(f"  replay payload {len(replay)} > 50 cap")
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    delta = _build_messages_replay_delta(sid, 0, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = delta["messages"]
+    if len(replay) > 51:
+        print(f"  replay payload {len(replay)} > 51 bounded cap")
+        return False
+    return True
+
+
+def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="turn-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    for i in range(2):
+        session_manager.append_user_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "user", "content": f"u{i}",
+            "events": [], "isStreaming": False,
+        })
+        session_manager.append_assistant_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "assistant", "content": f"a{i}",
+            "events": [], "isStreaming": False,
+        })
+    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["user", "assistant"]:
+        print(f"  cold replay split the turn boundary: {roles}")
+        return False
+    return True
+
+
+def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="orphan-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a1",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a2",
+        "events": [], "isStreaming": False,
+    })
+    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["assistant"]:
+        print(f"  orphan assistant got an invented header: {roles}")
+        return False
+    return True
+
+
+def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="incremental-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "prior-u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "prior-a",
+        "events": [], "isStreaming": False,
+    })
+    user = session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a",
+        "events": [], "isStreaming": False,
+    })
+    delta = _build_messages_replay_delta(sid, int(user["seq"]), limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["assistant"]:
+        print(f"  incremental replay prepended seen initiator: {roles}")
+        return False
+    return True
+
+
+def test_incremental_ws_replay_reuses_identical_window() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="incremental-window-cache", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "prior-u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "prior-a",
+        "events": [], "isStreaming": False,
+    })
+    user = session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    assistant_id = str(uuid.uuid4())
+    session_manager.append_assistant_msg(sid, {
+        "id": assistant_id,
+        "role": "assistant",
+        "content": "a",
+        "events": [],
+        "isStreaming": False,
+    })
+
+    calls = 0
+    original = session_manager._compute_messages_window
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    session_manager._compute_messages_window = counted
+    try:
+        first = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        second = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if calls != 1:
+            print(f"  identical replay rebuilt {calls} windows")
+            return False
+        if not first or not second:
+            print("  replay delta unexpectedly None")
+            return False
+        first["messages"][0]["content"] = "mutated"
+        third = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if not third or third["messages"][0].get("content") == "mutated":
+            print("  cached replay returned shared mutable data")
+            return False
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={"type": "assistant", "uuid": str(uuid.uuid4())},
+            source="test",
+            msg_id=assistant_id,
+        )
+        _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if calls != 2:
+            print(f"  render event did not invalidate window cache, calls={calls}")
+            return False
+    finally:
+        session_manager._compute_messages_window = original
+    return True
+
+
+def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, str, int]:
+    sess = session_manager.create(
+        name="replay-target", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    msg_id = str(uuid.uuid4())
+    msg = session_manager.append_assistant_msg(sid, {
+        "id": msg_id,
+        "role": "assistant",
+        "content": "a",
+        "events": [
+            {
+                "type": "assistant",
+                "data": {"type": "assistant", "uuid": str(uuid.uuid4())},
+            }
+            for _ in range(event_count)
+        ],
+        "isStreaming": False,
+    })
+    assert msg is not None
+    return sid, msg_id, int(msg.get("seq") or 0)
+
+
+def test_ws_replay_survives_stale_historical_projection() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    projection = types.ModuleType("historical_children_projection")
+    projection.ProjectionUnavailable = type("ProjectionUnavailable", (RuntimeError,), {})
+
+    def unavailable(*_args, **_kwargs):
+        raise projection.ProjectionUnavailable("not current")
+
+    projection.root_manifest = unavailable
+
+    sid, msg_id, _seen_seq = _session_with_completed_replay_target(event_count=2)
+    with patch.dict(sys.modules, {"historical_children_projection": projection}):
+        delta = _build_messages_replay_delta(sid, 0, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = [m for m in delta["messages"] if m.get("id") == msg_id]
+    if len(replay) != 1:
+        print(f"  completed message missing/duplicated under stale projection: {len(replay)}")
+        return False
+    msg = replay[0]
+    if msg.get("events"):
+        print(f"  completed replay should stay stubbed, got events={msg.get('events')}")
+        return False
+    if not isinstance(msg.get("stub"), dict):
+        print(f"  completed replay missing fallback stub: {msg}")
+        return False
+    return True
+
+
+def test_ws_replay_excludes_completed_seen_message() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sid, msg_id, seen_seq = _session_with_completed_replay_target()
+    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay_ids = {m.get("id") for m in delta["messages"]}
+    if msg_id in replay_ids:
+        print("  replay resent completed seq N message")
+        return False
+    payload_size = len(json.dumps(delta["messages"]))
+    if payload_size > 1000:
+        print(f"  completed/no-in-flight replay serialized huge payload: {payload_size} bytes")
+        return False
+    return True
+
+
+def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+    from turn_manager import TurnManager  # noqa: E402
+
+    sid, msg_id, seen_seq = _session_with_completed_replay_target(event_count=1)
+    tm = TurnManager(coordinator=None)
+    tm.current_assistant_msgs[sid] = {
+        "id": msg_id,
+        "role": "assistant",
+        "content": "streaming",
+        "events": [
+            {"type": "assistant", "data": {"uuid": "live-1"}},
+            {"type": "assistant", "data": {"uuid": "live-2"}},
+        ],
+        "isStreaming": True,
+    }
+    delta = _build_messages_replay_delta(
+        sid,
+        seen_seq,
+        limit=50,
+        get_in_flight=tm.get_in_flight_assistant_msg,
+    )
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = [m for m in delta["messages"] if m.get("id") == msg_id]
+    if len(replay) != 1:
+        print(f"  in-flight message missing/duplicated: {len(replay)}")
+        return False
+    msg = replay[0]
+    if msg.get("content") != "streaming" or len(msg.get("events") or []) != 2:
+        print(f"  in-flight replacement failed: {msg}")
+        return False
+    return True
+
+
+def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sid = "sid-race"
+    msg_id = "msg-race"
+    calls: list[int] = []
+    in_flight_holder = {"msg": None}
+
+    def _get_in_flight(_sid: str):
+        return in_flight_holder["msg"]
+
+    def _get_messages_since(_sid: str, since_seq: int, *, limit: int):
+        calls.append(since_seq)
+        if len(calls) == 1:
+            in_flight_holder["msg"] = {
+                "id": msg_id, "role": "assistant",
+                "events": [{"type": "assistant", "data": {"uuid": "live"}}],
+                "isStreaming": True,
+            }
+            return {"messages": [], "next_seq": 8}
+        return {
+            "messages": [{
+                "id": msg_id, "role": "assistant",
+                "events": [], "isStreaming": False, "seq": 7,
+            }],
+            "next_seq": 8,
+        }
+
+    delta = _build_messages_replay_delta(
+        sid,
+        7,
+        limit=50,
+        get_messages_since=_get_messages_since,
+        get_in_flight=_get_in_flight,
+    )
+    if calls != [8, 7]:
+        print(f"  expected exclusive then inclusive calls, got {calls}")
+        return False
+    replay = delta["messages"] if delta else []
+    if len(replay) != 1 or replay[0].get("id") != msg_id:
+        print(f"  in-flight race replay wrong: {replay}")
+        return False
+    if not replay[0].get("isStreaming"):
+        print("  in-flight race did not preserve streaming state")
+        return False
+    return True
+
+
+async def test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    loop = asyncio.get_running_loop()
+    reconciled: list[str] = []
+
+    def _reconcile(root_id: str, *, after_seq: int = 0) -> list:
+        return [{"app_session_id": root_id, "msg_id": "orphan", "stub": {}}]
+
+    _wire_loop_and_fns(
+        loop,
+        reconcile_fn=_reconcile,
+        reconciled_fn=lambda root_id: reconciled.append(root_id),
+    )
+    sid, msg_id, seen_seq = _session_with_completed_replay_target()
+    _ = session_manager.get(sid)
+    session_manager._reconcile_dirty[sid] = False
+    event_ingester.ingest(
+        sid, sid=sid, event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": str(uuid.uuid4()),
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "orphan"}],
+            },
+        },
+        source="claude_tailer", msg_id=None,
+    )
+    if session_manager._reconcile_dirty.get(sid) is not True:
+        print("  orphan did not arm reconcile dirty")
+        return False
+    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    if msg_id in {m.get("id") for m in delta["messages"]}:
+        print("  orphan reconnect resent completed huge message")
+        return False
+    task = session_manager.schedule_reconcile_if_needed(sid)
+    if task is None:
+        print("  dirty orphan did not schedule reconcile")
+        return False
+    await task
+    if sid not in reconciled:
+        print(f"  session_reconciled not emitted: {reconciled}")
         return False
     return True
 
@@ -580,6 +1082,36 @@ def test_ws_event_cursor_uses_server_floor() -> bool:
     if negative != 0:
         print(f"  missing session negative cursor should clamp to 0, got {negative}")
         return False
+    return True
+
+
+def test_ws_replay_stale_debug_is_debug_gated() -> bool:
+    source = Path(_BACKEND, "main.py").read_text(encoding="utf-8")
+    start = source.index('await ws_callback({\n                                "type": "messages_replay"')
+    end = source.index('                    except Exception:\n                        logger.exception("messages_replay on subscribe failed")', start)
+    replay_tail = source[start:end]
+    debug_gate = "if logger.isEnabledFor(logging.DEBUG):"
+    if debug_gate not in replay_tail:
+        print("  missing DEBUG gate around stale replay probes")
+        return False
+    gated = replay_tail[replay_tail.index(debug_gate):]
+    for needle in (
+        "session_manager._root_id_for",
+        "session_manager.is_reconcile_dirty",
+        "logger.debug(",
+    ):
+        if needle not in gated:
+            print(f"  {needle} is not behind DEBUG gate")
+            return False
+    normal_path = replay_tail[:replay_tail.index(debug_gate)]
+    for needle in (
+        "session_manager._root_id_for",
+        "session_manager.is_reconcile_dirty",
+        "logger.info(\n                                    \"WS replay",
+    ):
+        if needle in normal_path:
+            print(f"  {needle} still runs on normal replay path")
+            return False
     return True
 
 
@@ -672,8 +1204,19 @@ async def _amain() -> int:
         ("non-render orphans do not invalidate snapshot", test_non_render_orphans_do_not_invalidate_snapshot),
         ("worker_event advances render watermark", test_worker_event_advances_render_watermark),
         ("non-render orphan does not rebuild root events", test_non_render_orphan_does_not_rebuild_root_events_projection),
+        ("render orphan updates warm root events", test_render_orphan_updates_warm_root_events_projection),
+        ("stamped event updates warm root events", test_stamped_event_updates_warm_root_events_projection),
         ("ws replay cap at msg_limit", test_ws_replay_cap_at_msg_limit),
+        ("cold ws replay keeps turn header initiator", test_cold_ws_replay_keeps_turn_header_initiator),
+        ("cold ws replay does not invent orphan header", test_cold_ws_replay_does_not_invent_orphan_header),
+        ("incremental ws replay does not prepend seen initiator", test_incremental_ws_replay_does_not_prepend_seen_initiator),
+        ("incremental ws replay reuses identical window", test_incremental_ws_replay_reuses_identical_window),
+        ("ws replay survives stale historical projection", test_ws_replay_survives_stale_historical_projection),
+        ("ws replay excludes completed seen message", test_ws_replay_excludes_completed_seen_message),
+        ("ws replay keeps preexisting in-flight message", test_ws_replay_keeps_preexisting_in_flight_message),
+        ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
         ("ws event cursor uses server floor", test_ws_event_cursor_uses_server_floor),
+        ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),
         ("stubbed team tree skips full event hydration", test_stubbed_team_tree_skips_full_event_hydration),
     ]
     async_tests = [
@@ -684,6 +1227,7 @@ async def _amain() -> int:
         ("slow reconcile → started+finished", test_slow_reconcile_emits_started_then_finished),
         ("failing reconcile still emits finished", test_failing_reconcile_still_emits_finished),
         ("loop responsive during slow reconcile", test_loop_responsive_during_slow_reconcile),
+        ("ws replay orphan finalize uses reconcile", test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay),
     ]
 
     fails = 0

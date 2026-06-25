@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+import app_version
 from env_compat import get_env
 from paths import ba_home
 from topology import NodeSpec, load_topology, local_node_id
@@ -63,6 +64,8 @@ class NodeConnection:
     ws: Any                                  # the FastAPI WebSocket; opaque here
     connected_at: float
     last_seen: float
+    app_commit_sha: str = ""
+    app_dirty: bool = False
     # Inflight RPC futures keyed by request_id.
     pending_rpcs: dict[str, asyncio.Future] = field(default_factory=dict)
     # Inflight runs keyed by run_id — proxies a RemoteRunState held by
@@ -81,6 +84,9 @@ class NodeConnection:
 # the node disappearing. We never drop a key once it's been seen.
 _state: dict[str, str] = {}
 _conns: dict[str, NodeConnection] = {}
+_state_version = 0
+_snapshot_static_cache_key: tuple[Any, ...] | None = None
+_snapshot_static_cache: dict[str, NodeSpec] | None = None
 # Subscribers fire on every transition. List of async callables.
 _listeners: list[Callable[[str, str], Awaitable[None]]] = []
 
@@ -383,7 +389,13 @@ async def _fire(node_id: str, state: str) -> None:
             logger.exception("node_store listener raised for %s", node_id)
 
 
-async def register(spec: NodeSpec, ws: Any) -> NodeConnection:
+async def register(
+    spec: NodeSpec,
+    ws: Any,
+    *,
+    app_commit_sha: str = "",
+    app_dirty: bool = False,
+) -> NodeConnection:
     """Mark a node as connected with its live WS handle. Replaces any
     prior NodeConnection for the same id (re-registration races on
     rapid reconnect drop the older socket on the floor — caller's
@@ -398,17 +410,30 @@ async def register(spec: NodeSpec, ws: Any) -> NodeConnection:
     map from disk and let subsequent acks advance it forward."""
     now = time.time()
     persisted = await asyncio.to_thread(_load_persisted_offsets, spec.id)
+    prior = _conns.get(spec.id)
+    version_changed = (
+        prior is not None
+        and (
+            prior.app_commit_sha != app_commit_sha
+            or prior.app_dirty != app_dirty
+        )
+    )
     conn = NodeConnection(
         spec=spec,
         ws=ws,
         connected_at=now,
         last_seen=now,
+        app_commit_sha=app_commit_sha,
+        app_dirty=app_dirty,
         last_acked_offset=persisted,
     )
+    global _state_version
     _conns[spec.id] = conn
     prev = _state.get(spec.id)
     _state[spec.id] = "connected"
-    if prev != "connected":
+    if prev != "connected" or version_changed:
+        _state_version += 1
+    if prev != "connected" or version_changed:
         await _fire(spec.id, "connected")
     return conn
 
@@ -435,9 +460,12 @@ async def unregister(node_id: str) -> None:
     # everything else alone.
     if _conns.get(node_id) is not leaving:
         return
+    global _state_version
     _conns.pop(node_id, None)
     prev = _state.get(node_id)
     _state[node_id] = "disconnected"
+    if prev != "disconnected":
+        _state_version += 1
     if prev != "disconnected":
         await _fire(node_id, "disconnected")
 
@@ -450,8 +478,12 @@ async def forget(node_id: str) -> None:
     """Remove all in-memory state for a node and broadcast disconnected.
     Used after a node is deleted from the registry/topology so snapshot()
     won't re-materialize it from the orphan-fallback path."""
+    global _state_version
+    had_state = node_id in _state or node_id in _conns
     _conns.pop(node_id, None)
     _state.pop(node_id, None)
+    if had_state:
+        _state_version += 1
     await _fire(node_id, "disconnected")
 
 
@@ -462,39 +494,67 @@ def state(node_id: str) -> str:
     return _state.get(node_id, "unknown")
 
 
-def snapshot() -> list[dict]:
-    """REST projection: every KNOWN node + its live state. Used by
-    `GET /api/nodes`. Sources, in priority order:
-      1. topology.yaml (static nodes + the primary), if present.
-      2. node_registry_store (dynamic nodes approved via the popup).
-      3. any node we've seen a live/closed connection for but that is
-         in neither source (defensive — shouldn't normally happen).
-    Tolerates a missing topology.yaml so dynamic-only deployments still
-    surface their nodes."""
-    specs: dict[str, NodeSpec] = {}
-    try:
-        for node_id, spec in load_topology().all_nodes().items():
-            specs[node_id] = spec
-    except Exception:
-        pass
+def _version_status(app_commit_sha: str, primary_commit_sha: str) -> str:
+    if not app_commit_sha or not primary_commit_sha:
+        return "unknown"
+    if app_commit_sha == primary_commit_sha:
+        return "ok"
+    return "mismatch"
 
-    # Always represent the local/primary host. In a dynamic-only deploy
-    # (no topology.yaml) the block above raised and left `specs` with no
-    # primary, so /api/nodes omitted the host — the "run on" picker then
-    # offered only remote workers while its default `node_id="primary"`
-    # matched no <option> (a controlled <select> silently rendering the
-    # first worker), so sessions landed on "primary" regardless of the
-    # visible choice, and no machine ever showed the "(host)" badge. The
-    # id matches what /api/local_node_id returns, so the frontend's
-    # `m.id === localNodeId` host badge lights up across the picker,
-    # machine-node UI, and DirPicker. Skip when a primary already exists
-    # (topology-present deploy) to avoid duplicating the host.
+
+def connection_version_status(conn: NodeConnection) -> str:
+    return _version_status(conn.app_commit_sha, app_version.current_commit_sha())
+
+
+def connection_version_blocks_work(conn: NodeConnection) -> bool:
+    return connection_version_status(conn) == "mismatch"
+
+
+def assert_node_version_ready(node_id: str) -> None:
+    conn = get_connection(node_id)
+    if conn is None:
+        raise RuntimeError(f"node {node_id!r} is not connected")
+    if not connection_version_blocks_work(conn):
+        return
+    primary_sha = app_version.current_commit_sha()
+    node_sha = conn.app_commit_sha or "unknown"
+    raise RuntimeError(
+        f"node {node_id!r} is running app commit {node_sha}, "
+        f"but primary is running {primary_sha}; update or restart the node "
+        f"onto the primary version before running work there."
+    )
+
+
+def _node_registry_fingerprint() -> tuple[int, int, int]:
+    try:
+        import node_registry_store
+        return node_registry_store.version_token()
+    except Exception:
+        return (0, 0, 0)
+
+
+def _snapshot_static_specs() -> dict[str, NodeSpec]:
+    global _snapshot_static_cache_key, _snapshot_static_cache
+    topology_key: tuple[str, int] | tuple[str, None]
+    try:
+        topology = load_topology()
+        topology_key = ("topology", id(topology))
+    except Exception:
+        topology = None
+        topology_key = ("topology", None)
+    registry_key = _node_registry_fingerprint()
+    local_id = _local_node_id_or_primary()
+    cache_key = (topology_key, registry_key, local_id)
+    if _snapshot_static_cache_key == cache_key and _snapshot_static_cache is not None:
+        return dict(_snapshot_static_cache)
+
+    specs: dict[str, NodeSpec] = {}
+    if topology is not None:
+        specs.update(topology.all_nodes())
     if not any(s.role == "primary" for s in specs.values()):
-        local_id = _local_node_id_or_primary()
         specs[local_id] = NodeSpec(
             id=local_id, role="primary", address="local", cwd_roots=(),
         )
-
     try:
         import node_registry_store
         for rec in node_registry_store.list_all():
@@ -509,6 +569,22 @@ def snapshot() -> list[dict]:
     except Exception:
         logger.exception("node_store.snapshot: registry merge failed")
 
+    _snapshot_static_cache_key = cache_key
+    _snapshot_static_cache = dict(specs)
+    return dict(specs)
+
+
+def snapshot() -> list[dict]:
+    """REST projection: every KNOWN node + its live state. Used by
+    `GET /api/nodes`. Sources, in priority order:
+      1. topology.yaml (static nodes + the primary), if present.
+      2. node_registry_store (dynamic nodes approved via the popup).
+      3. any node we've seen a live/closed connection for but that is
+         in neither source (defensive — shouldn't normally happen).
+    Tolerates a missing topology.yaml so dynamic-only deployments still
+    surface their nodes."""
+    specs = _snapshot_static_specs()
+
     for nid in set(_state) | set(_conns):
         if nid in specs:
             continue
@@ -518,8 +594,21 @@ def snapshot() -> list[dict]:
         )
 
     out: list[dict] = []
+    primary_commit_sha = app_version.current_commit_sha()
+    primary_dirty = app_version.current_dirty()
     for node_id, spec in specs.items():
         conn = _conns.get(node_id)
+        is_primary = spec.role == "primary"
+        node_commit_sha = (
+            primary_commit_sha
+            if is_primary
+            else (conn.app_commit_sha if conn else "")
+        )
+        node_dirty = (
+            primary_dirty
+            if is_primary
+            else (conn.app_dirty if conn else False)
+        )
         out.append({
             "id": node_id,
             "role": spec.role,
@@ -528,8 +617,27 @@ def snapshot() -> list[dict]:
             "state": _state.get(node_id, "connected" if spec.role == "primary" else "unknown"),
             "connected_at": conn.connected_at if conn else None,
             "last_seen": conn.last_seen if conn else None,
+            "app_commit_sha": node_commit_sha,
+            "app_dirty": node_dirty,
+            "primary_commit_sha": primary_commit_sha,
+            "primary_dirty": primary_dirty,
+            "version_status": _version_status(node_commit_sha, primary_commit_sha),
         })
     return out
+
+
+def connected_worker_node_ids_snapshot() -> tuple[int, tuple[str, ...]]:
+    return (
+        _state_version,
+        tuple(
+            sorted(
+                node_id
+                for node_id, conn in _conns.items()
+                if _state.get(node_id) == "connected" and conn.spec.role != "primary"
+                and not connection_version_blocks_work(conn)
+            )
+        ),
+    )
 
 
 def touch_last_seen(node_id: str) -> None:
@@ -546,12 +654,15 @@ def reset_for_tests() -> None:
     deterministic stop should await `stop_offset_flush_loop` instead.
     Callers expecting a fully fresh process should also nuke
     `ba_home()/node_store/` if BETTER_CLAUDE_HOME is shared."""
-    global _flush_task
+    global _flush_task, _state_version, _snapshot_static_cache_key, _snapshot_static_cache
     if _flush_task is not None and not _flush_task.done():
         _flush_task.cancel()
     _flush_task = None
     _conns.clear()
     _state.clear()
+    _state_version += 1
     _listeners.clear()
     _dirty_nodes.clear()
     _flush_locks.clear()
+    _snapshot_static_cache_key = None
+    _snapshot_static_cache = None

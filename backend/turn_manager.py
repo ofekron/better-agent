@@ -32,13 +32,18 @@ construction.
 """
 
 import asyncio
+import contextvars
 import copy
+import json
 import logging
 import os
+import random
 import threading
 import time as _time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Awaitable, Callable, Literal, Optional
 
 from continuation import is_context_overflow_error
@@ -50,13 +55,18 @@ from event_shape import (
     is_synthetic_event as _is_synthetic_event,
 )
 from capability_contexts import provider_capability_contexts
+from extension_context_audit import runtime_context as extension_audit_context
+from extension_store import user_instruction_contexts as extension_user_instruction_contexts
 from runtime_skills import runtime_skill_contexts
 from i18n import t
+import llm_call_log
+import perf
 from provider import StreamEvent
-from runs_dir import pid_alive as _pid_alive, salvage_complete_payload
+from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
 from turn_helpers import (
+    _RATE_LIMIT_MAX_ATTEMPTS,
     _TRANSIENT_BASE_WAIT_S,
     _TRANSIENT_MAX_ATTEMPTS,
     _TRANSIENT_MAX_WAIT_S,
@@ -69,6 +79,38 @@ from user_msg_lifecycle import emit_sent
 
 logger = logging.getLogger(__name__)
 
+_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="stream-event-apply",
+)
+
+# `_drive_cli_run` (and its immediate caller, `run_turn`) dispatch every
+# active turn for every active session through a chain of ~20 synchronous
+# calls (session record fetch, provider lookup, capability/context
+# building) — genuinely hot, latency-sensitive, user-facing work. Left on
+# `asyncio.to_thread`'s process-wide default pool, an unrelated slow
+# caller elsewhere in the backend (of which there are hundreds) can
+# occupy enough worker slots to stall turn dispatch — the same
+# executor-starvation pattern already isolated for `_FILE_POLL_EXECUTOR`
+# in jsonl_tailer.py. Sized off cpu_count like that pool; turn dispatch
+# fires per-turn/per-retry rather than on a fast poll tick, so a smaller
+# multiplier is enough to avoid queuing under realistic concurrency.
+_TURN_DISPATCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=(os.cpu_count() or 4) * 4,
+    thread_name_prefix="turn-dispatch",
+)
+
+
+async def _to_turn_dispatch_thread(func, /, *args, **kwargs):
+    """`asyncio.to_thread`, routed through `_TURN_DISPATCH_EXECUTOR`
+    instead of the default pool. Copies the calling context like
+    `asyncio.to_thread` does, so contextvars (e.g. request-authority
+    binding in orchestrator.py) still propagate into the thread."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    func_call = partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(_TURN_DISPATCH_EXECUTOR, func_call)
+
 
 # Bridged direct-WS framing types. Mirrors `_BRIDGE_EVENT_TYPES` in
 # orchestrator.py — kept private here so this module is self-contained.
@@ -76,6 +118,39 @@ _BRIDGE_EVENT_TYPES = frozenset((
     "turn_complete", "turn_stopped", "turn_detached",
     "worker_creation_requested",
 ))
+
+
+def _event_uuid(event_dict: dict) -> str:
+    data = event_dict.get("data")
+    if isinstance(data, dict):
+        uid = data.get("uuid")
+        return uid if isinstance(uid, str) else ""
+    return ""
+
+
+def _event_fingerprint(event_dict: dict) -> str:
+    try:
+        return json.dumps(event_dict, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        return repr(event_dict)
+
+
+def _missing_event_dicts(existing: list[dict], candidates: list[dict]) -> list[dict]:
+    seen = {
+        (_event_uuid(event), _event_fingerprint(event))
+        for event in existing
+        if _event_uuid(event)
+    }
+    missing: list[dict] = []
+    for event in candidates:
+        uid = _event_uuid(event)
+        key = (uid, _event_fingerprint(event))
+        if uid and key in seen:
+            continue
+        if uid:
+            seen.add(key)
+        missing.append(event)
+    return missing
 
 
 class _Cancelled(Exception):
@@ -86,8 +161,16 @@ class _Cancelled(Exception):
 # pointing at the parent msg do NOT flip streaming.
 _STREAMING_KINDS = frozenset({"manager", "native"})
 _PIDLESS_RUN_STALE_AFTER_S = 30.0
+# Running-state discrepancy audit cadence: bg tick is 2 s, so 150 ticks
+# ≈ every 5 minutes.
+_AUDIT_EVERY_TICKS = 150
+# runner_alive heartbeat is refreshed every ~5 s; older than this while
+# the pid is alive means the runner is stuck or the heartbeat writer died.
+_AUDIT_STALE_HEARTBEAT_S = 30.0
 _RECOVERED_CANCEL_ESCALATE_AFTER_S = 5.0
 _CONTEXT_CONTINUATION_PREEMPT_RATIO = 0.90
+_RATE_LIMIT_MIN_WAIT_S = 5.0
+_RATE_LIMIT_FALLBACK_WAIT_S = 60.0
 
 
 def _provider_capability_contexts(
@@ -106,6 +189,20 @@ def _stamp_agent_type(mode: str, event_dict: dict) -> dict:
     if mode == "manager" and event_dict.get("type") == "agent_message":
         return {**event_dict, "agent_type": "manager"}
     return event_dict
+
+
+def _rate_limit_wait_seconds(reset_dt: Optional[datetime]) -> float:
+    if reset_dt is None:
+        return _RATE_LIMIT_FALLBACK_WAIT_S
+    reset_utc = (
+        reset_dt.astimezone(timezone.utc)
+        if reset_dt.tzinfo is not None
+        else reset_dt.replace(tzinfo=timezone.utc)
+    )
+    return max(
+        _RATE_LIMIT_MIN_WAIT_S,
+        (reset_utc - datetime.now(timezone.utc)).total_seconds(),
+    )
 
 
 def _release_abandoned_queue(
@@ -188,8 +285,13 @@ class TurnManager:
         # endpoints never call os.kill(pid,0) on the event loop.
         self._cached_running: set[str] = set()
         self._cached_monitoring: dict[str, str] = {}
+        self._cached_state_version = 0
         self._cache_lock = threading.Lock()
         self._bg_tick_started = False
+        self._audit_tick_counter = 0
+        # Event loop captured in start_background_tick(); used to hand a
+        # pruned-session emit_run_state back from the background thread.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ======================================================================
     # (ii) Single bus-emitter for lifecycle.turn_* facts.
@@ -228,6 +330,7 @@ class TurnManager:
         app_session_id: str,
         trace_id: Optional[str] = None,
         reason: Optional[str] = None,
+        provider_kind: Optional[str] = None,
     ) -> None:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
@@ -236,8 +339,8 @@ class TurnManager:
         cancel-stopped, error, recovery-finalize, worker-inner. Today
         the error/recovery/worker paths in `Coordinator` emit only the
         direct WS framing and skip the bus; this helper closes that
-        gap (the (ii) behavior change). The rearranger and any future
-        `lifecycle.turn_*` subscriber observe every terminal.
+        gap (the (ii) behavior change). Any `lifecycle.turn_*`
+        subscriber observes every terminal.
 
         `reason` is an optional payload tag — "success" / "cancelled"
         / "error" / "recovery_finalize" / "worker_inner" — so
@@ -254,6 +357,8 @@ class TurnManager:
                 payload["trace_id"] = trace_id
             if reason is not None:
                 payload["reason"] = reason
+            if provider_kind is not None:
+                payload["provider_kind"] = provider_kind
             event_type = (
                 "lifecycle.turn_complete" if kind == "complete"
                 else "lifecycle.turn_stopped"
@@ -297,6 +402,38 @@ class TurnManager:
         if app_session_id not in self._forced_context_overflow_once:
             return False
         self._forced_context_overflow_once.remove(app_session_id)
+        return True
+
+    def request_immediate_continuation(
+        self,
+        app_session_id: str,
+        prompt: str,
+        *,
+        reason: str = "agent_requested",
+    ) -> bool:
+        """Agent-requested IMMEDIATE continuation (`continue_in_fresh_context`
+        with `when="now"`): abort the in-flight run and restart in a fresh
+        provider subprocess under the same session.
+
+        Sets the continuation flag with `when="now"`, then signals the current
+        run to abort (cancel_event + fanout) WITHOUT the user-cancel
+        side-effects (`_session_cancelled` / `_interrupted_by_msg_id`). The
+        drive loop's cancel path detects the flag and starts the continuation
+        instead of returning 'cancelled'. Returns False if no live turn is
+        running to abort (caller falls back to next-turn semantics)."""
+        session_manager.set_continuation_requested(
+            app_session_id, prompt, reason=reason, when="now",
+        )
+        event = self.cancel_events.get(app_session_id)
+        if not event:
+            return False
+        event.set()
+        for run_id in self.active_run_ids.get(app_session_id, []):
+            self._c._cancel_turn_fanout(run_id)
+        logger.info(
+            "continuation: agent-requested IMMEDIATE abort for %s",
+            app_session_id[:8],
+        )
         return True
 
     def _run_state_age_s(self, entry: dict) -> float:
@@ -398,7 +535,28 @@ class TurnManager:
         msg = self.current_assistant_msgs.get(app_session_id)
         if msg is None:
             return None
-        return copy.deepcopy(msg)
+        # `msg` is the SAME dict `apply_event` mutates — frequently from a
+        # different thread (SDK callback / asyncio.to_thread) under
+        # `session_manager._lock_for_root(root_id)`. An unguarded
+        # `copy.deepcopy` walks the dict tree and races a concurrent key
+        # change, raising 'RuntimeError: dictionary keys changed during
+        # iteration'. Take the snapshot under that same per-root lock so no
+        # thread can reshape the tree mid-copy.
+        #
+        # Lock-order safe: this acquires ONLY a session_manager root lock
+        # for a READ-only deepcopy, and the callers (websocket_chat /
+        # messages_replay / propose_sessions) hold no lock when invoking it.
+        # The documented cross-subsystem order is event_ingester →
+        # session_manager; since no event_ingester lock is taken here, that
+        # order cannot invert.
+        rid = session_manager._root_id_for(app_session_id)
+        if rid is None:
+            # No resolvable root ⇒ no `session_manager.batch(...)` can be
+            # mutating the dict (batch raises KeyError without a root), so
+            # the unguarded copy cannot race a mutation.
+            return copy.deepcopy(msg)
+        with session_manager._lock_for_root(rid):
+            return copy.deepcopy(msg)
 
     def in_flight_event_count(self, app_session_id: str) -> int:
         """Manager-event count on the in-flight assistant message for
@@ -433,13 +591,15 @@ class TurnManager:
     def _dbg_runstate(self, app_session_id: str, label: str) -> None:
         """Diagnostic snapshot of _run_state + active_run_ids for a session.
         Grep `RUNSTATE_DBG` to trace why a 'Native Running' badge sticks."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
         runs = self._run_state.get(app_session_id) or []
         entries = [
             f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
             f"|tgt={(r.get('target_message_id') or '-')[:8]}"
             for r in runs
         ]
-        logger.info(
+        logger.debug(
             "RUNSTATE_DBG[%s] sid=%s n=%d active_ids=%s entries=%s",
             label, app_session_id[:8], len(runs),
             [str(x)[:8] for x in self.active_run_ids.get(app_session_id, [])],
@@ -469,6 +629,22 @@ class TurnManager:
             if not self._run_state[app_session_id]:
                 self._run_state.pop(app_session_id, None)
         now = datetime.now().isoformat()
+        for entry in self._run_state.get(app_session_id) or []:
+            if entry.get("run_id") != run_id:
+                continue
+            entry.update({
+                "kind": kind,
+                "target_message_id": target_message_id,
+                "delegation_id": delegation_id,
+                "pid": pid,
+                "last_event_at": now,
+            })
+            self._maybe_flip_streaming(
+                app_session_id, target_message_id, True, kind,
+            )
+            session_manager.recompute_state(app_session_id)
+            self._dbg_runstate(app_session_id, f"add_existing:{run_id[:8]}:{kind}")
+            return entry
         entry = {
             "run_id": run_id,
             "kind": kind,
@@ -489,7 +665,7 @@ class TurnManager:
     def run_state_remove(self, app_session_id: str, run_id: str) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
-            logger.info(
+            logger.debug(
                 "RUNSTATE_DBG[remove_noop:%s] sid=%s — no entries to remove",
                 run_id[:8], app_session_id[:8],
             )
@@ -571,23 +747,20 @@ class TurnManager:
             pid = r.get("pid")
             run_id = r.get("run_id")
             if pid is None:
+                if self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S:
+                    alive.append(r)
+                    continue
                 if run_id in active_ids and sid in self.cancel_events:
                     alive.append(r)
                     continue
                 if run_id in active_ids and r.get("retrying"):
                     alive.append(r)
                     continue
-                if (
-                    run_id in active_ids
-                    and self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S
-                ):
-                    alive.append(r)
-                else:
-                    logger.warning(
-                        "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
-                        (run_id or "?")[:8], sid[:8],
-                    )
-                    dropped.append(r)
+                logger.warning(
+                    "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
+                    (run_id or "?")[:8], sid[:8],
+                )
+                dropped.append(r)
                 continue
             if _pid_alive(pid):
                 alive.append(r)
@@ -623,9 +796,11 @@ class TurnManager:
             if app_session_id is not None
             else list(self._run_state.keys())
         )
+        pruned_sids: list[str] = []
         for sid in sids:
             try:
-                self._prune_dead_entries(sid)
+                if self._prune_dead_entries(sid):
+                    pruned_sids.append(sid)
             except Exception:
                 logger.warning(
                     "tick_running_state: prune failed for %s", sid[:8],
@@ -639,6 +814,23 @@ class TurnManager:
                     "tick_running_state: recompute failed for %s", sid[:8],
                     exc_info=True,
                 )
+        # Passive pruning mutates `_run_state` directly with no client
+        # notification (unlike the explicit run_state_remove+emit pairing
+        # in run_turn's finally). Without this, already-connected
+        # frontends keep a stale non-empty run list until an unrelated
+        # emit or a reload. This runs on a background OS thread, so the
+        # coroutine is handed to the captured event loop threadsafe.
+        if pruned_sids and self._loop is not None:
+            for sid in pruned_sids:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.emit_run_state(sid), self._loop,
+                    )
+                except Exception:
+                    logger.warning(
+                        "tick_running_state: emit_run_state schedule "
+                        "failed for %s", sid[:8], exc_info=True,
+                    )
 
     # ── Background tick + cached state ────────────────────────────
 
@@ -650,6 +842,12 @@ class TurnManager:
         if self._bg_tick_started:
             return
         self._bg_tick_started = True
+        # Captured so the background thread can hand a pruned-session
+        # `emit_run_state` back onto the event loop (see tick_running_state)
+        # — passive pruning otherwise mutates `_run_state` with no client
+        # notification at all, leaving already-connected frontends on a
+        # stale (non-empty) run list until an unrelated emit or reload.
+        self._loop = asyncio.get_running_loop()
         # Initial synchronous tick so the cache is populated immediately.
         self._refresh_cache()
         t = threading.Thread(
@@ -663,6 +861,10 @@ class TurnManager:
             try:
                 _time.sleep(2.0)
                 self._refresh_cache()
+                self._audit_tick_counter += 1
+                if self._audit_tick_counter >= _AUDIT_EVERY_TICKS:
+                    self._audit_tick_counter = 0
+                    self.audit_running_discrepancies()
             except Exception:
                 logger.exception("bg tick failed")
 
@@ -679,6 +881,11 @@ class TurnManager:
             except Exception:
                 pass
         with self._cache_lock:
+            if (
+                self._cached_running != running
+                or self._cached_monitoring != monitoring
+            ):
+                self._cached_state_version += 1
             self._cached_running = running
             self._cached_monitoring = monitoring
 
@@ -700,6 +907,119 @@ class TurnManager:
         with self._cache_lock:
             return set(self._cached_running), dict(self._cached_monitoring)
 
+    def cached_state_version(self) -> int:
+        with self._cache_lock:
+            return self._cached_state_version
+
+    def audit_running_discrepancies(self) -> list[dict]:
+        """Compare every layer of "running" truth and log mismatches.
+
+        Layers, from ground truth outward:
+          1. runner process — pid liveness, runs/<run_id>/runner_alive
+             heartbeat age, complete.json presence (disk).
+          2. _run_state — the in-memory entries this class maintains.
+          3. is_running / monitoring_state — live derivation from (2).
+          4. cached — the background-tick snapshot REST endpoints read.
+          5. broadcast — last running_changed / monitoring_changed values
+             the frontend received (session_manager).
+
+        Emits one RUNNING_AUDIT info line per pass and one
+        RUNNING_DISCREPANCY warning (full JSON detail) per mismatched
+        sid. Returns the discrepancy records."""
+        from runs_dir import read_best_complete, runner_alive_path, runs_root
+
+        broadcast_running, broadcast_monitoring = (
+            session_manager.broadcast_state_snapshot()
+        )
+        with self._cache_lock:
+            cached_running = set(self._cached_running)
+            cached_monitoring = dict(self._cached_monitoring)
+        sids = (
+            set(self._run_state.keys())
+            | cached_running
+            | {s for s, v in broadcast_running.items() if v}
+        )
+        now = _time.time()
+        root = runs_root()
+        discrepancies: list[dict] = []
+        live_count = 0
+        for sid in sids:
+            runs: list[dict] = []
+            for r in self._run_state.get(sid, []):
+                pid = r.get("pid")
+                run_id = r.get("run_id") or "?"
+                run_dir = root / run_id
+                try:
+                    hb_age = round(
+                        now - runner_alive_path(run_dir).stat().st_mtime, 1,
+                    )
+                except OSError:
+                    hb_age = None
+                runs.append({
+                    "run_id": run_id[:8],
+                    "kind": r.get("kind"),
+                    "pid": pid,
+                    "pid_alive": _pid_alive(pid) if pid is not None else None,
+                    "heartbeat_age_s": hb_age,
+                    "complete_json": read_best_complete(run_dir) is not None,
+                    "started_at": r.get("started_at"),
+                    "last_event_at": r.get("last_event_at"),
+                    "retrying": bool(r.get("retrying")),
+                })
+            live = self.is_running(sid)
+            if live:
+                live_count += 1
+            try:
+                user_kind = session_manager.is_user_kind_sid(sid)
+            except Exception:
+                user_kind = False
+            record = {
+                "sid": sid[:8],
+                "user_kind": user_kind,
+                "live_is_running": live,
+                "live_monitoring": self.monitoring_state(sid),
+                "cached_is_running": sid in cached_running,
+                "cached_monitoring": cached_monitoring.get(sid, "stopped"),
+                "broadcast_running": broadcast_running.get(sid, False),
+                "broadcast_monitoring": broadcast_monitoring.get(sid, "stopped"),
+                "runs": runs,
+            }
+            reasons: list[str] = []
+            if record["cached_is_running"] != live:
+                reasons.append("cached!=live")
+            if record["cached_monitoring"] != record["live_monitoring"]:
+                reasons.append("cached_monitoring!=live")
+            # Broadcast comparisons only apply to user-facing sessions —
+            # workers are excluded from running/monitoring broadcasts by
+            # design (recompute_state kind gate).
+            if user_kind:
+                if record["broadcast_running"] != live:
+                    reasons.append("broadcast!=live")
+                if record["broadcast_monitoring"] != record["live_monitoring"]:
+                    reasons.append("broadcast_monitoring!=live")
+            if any(r["pid_alive"] and r["complete_json"] for r in runs):
+                reasons.append("pid_alive_but_complete_json")
+            if any(
+                r["pid_alive"]
+                and r["heartbeat_age_s"] is not None
+                and r["heartbeat_age_s"] > _AUDIT_STALE_HEARTBEAT_S
+                for r in runs
+            ):
+                reasons.append("pid_alive_but_stale_heartbeat")
+            if reasons:
+                record["reasons"] = reasons
+                discrepancies.append(record)
+                logger.warning(
+                    "RUNNING_DISCREPANCY %s", json.dumps(record, default=str),
+                )
+        logger.info(
+            "RUNNING_AUDIT sids=%d live=%d cached=%d broadcast=%d discrepancies=%d",
+            len(sids), live_count, len(cached_running),
+            sum(1 for v in broadcast_running.values() if v),
+            len(discrepancies),
+        )
+        return discrepancies
+
     def _run_state_touch(self, app_session_id: str) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
@@ -713,7 +1033,7 @@ class TurnManager:
     ) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
-            logger.info(
+            logger.debug(
                 "RUNSTATE_DBG[set_pid_noop:%s] sid=%s pid=%s — no entries",
                 run_id[:8], app_session_id[:8], pid,
             )
@@ -726,7 +1046,7 @@ class TurnManager:
                     app_session_id, f"set_pid:{run_id[:8]}:{pid}",
                 )
                 return
-        logger.info(
+        logger.debug(
             "RUNSTATE_DBG[set_pid_nomatch:%s] sid=%s pid=%s — run_id absent",
             run_id[:8], app_session_id[:8], pid,
         )
@@ -784,14 +1104,15 @@ class TurnManager:
 
     async def emit_run_state(self, app_session_id: str) -> None:
         snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
-        logger.info(
-            "RUNSTATE_DBG[emit] sid=%s runs=%s",
-            app_session_id[:8],
-            [
-                f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
-                for r in snapshot
-            ],
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "RUNSTATE_DBG[emit] sid=%s runs=%s",
+                app_session_id[:8],
+                [
+                    f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
+                    for r in snapshot
+                ],
+            )
         await self._c.broadcast_session(
             app_session_id,
             "run_state",
@@ -929,6 +1250,35 @@ class TurnManager:
             write_journal=write_journal,
         )
 
+    def _apply_provider_stream_event_sync(
+        self,
+        *,
+        app_session_id: str,
+        persist_to: str,
+        msg_id: str,
+        event_dict: dict,
+        manager_sid_holder: dict,
+        workers_list: list[dict],
+        user_msg: Optional[dict],
+        run_id: str,
+    ) -> dict:
+        with session_manager.message_batch(
+            persist_to,
+            msg_id,
+            hydrate_events=False,
+        ) as (_node, live_msg):
+            self._apply_event_to_assistant_msg(
+                app_session_id,
+                event_dict,
+                live_msg,
+                manager_sid_holder,
+                workers_list,
+                user_msg=user_msg,
+                run_id=run_id,
+                write_journal=False,
+            )
+            return live_msg
+
     async def _publish_provider_stream_event(
         self,
         *,
@@ -975,6 +1325,8 @@ class TurnManager:
         trace_step_name: str,
         session_id_field: str,
         mode: Literal["native", "manager"],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         client_id: Optional[str] = None,
         supervised: bool = False,
         supervisor_agent_session_id: Optional[str] = None,
@@ -983,6 +1335,7 @@ class TurnManager:
         persist_to: Optional[str] = None,
         user_initiated: bool = False,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
@@ -1004,6 +1357,44 @@ class TurnManager:
         lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
             app_session_id,
         )
+
+        # Persist phase FIRST, before any turn registration. The user-msg
+        # append is strict inside `_init_turn_messages`: if the session
+        # can't be found the KeyError propagates out of run_turn with
+        # ZERO bookkeeping registered (no cancel_event, no
+        # active_run_ids entry, no run_state) — the prompt-processor
+        # barrier stays clean and the lifecycle terminates as `failed`
+        # (orchestrator's handle_prompt catch), never a success-shaped
+        # `done` for a prompt that was never persisted.
+        try:
+            user_msg = self._c._init_turn_messages(
+                session=session,
+                app_session_id=persist_to,
+                prompt=prompt,
+                images=images,
+                files=files,
+                client_id=client_id,
+                source=source,
+                lifecycle_msg_id=lifecycle_msg_id,
+                cli_prompt=cli_prompt,
+                queue_item_id=queue_item_id,
+                team_message=team_message,
+                file_discussion_id=file_discussion_id,
+            )
+            if queue_item_id:
+                self._c._forget_active_prompt_item(queue_item_id)
+
+            await self._c.user_prompt_manager.notify_user_msg_persisted(
+                ws_callback, persist_to, user_msg,
+            )
+        except BaseException:
+            # Pre-registration abort: a cancel parked for THIS prompt
+            # (dequeue→here gap) must not survive to spuriously kill the
+            # session's next turn — the prompt it meant to displace never
+            # ran.
+            self._pending_cancel.pop(app_session_id, None)
+            raise
+
         cancel_event = asyncio.Event()
         self.cancel_events[app_session_id] = cancel_event
         # A cancel may have landed in the dequeue→here gap; consume it
@@ -1034,66 +1425,14 @@ class TurnManager:
         )
         await self.emit_run_state(app_session_id)
 
-        user_msg = self._c._init_turn_messages(
-            session=session,
-            app_session_id=persist_to,
-            prompt=prompt,
-            images=images,
-            files=files,
-            client_id=client_id,
-            source=source,
-            lifecycle_msg_id=lifecycle_msg_id,
-            queue_item_id=queue_item_id,
-            team_message=team_message,
-            file_discussion_id=file_discussion_id,
-        )
-        if queue_item_id:
-            self._c._forget_active_prompt_item(queue_item_id)
-
-        await self._c.user_prompt_manager.notify_user_msg_persisted(
-            ws_callback, persist_to, user_msg,
-        )
-
         manager_sid_holder: dict[str, Optional[str]] = {
             "id": session.get(session_id_field)
         }
-
-        new_msg = self._c._build_assistant_msg(
-            session=session, app_session_id=app_session_id,
-        )
-        if source:
-            new_msg["source"] = source
-        if file_discussion_id:
-            new_msg["file_discussion_id"] = file_discussion_id
-        session_manager.append_assistant_msg(persist_to, new_msg)
-        assistant_msg_holder: list[Optional[dict]] = [new_msg]
-        self.current_assistant_msgs[app_session_id] = new_msg
-        self._run_state_set_target(app_session_id, turn_run_id, new_msg["id"])
-        try:
-            from event_journal import publish_event
-            root_id = session_manager._root_id_for(persist_to) or persist_to
-            await publish_event(
-                session_id=root_id,
-                context_id=persist_to,
-                event_type="turn_started",
-                data={
-                    "turn_id": turn_run_id,
-                    "message_id": new_msg["id"],
-                    "source_ts": datetime.now(timezone.utc).isoformat(),
-                },
-                source="orchestrator.turn",
-                message_id=new_msg["id"],
-                turn_id=turn_run_id,
-                run_id=turn_run_id,
-            )
-        except Exception:
-            logger.exception(
-                "failed to persist turn ownership boundary for %s",
-                app_session_id,
-            )
-
-        await self._c._dispatch_messages_delta(app_session_id, persist_to, new_msg)
-        await self.emit_run_state(app_session_id)
+        # Predefined so every except/finally branch below can reference
+        # them even when the widened try aborts before assignment
+        # (assistant append raising strict KeyError). All consumers are
+        # None/.get-tolerant.
+        assistant_msg_holder: list[Optional[dict]] = [None]
 
         original_ws_callback = ws_callback
 
@@ -1110,17 +1449,24 @@ class TurnManager:
                         assistant_msg=msg,
                         run_id=turn_run_id,
                     )
-                    with session_manager.batch(persist_to):
-                        self._apply_event_to_assistant_msg(
-                            app_session_id,
-                            event_dict,
-                            msg,
-                            manager_sid_holder,
-                            workers_list,
+                    msg_id = msg.get("id")
+                    loop = asyncio.get_running_loop()
+                    live_msg = await loop.run_in_executor(
+                        _STREAM_EVENT_APPLY_EXECUTOR,
+                        partial(
+                            self._apply_provider_stream_event_sync,
+                            app_session_id=app_session_id,
+                            persist_to=persist_to,
+                            msg_id=msg_id,
+                            event_dict=event_dict,
+                            manager_sid_holder=manager_sid_holder,
+                            workers_list=workers_list,
                             user_msg=user_msg,
                             run_id=turn_run_id,
-                            write_journal=False,
-                        )
+                        ),
+                    )
+                    if live_msg is not msg:
+                        assistant_msg_holder[0] = live_msg
                 self._run_state_touch(app_session_id)
             except Exception as exc:
                 from event_journal import EventJournalWriteError
@@ -1140,10 +1486,16 @@ class TurnManager:
         ws_callback = save_ws_callback
         self._turn_save_callbacks[app_session_id] = save_ws_callback
 
-        trace = TraceCollector(session_id=app_session_id, user_prompt=prompt)
+        trace = TraceCollector(
+            session_id=app_session_id,
+            user_prompt=prompt,
+            source=source,
+            user_initiated=user_initiated,
+        )
         trace.set_ws_callback(save_ws_callback)
 
         primary_result: dict = {}
+        frozen_provider_kind: Optional[str] = None
 
         if (
             user_initiated
@@ -1152,6 +1504,53 @@ class TurnManager:
             cli_prompt = _append_todo_reminder(cli_prompt, session)
 
         try:
+            new_msg = self._c._build_assistant_msg(
+                session=session, app_session_id=app_session_id,
+                provider_id=provider_id, model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            if source:
+                new_msg["source"] = source
+            if file_discussion_id:
+                new_msg["file_discussion_id"] = file_discussion_id
+            # strict: registering a never-appended message as the turn
+            # target lets the provider stream into a phantom (KeyError
+            # storm, "prompt not executed", recovery drop). Raising here
+            # lands in the except/finally below: turn-failure UX plus
+            # full bookkeeping cleanup — the prompt was delivered, the
+            # turn errored.
+            session_manager.append_assistant_msg(
+                persist_to, new_msg, strict=True,
+            )
+            assistant_msg_holder[0] = new_msg
+            self.current_assistant_msgs[app_session_id] = new_msg
+            self._run_state_set_target(app_session_id, turn_run_id, new_msg["id"])
+            try:
+                from event_journal import publish_event
+                root_id = session_manager._root_id_for(persist_to) or persist_to
+                await publish_event(
+                    session_id=root_id,
+                    context_id=persist_to,
+                    event_type="turn_started",
+                    data={
+                        "turn_id": turn_run_id,
+                        "message_id": new_msg["id"],
+                        "source_ts": datetime.now(timezone.utc).isoformat(),
+                    },
+                    source="orchestrator.turn",
+                    message_id=new_msg["id"],
+                    turn_id=turn_run_id,
+                    run_id=turn_run_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to persist turn ownership boundary for %s",
+                    app_session_id,
+                )
+
+            await self._c._dispatch_messages_delta(app_session_id, persist_to, new_msg)
+            await self.emit_run_state(app_session_id)
+
             step = trace.start_step(trace_step_name)
             step.input_prompt = cli_prompt
 
@@ -1164,6 +1563,16 @@ class TurnManager:
                 manager_session_id=session.get(session_id_field),
             )
 
+            # The session is resuming work, so the prior turn (even if it
+            # errored) is no longer the "last" turn. Retire the error dot
+            # up-front; if THIS turn errors it gets re-set below. Deliberately
+            # NOT tied to view/seen state — the dot reflects "did the most
+            # recent turn error?", nothing else.
+            try:
+                session_manager.clear_unseen_error(app_session_id)
+            except Exception:
+                logger.debug("clear_unseen_error at turn start failed", exc_info=True)
+
             current_sid = session.get(session_id_field)
             forked_from_field = (
                 "forked_from_supervisor_agent_sid"
@@ -1173,12 +1582,20 @@ class TurnManager:
             forked_from_sid = session.get(forked_from_field)
             is_fork_first_turn = not current_sid and bool(forked_from_sid)
             resume_sid = current_sid or (forked_from_sid if is_fork_first_turn else None)
+            frozen_provider = await _to_turn_dispatch_thread(
+                self._c.provider_for_run,
+                app_session_id,
+                provider_id,
+            )
+            frozen_provider_kind = str(getattr(frozen_provider, "KIND", "")) or None
             primary_result = await self._drive_cli_run(
                 prompt=cli_prompt,
                 images=images,
                 files=files,
                 cwd=cwd,
                 model=model,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
                 session_id=resume_sid,
                 ws_callback=ws_callback,
                 app_session_id=app_session_id,
@@ -1194,6 +1611,7 @@ class TurnManager:
                 user_initiated=user_initiated,
                 turn_run_id=turn_run_id,
                 disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
             )
 
@@ -1202,15 +1620,32 @@ class TurnManager:
 
             persist_id = session["id"]
             new_sid = primary_result.get("session_id")
+            if is_fork_first_turn and new_sid and session_id_field != "supervisor_agent_session_id":
+                try:
+                    parent_lines = int(session.get("parent_line_count_at_fork") or 0)
+                except (TypeError, ValueError):
+                    parent_lines = 0
+                if parent_lines > 0:
+                    try:
+                        session_manager.advance_processed_lines(
+                            persist_id,
+                            new_sid,
+                            parent_lines,
+                            bump_updated_at=False,
+                        )
+                    except Exception:
+                        logger.exception("advance_processed_lines on first-turn fork failed")
             if (
                 new_sid
                 and new_sid != session.get(session_id_field)
                 and session_id_field != "supervisor_agent_session_id"
             ):
+                provider = self._c.provider_for_run(app_session_id, provider_id)
                 persist_mode = session.get("orchestration_mode") or mode
                 with session_manager.batch(persist_id):
                     session_manager.set_agent_sid(
                         persist_id, persist_mode, new_sid,
+                        provider_id=provider.id, model=model,
                     )
                     if session.get("forked_from_agent_sid"):
                         session_manager.clear_forked_from(persist_id)
@@ -1259,6 +1694,34 @@ class TurnManager:
                 session = session_manager.get(persist_id) or session
 
             await trace.end_step(step)
+
+            try:
+                provider_record = self._c.provider_for_run(app_session_id, provider_id)
+                await _to_turn_dispatch_thread(
+                    llm_call_log.append_call,
+                    source=source or "turn",
+                    reason=trace_step_name,
+                    provider_id=provider_record.id,
+                    provider_kind=provider_record.KIND,
+                    provider_name=provider_record.record.get("name"),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    app_session_id=persist_id,
+                    provider_session_id=primary_result.get("session_id"),
+                    trace_id=trace.trace_id,
+                    run_id=turn_run_id,
+                    prompt=prompt,
+                    token_usage=step.token_usage,
+                    success=bool(primary_result.get("success")),
+                    error=primary_result.get("error"),
+                    metadata={
+                        "mode": mode,
+                        "session_id_field": session_id_field,
+                        "user_initiated": user_initiated,
+                    },
+                )
+            except Exception:
+                logger.exception("failed to append llm call log")
 
             if lifecycle_msg_id:
                 try:
@@ -1327,6 +1790,9 @@ class TurnManager:
                     app_session_id=app_session_id,
                     trace_id=trace.trace_id,
                     reason="success",
+                    provider_kind=(
+                        primary_result.get("provider_kind") or frozen_provider_kind
+                    ),
                 )
             else:
                 await self._publish_terminal_lifecycle(
@@ -1334,6 +1800,9 @@ class TurnManager:
                     app_session_id=app_session_id,
                     trace_id=trace.trace_id,
                     reason="error",
+                    provider_kind=(
+                        primary_result.get("provider_kind") or frozen_provider_kind
+                    ),
                 )
 
         except _Cancelled:
@@ -1379,6 +1848,9 @@ class TurnManager:
                 app_session_id=app_session_id,
                 trace_id=trace.trace_id,
                 reason="cancelled",
+                provider_kind=(
+                    primary_result.get("provider_kind") or frozen_provider_kind
+                ),
             )
 
         except asyncio.CancelledError:
@@ -1386,6 +1858,30 @@ class TurnManager:
                 "Turn task cancelled (likely shutdown) for session %s",
                 app_session_id,
             )
+            # If the run already reached a durable successful completion
+            # before this cancellation (the complete event was consumed,
+            # so `primary_result` carries success=True — the same
+            # condition that let `trace.save()` run above), seal the
+            # assistant message now instead of detaching. The detach path
+            # assumes a fresh backend will pick the run up via
+            # run_recovery, but recovery is STARTUP-ONLY — if the backend
+            # never restarts, the message stays a blank non-terminal
+            # bubble forever.
+            try:
+                self._seal_completed_turn_on_cancel(
+                    session=session,
+                    persist_to=persist_to,
+                    user_msg=user_msg,
+                    assistant_msg=assistant_msg_holder[0],
+                    primary_result=primary_result,
+                    workers=list(workers_list),
+                    trace_id=trace.trace_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to seal completed turn on cancel for %s",
+                    app_session_id,
+                )
             try:
                 trace.finalize()
                 trace.save()
@@ -1429,11 +1925,14 @@ class TurnManager:
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
+            # The error dot is set inside `_finalize_turn_messages` (called
+            # just above with error_text) — the single chokepoint covering
+            # both exception and non-exception failure paths.
 
             # (ii) NEW: error terminal now publishes lifecycle.turn_stopped.
             # Pre-cutover the error path emitted only the direct
             # `error` WS frame and skipped the bus, leaving the
-            # rearranger and other lifecycle subscribers blind to error
+            # lifecycle subscribers blind to error
             # terminals. Treat as "stopped" since the turn did not
             # complete successfully.
             await self._publish_terminal_lifecycle(
@@ -1441,6 +1940,9 @@ class TurnManager:
                 app_session_id=app_session_id,
                 trace_id=trace.trace_id,
                 reason="error",
+                provider_kind=(
+                    primary_result.get("provider_kind") or frozen_provider_kind
+                ),
             )
 
         finally:
@@ -1468,8 +1970,68 @@ class TurnManager:
             try:
                 await self.emit_run_state(app_session_id)
             except Exception:
-                pass
+                # Backend truth (_run_state) is already correct at this
+                # point — only the client notification failed. Logged
+                # (not swallowed) so a lost "run finished" frame is
+                # diagnosable instead of silently leaving connected
+                # clients on a stale run_state snapshot.
+                logger.warning(
+                    "run_turn: emit_run_state failed after removing run %s "
+                    "for sid=%s — clients may show a stale run until the "
+                    "next emit or reconnect",
+                    turn_run_id[:8], app_session_id[:8],
+                    exc_info=True,
+                )
             self._turn_save_callbacks.pop(app_session_id, None)
+
+    def _seal_completed_turn_on_cancel(
+        self,
+        *,
+        session: dict,
+        persist_to: str,
+        user_msg: dict,
+        assistant_msg: Optional[dict],
+        primary_result: dict,
+        workers: list,
+        trace_id: Optional[str],
+    ) -> None:
+        """Seal a successful turn's assistant message when its task is
+        cancelled (asyncio.CancelledError) AFTER the run already
+        completed.
+
+        Normally the success path of `run_turn` calls
+        `_finalize_turn_messages` itself. But if a cancellation lands in
+        the window between the complete event being consumed (so
+        `primary_result.success` is True and the trace was saved) and
+        finalize running — or during finalize — control lands in the
+        `asyncio.CancelledError` branch, which historically detached and
+        deferred to `run_recovery`. Recovery is STARTUP-ONLY: when the
+        backend never restarts, the message is left as a blank
+        non-terminal bubble forever.
+
+        This re-runs the success finalization on the spot so the message
+        reaches its terminal `completed_at` state without depending on a
+        restart. Idempotent: a message the success path already sealed
+        (`completed_at`/`stopped_at` on the in-memory dict) is skipped.
+        """
+        finalized_msg = assistant_msg
+        if (
+            not primary_result.get("success")
+            or finalized_msg is None
+            or finalized_msg.get("completed_at")
+            or finalized_msg.get("stopped_at")
+        ):
+            return
+        self._c._finalize_turn_messages(
+            session=session,
+            app_session_id=persist_to,
+            user_msg=user_msg,
+            assistant_msg=finalized_msg,
+            primary_result=primary_result,
+            workers=workers,
+            stopped_at=None,
+            trace_id=trace_id,
+        )
 
     # ======================================================================
     # CLI driver — spawn one runner.py and stream its events.
@@ -1488,6 +2050,8 @@ class TurnManager:
         cancel_event: asyncio.Event,
         session_id_field: str,
         mode: Literal["native", "manager"],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         fork: bool = False,
         supervised: bool = False,
         supervisor_agent_session_id: Optional[str] = None,
@@ -1497,24 +2061,32 @@ class TurnManager:
         turn_run_id: str,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         capability_contexts: Optional[list[dict]] = None,
     ) -> dict:
         loop = asyncio.get_running_loop()
 
-        _session_rec = session_manager.get(primary_session_id or app_session_id)
+        _session_rec = await _to_turn_dispatch_thread(
+            session_manager.get,
+            primary_session_id or app_session_id,
+        )
         bt_enabled = bool((_session_rec or {}).get("browser_harness_enabled", False))
-        reasoning_effort = (_session_rec or {}).get("reasoning_effort")
+        reasoning_effort = (
+            str(reasoning_effort or "").strip()
+            or (_session_rec or {}).get("reasoning_effort")
+        )
 
-        backend_url: Optional[str] = None
-        internal_token: Optional[str] = None
-        if mode == "manager" or supervised or bt_enabled or user_initiated:
-            from env_compat import get_env
-            backend_url = (_session_rec or {}).get("backend_url") or get_env(
-                "BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"
-            )
-            internal_token = self._c.internal_token
+        from env_compat import get_env
+        backend_url: Optional[str] = (_session_rec or {}).get("backend_url") or get_env(
+            "BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"
+        )
+        internal_token: Optional[str] = self._c.internal_token
 
-        provider = self._c.provider_for_session(primary_session_id or app_session_id)
+        provider = await _to_turn_dispatch_thread(
+            self._c.provider_for_run,
+            primary_session_id or app_session_id,
+            provider_id,
+        )
         provider_kind = getattr(provider, "KIND", "")
         run_setting_sources: Optional[list[str]] = (
             [] if supervised else None
@@ -1524,15 +2096,31 @@ class TurnManager:
         discovered_session_id: Optional[str] = None
         current_session_id = session_id
         # Read continuation_chain from session for the provider → runner.
-        _session_rec_chain = (
-            session_manager.get(primary_session_id or app_session_id) or {}
-        ).get("continuation_chain") or []
-        provider_run_config = (_session_rec or {}).get("provider_run_config") or None
+        _session_rec_chain = (_session_rec or {}).get("continuation_chain") or []
+        raw_provider_run_config = (_session_rec or {}).get("provider_run_config")
+        provider_run_config = dict(raw_provider_run_config) if isinstance(raw_provider_run_config, dict) else {}
+        if fork:
+            try:
+                fork_parent_line_count = int((_session_rec or {}).get("parent_line_count_at_fork") or 0)
+            except (TypeError, ValueError):
+                fork_parent_line_count = 0
+            if fork_parent_line_count > 0:
+                provider_run_config["fork_parent_line_count"] = fork_parent_line_count
         session_capability_contexts = (
             _session_rec or {}
         ).get("capability_contexts") or []
-        runtime_capability_contexts = runtime_skill_contexts(
+        runtime_capability_contexts = await _to_turn_dispatch_thread(
+            runtime_skill_contexts,
             cwd,
+            bare_config=bool((_session_rec or {}).get("bare_config")),
+        )
+        dynamic_capability_contexts = await _to_turn_dispatch_thread(
+            extension_audit_context,
+            cwd,
+            bare_config=bool((_session_rec or {}).get("bare_config")),
+        )
+        extension_instruction_contexts = await _to_turn_dispatch_thread(
+            extension_user_instruction_contexts,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
         run_capability_contexts = _provider_capability_contexts(
@@ -1541,9 +2129,13 @@ class TurnManager:
         )
         run_capability_contexts = [
             *runtime_capability_contexts,
+            *dynamic_capability_contexts,
+            *extension_instruction_contexts,
             *run_capability_contexts,
         ]
         transient_attempt = 0
+        rate_limit_attempt = 0
+        moved_project_wrap_done = False
         in_flight_msg = self.current_assistant_msgs.get(app_session_id)
         if in_flight_msg:
             transient_attempt = int(
@@ -1557,19 +2149,22 @@ class TurnManager:
         auto_retry_count = 0
         auto_retry_kinds: set[str] = set()
 
-        def _clear_continuation_active() -> None:
+        async def _clear_continuation_active() -> None:
             nonlocal continuation_active_msg_id
             if not continuation_active_msg_id:
                 return
-            session_manager.set_msg_continuation_active(
+            await _to_turn_dispatch_thread(
+                session_manager.set_msg_continuation_active,
                 app_session_id,
                 continuation_active_msg_id,
                 None,
             )
             continuation_active_msg_id = None
 
-        def _should_preempt_context_continuation() -> bool:
-            if provider_kind != "codex":
+        def _should_preempt_context_continuation_sync() -> bool:
+            import provider_manifest
+            _spec = provider_manifest.spec_for(provider_kind)
+            if not (_spec and _spec.context_continuation):
                 return False
             if not current_session_id:
                 return False
@@ -1583,31 +2178,201 @@ class TurnManager:
                 return False
             return tokens >= int(window * _CONTEXT_CONTINUATION_PREEMPT_RATIO)
 
-        def _start_context_continuation(old_provider_sid: Optional[str]) -> int:
-            nonlocal current_session_id, discovered_session_id, prompt
-            nonlocal _session_rec_chain, continuation_active_msg_id
+        async def _should_preempt_context_continuation() -> bool:
+            return await _to_turn_dispatch_thread(_should_preempt_context_continuation_sync)
+
+        def _start_continuation_sync(
+            *,
+            old_provider_sid: Optional[str],
+            reason: str,
+            prompt_snapshot: str,
+            active_msg_id: Optional[str],
+        ):
             continuation = start_continuation_for(
                 session_manager=session_manager,
                 app_session_id=primary_session_id or app_session_id,
-                prompt=prompt,
-                provider_kind=provider_kind,
+                prompt=prompt_snapshot,
                 old_provider_sid=old_provider_sid,
+                reason=reason,
+            )
+            if active_msg_id:
+                session_manager.set_msg_continuation_active(
+                    app_session_id, active_msg_id, continuation.chain_depth,
+                )
+            return continuation
+
+        async def _start_context_continuation(
+            old_provider_sid: Optional[str], *, reason: str = "context_exceeded",
+        ) -> int:
+            nonlocal current_session_id, discovered_session_id, prompt
+            nonlocal _session_rec_chain, continuation_active_msg_id
+            _in_flight = self.current_assistant_msgs.get(app_session_id)
+            _msg_id = _in_flight.get("id") if _in_flight else None
+            continuation = await _to_turn_dispatch_thread(
+                _start_continuation_sync,
+                old_provider_sid=old_provider_sid,
+                reason=reason,
+                prompt_snapshot=prompt,
+                active_msg_id=_msg_id,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
             discovered_session_id = None
             prompt = continuation.prompt
 
+            if _msg_id:
+                continuation_active_msg_id = _msg_id
+            return continuation.chain_depth
+
+        def _should_preempt_selector_change_continuation_sync() -> bool:
+            if not current_session_id:
+                return False
+            session_rec = session_manager.get(primary_session_id or app_session_id) or {}
+            if session_id_field == "supervisor_agent_session_id":
+                last_prov = session_rec.get("last_active_supervisor_provider_id")
+                last_mod = session_rec.get("last_active_supervisor_model")
+            else:
+                last_prov = session_rec.get("last_active_provider_id")
+                last_mod = session_rec.get("last_active_model")
+
+            current_prov_id = session_rec.get("provider_id")
+            current_model = session_rec.get("model")
+
+            if last_prov is not None and current_prov_id != last_prov:
+                return True
+            if last_mod is not None and current_model != last_mod:
+                return True
+            return False
+
+        async def _should_preempt_selector_change_continuation() -> bool:
+            return await _to_turn_dispatch_thread(
+                _should_preempt_selector_change_continuation_sync,
+            )
+
+        async def _context_strategy_is_continuation() -> bool:
+            import user_prefs
+            return (
+                await _to_turn_dispatch_thread(user_prefs.get_context_strategy)
+            ) == "continuation"
+
+        async def _refresh_provider_context() -> None:
+            nonlocal _session_rec, reasoning_effort, provider, provider_kind
+            nonlocal _session_rec_chain, provider_run_config
+            nonlocal session_capability_contexts, runtime_capability_contexts
+            nonlocal run_capability_contexts, model
+            _session_rec = await _to_turn_dispatch_thread(
+                session_manager.get,
+                primary_session_id or app_session_id,
+            ) or {}
+            reasoning_effort = _session_rec.get("reasoning_effort")
+            session_model = _session_rec.get("model")
+            if isinstance(session_model, str) and session_model.strip():
+                model = session_model
+            provider = await _to_turn_dispatch_thread(
+                self._c.provider_for_session,
+                primary_session_id or app_session_id,
+            )
+            provider_kind = getattr(provider, "KIND", "")
+            _session_rec_chain = _session_rec.get("continuation_chain") or []
+            provider_run_config = _session_rec.get("provider_run_config") or None
+            session_capability_contexts = _session_rec.get("capability_contexts") or []
+            runtime_capability_contexts = await _to_turn_dispatch_thread(
+                runtime_skill_contexts,
+                cwd,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
+            dynamic_capability_contexts = await _to_turn_dispatch_thread(
+                extension_audit_context,
+                cwd,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
+            extension_instruction_contexts = await _to_turn_dispatch_thread(
+                extension_user_instruction_contexts,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
+            run_capability_contexts = _provider_capability_contexts(
+                [*session_capability_contexts, *(capability_contexts or [])],
+                provider_kind,
+            )
+            run_capability_contexts = [
+                *runtime_capability_contexts,
+                *dynamic_capability_contexts,
+                *extension_instruction_contexts,
+                *run_capability_contexts,
+            ]
+
+        async def _stamp_run_meta() -> None:
+            """Re-stamp `run_meta` on the in-flight assistant message from
+            the freshly resolved selectors. Called every retry iteration so
+            a mid-message selector switch (rate-limit 'continue on another
+            provider', selector-change continuation) updates the badge to
+            the provider/model/effort that runs the succeeding attempt.
+            Skips the persist+broadcast when unchanged since the last stamp."""
+            inflight = self.current_assistant_msgs.get(app_session_id)
+            msg_id = inflight.get("id") if inflight else None
+            if not msg_id:
+                return
+            resolved = {
+                "provider_id": getattr(provider, "id", None),
+                "model": (model or "").strip() or None,
+                "reasoning_effort": (str(reasoning_effort or "").strip()) or None,
+            }
+            new_meta = {k: v for k, v in resolved.items() if v}
+            if inflight is not None and inflight.get("run_meta") == new_meta:
+                return
+            await _to_turn_dispatch_thread(
+                session_manager.set_msg_run_meta,
+                app_session_id, msg_id, new_meta,
+            )
+            if inflight is not None:
+                inflight["run_meta"] = new_meta
+
+        def _should_wrap_moved_project_continuation_sync() -> bool:
+            # Turn-1 handoff for a session created by move-to-project: the
+            # seeded continuation_chain points at the moved session's
+            # provider-native transcript, but this session never ran, so the
+            # post-run/preempt continuation gates (which require an existing
+            # provider sid) can never fire. Wrap the very first prompt here.
+            if session_id_field == "supervisor_agent_session_id":
+                return False
+            if current_session_id:
+                return False
+            session = session_manager.get(primary_session_id or app_session_id) or {}
+            if not session.get("moved_from_session_id"):
+                return False
+            if session.get(session_id_field):
+                return False
+            return bool(session.get("continuation_chain"))
+
+        async def _should_wrap_moved_project_continuation() -> bool:
+            return await _to_turn_dispatch_thread(
+                _should_wrap_moved_project_continuation_sync,
+            )
+
+        async def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
+            nonlocal current_session_id, discovered_session_id, prompt
+            nonlocal _session_rec_chain, continuation_active_msg_id
             _in_flight = self.current_assistant_msgs.get(app_session_id)
             _msg_id = _in_flight.get("id") if _in_flight else None
+            continuation = await _to_turn_dispatch_thread(
+                _start_continuation_sync,
+                old_provider_sid=old_provider_sid,
+                reason="selector_changed",
+                prompt_snapshot=prompt,
+                active_msg_id=_msg_id,
+            )
+            _session_rec_chain = continuation.continuation_chain
+            current_session_id = None
+            discovered_session_id = None
+            prompt = continuation.prompt
+
             if _msg_id:
-                session_manager.set_msg_continuation_active(
-                    app_session_id, _msg_id, continuation.chain_depth,
-                )
                 continuation_active_msg_id = _msg_id
             return continuation.chain_depth
 
         while True:
+            await _refresh_provider_context()
+            await _stamp_run_meta()
             if cancel_event.is_set():
                 # Displaced before spawn (pending-cancel consumed by
                 # run_turn, or cancel landed between retries) — don't
@@ -1618,10 +2383,11 @@ class TurnManager:
                     "events": collected,
                     "error": t("runner.cancelled"),
                     "token_usage": None,
+                    "provider_kind": provider_kind,
                 }
-            if _should_preempt_context_continuation():
+            if await _should_preempt_context_continuation():
                 old_provider_sid = current_session_id
-                chain_depth = _start_context_continuation(old_provider_sid)
+                chain_depth = await _start_context_continuation(old_provider_sid)
                 logger.info(
                     "continuation: preempting native compaction for %s "
                     "(provider=%s chain depth %d, old sid %s)",
@@ -1629,6 +2395,34 @@ class TurnManager:
                     provider_kind or "unknown",
                     chain_depth,
                     (old_provider_sid or "none")[:8],
+                )
+                continue
+            if await _should_preempt_selector_change_continuation():
+                old_provider_sid = current_session_id
+                chain_depth = await _start_selector_change_continuation(old_provider_sid)
+                logger.info(
+                    "continuation: preempting due to provider/model change for %s "
+                    "(provider=%s chain depth %d, old sid %s)",
+                    app_session_id[:8],
+                    provider_kind or "unknown",
+                    chain_depth,
+                    (old_provider_sid or "none")[:8],
+                )
+                continue
+            if (
+                not moved_project_wrap_done
+                and await _should_wrap_moved_project_continuation()
+            ):
+                moved_project_wrap_done = True
+                chain_depth = await _start_context_continuation(
+                    None, reason="moved_project",
+                )
+                logger.info(
+                    "continuation: wrapping first turn of moved session %s "
+                    "(provider=%s chain depth %d)",
+                    app_session_id[:8],
+                    provider_kind or "unknown",
+                    chain_depth,
                 )
                 continue
             run_id = str(uuid.uuid4())
@@ -1653,12 +2447,17 @@ class TurnManager:
             else:
                 spawn_started = _time.monotonic()
                 import startup_recovery_gate
-                await startup_recovery_gate.wait_for_recovery_ready()
+                with perf.timed("provider.start_run.recovery_gate"):
+                    await startup_recovery_gate.wait_for_recovery_ready()
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
                 ).get("id")
-                await asyncio.to_thread(
-                    provider.start_run,
+                root_id = session_manager._root_id_for(app_session_id) or app_session_id
+                with perf.timed("provider.start_run.flush_root_persist"):
+                    await _to_turn_dispatch_thread(session_manager.flush_root_persist, root_id)
+                with perf.timed("provider.start_run.provider_call"):
+                    await _to_turn_dispatch_thread(
+                        provider.start_run,
                     run_id=run_id,
                     prompt=prompt,
                     images=images,
@@ -1671,6 +2470,7 @@ class TurnManager:
                     session_id=current_session_id,
                     mode=mode,
                     app_session_id=app_session_id,
+                    source=source,
                     setting_sources=run_setting_sources,
                     backend_url=backend_url,
                     internal_token=internal_token,
@@ -1683,11 +2483,12 @@ class TurnManager:
                     working_mode=(_session_rec or {}).get("working_mode"),
                     continuation_chain=_session_rec_chain or None,
                     disallowed_tools=disallowed_tools,
+                    disabled_builtin_extensions=disabled_builtin_extensions,
                     provider_run_config=provider_run_config,
                     capability_contexts=run_capability_contexts,
                     target_message_id=target_message_id,
-                    turn_run_id=turn_run_id,
-                )
+                        turn_run_id=turn_run_id,
+                    )
                 spawn_elapsed = _time.monotonic() - spawn_started
                 if spawn_elapsed > 2.0:
                     logger.warning(
@@ -1739,25 +2540,75 @@ class TurnManager:
                                 if not _p.done():
                                     _p.cancel()
 
-                        if not done and provider.is_running(run_id):
-                            continue
-                        if not done and not provider.is_running(run_id):
+                        if not done:
+                            provider_running = await provider.is_running_off_loop(run_id)
+                            if provider_running:
+                                continue
                             logger.warning(
                                 "runner dead but no complete event for %s — "
                                 "synthesizing failure",
                                 run_id,
                             )
                             captured_complete = False
-                            try:
-                                late = await asyncio.wait_for(queue.get(), timeout=1)
+                            late_deadline = asyncio.get_running_loop().time() + 1.0
+                            while True:
+                                remaining = late_deadline - asyncio.get_running_loop().time()
+                                if remaining <= 0:
+                                    break
+                                try:
+                                    late = await asyncio.wait_for(
+                                        queue.get(), timeout=min(remaining, 0.1),
+                                    )
+                                except asyncio.TimeoutError:
+                                    continue
+                                except Exception:
+                                    break
                                 late_dict = {"type": late.type, "data": late.data}
                                 if not _is_synthetic_event(late_dict):
                                     attempt_events.append(late_dict)
+                                    if late.type not in ("session_discovered", "complete", "error"):
+                                        try:
+                                            await ws_callback(
+                                                _stamp_agent_type(mode, late_dict),
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "dead-runner late event ws_callback failed",
+                                                exc_info=True,
+                                            )
                                 if late.type == "complete":
                                     captured_complete = True
-                            except (asyncio.TimeoutError, Exception):
-                                pass
+                                    break
                             if not captured_complete:
+                                if getattr(provider, "KIND", "") == "codex":
+                                    try:
+                                        from provider_codex import read_codex_run_rollout_events
+                                        replayed_events = read_codex_run_rollout_events(
+                                            runs_root() / run_id,
+                                        )
+                                    except Exception:
+                                        logger.debug(
+                                            "codex dead-runner rollout replay failed for %s",
+                                            run_id,
+                                            exc_info=True,
+                                        )
+                                        replayed_events = []
+                                    for replayed_event in _missing_event_dicts(
+                                        attempt_events, replayed_events,
+                                    ):
+                                        if _is_synthetic_event(replayed_event):
+                                            continue
+                                        attempt_events.append(replayed_event)
+                                        try:
+                                            await ws_callback(
+                                                _stamp_agent_type(mode, replayed_event),
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "codex replay event ws_callback failed for %s",
+                                                run_id,
+                                                exc_info=True,
+                                            )
                                 # The runner frequently succeeded and wrote
                                 # complete.json just before exiting, but the
                                 # provider's complete event lost the race
@@ -1817,7 +2668,7 @@ class TurnManager:
                                         queue.get(), timeout=min(_remaining, 1.0),
                                     )
                                 except asyncio.TimeoutError:
-                                    if not provider.is_running(run_id):
+                                    if not await provider.is_running_off_loop(run_id):
                                         break
                                     continue
                                 except Exception:
@@ -1840,11 +2691,20 @@ class TurnManager:
                             break
 
                         event: StreamEvent = get_task.result()
+                        if event.type == "context_usage":
+                            context_window = event.data.get("context_window")
+                            context_tokens = event.data.get("context_tokens")
+                            persist_id = primary_session_id or app_session_id
+                            if isinstance(context_window, int) and context_window > 0:
+                                session_manager.set_context_window(persist_id, context_window)
+                            if isinstance(context_tokens, int) and context_tokens >= 0:
+                                session_manager.set_context_tokens(persist_id, context_tokens)
+                            continue
                         event_dict = {"type": event.type, "data": event.data}
                         if not _is_synthetic_event(event_dict):
                             attempt_events.append(event_dict)
                             if event.type != "session_discovered":
-                                _clear_continuation_active()
+                                await _clear_continuation_active()
 
                         if event.type == "session_discovered":
                             sid = event.data.get("session_id")
@@ -1853,16 +2713,18 @@ class TurnManager:
                                 if session_id_field == "supervisor_agent_session_id":
                                     discovery_mode = "supervisor"
                                 else:
-                                    _disc_rec = session_manager.get(
-                                        primary_session_id or app_session_id
-                                    )
                                     discovery_mode = (
-                                        (_disc_rec or {}).get("orchestration_mode")
+                                        session_manager.get_field(
+                                            primary_session_id or app_session_id,
+                                            "orchestration_mode",
+                                        )
                                         or "manager"
                                     )
                                 session_manager.set_agent_sid(
                                     primary_session_id or app_session_id,
                                     discovery_mode, sid,
+                                    provider_id=provider.id,
+                                    model=model,
                                 )
 
                         if event.type in ("complete", "error"):
@@ -1879,13 +2741,38 @@ class TurnManager:
             collected.extend(attempt_events)
 
             if attempt_cancelled:
-                _clear_continuation_active()
+                # Agent-requested IMMEDIATE continuation (`when="now"`): the
+                # abort landed — restart in a fresh provider subprocess under
+                # the SAME session with the queued prompt. Clear the cancel
+                # signal so the next iteration proceeds. Only fires for
+                # `when="now"`; a plain user-cancel with a stale next-turn
+                # flag falls through to the cancelled return.
+                requested = session_manager.pop_continuation_requested(
+                    primary_session_id or app_session_id,
+                )
+                if requested and requested.get("when") == "now":
+                    cancel_event.clear()
+                    self._c._session_cancelled.pop(app_session_id, None)
+                    prompt = requested.get("prompt") or ""
+                    _chain_depth = await _start_context_continuation(
+                        discovered_session_id or current_session_id,
+                        reason="agent_requested",
+                    )
+                    logger.info(
+                        "continuation: agent-requested IMMEDIATE restart for "
+                        "%s (chain depth %d)",
+                        app_session_id[:8], _chain_depth,
+                    )
+                    self._pop_run_id(app_session_id, run_id)
+                    continue
+                await _clear_continuation_active()
                 return {
                     "success": False,
                     "session_id": discovered_session_id,
                     "events": collected,
                     "error": t("runner.cancelled"),
                     "token_usage": None,
+                    "provider_kind": provider_kind,
                 }
 
             complete = next(
@@ -1912,10 +2799,9 @@ class TurnManager:
                 not success
                 and is_context_overflow_error(error)
             ):
-                import user_prefs
-                if user_prefs.get_context_strategy() == "continuation":
+                if await _context_strategy_is_continuation():
                     old_provider_sid = new_sid or current_session_id
-                    chain_depth = _start_context_continuation(old_provider_sid)
+                    chain_depth = await _start_context_continuation(old_provider_sid)
 
                     logger.info(
                         "continuation: fresh subprocess for %s "
@@ -1929,15 +2815,14 @@ class TurnManager:
                     self._pop_run_id(app_session_id, run_id)
                     continue  # Retry loop → fresh start_run with no session_id
 
-            if not success and _is_rate_limit_attempt(error, attempt_events):
+            if (not success
+                    and _is_rate_limit_attempt(error, attempt_events)
+                    and rate_limit_attempt < _RATE_LIMIT_MAX_ATTEMPTS):
+                rate_limit_attempt += 1
                 in_flight = self.current_assistant_msgs.get(app_session_id)
                 assistant_msg_id = in_flight.get("id") if in_flight else None
                 reset_dt = provider.parse_rate_limit(error, attempt_events)
-                if reset_dt is not None:
-                    wait_s = max(5.0, min(600.0,
-                        (reset_dt.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
-                else:
-                    wait_s = 5.0
+                wait_s = _rate_limit_wait_seconds(reset_dt)
                 retry_at = (datetime.now(timezone.utc) + timedelta(seconds=wait_s)).isoformat()
                 if assistant_msg_id:
                     session_manager.set_msg_retrying_until(
@@ -1953,13 +2838,32 @@ class TurnManager:
                         session_manager.set_msg_retrying_until(
                             app_session_id, assistant_msg_id, None,
                         )
-                    _clear_continuation_active()
+                    requested = session_manager.pop_continuation_requested(
+                        primary_session_id or app_session_id,
+                    )
+                    if requested and requested.get("when") == "now":
+                        cancel_event.clear()
+                        self._c._session_cancelled.pop(app_session_id, None)
+                        prompt = requested.get("prompt") or ""
+                        _chain_depth = await _start_context_continuation(
+                            new_sid or current_session_id,
+                            reason=requested.get("reason") or "agent_requested",
+                        )
+                        logger.info(
+                            "continuation: rate-limit provider switch restart for "
+                            "%s (chain depth %d)",
+                            app_session_id[:8], _chain_depth,
+                        )
+                        self._pop_run_id(app_session_id, run_id)
+                        continue
+                    await _clear_continuation_active()
                     return {
                         "success": False,
                         "session_id": new_sid,
                         "events": collected,
                         "error": t("runner.cancelled"),
                         "token_usage": None,
+                        "provider_kind": provider_kind,
                     }
                 except asyncio.TimeoutError:
                     pass
@@ -1980,6 +2884,8 @@ class TurnManager:
                         _TRANSIENT_BASE_WAIT_S * (2 ** (transient_attempt - 1)),
                         _TRANSIENT_MAX_WAIT_S,
                     )
+                    # ±25% jitter — same rationale as the rate-limit branch.
+                    wait_s = min(_TRANSIENT_MAX_WAIT_S, wait_s * random.uniform(0.75, 1.25))
                     logger.warning(
                         "Transient error on attempt %d/%d for %s, retrying in %.0fs: %s",
                         transient_attempt, _TRANSIENT_MAX_ATTEMPTS,
@@ -2007,13 +2913,14 @@ class TurnManager:
                             session_manager.set_msg_retrying_until(
                                 app_session_id, assistant_msg_id, None,
                             )
-                        _clear_continuation_active()
+                        await _clear_continuation_active()
                         return {
                             "success": False,
                             "session_id": new_sid,
                             "events": collected,
                             "error": t("runner.cancelled"),
                             "token_usage": None,
+                            "provider_kind": provider_kind,
                         }
                     except asyncio.TimeoutError:
                         pass
@@ -2044,12 +2951,40 @@ class TurnManager:
                         app_session_id, done_msg_id, auto_retry_count, kind,
                     )
 
+            # Agent-requested continuation: the agent called
+            # `continue_in_fresh_context` during this turn. Honor it by
+            # starting a fresh provider subprocess under the SAME Better
+            # Agent session (continuation_chain extended) with the queued
+            # prompt — same path as context-overflow, triggered by the agent.
+            if success:
+                requested = session_manager.pop_continuation_requested(
+                    primary_session_id or app_session_id,
+                )
+                if requested:
+                    # Clear any abort signal so the continuation iteration
+                    # proceeds — relevant when a `when="now"` abort raced the
+                    # run to a natural success and landed here instead.
+                    cancel_event.clear()
+                    self._c._session_cancelled.pop(app_session_id, None)
+                    prompt = requested.get("prompt") or ""
+                    _chain_depth = await _start_context_continuation(
+                        new_sid or current_session_id,
+                        reason="agent_requested",
+                    )
+                    logger.info(
+                        "continuation: agent-requested fresh subprocess for "
+                        "%s (chain depth %d)",
+                        app_session_id[:8], _chain_depth,
+                    )
+                    self._pop_run_id(app_session_id, run_id)
+                    continue
+
             await self._emit_attempt_terminal(
                 ws_callback=ws_callback,
                 mode=mode,
                 attempt_events=attempt_events,
             )
-            _clear_continuation_active()
+            await _clear_continuation_active()
             return {
                 "success": success,
                 "session_id": new_sid,
@@ -2059,6 +2994,7 @@ class TurnManager:
                 "context_window": complete_data.get("context_window"),
                 "context_tokens": complete_data.get("context_tokens"),
                 "sdk_output": complete_data.get("sdk_output") or None,
+                "provider_kind": provider_kind,
             }
 
     # ======================================================================

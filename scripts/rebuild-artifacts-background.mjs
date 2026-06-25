@@ -3,6 +3,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isThrottled, recordRun } from "./artifact-throttle.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -43,6 +44,15 @@ if (files.length === 0) {
   console.log("[artifacts] no staged files — skipping background artifact rebuild.");
   process.exit(0);
 }
+
+// Throttle: at most one rebuild scheduled per window. BA_FORCE_ARTIFACT_REBUILD=1 bypasses.
+const stampPath = join(LOG_DIR, "last-scheduled");
+const now = Date.now();
+if (process.env.BA_FORCE_ARTIFACT_REBUILD !== "1" && isThrottled(stampPath, now)) {
+  console.log("[artifacts] throttled — a rebuild was scheduled within the last 10 min; skipping.");
+  process.exit(0);
+}
+recordRun(stampPath, now);
 
 mkdirSync(LOG_DIR, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");

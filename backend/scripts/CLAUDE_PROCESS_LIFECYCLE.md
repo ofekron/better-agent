@@ -1,5 +1,11 @@
 # Claude Code CLI Process Lifecycle — Empirical Report
 
+> **Status (2026-07-08):** the babysitter linger / prompt handoff /
+> continuation machinery referenced below was removed — the runner is
+> strictly per-turn again, and background execution is disabled on every
+> run (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, see `runs_dir.py`). The
+> process-hierarchy and reparenting measurements remain valid.
+
 **Date:** 2026-06-11
 **Claude Code version:** 2.1.165
 **Platform:** macOS (Darwin 24.5.0, arm64)

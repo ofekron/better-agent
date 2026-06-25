@@ -37,12 +37,12 @@ def _reset() -> None:
     manager._root_locks.clear()
     manager._batches.clear()
     with sm_mod._persist_state_lock:
-        for timer in sm_mod._persist_timer.values():
-            timer.cancel()
-        sm_mod._persist_timer.clear()
+        sm_mod._persist_deadlines.clear()
+        sm_mod._persist_deadline_heap.clear()
         sm_mod._persist_pending.clear()
         sm_mod._persist_last_at.clear()
         sm_mod._persist_inflight.clear()
+        sm_mod._persist_state_changed.notify_all()
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
@@ -111,7 +111,7 @@ def main() -> int:
         with sm_mod._persist_state_lock:
             pending_during_write = sid in sm_mod._persist_pending
             inflight_during_write = sid in sm_mod._persist_inflight
-            timers_during_write = len(sm_mod._persist_timer)
+            deadlines_during_write = len(sm_mod._persist_deadlines)
         release.set()
         flushed = _wait_until(lambda: stats["writes"] >= 2, timeout=2.0)
         drained = _wait_until(
@@ -121,7 +121,7 @@ def main() -> int:
         ok = (
             pending_during_write
             and inflight_during_write
-            and timers_during_write == 0
+            and deadlines_during_write == 0
             and flushed
             and drained
             and stats["max_active"] == 1
@@ -129,7 +129,7 @@ def main() -> int:
         )
         detail = (
             f"pending={pending_during_write} inflight={inflight_during_write} "
-            f"timers={timers_during_write} flushed={flushed} drained={drained} "
+            f"deadlines={deadlines_during_write} flushed={flushed} drained={drained} "
             f"writes={stats['writes']} max_active={stats['max_active']}"
         )
         print(f"{PASS if ok else FAIL} persist coalesces while write is in-flight — {detail}")

@@ -15,6 +15,7 @@ function setViewportWidth(width: number) {
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   setViewportWidth(1024);
 });
 
@@ -46,23 +47,24 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
 }
 
 describe("InputArea queued prompt promote action", () => {
-  it("shows both Steer and Interrupt on queued prompts when the active provider supports steering", () => {
+  it("shows separate queued Steer and Interrupt actions when the provider supports steering", () => {
     const { onPromoteQueued, onSteerQueued } = renderInputArea(true);
 
     const banner = screen.getByTestId("queued-prompt-banner");
     const steer = within(banner).getByRole("button", { name: "Steer" });
     const interrupt = within(banner).getByRole("button", { name: "⚡ Interrupt" });
     expect(steer.getAttribute("title")).toBe("Send into the active Codex turn");
-    expect(steer.classList.contains("steer")).toBe(true);
     expect(interrupt.getAttribute("title")).toBe(
       "Cancel current turn and send this prompt immediately",
     );
     expect(interrupt.classList.contains("interrupt")).toBe(true);
 
     fireEvent.click(steer);
+    expect(onSteerQueued).toHaveBeenCalledWith("q1");
+    expect(onPromoteQueued).toHaveBeenCalledTimes(0);
+
     fireEvent.click(interrupt);
-    expect(onSteerQueued).toHaveBeenCalledTimes(1);
-    expect(onPromoteQueued).toHaveBeenCalledTimes(1);
+    expect(onPromoteQueued).toHaveBeenCalledWith("q1");
   });
 
   it("keeps Interrupt on queued prompts when steering is unavailable", () => {
@@ -77,7 +79,33 @@ describe("InputArea queued prompt promote action", () => {
     expect(button.classList.contains("interrupt")).toBe(true);
   });
 
-  it("shows separate active Steer and Interrupt buttons while streaming", () => {
+  it("renders every queued prompt package as its own banner", () => {
+    const onQueuedTextEdit = vi.fn();
+    renderInputArea(true, "", {
+      queuedPrompts: [
+        { id: "q1", preview: "first queued" },
+        { id: "q2", preview: "second queued" },
+      ],
+      onQueuedTextEdit,
+    });
+
+    const banners = screen.getAllByTestId("queued-prompt-banner");
+    expect(banners).toHaveLength(2);
+    expect(within(banners[0]).getByText("first queued")).toBeTruthy();
+    expect(within(banners[1]).getByText("second queued")).toBeTruthy();
+    expect(within(banners[0]).getByRole("button", { name: "Steer" })).toBeTruthy();
+    expect(within(banners[1]).getByRole("button", { name: "Steer" })).toBeTruthy();
+    expect(within(banners[0]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
+    expect(within(banners[1]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
+
+    fireEvent.click(within(banners[1]).getByRole("button", { name: "second queued" }));
+    const editor = screen.getByDisplayValue("second queued");
+    fireEvent.change(editor, { target: { value: "edited second queued" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited second queued", "q2");
+  });
+
+  it("shows separate active Queue, Steer, and Interrupt buttons while streaming", () => {
     renderInputArea(true, "active work");
 
     expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
@@ -95,17 +123,57 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).toBeNull();
   });
 
-  it("moves active Codex alternatives into the prompt overflow menu on mobile", () => {
+  it("edits the same prompt draft from the focused writing modal", () => {
+    const onDraftChange = vi.fn();
+    renderInputArea(false, "initial draft", { onDraftChange, isStreaming: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus writing" }));
+
+    const modal = screen.getByRole("dialog", { name: "Focus writing" });
+    const focusedEditor = within(modal).getByTestId("composer-focus-textarea");
+    expect((focusedEditor as HTMLTextAreaElement).value).toBe("initial draft");
+
+    fireEvent.change(focusedEditor, { target: { value: "expanded draft" } });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("expanded draft");
+    expect((screen.getByTestId("input-textarea") as HTMLTextAreaElement).value).toBe(
+      "expanded draft",
+    );
+  });
+
+  it("sends the focused writing modal draft through the primary action", async () => {
+    const onSend = vi.fn(() => true);
+    renderInputArea(false, "expanded draft", { isStreaming: false, onSend });
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus writing" }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("composer-focus-send-btn"));
+    });
+
+    expect(onSend).toHaveBeenCalledWith("expanded draft", [], []);
+    expect(screen.queryByRole("dialog", { name: "Focus writing" })).toBeNull();
+    expect((screen.getByTestId("input-textarea") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("shows mobile Stop, Steer, and Queue above the prompt while keeping Interrupt in overflow", () => {
     setViewportWidth(390);
     const firstStop = vi.fn();
     const first = renderInputArea(true, "active work", { onStop: firstStop });
 
+    const mobileActions = screen.getByTestId("mobile-steer-actions");
+    expect(Array.from(mobileActions.querySelectorAll("button")).map((button) => button.textContent)).toEqual([
+      "Stop",
+      "Steer",
+      "Queue",
+    ]);
     expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
-    expect(screen.queryByTestId("queue-btn")).toBeNull();
+    expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
+    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
     expect(screen.queryByTestId("interrupt-btn")).toBeNull();
-    expect(screen.queryByTestId("stop-btn")).toBeNull();
+    fireEvent.click(screen.getByTestId("stop-btn"));
+    expect(firstStop).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByTestId("queue-btn"));
     expect(first.onSend).toHaveBeenCalledTimes(1);
     expect(first.onSteer).toHaveBeenCalledTimes(0);
@@ -125,18 +193,69 @@ describe("InputArea queued prompt promote action", () => {
     renderInputArea(true, "active work", { onStop });
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByTestId("stop-btn"));
-    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
+    expect(onStop).toHaveBeenCalledTimes(0);
   });
 
   it("uses Steer as the primary active Codex action", async () => {
-    const { onSteer } = renderInputArea(true, "active work");
+    const { onSend, onSteer } = renderInputArea(true, "active work");
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("send-btn"));
     });
 
     expect(onSteer).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses desktop Enter to queue while streaming", async () => {
+    setViewportWidth(1280);
+    const { onSend, onSteer } = renderInputArea(true, "active work");
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses empty desktop Enter to steer the queued prompt for steerable providers", async () => {
+    setViewportWidth(1280);
+    const { onPromoteQueued, onSteerQueued } = renderInputArea(true);
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onSteerQueued).toHaveBeenCalledTimes(1);
+    expect(onPromoteQueued).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses empty desktop Enter to interrupt the queued prompt when steering is unavailable", async () => {
+    setViewportWidth(1280);
+    const { onPromoteQueued, onSteerQueued } = renderInputArea(false);
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onPromoteQueued).toHaveBeenCalledTimes(1);
+    expect(onSteerQueued).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses the explicit Queue button for active Codex queueing", async () => {
+    const { onSend, onSteer } = renderInputArea(true, "active work");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("queue-btn"));
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
   });
 
   it("does not submit Steer twice on rapid double click", async () => {
@@ -154,23 +273,149 @@ describe("InputArea queued prompt promote action", () => {
     expect(onSteer).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps queued Interrupt primary and moves queued Steer into overflow on mobile", () => {
+  it("keeps queued Steer and Interrupt available on mobile", () => {
+    // Mobile defaults the queue list to collapsed; expand it for this test.
+    window.localStorage.setItem("better-agent-queued-list-collapsed", "false");
     setViewportWidth(390);
     const { onPromoteQueued, onSteerQueued, onCancelQueued } = renderInputArea(true);
 
     const banner = screen.getByTestId("queued-prompt-banner");
+    expect(within(banner).getByRole("button", { name: "Steer" })).toBeTruthy();
     expect(within(banner).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
-    expect(within(banner).queryByRole("button", { name: "Steer" })).toBeNull();
 
     fireEvent.click(within(banner).getByRole("button", { name: "More queued actions" }));
+    fireEvent.click(within(banner).getByRole("button", { name: "Cancel" }));
+    expect(onCancelQueued).toHaveBeenCalledTimes(1);
+
     fireEvent.click(within(banner).getByRole("button", { name: "Steer" }));
     expect(onSteerQueued).toHaveBeenCalledTimes(1);
 
     fireEvent.click(within(banner).getByRole("button", { name: "⚡ Interrupt" }));
     expect(onPromoteQueued).toHaveBeenCalledTimes(1);
+  });
 
-    fireEvent.click(within(banner).getByRole("button", { name: "More queued actions" }));
-    fireEvent.click(within(banner).getByRole("button", { name: "Cancel" }));
-    expect(onCancelQueued).toHaveBeenCalledTimes(1);
+  it("can minimize and expand the queued prompt banner", () => {
+    renderInputArea(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+    expect(within(minimized).getByRole("button", { name: "Expand queued prompt" })).toBeTruthy();
+    expect(within(minimized).getByText("queued work")).toBeTruthy();
+    expect(within(minimized).getByRole("button", { name: "Steer" })).toBeTruthy();
+    expect(within(minimized).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
+    expect(within(minimized).getByRole("button", { name: "Cancel" })).toBeTruthy();
+
+    fireEvent.click(within(minimized).getByRole("button", { name: "Expand queued prompt" }));
+
+    const expanded = screen.getByTestId("queued-prompt-banner");
+    expect(expanded.getAttribute("data-minimized")).toBeNull();
+    expect(within(expanded).getByRole("button", { name: "Minimize queued prompt" })).toBeTruthy();
+  });
+
+  it("persists the queued prompt minimized preference", () => {
+    renderInputArea(false);
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+    expect(localStorage.getItem("better-agent-queued-prompt-minimized")).toBe("true");
+
+    cleanup();
+    renderInputArea(false);
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+    expect(within(minimized).getByRole("button", { name: "Expand queued prompt" })).toBeTruthy();
+  });
+
+  it("renders queued tags and summarizes attachments while minimized", () => {
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: '<inline-tags><c file="a.ts" range="1-2">check this</c></inline-tags>\n\nqueued work',
+        images: [{ dataUrl: "data:image/png;base64,aaa", base64: "aaa", mediaType: "image/png" }],
+        files: [{ name: "notes.txt", base64: "bbb", mediaType: "text/plain", size: 12 }],
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(within(minimized).getByText("queued work")).toBeTruthy();
+    expect(within(minimized).getByText("check this")).toBeTruthy();
+    expect(within(minimized).getByText("a.ts:1-2")).toBeTruthy();
+    expect(screen.queryByText("notes.txt")).toBeNull();
+    expect(screen.getByTestId("queued-minimized-summary").textContent).toBe(
+      "1 image · 1 file",
+    );
+  });
+
+  it("renders comment-only inline tags as visible queued cards on desktop", () => {
+    setViewportWidth(1280);
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: "<inline-tags><comment>Verify card rendering on desktop</comment><comment>Confirm comment cards stay visible and summarized</comment></inline-tags> Remaining user text after the comment tags.",
+      },
+    });
+
+    const banner = screen.getByTestId("queued-prompt-banner");
+    expect(within(banner).getByText("Verify card rendering on desktop")).toBeTruthy();
+    expect(within(banner).getByText("Confirm comment cards stay visible and summarized")).toBeTruthy();
+    expect(within(banner).getByText("Remaining user text after the comment tags.")).toBeTruthy();
+    expect(banner.textContent).not.toContain("<inline-tags>");
+    expect(banner.classList.contains("has-tags")).toBe(true);
+
+    fireEvent.click(within(banner).getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(within(minimized).getByText("Verify card rendering on desktop")).toBeTruthy();
+    expect(within(minimized).getByText("Confirm comment cards stay visible and summarized")).toBeTruthy();
+    expect(within(minimized).getByText("Remaining user text after the comment tags.")).toBeTruthy();
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+  });
+
+  it("renders mixed selected-text and plain inline comment cards readably", () => {
+    setViewportWidth(1280);
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: '<inline-tags>\n<c file="src/app.tsx" range="10:1-10:24"><sel>export const Foo</sel>Verify this card renders readably</c>\n<c>Second comment — should appear as its own card</c>\n</inline-tags>\nMain user prompt text after the comment envelope.',
+      },
+    });
+
+    const banner = screen.getByTestId("queued-prompt-banner");
+    expect(within(banner).getByText("src/app.tsx:10:1-10:24")).toBeTruthy();
+    expect(within(banner).getByText("export const Foo")).toBeTruthy();
+    expect(within(banner).getByText("Verify this card renders readably")).toBeTruthy();
+    expect(within(banner).getByText("Second comment — should appear as its own card")).toBeTruthy();
+    expect(within(banner).getByText("Main user prompt text after the comment envelope.")).toBeTruthy();
+    expect(banner.textContent).not.toContain("<inline-tags>");
+  });
+
+  it("opens queued prompt editing from the queued item click", () => {
+    const onQueuedTextEdit = vi.fn();
+    renderInputArea(true, "", { onQueuedTextEdit });
+
+    expect(screen.queryByRole("button", { name: "Edit queued prompt" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "queued work" }));
+
+    const editor = screen.getByDisplayValue("queued work");
+    fireEvent.change(editor, { target: { value: "edited queued work" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work", "q1");
+  });
+
+  it("uses the mobile-safe queued editing layout", () => {
+    // Mobile defaults the queue list to collapsed; expand it for this test.
+    window.localStorage.setItem("better-agent-queued-list-collapsed", "false");
+    setViewportWidth(390);
+    renderInputArea(true, "", { onQueuedTextEdit: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "queued work" }));
+
+    const modal = screen.getByRole("dialog", { name: "Edit queued prompt" });
+    expect(modal.querySelector(".queued-edit-modal-header")).toBeTruthy();
+    expect(modal.querySelector(".queued-prompt-edit-input")).toBeTruthy();
+    expect(modal.querySelector(".queued-prompt-actions")).toBeTruthy();
   });
 });

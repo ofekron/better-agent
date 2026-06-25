@@ -60,7 +60,7 @@ async def maybe_supervise(
     the verdict loop. Both are no-ops unless ``supervisor_enabled`` is
     set on the session."""
     if not extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+        extension_store.extension_id_for_role('supervisor')
     ):
         return
     await replay_pending_verdict(
@@ -89,12 +89,15 @@ async def replay_pending_verdict(
     ``maybe_run_verdict_loop`` so the pending feedback reaches the
     primary before the supervisor evaluates the new turn.
     """
-    session = session_manager.get(app_session_id)
+    session = session_manager.get_fields(
+        app_session_id,
+        ("pending_supervisor_verdict", "supervisor_enabled"),
+    )
     pending = (session or {}).get("pending_supervisor_verdict") if session else None
     if not pending:
         return
     if not extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+        extension_store.extension_id_for_role('supervisor')
     ):
         session_manager.clear_pending_supervisor_verdict(app_session_id)
         return
@@ -157,7 +160,7 @@ async def maybe_run_verdict_loop(
     """
     for verdict_num in range(MAX_VERDICTS_PER_TURN):
         if not extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+            extension_store.extension_id_for_role('supervisor')
         ):
             return
         if coordinator.is_session_cancelled(app_session_id):

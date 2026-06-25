@@ -117,6 +117,49 @@ def main() -> int:
         release_guarded = True
     ok &= _check(release_guarded, "TestHome.release refuses prod-rooted path")
 
+    import session_store
+    from session_manager import manager as session_manager
+
+    first_home = paths.ba_home()
+    first = session_manager.create(
+        id="home-switch-first",
+        name="first",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model",
+        provider_id="provider",
+    )
+    ok &= _check(
+        (first_home / "sessions" / f"{first['id']}.json").exists(),
+        "session_manager writes to the first isolated home",
+    )
+    _test_home._ORIG_RMTREE(first_home)
+    second_home = Path(_test_home.isolate("bc-test-home-switch-"))
+    ok &= _check(
+        session_store.get_session(first["id"]) is None,
+        "session_store does not see old-home session after test-home switch",
+    )
+    ok &= _check(
+        session_manager.get(first["id"]) is None,
+        "session_manager does not return old in-memory session after test-home switch",
+    )
+    second = session_manager.create(
+        id="home-switch-second",
+        name="second",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model",
+        provider_id="provider",
+    )
+    ok &= _check(
+        (second_home / "sessions" / f"{second['id']}.json").exists(),
+        "session_store follows a later test-home switch after old home deletion",
+    )
+    ok &= _check(
+        not (second_home / "sessions" / f"{first['id']}.json").exists(),
+        "session_store clears home-scoped indexes on test-home switch",
+    )
+
     print(PASS if ok else FAIL)
     return 0 if ok else 1
 

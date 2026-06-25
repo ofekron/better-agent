@@ -52,6 +52,7 @@ export class Strategy implements OrchestrationStrategy {
     if (
       etype === "agent_message" ||
       etype === "manager_event" ||
+      etype === "model_switched" ||
       etype === "steer_prompt"
     ) {
       // agent_message / steer_prompt: canonical render payloads.
@@ -113,6 +114,9 @@ export class Strategy implements OrchestrationStrategy {
         is_new: boolean;
         instructions_preview: string;
         orchestration_mode?: OrchestrationMode;
+        provider_id?: string | null;
+        model?: string | null;
+        reasoning_effort?: WorkerPanel["reasoning_effort"];
         run_mode?: string;
       };
       const existing = message.workers ?? [];
@@ -129,6 +133,9 @@ export class Strategy implements OrchestrationStrategy {
         is_new: d.is_new,
         instructions_preview: d.instructions_preview,
         orchestration_mode: d.orchestration_mode,
+        provider_id: d.provider_id,
+        model: d.model,
+        reasoning_effort: d.reasoning_effort,
         run_mode: d.run_mode,
         events: [],
       };
@@ -142,7 +149,21 @@ export class Strategy implements OrchestrationStrategy {
       const idx = workers.findIndex((p) => p.delegation_id === d.delegation_id);
       if (idx === -1) return message;
       const next = [...workers];
-      next[idx] = { ...next[idx], events: [...next[idx].events, d.event] };
+      const events = next[idx].events ?? [];
+      const uuid = d.event.data?.uuid as string | undefined;
+      let nextEvents = events;
+      if (uuid) {
+        const eventIdx = events.findIndex((e) => e.data?.uuid === uuid);
+        if (eventIdx !== -1) {
+          nextEvents = [...events];
+          nextEvents[eventIdx] = d.event;
+        } else {
+          nextEvents = [...events, d.event];
+        }
+      } else {
+        nextEvents = [...events, d.event];
+      }
+      next[idx] = { ...next[idx], events: nextEvents };
       return { ...message, workers: next };
     }
 

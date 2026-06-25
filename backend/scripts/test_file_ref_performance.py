@@ -17,6 +17,10 @@ def main() -> None:
     assert resolver.rewrite_text(text, "/tmp") == text
     elapsed = time.monotonic() - started
     assert elapsed < 1.0, f"file-reference scan took {elapsed:.2f}s"
+    assert resolver.rewrite_text("see missing.py", "/tmp") == "see missing.py"
+    cache_size = len(resolver._cwd_path_cache._d)
+    assert resolver.rewrite_text("see also missing.py", "/tmp") == "see also missing.py"
+    assert len(resolver._cwd_path_cache._d) == cache_size
     print(f"PASS: large non-path scanned in {elapsed:.3f}s")
 
 

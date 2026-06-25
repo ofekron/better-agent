@@ -5,6 +5,7 @@ runner subprocesses, because a frozen app cannot run `python runner.py`.
 This entrypoint inspects argv:
   - `--run-dir` present  → run the named runner in-process and exit.
   - `--communicate-mcp` present → run the stdio team-message MCP server.
+  - `--capabilities-mcp` present → run the stdio capability-management MCP server.
   - `--open-file-panel-mcp` present → run the stdio file-panel MCP server.
   - `--open-config-panel-mcp` present → run the stdio config-panel MCP server.
   - `--extension-mcp` present → run an installed extension MCP launcher.
@@ -43,6 +44,8 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
     invocation starts the server."""
     if "--communicate-mcp" in argv:
         return ("communicate_mcp", None, None)
+    if "--capabilities-mcp" in argv:
+        return ("capabilities_mcp", None, None)
     if "--open-file-panel-mcp" in argv:
         return ("open_file_panel_mcp", None, None)
     if "--open-config-panel-mcp" in argv:
@@ -54,11 +57,12 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
     if "--run-dir" not in argv:
         return ("server", None, None)
     import argparse
+    import provider_manifest
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument(
         "--runner-kind", default="claude",
-        choices=["claude", "gemini", "codex", "agy"],
+        choices=provider_manifest.runner_kinds(),
     )
     args = parser.parse_args(argv)
     return ("runner", args.runner_kind, args.run_dir)
@@ -69,6 +73,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
     if mode == "communicate_mcp":
         from communicate_mcp import main as communicate_main
         return communicate_main()
+    if mode == "capabilities_mcp":
+        from capabilities_mcp import main as capabilities_main
+        return capabilities_main()
     if mode == "open_file_panel_mcp":
         from open_file_panel_mcp import main as open_file_panel_main
         return open_file_panel_main()
@@ -80,14 +87,14 @@ def _main(argv: Optional[list[str]] = None) -> int:
         index = (sys.argv[1:] if argv is None else argv).index("--extension-mcp")
         return extension_mcp_main((sys.argv[1:] if argv is None else argv)[index + 1:])
     if mode == "runner":
-        if kind == "gemini":
-            from runner_gemini import main as runner_main
-        elif kind == "codex":
-            from runner_codex import main as runner_main
-        elif kind == "agy":
-            from runner_agy import main as runner_main
-        else:
-            from runner import main as runner_main
+        # Runner module per kind comes from the canonical manifest; "runner"
+        # is the default Claude runner. (codex + fugu both resolve to
+        # runner_codex; the launcher binary differs, not the runner.)
+        import importlib
+        import provider_manifest
+        runner_main = importlib.import_module(
+            provider_manifest.runner_module_for(kind)
+        ).main
         return runner_main(run_dir)
     import uvicorn
     if mode == "node_server":
@@ -96,6 +103,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
             main_node.app,
             host="0.0.0.0",
             port=_env_port("BETTER_CLAUDE_NODE_PORT", 8002),
+            proxy_headers=False,
+            ws_per_message_deflate=False,
         )
         return 0
     import main
@@ -104,6 +113,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
         main.app,
         host=user_prefs.get_network_bind_address(),
         port=_env_port("BETTER_CLAUDE_BACKEND_PORT", 8000),
+        proxy_headers=False,
+        ws_per_message_deflate=False,
     )
     return 0
 

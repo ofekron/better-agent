@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { setStoredToken } from "../bearerAuth";
+import { setStoredToken, setTokens } from "../bearerAuth";
+import { ChangeServerButton } from "./ChangeServer";
 
 interface Props {
   /** Called after a successful login. Parent re-fetches /api/auth/me
@@ -12,50 +13,158 @@ interface Props {
 /** Single-user login form. Posts username + password to
  * /api/auth/login; the backend sets the `better_agent_session` cookie on
  * success, which then gates every subsequent /api/* request and
- * the /ws/chat WebSocket. */
+ * the /ws/chat WebSocket.
+ *
+ * Plus a passwordless path for external devices:
+ *   - The login screen renders a one-time QR (GET /api/auth/qr_grant,
+ *     mintable only from loopback / an authed session) encoding
+ *     .../?qr=<grant>. A phone scans it with its camera.
+ *   - Opening .../?qr=<grant> redeems it (POST /api/auth/qr_redeem) for a
+ *     short access token + rotating refresh token — no password typed,
+ *     no long-lived credential on the phone. */
 export function Login({ onSuccess }: Props) {
   const { t } = useTranslation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [qr, setQr] = useState("");
 
-  const onSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ username, password }),
-      });
-      if (res.ok) {
-        // Native clients (Capacitor) need the bearer token because the
-        // session cookie won't cross origins. Browsers ignore it and
-        // ride the cookie. Tolerant if the body isn't JSON (defensive).
-        try {
-          const body = await res.json();
-          if (body?.token) setStoredToken(body.token);
-        } catch {
-          /* no token in body → cookie-only browser path is fine */
+  const doLogin = useCallback(
+    async (u: string, p: string): Promise<boolean> => {
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await fetch(`${API}/api/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ username: u, password: p }),
+        });
+        if (res.ok) {
+          // Native clients (Capacitor) need the bearer token because the
+          // session cookie won't cross origins. Browsers ignore it and
+          // ride the cookie. Tolerant if the body isn't JSON (defensive).
+          try {
+            const body = await res.json();
+            if (body?.token) setStoredToken(body.token);
+          } catch {
+            /* no token in body → cookie-only browser path is fine */
+          }
+          onSuccess();
+          return true;
         }
-        onSuccess();
-        return;
+        if (res.status === 429) {
+          setError(t("login.tooManyAttempts"));
+        } else if (res.status === 401) {
+          setError(t("login.invalidCredentials"));
+        } else {
+          setError(t("login.unknownError", { status: res.status }));
+        }
+      } catch {
+        setError(t("login.networkError"));
+      } finally {
+        setBusy(false);
       }
-      if (res.status === 429) {
-        setError(t("login.tooManyAttempts"));
-      } else if (res.status === 401) {
-        setError(t("login.invalidCredentials"));
-      } else {
-        setError(t("login.unknownError", { status: res.status }));
+      return false;
+    },
+    [onSuccess, t]
+  );
+
+  // Scan-to-login: the phone camera opens .../?qr=<grant>. Embedders
+  // (e.g. the TestApe Control Panel iframe) pass .../s/<id>#qr=<grant>
+  // instead — the fragment never reaches the server, so the one-time
+  // grant stays out of HTTP access logs. Captured once at mount, before
+  // the URL is stripped, so the mint effect below can tell a redeem is
+  // in flight.
+  const [redeemGrant] = useState(() => {
+    const fromSearch = new URLSearchParams(window.location.search).get("qr");
+    if (fromSearch) return fromSearch;
+    const fromHash = window.location.hash.match(/[#&]qr=([^&]+)/);
+    return fromHash ? decodeURIComponent(fromHash[1]) : null;
+  });
+
+  // Redeem the grant once for tokens, strip it from the URL (one-time
+  // anyway, but keep it out of history), and enter the app. The ref
+  // keeps re-renders (new t/onSuccess identities) from replaying the
+  // one-time grant.
+  const redeemStartedRef = useRef(false);
+  useEffect(() => {
+    const grant = redeemGrant;
+    if (!grant || redeemStartedRef.current) return;
+    redeemStartedRef.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    (async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await fetch(`${API}/api/auth/qr_redeem`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ grant }),
+        });
+        if (res.ok) {
+          const body = await res.json();
+          if (body?.access_token && body?.refresh_token) {
+            setTokens(body.access_token, body.refresh_token);
+          }
+          onSuccess();
+          return;
+        }
+        setError(
+          res.status === 401
+            ? "This QR code expired or was already used — generate a new one."
+            : `Sign-in failed (${res.status}).`
+        );
+      } catch {
+        setError(t("login.networkError"));
+      } finally {
+        setBusy(false);
       }
-    } catch {
-      setError(t("login.networkError"));
-    } finally {
-      setBusy(false);
-    }
+    })();
+  }, [redeemGrant, onSuccess, t]);
+
+  // Mint + render the login QR, then re-mint before it expires so the
+  // displayed code is always redeemable. 403/409 (not loopback/authed, or
+  // not configured) → no QR shown, password login still works. Skipped
+  // when this mount is redeeming a presented grant.
+  useEffect(() => {
+    if (redeemGrant) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const res = await fetch(`${API}/api/auth/qr_grant`, {
+          credentials: "include",
+        });
+        if (!res.ok || !alive) return;
+        const { login_url, expires_in } = await res.json();
+        if (!login_url || !alive) return;
+        const QRCode = await import("qrcode");
+        const dataUrl = await QRCode.toDataURL(login_url, {
+          width: 180,
+          margin: 1,
+          color: { dark: "#000", light: "#fff" },
+        });
+        if (!alive) return;
+        setQr(dataUrl);
+        const ms = Math.max(30, (Number(expires_in) || 300) - 30) * 1000;
+        timer = setTimeout(load, ms);
+      } catch {
+        /* no QR — typed login still works */
+      }
+    };
+    void load();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [redeemGrant]);
+
+  const onSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    void doLogin(username, password);
   };
 
   return (
@@ -92,6 +201,21 @@ export function Login({ onSuccess }: Props) {
         >
           {busy ? t("login.signingIn") : t("login.signIn")}
         </button>
+        <ChangeServerButton />
+        {qr && (
+          <div style={{ marginTop: 20, textAlign: "center" }}>
+            <img
+              src={qr}
+              alt="One-time login QR"
+              width={180}
+              height={180}
+              style={{ borderRadius: 8 }}
+            />
+            <p style={{ marginTop: 8, fontSize: 13, color: "var(--text-muted)" }}>
+              Scan with a phone to sign in — one-time, expires shortly
+            </p>
+          </div>
+        )}
       </form>
     </div>
   );

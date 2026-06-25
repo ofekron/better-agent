@@ -6,29 +6,35 @@ import {
   useWebSocket,
   type ImagePayload,
   type FilePayload,
-  type RearrangerStateUpdate,
-  type RearrangerUpdate,
 } from "./hooks/useWebSocket";
-import { useLocalStorage } from "./hooks/useLocalStorage";
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
-import { useMachines } from "./hooks/useMachines";
+import {
+  syncExtensionsToConnectedNodes,
+  syncExtensionsToNode,
+  syncProvidersToConnectedNodes,
+  syncProvidersToNode,
+  useMachines,
+} from "./hooks/useMachines";
+import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { Chat } from "./components/Chat";
+import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
-import { EDIT_SINGLETON_ID } from "./projectStructureEditSession";
+import { editSingletonId } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
-import { SessionList } from "./components/SessionList";
+import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
 import type { FileEditorHandle } from "./components/FileViewer";
 import { ConfigPanelContext } from "./components/configPanelContext";
 import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
+import { sessionHasForkSource } from "./utils/sessionFork";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
-import { TokenUsageDisplay } from "./components/TokenUsage";
+import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
@@ -40,10 +46,20 @@ import {
   type ProviderConfigSyncFetchRoutes,
 } from "@better-agent/provider-config-sync-ui";
 import { ConfirmModal } from "./components/ConfirmModal";
+import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
+import { PreSendAdvisoryDialog } from "./components/PreSendAdvisoryDialog";
+import {
+  fetchPreSendAdvisories,
+  isPreSendAdvisorySnoozed,
+  snoozePreSendAdvisory,
+  type PreSendAdvisory,
+} from "./utils/preSendAdvisory";
+import { sessionIsBypass } from "./utils/permission";
 import {
   ProjectSuggestionModal,
   type ProjectSuggestion,
 } from "./components/ProjectSuggestionModal";
+import { MoveSessionModal } from "./components/MoveSessionModal";
 import {
   NewSessionModal,
   type SessionConfig,
@@ -57,6 +73,9 @@ import type { FileAnchorComment } from "./components/FileEditor";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { ProjectTabs } from "./components/ProjectTabs";
 import { ProjectGitStatus } from "./components/ProjectGitStatus";
+import { SessionSelectorControls } from "./components/SessionSelectorControls";
+import { ModelPickerModal } from "./components/ModelPickerModal";
+import type { SelectorUpdates } from "./components/modelPicker";
 
 import { Login } from "./components/Login";
 import { DesktopInstallPrompt } from "./components/DesktopInstallPrompt";
@@ -72,19 +91,23 @@ import { Setup } from "./components/Setup";
 import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
 import { NotesPanel } from "./components/NotesPanel";
-import { TodosPanel, visibleTodoCount } from "./components/TodosPanel";
+import { TodosPanel, todoProgress } from "./components/TodosPanel";
 import { CommentsPanel } from "./components/CommentsPanel";
+import { ChangesPanel } from "./components/ChangesPanel";
 import Icon from "./components/Icon";
 import { ExtensionPageIcons, ExtensionQuickButtons } from "./components/ExtensionUiHooks";
 import { RefreshResult } from "./components/RefreshResult";
 import { applyAppearancePrefs, type AppearancePrefs } from "./components/AppearanceSetting";
 import { scaledFontSize } from "./utils/typography";
-import { clearRefreshContext, saveRefreshContext } from "./lib/refreshContext";
-import { hardRefreshCurrentPage } from "./lib/hardRefresh";
+import { useRefreshApp } from "./hooks/useRefreshApp";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
+import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
+import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
+import { logDurable } from "./lib/frontendLogger";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
+import { SIDEBAR_MINIMIZED_WIDTH } from "./sidebarLayout";
 import {
   VOICE_APPEND_DRAFT_EVENT,
   VOICE_NEW_SESSION_EVENT,
@@ -92,54 +115,64 @@ import {
   VOICE_SEND_PROMPT_EVENT,
   type VoicePromptEventDetail,
 } from "./lib/voiceActivation";
-import { useRoute, sessionPath } from "./hooks/useRoute";
+import { useRoute, sessionPath, extensionPanelPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
-import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, TokenUsage } from "./types";
+import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
+import { isLeakedProviderMirror } from "./utils/modelDrift";
 import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
 import type { FileEditingState } from "./types/fileEditing";
-import { mergeTagsIntoPrompt } from "./utils/inlineTagsPrompt";
-import { buildOpenFilesPreamble } from "./utils/openFilesPreamble";
-import { patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
+import { buildFinalPrompt } from "./utils/finalPrompt";
+import type { OpenFileSnapshot } from "./utils/openFilesPreamble";
+import { isValidEmptyFileEditSession, patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
 import { appendPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
 import {
+  applyBackendSnapshot,
+  cacheOpenSessionTabIds,
+  getOpenSessionTabJoinedAt,
+  getOpenSessionTabIds,
   getRememberedSessionId,
+  getSelectedProject,
   pickSessionForProject,
+  setOpenSessionTabIds,
   setRememberedSessionId,
-} from "./utils/rememberedSession";
-import { buildSendPromptForm, mergeQueuedAttachments } from "./utils/sendPromptForm";
+  setSelectedProject,
+  type UiSelectionSnapshot,
+} from "./utils/uiSelection";
+import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
+import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
+import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
+import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
 import {
   handleWSEvent as progressHandleWSEvent,
   trackPromise as progressTrackPromise,
   trackedFetch as progressTrackedFetch,
+  useOpProgress,
 } from "./progress/store";
 import { clearStoredToken } from "./bearerAuth";
+import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
 import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
 import { API, WS_URL } from "./api";
+import { extBackendBase } from "./extensionIds";
 import { eventBus } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
-type RefreshMode = "now" | "idle";
-type RestartStatus = {
-  accepted: boolean;
-  refresh_result?: { request_id?: string } | null;
-};
+type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
-const REARRANGER_API = `${API}/api/extensions/ofek-dev.rearranger/backend`;
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
-const SUPERVISOR_API = `${API}/api/extensions/ofek-dev.supervisor/backend`;
+const supervisorApi = () => extBackendBase("supervisor");
 const PROVIDER_CONFIG_SYNC_PATH = "/api/extensions/ofek-dev.provider-config-sync/backend";
 const PROVIDER_CONFIG_SYNC_ROUTES: ProviderConfigSyncFetchRoutes = {
   projects: "/api/projects",
@@ -157,6 +190,7 @@ const PROVIDER_CONFIG_SYNC_ROUTES: ProviderConfigSyncFetchRoutes = {
   repositoryLoad: `${PROVIDER_CONFIG_SYNC_PATH}/repository/load`,
   repositorySync: `${PROVIDER_CONFIG_SYNC_PATH}/repository/sync`,
 };
+const stopSessionOpId = (sessionId: string) => `session:stop:${sessionId}`;
 
 interface ViewingFile {
   path: string;
@@ -165,17 +199,80 @@ interface ViewingFile {
   focus?: FileFocus;
 }
 
+type PendingQueueDraft = QueuedBannerState & {
+  clientId: string | null;
+};
+
 // Frozen module-level empty arrays so the no-data branches of props
 // passed into <Chat> hand referentially-stable values across renders.
-// A fresh `[]` per render would invalidate `memo(MessageGroup)` and
+// A fresh `[]` per render would invalidate `memo(TurnGroup)` and
 // the renderedGroups useMemo inside Chat on every parent re-render.
 const EMPTY_MSGS: readonly ChatMessage[] = Object.freeze([]);
 const EMPTY_RUNS_PROP: readonly import("./types").RunInfo[] = Object.freeze([]);
 const EMPTY_EVENTS: readonly import("./types").WSEvent[] = Object.freeze([]);
 const EMPTY_INLINE_TAGS: readonly import("./types/inlineTag").InlineTag[] =
   Object.freeze([]);
-const MIN_TAB_WIDTH_PX = 90;
-const MAX_TAB_CAP = 15;
+const OPEN_SESSION_FRESHNESS_FIELDS = [
+  "updated_at",
+  "last_user_prompt_at",
+  "last_opened_at",
+  "topbar_pinned_at",
+] as const;
+const OPEN_SESSION_CONTENT_FRESHNESS_FIELDS = [
+  "updated_at",
+  "last_user_prompt_at",
+] as const;
+
+function sessionFreshness(
+  session: Session,
+  fields: readonly (typeof OPEN_SESSION_FRESHNESS_FIELDS)[number][],
+): number {
+  let newest = -Infinity;
+  for (const field of fields) {
+    const value = session[field];
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) newest = Math.max(newest, ms);
+  }
+  return newest;
+}
+
+function mergeOpenSessionRecord(current: Session | undefined, incoming: Session): Session {
+  if (!current) return incoming;
+  const currentContentFreshness = sessionFreshness(current, OPEN_SESSION_CONTENT_FRESHNESS_FIELDS);
+  const incomingContentFreshness = sessionFreshness(incoming, OPEN_SESSION_CONTENT_FRESHNESS_FIELDS);
+  if (incomingContentFreshness < currentContentFreshness) {
+    let merged = current;
+    for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+      const incomingValue = incoming[field];
+      if (!incomingValue) continue;
+      const currentValue = current[field];
+      const currentMs = currentValue ? Date.parse(currentValue) : NaN;
+      const incomingMs = Date.parse(incomingValue);
+      if (!Number.isNaN(incomingMs) && (Number.isNaN(currentMs) || incomingMs > currentMs)) {
+        merged = { ...merged, [field]: incomingValue };
+      }
+    }
+    return merged;
+  }
+  const merged = { ...current, ...incoming };
+  for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+    const currentValue = current[field];
+    const incomingValue = incoming[field];
+    if (currentValue && !incomingValue) {
+      merged[field] = currentValue;
+      continue;
+    }
+    if (!currentValue || !incomingValue) continue;
+    const currentMs = Date.parse(currentValue);
+    const incomingMs = Date.parse(incomingValue);
+    if (!Number.isNaN(currentMs) && !Number.isNaN(incomingMs) && currentMs > incomingMs) {
+      merged[field] = currentValue;
+    }
+  }
+  const keys = Object.keys(incoming) as (keyof Session)[];
+  return keys.some((key) => current[key] !== merged[key]) ? merged : current;
+}
 
 const ProviderConfigSyncPage = lazyWithRetry(() =>
   import("@better-agent/provider-config-sync-ui").then((m) => ({
@@ -204,6 +301,12 @@ const MultiFileEditor = lazyWithRetry(() =>
 );
 const AnalyticsPage = lazyWithRetry(() =>
   import("./components/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })),
+);
+const CommunicationsView = lazyWithRetry(() =>
+  import("./components/CommunicationsView").then((m) => ({ default: m.CommunicationsView })),
+);
+const SchedulesPage = lazyWithRetry(() =>
+  import("./components/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
 );
 const providerConfigSyncClient = createFetchProviderConfigSyncClient({
   baseUrl: API,
@@ -237,18 +340,36 @@ export function clearDonationRedirectFromUrl() {
   );
 }
 
-function BackendUnavailable({ error, onRetry }: { error: string; onRetry: () => void }) {
+function BackendUnavailable({
+  error,
+  onRetry,
+  onChangeServer,
+}: {
+  error: string;
+  onRetry: () => void;
+  onChangeServer?: () => void;
+}) {
   const { t } = useTranslation();
   return (
     <div className="login-shell">
       <div className="login-card">
-        <h1 className="login-title">{t("backendUnavailable.title", "Cannot reach Better Agent")}</h1>
+        <h1 className="login-title">{t("backendUnavailable.title")}</h1>
         <p className="login-subtitle">
-          {error || t("backendUnavailable.subtitle", "The backend is unavailable or rejected this browser origin.")}
+          {error || t("backendUnavailable.subtitle")}
         </p>
         <button className="login-submit" type="button" onClick={onRetry}>
-          {t("backendUnavailable.retry", "Retry")}
+          {t("backendUnavailable.retry")}
         </button>
+        {onChangeServer && (
+          <button
+            className="login-submit"
+            type="button"
+            onClick={onChangeServer}
+            style={{ marginTop: 10, background: "var(--bg-input)", color: "var(--text-primary)" }}
+          >
+            {t("backendUnavailable.changeServer")}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -266,6 +387,16 @@ function BetterAgentBrandMark({ className = "" }: { className?: string }) {
       B
     </span>
   );
+}
+
+function findSessionNode(tree: Session | null | undefined, id: string): Session | undefined {
+  if (!tree) return undefined;
+  if (tree.id === id) return tree;
+  for (const fork of tree.forks ?? []) {
+    const match = findSessionNode(fork, id);
+    if (match) return match;
+  }
+  return undefined;
 }
 
 function capabilityContextFromPickerSource(
@@ -296,7 +427,7 @@ export default function App() {
   // auth crosses origins via bearer token (see bearerAuth.ts).
   const [serverUrlReady] = useState(() => {
     if (typeof Capacitor !== "undefined" && Capacitor.isNativePlatform()) {
-      return !!localStorage.getItem("better_agent_server_url");
+      return hasNativeServerUrl();
     }
     return true;
   });
@@ -317,6 +448,16 @@ export default function App() {
   const [authedUser, setAuthedUser] = useState<{ username: string } | null>(
     null
   );
+  useEffect(() => {
+    const onAuthUserChanged = (event: Event) => {
+      const username = (event as CustomEvent).detail?.username;
+      if (typeof username === "string" && username.trim()) {
+        setAuthedUser({ username });
+      }
+    };
+    window.addEventListener("auth_user_changed", onAuthUserChanged);
+    return () => window.removeEventListener("auth_user_changed", onAuthUserChanged);
+  }, []);
   // Native-only: prompt when the backend has a newer APK staged.
   const { update: nativeUpdate, dismiss: dismissNativeUpdate } =
     useNativeAppUpdate();
@@ -415,6 +556,13 @@ export default function App() {
     }
   }, []);
 
+  const handleChangeServer = useCallback(() => {
+    clearNativeServerUrl();
+    clearStoredToken();
+    window.history.replaceState(null, "", "/");
+    window.location.reload();
+  }, []);
+
   // Re-gate when the WS reports an auth failure.
  useWebSocket
   // surfaces this via a custom event so we don't have to thread
@@ -442,7 +590,13 @@ export default function App() {
   }
 
   if (authStatus === "unreachable") {
-    return <BackendUnavailable error={authProbeError} onRetry={() => checkAuth()} />;
+    return (
+      <BackendUnavailable
+        error={authProbeError}
+        onRetry={() => checkAuth()}
+        onChangeServer={Capacitor.isNativePlatform() ? handleChangeServer : undefined}
+      />
+    );
   }
 
   // Mobile-app download — the QR points at `/?download=android|ios`. We
@@ -519,68 +673,6 @@ interface AppMainProps {
   suppressDonationWelcome: boolean;
 }
 
-const BUILTIN_EXTENSION_IDS = {
-  ask: "ofek-dev.ask",
-  team: "ofek-dev.team-orchestration",
-  supervisor: "ofek-dev.supervisor",
-  projectStructure: "ofek-dev.project-structure",
-  machineNodes: "ofek-dev.machine-nodes",
-  credentialBroker: "ofek-dev.credential-broker",
-  providerConfigSync: "ofek-dev.provider-config-sync",
-  canvas: "ofek-dev.canvas",
-  rearranger: "ofek-dev.rearranger",
-  promptEngineer: "ofek-dev.prompt-engineer",
-  browserHarness: "ofek-dev.browser-harness",
-} as const;
-
-type BuiltinExtensionFlags = Record<keyof typeof BUILTIN_EXTENSION_IDS, boolean>;
-
-const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
-  ask: true,
-  team: true,
-  supervisor: true,
-  projectStructure: true,
-  machineNodes: true,
-  credentialBroker: true,
-  providerConfigSync: true,
-  canvas: true,
-  rearranger: true,
-  promptEngineer: true,
-  browserHarness: true,
-};
-
-function useBuiltinExtensionFlags(authStatus: "loading" | "authed"): BuiltinExtensionFlags {
-  const [flags, setFlags] = useState<BuiltinExtensionFlags>(DEFAULT_BUILTIN_EXTENSION_FLAGS);
-
-  const refresh = useCallback(async () => {
-    if (authStatus !== "authed") return;
-    try {
-      const res = await fetch(`${API}/api/extensions`, { credentials: "include" });
-      if (!res.ok) return;
-      const payload = await res.json();
-      const records = Array.isArray(payload.extensions) ? payload.extensions : [];
-      const next = { ...DEFAULT_BUILTIN_EXTENSION_FLAGS };
-      for (const [key, id] of Object.entries(BUILTIN_EXTENSION_IDS) as Array<[keyof BuiltinExtensionFlags, string]>) {
-        const record = records.find((item: any) => item?.manifest?.id === id);
-        next[key] = record ? record.enabled === true : false;
-      }
-      setFlags(next);
-    } catch {
-      setFlags(DEFAULT_BUILTIN_EXTENSION_FLAGS);
-    }
-  }, [authStatus]);
-
-  useEffect(() => {
-    void refresh();
-    const off = eventBus.subscribe("extensions_changed", () => {
-      void refresh();
-    });
-    return off;
-  }, [refresh]);
-
-  return flags;
-}
-
 function AppMain({
   authStatus,
   authedUser,
@@ -591,16 +683,38 @@ function AppMain({
   const sessionToolbarModules = useExtensionFrontendModules("session-toolbar");
   const mobileSessionTopbarModules = useExtensionFrontendModules("mobile-session-topbar");
   const teamSidebarModules = useExtensionFrontendModules("team-sidebar");
+  const routinesSidebarModules = useExtensionFrontendModules("routines-sidebar");
+  const extensionPanelModules = useExtensionFrontendModules("extension-panel");
   const routePageModules = useExtensionFrontendModules("route-page");
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
   const canvasPanelModules = useExtensionFrontendModules("right-panel-canvas");
+  const screenPanelModules = useExtensionFrontendModules("right-panel-screen");
   const askGreetingModules = useExtensionFrontendModules("ask-greeting");
   const askSessionPickerModules = useExtensionFrontendModules("ask-session-picker");
+  const assistantSummaryModules = useExtensionFrontendModules("assistant-summary");
   const sessionActionModalModules = useExtensionFrontendModules("session-action-modal");
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
+  const sessionDragOverlayModules = useExtensionFrontendModules("session-drag-overlay");
   const builtinExtensions = useBuiltinExtensionFlags(authStatus);
   useAttentionSound();
+
+  // The session id currently being dragged in the sidebar, or null. Pure
+  // transient UI state bridged from the `session_drag_start/end` facts so
+  // the agent-board extension's drop overlay can reveal itself via context.
+  const [draggingSession, setDraggingSession] = useState<{ id: string; name: string } | null>(null);
+  useEffect(() => {
+    const offStart = eventBus.subscribe("session_drag_start", (p) =>
+      setDraggingSession({ id: p.session_id, name: p.name ?? "" }),
+    );
+    const offEnd = eventBus.subscribe("session_drag_end", () =>
+      setDraggingSession(null),
+    );
+    return () => {
+      offStart();
+      offEnd();
+    };
+  }, []);
 
   // Responsive layout mode. Width-only (see useViewport docs).
   // When mode !== 'desktop' the sidebar and right-panel become
@@ -612,6 +726,28 @@ function AppMain({
   const { machines } = useMachines(authStatus);
   const showMachinesLink = builtinExtensions.machineNodes && machines.length > 1;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Header action icons collapse into a kebab menu when they don't fit
+  // one line (width-based, not viewport-based). Config stays out always.
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
+  const [headerOverflow, setHeaderOverflow] = useState(false);
+  // Callback ref so the observer (re)attaches whenever the header row
+  // mounts — it renders only after auth/session load, so an empty-deps
+  // effect would run once on a not-yet-present node and never reconnect.
+  const headerRoRef = useRef<ResizeObserver | null>(null);
+  const headerRowRef = useCallback((row: HTMLDivElement | null) => {
+    headerRoRef.current?.disconnect();
+    headerRoRef.current = null;
+    if (!row) return;
+    const ghost = row.querySelector<HTMLElement>(".sidebar-header-ghost");
+    const measure = () =>
+      setHeaderOverflow((ghost?.offsetWidth ?? 0) > row.clientWidth);
+    const ro = new ResizeObserver(measure);
+    ro.observe(row);
+    if (ghost) ro.observe(ghost);
+    headerRoRef.current = ro;
+    measure();
+  }, []);
   const [mobileRightOpen, setMobileRightOpen] = useState(false);
   const [mobileRightFullscreen, setMobileRightFullscreen] = useState(false);
   const closeMobileRightPanel = useCallback(() => {
@@ -623,6 +759,17 @@ function AppMain({
   // close innermost-first via the hook's module-scope stack).
   useBackButtonDismiss(mobileSidebarOpen, () => setMobileSidebarOpen(false));
   useBackButtonDismiss(mobileRightOpen, closeMobileRightPanel);
+  // Close the header overflow menu on outside click.
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!headerMenuRef.current?.contains(e.target as Node)) {
+        setHeaderMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [headerMenuOpen]);
   // Drive --vv-offset only when a virtual keyboard is plausible.
   useVisualViewport(isMobile);
   // Close drawers automatically when transitioning to desktop so
@@ -714,9 +861,12 @@ function AppMain({
     togglePin,
     unpinOtherSessions,
     archiveSession,
+    moveSessionToProject,
     toggleWorkerEligible,
-    updateRearranger,
+    toggleAgentRenameAllowed,
     applySessionMetadata,
+    preserveSessionMetadataThroughReconcile,
+    clearSessionMetadataReconcilePreserve,
     appendSessionIfNew,
     dropSessionIfPresent,
     refreshSessions,
@@ -730,6 +880,9 @@ function AppMain({
     applyMessageRecovering,
     applyMessageRetrying,
     applyMessageAutoRetry,
+    applyMessageContent,
+    applyMessageContinuation,
+    applyMessageRunMeta,
     applyMessageAskResult,
     applyMessageAskChoice,
     processingByRoot,
@@ -741,10 +894,31 @@ function AppMain({
     getNode,
     loadOlderMessages,
     sessionLoading,
+    sessionLoadError,
     searchSessions,
     setSessionListFilters,
     wsTargetSessionId,
   } = useSession(authStatus);
+  const [topbarPinnedSessions, setTopbarPinnedSessions] = useState<Record<string, Session>>({});
+
+  const refreshTopbarPinnedSessions = useCallback(() => {
+    fetch(`${API}/api/sessions/topbar-pinned`, { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sessions?: Session[] } | null) => {
+        const next: Record<string, Session> = {};
+        for (const session of data?.sessions ?? []) {
+          if (session?.id) next[session.id] = session;
+        }
+        setTopbarPinnedSessions(next);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    refreshTopbarPinnedSessions();
+  }, [sessionsLoaded, refreshTopbarPinnedSessions]);
+
   const [donationWelcomeMilestone, setDonationWelcomeMilestone] =
     useState<number | null>(null);
   useEffect(() => {
@@ -770,10 +944,7 @@ function AppMain({
   // its bus subscriptions once on mount and bootstraps from REST.
   useEffect(() => {
     sessionRegistry.bind();
-    if (authStatus === "authed" || !authStatus) {
-      void sessionRegistry.bootstrap();
-    }
-  }, [authStatus]);
+  }, []);
 
   const focusedForkId: string | null = currentTree
     ? focusedByRoot[currentTree.id] ?? currentTree.id
@@ -806,7 +977,6 @@ function AppMain({
     focusedForkId && currentTree
       ? getNode(focusedForkId) ?? currentTree
       : currentTree;
-  const focusedSession = currentSession;
   // Ref mirror so callbacks (syncProvider) can read the current session
   // without stale closures or re-triggering effects.
   const currentSessionRef = useRef(currentSession);
@@ -841,40 +1011,62 @@ function AppMain({
     () => `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
 
-  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate";
-  const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
-  >("better-agent-right-panel-states", {});
-
-  /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
+  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen" | "board" | "communications";
+  type RightPanelPatch = {
+    open?: boolean;
+    tab?: RightPanelTab;
+    width?: number;
+    mobileHeight?: number;
+    todosDismissed?: boolean;
+    addAutoReason?: AutoOpenReason;
+    clearAutoReasons?: boolean;
+    sidebarMinimized?: boolean;
+    optimistic?: boolean;
+  };
   const patchRightPanel = useCallback(
-    (
-      sessionId: string,
-      patch: {
-        open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos";
-        addAutoReason?: AutoOpenReason;
-        clearAutoReasons?: boolean;
-      },
-    ) => {
-      setLocalRightPanelStates((prev) => {
-        const current = prev[sessionId] || {};
-        let autoOpenedBy = [...(current.autoOpenedBy ?? [])];
-        if (patch.clearAutoReasons) autoOpenedBy = [];
-        if (patch.addAutoReason && !autoOpenedBy.includes(patch.addAutoReason)) {
-          autoOpenedBy.push(patch.addAutoReason);
-        }
-        const next: typeof current = {
-          ...current,
-          open: patch.open ?? current.open,
-          tab: patch.tab ?? current.tab,
-          todosDismissed: current.todosDismissed,
-          autoOpenedBy: autoOpenedBy.length > 0 ? autoOpenedBy : undefined,
-        };
-        return { ...prev, [sessionId]: next };
-      });
+    (sessionId: string, patch: RightPanelPatch) => {
+      if (patch.optimistic !== false) {
+        applySessionMetadata(sessionId, (session): SessionMetadataPatch => {
+          let autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
+          if (patch.clearAutoReasons) autoOpenedBy = [];
+          if (patch.addAutoReason && !autoOpenedBy.includes(patch.addAutoReason)) {
+            autoOpenedBy.push(patch.addAutoReason);
+          }
+          const next: SessionMetadataPatch = {};
+          if (patch.open !== undefined) next.right_panel_open = patch.open;
+          if (patch.tab !== undefined) next.right_panel_active_tab = patch.tab;
+          if (patch.width !== undefined) next.right_panel_width = patch.width;
+          if (patch.mobileHeight !== undefined) next.right_panel_mobile_height = patch.mobileHeight;
+          if (patch.todosDismissed !== undefined) next.right_panel_todos_dismissed = patch.todosDismissed;
+          if (patch.clearAutoReasons || patch.addAutoReason !== undefined) {
+            next.right_panel_auto_opened_by = autoOpenedBy;
+          }
+          if (patch.sidebarMinimized !== undefined) next.sidebar_minimized = patch.sidebarMinimized;
+          return next;
+        });
+      }
+      const body: Record<string, unknown> = { client_id: clientId };
+      if (patch.open !== undefined) body.open = patch.open;
+      if (patch.tab !== undefined) body.tab = patch.tab;
+      if (patch.width !== undefined) body.width = patch.width;
+      if (patch.mobileHeight !== undefined) body.mobile_height = patch.mobileHeight;
+      if (patch.todosDismissed !== undefined) body.todos_dismissed = patch.todosDismissed;
+      if (patch.clearAutoReasons) body.auto_opened_by = [];
+      if (patch.addAutoReason) {
+        const currentReasons = currentSession?.id === sessionId
+          ? [...(currentSession.right_panel_auto_opened_by ?? [])]
+          : [];
+        if (!currentReasons.includes(patch.addAutoReason)) currentReasons.push(patch.addAutoReason);
+        body.auto_opened_by = currentReasons;
+      }
+      if (patch.sidebarMinimized !== undefined) body.sidebar_minimized = patch.sidebarMinimized;
+      return fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(() => undefined);
     },
-    [setLocalRightPanelStates],
+    [applySessionMetadata, clientId, currentSession],
   );
 
   /** Toggle the right panel. Mobile: flips `mobileRightOpen`
@@ -887,16 +1079,20 @@ function AppMain({
       return;
     }
     if (!currentSession) return;
-    const state = localRightPanelStates[currentSession.id];
-    const currentOpen = state?.open ?? false;
+    const currentOpen = isMobile ? mobileRightOpen : (currentSession.right_panel_open ?? false);
     const closing = currentOpen;
-    const closingTodos = closing && (state?.tab === "todos" || state?.tab === undefined);
+    const closingTodos = closing && currentSession.right_panel_active_tab === "todos";
+    if (isMobile) {
+      setMobileRightOpen(!currentOpen);
+      setMobileRightFullscreen(false);
+      setMobileSidebarOpen(false);
+    }
     patchRightPanel(currentSession.id, {
       open: !currentOpen,
       ...(closingTodos ? { todosDismissed: true } : {}),
-      clearAutoReasons: true, // manual toggle — clear auto-open tracking
+      clearAutoReasons: true,
     });
-  }, [isMobile, currentSession, patchRightPanel, localRightPanelStates]);
+  }, [isMobile, mobileRightOpen, currentSession, patchRightPanel]);
 
   /** Switch to a specific tab AND ensure the panel is open. Marks as auto-opened. */
   const openRightPanelWithTab = useCallback(
@@ -924,10 +1120,9 @@ function AppMain({
     prevTodosRef.current = todos;
     if (hadTodos) return; // already had todos — skip
     if (!todos || todos.length === 0) return; // no todos yet
-    const state = localRightPanelStates[currentSession.id];
-    if (state?.todosDismissed) return; // user closed it — respect
+    if (currentSession.right_panel_todos_dismissed) return;
     openRightPanelWithTab("todos");
-  }, [currentSession, currentSession?.current_todos, localRightPanelStates, openRightPanelWithTab]);
+  }, [currentSession, currentSession?.current_todos, openRightPanelWithTab]);
 
   const lastOpenFilePanelCountBySessionRef = useRef<Record<string, number>>({});
   useEffect(() => {
@@ -968,6 +1163,12 @@ function AppMain({
           return (currentSession.notes?.length ?? 0) > 0;
         case "canvas":
           return false;
+        case "screen":
+          return false;
+        case "board":
+          return false;
+        case "communications":
+          return false;
         case "navigate": {
           return (
             (currentSession.inline_tags?.length ?? 0) > 0 ||
@@ -981,10 +1182,9 @@ function AppMain({
 
   useEffect(() => {
     if (!currentSession) return;
-    const state = localRightPanelStates[currentSession.id];
-    if (!state?.open || !state.autoOpenedBy?.length) return;
+    if (!currentSession.right_panel_open || !currentSession.right_panel_auto_opened_by?.length) return;
 
-    const allGone = state.autoOpenedBy.every((r) => !autoReasonHasContent(r));
+    const allGone = currentSession.right_panel_auto_opened_by.every((r) => !autoReasonHasContent(r));
     if (allGone) {
       patchRightPanel(currentSession.id, { open: false, clearAutoReasons: true });
     }
@@ -994,7 +1194,8 @@ function AppMain({
     currentSession?.inline_tags,
     currentSession?.open_file_panels,
     currentSession?.notes,
-    localRightPanelStates,
+    currentSession?.right_panel_open,
+    currentSession?.right_panel_auto_opened_by,
     patchRightPanel,
     autoReasonHasContent,
   ]);
@@ -1045,9 +1246,44 @@ function AppMain({
     [],
   );
 
+  // Ephemeral PR-created toast shown in the chat panel. Single slot
+  // (latest wins), auto-dismisses after 10s. Fired only on the LIVE
+  // pr-link push (useWebSocket onPrLink), never on replay.
+  const [prToast, setPrToast] = useState<{
+    prNumber?: number;
+    prUrl: string;
+    prRepository?: string;
+    at: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!prToast) return;
+    const t = setTimeout(() => setPrToast(null), 10000);
+    return () => clearTimeout(t);
+  }, [prToast]);
+  const handlePrLink = useCallback(
+    (info: {
+      sessionId?: string;
+      prNumber?: number;
+      prUrl: string;
+      prRepository?: string;
+    }) => {
+      setPrToast({
+        prNumber: info.prNumber,
+        prUrl: info.prUrl,
+        prRepository: info.prRepository,
+        at: Date.now(),
+      });
+    },
+    [],
+  );
+
   // Supervisor prompt modal — shown when enabling supervisor so the user
   // can edit the per-turn custom prompt before activation.
   const [supervisorPromptModalOpen, setSupervisorPromptModalOpen] = useState(false);
+  // "enable" — confirm button reads Enable and activates supervisor.
+  // "edit" — confirm button reads Save; supervisor is already enabled, the
+  // enabled:true write in onConfirm is a no-op and only the prompt updates.
+  const [supervisorPromptModalMode, setSupervisorPromptModalMode] = useState<"enable" | "edit">("enable");
   // INVARIANT: the modal is bound to whichever session was current
   // when it opened — `onConfirm` writes via `currentSession.id` at
   // click time. Force-close on session switch so a stale modal can't
@@ -1091,21 +1327,16 @@ function AppMain({
   }, [currentSession]);
 
   const rightPanelOpenDesktop =
-    (localRightPanelStates[currentSession?.id ?? ""]?.open ?? false) && !!currentSession;
+    (currentSession?.right_panel_open ?? false) && !!currentSession;
   const rightPanelVisible =
     !promptEngState &&
     !fileEditingState &&
     (isMobile ? mobileRightOpen : rightPanelOpenDesktop);
 
-  const fileEditingPersistent = Boolean(
-    currentSession?.working_mode === "file_editing" &&
-    currentSession?.working_mode_meta?.persistent,
-  );
-
   /** Start a file-editor session for a given file path. Idempotent on
    * the backend (resumes an existing one for the same file). After
    * `selectSession`, derivation auto-mounts the overlay. */
-  const startFileEditor = useCallback(async (filePath: string) => {
+  const startFileEditor = useCallback(async (filePath: string): Promise<string | null> => {
     const cwd = currentSession?.cwd || "";
     const model = currentSession?.model || "";
     if (!model) {
@@ -1143,8 +1374,10 @@ function AppMain({
       await selectSession(fileEditSid);
       setViewingFile(null);
       setProjectSettingsCwd(null);
+      return fileEditSid;
     } catch (e) {
       alert(t("app.fileEditorStartFailed") + (e instanceof Error ? e.message : e));
+      return null;
     }
   }, [currentSession, selectSession, t]);
 
@@ -1179,31 +1412,9 @@ function AppMain({
    * Cleared on next open. */
   const [promptEngStartError, setPromptEngStartError] = useState<string>("");
 
-  const handleRearrangerUpdate = useCallback(
-    (u: RearrangerUpdate) => {
-      updateRearranger(u.appSessionId, {
-        tree: u.tree,
-        rearranger_session_id: u.rearrangerSessionId,
-        last_message_count: u.lastMessageCount,
-        rearranger_stats: u.rearrangerStats,
-        token_usage_total: u.tokenUsageTotal,
-        token_usage_last: u.tokenUsageLast,
-      });
-    },
-    [updateRearranger]
-  );
-  const handleRearrangerState = useCallback(
-    (s: RearrangerStateUpdate) => {
-      updateRearranger(s.appSessionId, { enabled: s.enabled });
-    },
-    [updateRearranger]
-  );
-
   const initialOfflineState = useMemo(() => {
-    const pendingQueueText: Record<string, string> = {};
+    const pendingQueueDrafts: Record<string, PendingQueueDraft[]> = {};
     const pendingBySession: Record<string, ChatMessage[]> = {};
-    const pendingImages: Record<string, PastedImage[]> = {};
-    const pendingFiles: Record<string, FileAttachment[]> = {};
     try {
       const raw = localStorage.getItem("better_agent_offline_queue");
       if (raw) {
@@ -1223,24 +1434,28 @@ function AppMain({
             }];
             
             if (entry.type !== "create_session" && entry.sendMode === "queue") {
-              pendingQueueText[sessionId] = entry.prompt;
-              if (entry.images?.length) {
-                pendingImages[sessionId] = entry.images.map(img => ({
-                  mediaType: img.media_type,
-                  base64: img.data,
-                  dataUrl: `data:${img.media_type};base64,${img.data}`,
-                  file: new File([], "image"), // dummy file for typing
-                }));
-              }
-              if (entry.files?.length) {
-                pendingFiles[sessionId] = entry.files.map(f => ({
-                  name: f.name,
-                  mediaType: f.media_type,
-                  base64: f.data,
-                  size: f.size,
-                  file: new File([], f.name), // dummy file
-                }));
-              }
+              pendingQueueDrafts[sessionId] = [...(pendingQueueDrafts[sessionId] ?? []), {
+                id: entry.clientId,
+                clientId: entry.clientId,
+                preview: entry.prompt,
+                ...(entry.images?.length ? {
+                  images: entry.images.map(img => ({
+                    mediaType: img.media_type,
+                    base64: img.data,
+                    dataUrl: `data:${img.media_type};base64,${img.data}`,
+                    file: new File([], "image"), // dummy file for typing
+                  })),
+                } : {}),
+                ...(entry.files?.length ? {
+                  files: entry.files.map(f => ({
+                    name: f.name,
+                    mediaType: f.media_type,
+                    base64: f.data,
+                    size: f.size,
+                    file: new File([], f.name), // dummy file
+                  })),
+                } : {}),
+              }];
             }
           }
         }
@@ -1248,7 +1463,7 @@ function AppMain({
     } catch (err) {
       void err;
     }
-    return { pendingQueueText, pendingBySession, pendingImages, pendingFiles };
+    return { pendingQueueDrafts, pendingBySession };
   }, []);
 
   // Optimistic user bubbles, keyed by app_session_id. Declared up here
@@ -1276,6 +1491,23 @@ function AppMain({
     },
     []
   );
+  const fileEditingPersistent = Boolean(
+    currentSession?.working_mode === "file_editing" &&
+    currentSession?.working_mode_meta?.persistent,
+  );
+  const emptyFileEditingHasUserPrompt = Boolean(
+    currentSession?.messages?.some((m) => m.role === "user" && !m.file_discussion_id) ||
+    (
+      currentSession
+        ? (pendingBySession[currentSession.id] ?? []).some((m) => m.role === "user" && !m.file_discussion_id)
+        : false
+    )
+  );
+  const emptyFileEditingSession = Boolean(
+    currentSession?.working_mode === "file_editing" &&
+    ((currentSession.working_mode_meta?.file_paths ?? []).length === 0) &&
+    !emptyFileEditingHasUserPrompt
+  );
   const removePendingByClientId = useCallback((pendingClientId: string) => {
     setPendingBySession((all) => {
       let changed = false;
@@ -1292,6 +1524,44 @@ function AppMain({
       return changed ? next : all;
     });
   }, []);
+  const stampPendingLifecycleId = useCallback(
+    (pendingClientId: string, lifecycleMsgId: string) => {
+      setPendingBySession((all) => {
+        let changed = false;
+        const next: typeof all = {};
+        for (const [sid, msgs] of Object.entries(all)) {
+          next[sid] = msgs.map((m) => {
+            if (m.id !== pendingClientId || m.lifecycle_msg_id === lifecycleMsgId) return m;
+            changed = true;
+            return { ...m, lifecycle_msg_id: lifecycleMsgId };
+          });
+        }
+        return changed ? next : all;
+      });
+    },
+    []
+  );
+  // A prompt whose backend persist FAILED never gets a
+  // user_message_persisted ack, so its pending entry is never cleared —
+  // mark it failed in place so the user sees the prompt didn't go
+  // through instead of a perpetual "sending" bubble.
+  const markPendingFailed = useCallback(
+    (lifecycleMsgId: string, errorText?: string) => {
+      setPendingBySession((all) => {
+        let changed = false;
+        const next: typeof all = {};
+        for (const [sid, msgs] of Object.entries(all)) {
+          next[sid] = msgs.map((m) => {
+            if (m.lifecycle_msg_id !== lifecycleMsgId || m.status === "error") return m;
+            changed = true;
+            return { ...m, status: "error" as const, errorText };
+          });
+        }
+        return changed ? next : all;
+      });
+    },
+    []
+  );
   const removePendingForSessionByClientId = useCallback(
     (sessionId: string, pendingClientId: string) => {
       setPendingForSession(sessionId, (prev) =>
@@ -1300,49 +1570,61 @@ function AppMain({
     },
     [setPendingForSession]
   );
-  // Textbox-merge slot: the full text of the most recent in-flight send
-  // per session, set synchronously in handleSend BEFORE the backend acks
-  // queued vs immediate. The queue banner (`queuedBySession`) is a pure
-  // backend mirror — set only on `prompt_queued`. This slot bridges the
-  // gap so a fast double-send can merge against the previous text even
-  // before the backend ack arrives. Cleared on `prompt_queued` (text
-  // moves into `queuedBySession.preview`) or `user_message_persisted`
-  // (immediate dispatch, no merge needed).
-  const [pendingQueueTextBySession, setPendingQueueTextBySession] = useState<
-    Record<string, string>
-  >(initialOfflineState.pendingQueueText);
-  // Ref mirror so the WS closure handlers can read the latest map
-  // without re-subscribing on every keystroke. Ref must be updated
-  // SYNCHRONOUSLY at every write site — a `useEffect`-based mirror
-  // races against the network: a fast `prompt_queued` arriving in
-  // the same tick as the corresponding `setState` would see the
-  // stale ref (effect runs after commit, network roundtrip can
-  // beat it on localhost). Helper below enforces ref-then-state
-  // ordering at every mutation site.
-  const pendingQueueTextRef = useRef<Record<string, string>>(initialOfflineState.pendingQueueText);
-  const writePendingQueueText = useCallback(
-    (sid: string, value: string | null) => {
-      const prev = pendingQueueTextRef.current;
-      let next: Record<string, string>;
-      if (value === null) {
-        if (!(sid in prev)) return;
-        const { [sid]: _drop, ...rest } = prev;
-        void _drop;
-        next = rest;
-      } else {
-        if (prev[sid] === value) return;
-        next = { ...prev, [sid]: value };
-      }
-      pendingQueueTextRef.current = next;
-      setPendingQueueTextBySession(next);
+  // Pre-ack queue previews are ordered by send time and matched to backend
+  // acks by client_id. The backend owns the real queue; this preserves full
+  // text/attachments until `queued_prompts` snapshots catch up.
+  const pendingQueueDraftsRef = useRef<Record<string, PendingQueueDraft[]>>(initialOfflineState.pendingQueueDrafts);
+  const metadataUnseenQueuedIdsRef = useRef<Record<string, Set<string>>>({});
+  // Catch the restart regression's other half: a queue-mode offline backlog
+  // entry that survived (was never acked) and is re-injected into the
+  // composer/pending surfaces on this mount. Logs once per mount. No content
+  // — sid + text length only.
+  useEffect(() => {
+    for (const [sid, drafts] of Object.entries(initialOfflineState.pendingQueueDrafts)) {
+      logDurable("queue-diag", "offline_queue_text_reinjected_on_mount", {
+        sid,
+        count: drafts.length,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const appendPendingQueueDraft = useCallback(
+    (sid: string, draft: PendingQueueDraft) => {
+      const prev = pendingQueueDraftsRef.current;
+      pendingQueueDraftsRef.current = {
+        ...prev,
+        [sid]: [...(prev[sid] ?? []), draft],
+      };
     },
     [],
   );
-  // Stash images/files sent with an in-flight queued prompt so the banner can
-  // display thumbnails. Cleared when prompt_queued ack arrives (they
-  // move into queuedBySession) or on user_message_persisted / cancel.
-  const pendingQueueImagesRef = useRef<Record<string, PastedImage[]>>(initialOfflineState.pendingImages);
-  const pendingQueueFilesRef = useRef<Record<string, FileAttachment[]>>(initialOfflineState.pendingFiles);
+  const takePendingQueueDraft = useCallback(
+    (sid: string, clientId: string | null | undefined) => {
+      const drafts = pendingQueueDraftsRef.current[sid] ?? [];
+      if (drafts.length === 0) return null;
+      const index = clientId ? drafts.findIndex((draft) => draft.clientId === clientId) : 0;
+      const resolvedIndex = index >= 0 ? index : 0;
+      const [draft] = drafts.slice(resolvedIndex, resolvedIndex + 1);
+      const nextDrafts = drafts.filter((_, i) => i !== resolvedIndex);
+      const prev = pendingQueueDraftsRef.current;
+      if (nextDrafts.length === 0) {
+        const { [sid]: _drop, ...rest } = prev;
+        void _drop;
+        pendingQueueDraftsRef.current = rest;
+      } else {
+        pendingQueueDraftsRef.current = { ...prev, [sid]: nextDrafts };
+      }
+      return draft ?? null;
+    },
+    [],
+  );
+  const clearPendingQueueDrafts = useCallback((sid: string) => {
+    const prev = pendingQueueDraftsRef.current;
+    if (!(sid in prev)) return;
+    const { [sid]: _drop, ...rest } = prev;
+    void _drop;
+    pendingQueueDraftsRef.current = rest;
+  }, []);
   const offlineQueue = useOfflineQueue();
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
@@ -1369,6 +1651,7 @@ function AppMain({
   );
   const handleUserMessagePersisted = useCallback(
     (sessionId: string, userMessage: ChatMessage) => {
+      const userTimestamp = userMessage.timestamp || new Date().toISOString();
       if (ackedRef.current.has(userMessage.id)) return;
       logPromptSend("user_message_persisted", {
         app_session_id: sessionId,
@@ -1377,27 +1660,20 @@ function AppMain({
         content_length: userMessage.content.length,
       });
       ackedRef.current.add(userMessage.id);
+      applySessionMetadata(sessionId, (session) => ({
+        // The backend sidebar summary derives these fields from persisted
+        // messages, but the local sidebar/tabs need the same sort keys before
+        // the follow-up refetch/WS projection arrives.
+        updated_at: userTimestamp,
+        last_user_prompt_at: userTimestamp,
+        message_count: Math.max(
+          (session.message_count ?? session.messages?.length ?? 0) + 1,
+          session.messages?.length ?? 0,
+        ),
+      }));
       addMessages(sessionId, [userMessage]);
-      // A queued prompt being persisted means it was actually sent to the
-      // agent — clear the queued banner for this session.
-      setQueuedForSession(sessionId, null);
-      // The textbox-merge slot is the pre-ack mirror for this very prompt
-      // — once it lands as a persisted user message, the slot has served
-      // its purpose. Clear it so a later send doesn't re-merge against
-      // text that's already in the timeline.
-      writePendingQueueText(sessionId, null);
-      // Clear stashed queue attachments for this session.
-      if (sessionId in pendingQueueImagesRef.current) {
-        const { [sessionId]: _drop, ...rest } = pendingQueueImagesRef.current;
-        void _drop;
-        pendingQueueImagesRef.current = rest;
-      }
-      if (sessionId in pendingQueueFilesRef.current) {
-        const { [sessionId]: _drop, ...rest } = pendingQueueFilesRef.current;
-        void _drop;
-        pendingQueueFilesRef.current = rest;
-      }
       const cid = userMessage.client_id ?? null;
+      takePendingQueueDraft(sessionId, cid);
       if (cid) {
         ackedClientIdsRef.current.add(cid);
         offlineDispatchedRef.current.delete(cid);
@@ -1405,6 +1681,14 @@ function AppMain({
       }
       if (cid) {
         removePendingForSessionByClientId(sessionId, cid);
+        setQueuedForSession(sessionId, (prev) => {
+          const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
+          return prev.filter((item) => {
+            const keep = item.id !== cid && item.clientId !== cid;
+            if (!keep) metadataUnseenIds?.delete(item.id);
+            return keep;
+          });
+        }, "user_message_persisted");
       } else {
         // No client_id (legacy): clear all pending for the acked session.
         setPendingBySession((all) => {
@@ -1422,7 +1706,7 @@ function AppMain({
       // Refresh sidebar so timestamps + sort order update immediately.
       refreshSessions();
     },
-    [addMessages, refreshSessions, writePendingQueueText, removeAckedOfflineAction, removePendingForSessionByClientId]
+    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
   );
   const handleSteerPromptPersisted = useCallback(
     (_sessionId: string, steerClientId?: string | null) => {
@@ -1466,6 +1750,11 @@ function AppMain({
   const handleProjectsChanged = useCallback(() => {
     refreshProjectsRef.current();
   }, []);
+  const refreshTeamWorkersRef = useRef<() => void>(() => {});
+  const handleWorkersChanged = useCallback(() => {
+    refreshSessions();
+    refreshTeamWorkersRef.current();
+  }, [refreshSessions]);
 
   const [projectUpdatesCounts, setProjectUpdatesCounts] = useState<Record<string, number>>({});
   const setProjectUpdatesCount = useCallback((projectId: string, count: number) => {
@@ -1479,23 +1768,23 @@ function AppMain({
     sendPromoteQueued,
     sendCancelQueued,
     sendUpdateQueued,
+    sendBeginQueuedEdit,
+    sendFinishQueuedEdit,
     events,
-    traceSteps,
     isStreaming,
     isStopping,
     streamingLoadPhase,
     lastResult,
     streamingAppSessionId,
   } = useWebSocket(WS_URL, {
-    onRearrangerUpdate: handleRearrangerUpdate,
-    onRearrangerState: handleRearrangerState,
     currentAppSessionId: wsTargetSessionId,
-    // Subscribe to every pane in the open tree. The focused pane is
-    // already covered by `currentAppSessionId`; this list carries the
-    // rest. useWebSocket de-duplicates and diffs against the previous
-    // set so subscribe/unsubscribe frames only fire on actual changes.
-    additionalAppSessionIds: allOpenSessionIds().filter(
-      (id) => id !== focusedSession?.id
+    // Subscribe to every pane in the open tree. `currentAppSessionId`
+    // covers the primary transport target; this list carries the rest.
+    // useWebSocket de-duplicates and diffs against the previous set so
+    // subscribe/unsubscribe frames only fire on actual changes.
+    additionalAppSessionIds: additionalSessionSubscriptionIds(
+      allOpenSessionIds(),
+      wsTargetSessionId,
     ),
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
@@ -1512,6 +1801,9 @@ function AppMain({
     onMessageRecoveringChanged: applyMessageRecovering,
     onMessageRetryingChanged: applyMessageRetrying,
     onMessageAutoRetryChanged: applyMessageAutoRetry,
+    onMessageContentUpdated: applyMessageContent,
+    onMessageContinuationChanged: applyMessageContinuation,
+    onMessageRunMetaChanged: applyMessageRunMeta,
     onMessageAskResultChanged: applyMessageAskResult,
     onMessageAskChoiceChanged: applyMessageAskChoice,
     onSessionProcessing: applySessionProcessing,
@@ -1526,19 +1818,57 @@ function AppMain({
       // draft_input_seq is not newer than the one we already hold (e.g. the
       // pre-send text broadcast arriving after the clear-on-send). Otherwise
       // it would resurrect just-sent text into the composer.
-      const storedSeq = getNode(sessionId)?.draft_input_seq;
+      const existingNode = getNode(sessionId);
+      const storedSeq = existingNode?.draft_input_seq;
       const toApply = filterStaleDraftPatch(
         patch,
         storedSeq,
         draftDebounceRef.current.has(sessionId),
       );
       applySessionMetadata(sessionId, toApply);
+      setOpenSessionRecords((prev) => {
+        const session = existingNode || sessions.find((s) => s.id === sessionId) || prev[sessionId];
+        if (!session) return prev;
+        const current = prev[sessionId];
+        const nextSession = {
+          ...session,
+          ...current,
+          ...toApply,
+        } as Session;
+        if (current && Object.keys(toApply).every((key) =>
+          current[key as keyof Session] === nextSession[key as keyof Session]
+        )) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [sessionId]: nextSession,
+        };
+      });
+      if ("topbar_pinned" in toApply) {
+        const nextPinned = Boolean(toApply.topbar_pinned);
+        const session = existingNode;
+        setTopbarPinnedSessions((prev) => {
+          const next = { ...prev };
+          if (nextPinned && session) {
+            next[sessionId] = {
+              ...session,
+              topbar_pinned: true,
+              topbar_pinned_at: toApply.topbar_pinned_at ?? session.topbar_pinned_at ?? null,
+            };
+          }
+          else delete next[sessionId];
+          return next;
+        });
+        if (nextPinned && !session) refreshTopbarPinnedSessions();
+      }
       if ("queued_prompts" in patch) {
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
-        const first = queuedPrompts[0] ?? null;
-        setQueuedForSession(sessionId, first
-          ? { id: first.id, preview: first.content }
-          : null);
+        setQueuedForSession(
+          sessionId,
+          (prev) => mergeQueuedSnapshotForSession(sessionId, prev, queuedPrompts),
+          "session_metadata_updated",
+        );
       }
     },
     onSessionForked: appendFork,
@@ -1549,12 +1879,13 @@ function AppMain({
     onProjectUpdatesChanged: (data) => {
       setProjectUpdatesCount(data.project_id, data.unseen_count);
     },
-    onWorkersChanged: refreshSessions,
+    onWorkersChanged: handleWorkersChanged,
     onSessionOrganizationChanged: refreshSessions,
     onProjectMappingsChanged: () => {
       window.dispatchEvent(new CustomEvent("project_mappings_changed"));
     },
     onSupervisorEvent: handleSupervisorEvent,
+    onPrLink: handlePrLink,
     onPromptQueued: (data) => {
       logPromptSend("app_prompt_queued", {
         app_session_id: data.app_session_id,
@@ -1562,33 +1893,19 @@ function AppMain({
         client_id: data.client_id ?? null,
         send_mode: data.send_mode,
         queue_position: data.queue_position,
-        pending_queue_text: data.app_session_id in pendingQueueTextRef.current,
+        pending_queue_drafts: pendingQueueDraftsRef.current[data.app_session_id]?.length ?? 0,
       });
-      // The backend just confirmed the queue entry. Prefer the full
-      // text we stashed at send time over the backend's truncated
-      // prompt_preview, then drop the textbox-merge slot — the banner
-      // now owns the canonical preview.
-      const fullText = pendingQueueTextRef.current[data.app_session_id];
-      const queuedImages = pendingQueueImagesRef.current[data.app_session_id];
-      const queuedFiles = pendingQueueFilesRef.current[data.app_session_id];
-      setQueuedForSession(data.app_session_id, {
+      const pendingDraft = takePendingQueueDraft(data.app_session_id, data.client_id);
+      const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[data.app_session_id] ?? new Set<string>();
+      metadataUnseenIds.add(data.queued_id);
+      metadataUnseenQueuedIdsRef.current[data.app_session_id] = metadataUnseenIds;
+      appendQueuedForSession(data.app_session_id, {
         id: data.queued_id,
-        preview: fullText ?? data.prompt_preview,
-        ...(queuedImages?.length ? { images: queuedImages } : {}),
-        ...(queuedFiles?.length ? { files: queuedFiles } : {}),
-      });
-      writePendingQueueText(data.app_session_id, null);
-      // Clear stashed attachments — they've moved into queuedBySession.
-      if (data.app_session_id in pendingQueueImagesRef.current) {
-        const { [data.app_session_id]: _drop, ...rest } = pendingQueueImagesRef.current;
-        void _drop;
-        pendingQueueImagesRef.current = rest;
-      }
-      if (data.app_session_id in pendingQueueFilesRef.current) {
-        const { [data.app_session_id]: _drop, ...rest } = pendingQueueFilesRef.current;
-        void _drop;
-        pendingQueueFilesRef.current = rest;
-      }
+        clientId: data.client_id ?? null,
+        preview: pendingDraft?.preview ?? data.prompt_preview,
+        ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
+        ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
+      }, "prompt_queued");
       // Remove the optimistic pending message bubble — the queued banner
       // on top of the input area is the single surface for queued state.
       // The real message will appear via user_message_persisted when the
@@ -1619,6 +1936,10 @@ function AppMain({
             removeAckedOfflineAction(_appSessionId, d.client_id);
             if (d.kind === "queued_behind") {
               removePendingByClientId(d.client_id);
+            } else if (d.lifecycle_msg_id) {
+              // Bind the optimistic pending entry to its lifecycle id so
+              // a later user_message_failed can mark it failed in place.
+              stampPendingLifecycleId(d.client_id, d.lifecycle_msg_id);
             }
           }
           break;
@@ -1633,26 +1954,35 @@ function AppMain({
           break;
         case "user_message_failed":
           patchMessageStatus(_appSessionId, d.lifecycle_msg_id, "error", d.error ?? d.reason);
+          markPendingFailed(d.lifecycle_msg_id, d.error ?? d.reason);
           break;
       }
     },
-    onTurnStarted: (appSessionId: string) => {
-      setQueuedForSession(appSessionId, null);
-    },
+    onTurnStarted: () => {},
     onQueueConsumed: (data) => {
-      setQueuedForSession(data.app_session_id, null);
+      setQueuedForSession(data.app_session_id, (prev) => {
+        if (!data.queued_id) return [];
+        return prev.filter((item) => item.id !== data.queued_id);
+      }, "queue_consumed");
     },
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
   });
+  const currentStopProgress = useOpProgress(
+    currentSession ? stopSessionOpId(currentSession.id) : "",
+  );
 
   const refreshSessionInventory = useCallback(() => {
     refreshSessions();
-    void sessionRegistry.bootstrap();
   }, [refreshSessions]);
 
+  const sawInitialConnectionRef = useRef(false);
   useEffect(() => {
     if (!connected) return;
+    if (!sawInitialConnectionRef.current) {
+      sawInitialConnectionRef.current = true;
+      return;
+    }
     refreshSessionInventory();
   }, [connected, refreshSessionInventory]);
 
@@ -1692,6 +2022,8 @@ function AppMain({
     [providers, defaultProviderId],
   );
   const currentSessionCanSteer = !!currentProvider?.supports_steering;
+  const currentSessionCanFork =
+    sessionHasForkSource(currentSession) && (currentProvider?.supports_fork ?? true);
   const [, setProviderName] = useState("");
   const syncProvider = useCallback(async () => {
     try {
@@ -1824,9 +2156,22 @@ function AppMain({
     if (!connected || offlineFlushRunningRef.current) return;
     offlineFlushRunningRef.current = true;
     void (async () => {
+      // Sessions whose queued `create_session` PERMANENTLY failed this pass.
+      // Prompts that target them are skipped (kept in the durable backlog,
+      // retried next tick) instead of racing a session that does not exist —
+      // so one poison create can't strand or hard-fail unrelated work.
+      const failedCreateSessionIds = new Set<string>();
       try {
         for (const entry of offlineQueue.getAll()) {
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
+          if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
+            logPromptSend("offline_flush_skip_dependent", {
+              type: entry.type,
+              app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
+              client_id: entry.clientId,
+            }, "warn");
+            continue;
+          }
           logPromptSend("offline_flush_attempt", {
             type: entry.type,
             app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
@@ -1835,22 +2180,64 @@ function AppMain({
           });
           if (entry.type === "create_session") {
             const queued = entry.session;
-            await createSession(
-              queued.name,
-              queued.model,
-              queued.cwd,
-              queued.orchestration_mode,
-              queued.browser_harness_enabled,
-              queued.provider_id,
-              queued.browser_harness_headless,
-              false,
-              undefined,
-              queued.node_id,
-              queued.reasoning_effort,
-              queued.id,
-              entry.capabilityContexts,
-              queued.folder_id,
-            );
+            try {
+              await createSession({
+                name: queued.name,
+                model: queued.model,
+                cwd: queued.cwd,
+                orchestrationMode: queued.orchestration_mode,
+                browserHarnessEnabled: queued.browser_harness_enabled,
+                providerId: queued.provider_id,
+                browserHarnessHeadless: queued.browser_harness_headless,
+                nodeId: queued.node_id,
+                reasoningEffort: queued.reasoning_effort,
+                permission: queued.permission,
+                clientSessionId: queued.id,
+                capabilityContexts: entry.capabilityContexts,
+                folderId: queued.folder_id,
+              });
+            } catch (createErr) {
+              // Per-entry error handling so one queued create can't strand the
+              // whole backlog (the loop's outer catch would abort every later
+              // action too). The durable backlog entry is KEPT in every branch
+              // — nothing is dropped, so no user intent is lost.
+              const outcome = outcomeForCreateError(createErr, queued.id);
+              logPromptSend("offline_flush_create_error", {
+                type: entry.type,
+                app_session_id: queued.id,
+                client_id: entry.clientId,
+                kind: outcome.stop ? "transient" : "permanent",
+                error: createErr instanceof Error ? createErr.message : String(createErr),
+              }, outcome.stop ? "warn" : "error");
+              if (outcome.stop) {
+                // Transient (network/abort/5xx): pause the entire drain and
+                // retry the whole backlog on the next tick. Returning here
+                // preserves strict action order — we never dispatch a later
+                // action ahead of this earlier one that is merely waiting on
+                // the network.
+                return;
+              }
+              // Permanent (4xx the backend rejected on its merits): surface it
+              // on the optimistic bubble instead of silently dropping it, and
+              // skip prompts that depend on this session for the rest of this
+              // pass. The entry stays in the durable backlog so a self-healing
+              // state (e.g. team-not-ready right after boot) recovers on a
+              // later tick.
+              failedCreateSessionIds.add(queued.id);
+              setPendingForSession(queued.id, (prev) =>
+                prev.map((m) =>
+                  m.id === entry.clientId
+                    ? {
+                        ...m,
+                        status: "error" as const,
+                        errorText:
+                          createErr instanceof Error ? createErr.message : String(createErr),
+                      }
+                    : m
+                ),
+              );
+              continue;
+            }
             const images = entry.images?.length ? entry.images : undefined;
             const offlineFiles = entry.files?.length ? entry.files : undefined;
             if (entry.prompt) {
@@ -1925,6 +2312,14 @@ function AppMain({
             app_session_id: entry.sessionId,
             client_id: entry.clientId,
           });
+          // Durable: a queue-mode entry re-dispatched on reconnect is the
+          // restart regression's re-send path. Capture sid/client/mode so a
+          // recurrence shows whether the prompt was re-sent after restart.
+          logDurable("queue-diag", "offline_flush_redispatched", {
+            sid: entry.sessionId,
+            client_id: entry.clientId,
+            send_mode: entry.sendMode ?? null,
+          });
           setPendingForSession(entry.sessionId, (prev) =>
             prev.map((m) =>
               m.id === entry.clientId ? { ...m, status: "sending" as const } : m
@@ -1974,52 +2369,186 @@ function AppMain({
   const [selectedProjectNodeId, setSelectedProjectNodeId] = useState(() => {
     return localStorage.getItem("better-agent-selected-project-node") || "primary";
   });
-  type QueuedBannerState = { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number };
+  const [teamWorkersBySession, setTeamWorkersBySession] = useState<Record<string, WorkerInfo[]>>({});
+  const refreshTeamWorkers = useCallback(async () => {
+    const targetCwd = currentSession?.cwd || selectedProjectPath || cwd || "";
+    if (!targetCwd) {
+      setTeamWorkersBySession({});
+      return;
+    }
+    try {
+      const response = await fetch(
+        `${extBackendBase("team")}/workers?cwd=${encodeURIComponent(targetCwd)}`,
+        { credentials: "include" },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { teams?: Array<{ root_session_id?: unknown; workers?: unknown }> };
+      const next: Record<string, WorkerInfo[]> = {};
+      for (const team of data.teams ?? []) {
+        if (typeof team.root_session_id !== "string") continue;
+        if (!Array.isArray(team.workers)) continue;
+        const boundWorkers = team.workers.filter((worker): worker is WorkerInfo => {
+          return Boolean(
+            worker &&
+            typeof worker === "object" &&
+            "agent_session_id" in worker &&
+            (worker as WorkerInfo).team_binding === "bound",
+          );
+        });
+        next[team.root_session_id] = boundWorkers;
+      }
+      setTeamWorkersBySession(next);
+    } catch {
+      setTeamWorkersBySession({});
+    }
+  }, [currentSession?.cwd, selectedProjectPath, cwd]);
+  useEffect(() => {
+    refreshTeamWorkersRef.current = () => {
+      void refreshTeamWorkers();
+    };
+    return () => {
+      refreshTeamWorkersRef.current = () => {};
+    };
+  }, [refreshTeamWorkers]);
+  useEffect(() => {
+    void refreshTeamWorkers();
+  }, [refreshTeamWorkers]);
+  const updateWorkerCreationPolicy = useCallback(async (
+    sessionId: string,
+    policy: WorkerCreationPolicy,
+  ) => {
+    const response = await fetch(
+      `${API}/api/sessions/${encodeURIComponent(sessionId)}/worker_creation_policy`,
+      {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ worker_creation_policy: policy }),
+      },
+    );
+    if (response.ok) refreshSessions();
+  }, [refreshSessions]);
   const [queuedBySession, setQueuedBySession] = useState<
-    Record<string, QueuedBannerState>
+    Record<string, QueuedBannerState[] | null>
   >({});
-  const persistedQueuedPrompt = useMemo((): QueuedBannerState | null => {
-    const first = currentSession?.queued_prompts?.[0];
-    return first ? { id: first.id, preview: first.content, imagesCount: first.images_count, filesCount: first.files_count } : null;
+  const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
+    return visibleQueuedPromptBanners(currentSession?.queued_prompts);
   }, [currentSession?.queued_prompts]);
-  const queuedPrompt = currentSession
+  const queuedPrompts = currentSession
     ? (currentSession.id in queuedBySession
-        ? queuedBySession[currentSession.id] ?? null
-        : persistedQueuedPrompt)
-    : null;
+        ? queuedBySession[currentSession.id] ?? []
+        : persistedQueuedPrompts)
+    : [];
+  const queuedPrompt = queuedPrompts[0] ?? null;
+  // Smoking-gun detector: backend says a prompt is queued (REST
+  // queued_prompts), but a local null in queuedBySession masks the banner so
+  // the user sees an empty queue. Fires only on transition (effect deps), not
+  // every render. This is the exact signature of the restart regression.
+  const sid = currentSession?.id ?? null;
+  const maskedQueueId = sid && sid in queuedBySession
+    && queuedBySession[sid] == null && persistedQueuedPrompts.length > 0
+    ? persistedQueuedPrompts[0].id : null;
+  useEffect(() => {
+    if (!sid || !maskedQueueId) return;
+    logDurable("queue-diag", "banner_masked_by_local_null", {
+      sid,
+      backend_queued_id: maskedQueueId,
+    });
+  }, [sid, maskedQueueId]);
   const setQueuedForSession = useCallback(
     (
       sessionId: string,
       value:
-        | QueuedBannerState
+        | QueuedBannerState[]
         | null
-        | ((prev: QueuedBannerState | null) => QueuedBannerState | null)
+        | ((prev: QueuedBannerState[]) => QueuedBannerState[] | null),
+      reason: string,
     ) => {
-      setQueuedBySession((all): Record<string, QueuedBannerState> => {
-        const current = all[sessionId] ?? null;
+      setQueuedBySession((all): Record<string, QueuedBannerState[] | null> => {
+        const current = all[sessionId] ?? [];
         const resolved = typeof value === "function" ? value(current) : value;
+        logDurable("queue-diag", "set_queued_banner", {
+          sid: sessionId,
+          reason,
+          from_ids: current.map((item) => item.id),
+          to_ids: resolved?.map((item) => item.id) ?? [],
+          to_null: !resolved,
+        });
         if (!resolved) {
           if (all[sessionId] === null) return all;
-          return { ...all, [sessionId]: null } as Record<string, QueuedBannerState>;
+          return { ...all, [sessionId]: null };
         }
         return { ...all, [sessionId]: resolved };
       });
     },
     [],
   );
+  const mergeQueuedSnapshotForSession = useCallback((
+    sessionId: string,
+    current: QueuedBannerState[],
+    queuedPrompts: QueuedPrompt[],
+  ): QueuedBannerState[] => {
+    const snapshot = visibleQueuedPromptBanners(queuedPrompts);
+    const snapshotIds = new Set(snapshot.map((item) => item.id));
+    const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
+    if (!metadataUnseenIds || metadataUnseenIds.size === 0) return snapshot;
+    for (const id of snapshotIds) metadataUnseenIds.delete(id);
+    if (metadataUnseenIds.size === 0) {
+      delete metadataUnseenQueuedIdsRef.current[sessionId];
+      return snapshot;
+    }
+    const preserved = current.filter(
+      (item) => metadataUnseenIds.has(item.id) && !snapshotIds.has(item.id),
+    );
+    for (const item of preserved) metadataUnseenIds.delete(item.id);
+    if (metadataUnseenIds.size === 0) {
+      delete metadataUnseenQueuedIdsRef.current[sessionId];
+    }
+    return [...snapshot, ...preserved];
+  }, []);
+  const appendQueuedForSession = useCallback(
+    (sessionId: string, item: QueuedBannerState, reason: string) => {
+      const persistedBase = visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
+      setQueuedForSession(sessionId, (prev) => {
+        const base = prev.length > 0 ? prev : persistedBase;
+        const existingIndex = base.findIndex((queued) => queued.id === item.id);
+        if (existingIndex >= 0) {
+          return base.map((queued, index) => index === existingIndex ? item : queued);
+        }
+        return [...base, item];
+      }, reason);
+    },
+    [getNode, setQueuedForSession],
+  );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
+  const [userDisplayName, setUserDisplayName] = useState<string | null>(null);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
-  // tabs bar can be hidden and its order chosen from Settings.
+  // tabs visibility and order chosen from Settings stay live.
   const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
   const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
-    const apply = (d: { sessions_tabs_sort?: unknown; sessions_tabs_visible?: unknown }) => {
+    const apply = (d: {
+      language?: unknown;
+      sessions_tabs_sort?: unknown;
+      sessions_tabs_visible?: unknown;
+      user_display_name?: unknown;
+    }) => {
+      if (typeof d.language === "string" && d.language !== i18n.language) {
+        i18n.changeLanguage(d.language);
+      }
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
       if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
+      if (typeof d.user_display_name === "string") setUserDisplayName(d.user_display_name);
+      if (d.user_display_name === null) setUserDisplayName(authedUser?.username ?? null);
     };
     const off = eventBus.subscribe("user_prefs_changed", (p) => apply(p as Record<string, unknown>));
-    return off;
-  }, []);
+    const onWindowPrefs = (event: Event) => apply((event as CustomEvent).detail as Record<string, unknown>);
+    window.addEventListener("user_prefs_changed", onWindowPrefs);
+    return () => {
+      off();
+      window.removeEventListener("user_prefs_changed", onWindowPrefs);
+    };
+  }, [authedUser?.username]);
   const firstRunWizardOpenedRef = useRef(false);
   // Load user prefs (language + shortcuts) from backend after auth
   useEffect(() => {
@@ -2039,6 +2568,11 @@ function AppMain({
         if (typeof data.sessions_tabs_visible === "boolean") {
           setSessionTabsVisible(data.sessions_tabs_visible);
         }
+        if (typeof data.user_display_name === "string") {
+          setUserDisplayName(data.user_display_name);
+        } else {
+          setUserDisplayName(authedUser?.username ?? null);
+        }
         if (data.first_run_wizard_done === false && !firstRunWizardOpenedRef.current) {
           firstRunWizardOpenedRef.current = true;
           navigate("/settings");
@@ -2051,7 +2585,47 @@ function AppMain({
         );
       })
       .catch(() => {});
-  }, [authStatus, navigate]);
+  }, [authStatus, navigate, authedUser?.username]);
+  // UI navigation-restore state (selected project + remembered sessions).
+  // Backend is the source of truth; mount GET reconciles the local cache
+  // (seeding the backend from legacy localStorage on first upgrade) and, on
+  // cold load, restores the last-selected project. WS only refreshes the
+  // restore-cache — it never force-navigates this tab's active view.
+  const uiSelectionLoadedRef = useRef(false);
+  useEffect(() => {
+    if (authStatus !== "authed") return;
+    progressTrackedFetch("uiSelection:load", `${API}/api/ui-selection`)
+      .then((r) => r.json())
+      .then((snap: UiSelectionSnapshot) => {
+        applyBackendSnapshot(snap, true);
+        setOpenSessionIds(getOpenSessionTabIds());
+        setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
+        uiSelectionLoadedRef.current = true;
+        const sel = getSelectedProject();
+        if (sel) {
+          setSelectedProjectPath(sel.path);
+          setSelectedProjectNodeId(sel.node_id);
+        }
+      })
+      .catch(() => {});
+    const off = eventBus.subscribe("ui_selection_changed", (p) => {
+      applyBackendSnapshot(p as UiSelectionSnapshot, false);
+      setOpenSessionIds(getOpenSessionTabIds());
+      setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
+      uiSelectionLoadedRef.current = true;
+    });
+    return off;
+  }, [authStatus]);
+  // Drain the panel write-backlog on each (re)connect so writes made while
+  // the backend was unreachable (open/close tab, pin, sort/visibility) are
+  // pushed once the backend can acknowledge them.
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (connected && !prevConnectedRef.current) {
+      signalReconnect();
+    }
+    prevConnectedRef.current = connected;
+  }, [connected]);
   useEffect(() => {
     const handler = (e: Event) => {
       applyAppearancePrefs((e as CustomEvent<AppearancePrefs>).detail);
@@ -2069,18 +2643,15 @@ function AppMain({
     return () => window.removeEventListener("shortcut_responses_changed", handler);
   }, []);
   const [viewingFile, setViewingFile] = useState<ViewingFile | null>(null);
-  const [rightPanelTab, setRightPanelTab] = useState<
-    "files" | "canvas" | "notes" | "comments" | "todos"
-  >("files");
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("files");
   useEffect(() => {
     if (!builtinExtensions.canvas && rightPanelTab === "canvas") {
       setRightPanelTab("files");
     }
-  }, [builtinExtensions.canvas, rightPanelTab]);
-  const [sessionTokenUsage, setSessionTokenUsage] =
-    useState<TokenUsage | null>(null);
-  const [sessionTokenUsageLast, setSessionTokenUsageLast] =
-    useState<TokenUsage | null>(null);
+    if (!builtinExtensions.testape && rightPanelTab === "screen") {
+      setRightPanelTab("files");
+    }
+  }, [builtinExtensions.canvas, builtinExtensions.testape, rightPanelTab]);
   // pendingBySession is declared above (right before useWebSocket) so
   // the user_message_persisted callback can clear it imperatively.
   // Each session owns its own pending list so a prompt mid-flight in
@@ -2116,98 +2687,29 @@ function AppMain({
     rightPanelVisible,
     rightPanelTab,
   ]);
+  // Proactive, real-time stale-view detection. Inert unless this is a
+  // debug-mode BA instance (?ba_debug=1 / ?ba_debug=stale-view /
+  // localStorage ba_debug / Vite dev build). Continuously compares the
+  // rendered chat panel against the canonical in-memory session and
+  // logs/dispatches any divergence the moment it happens.
+  useStaleViewDetector({ currentSession, connected });
   const retryPayloadsRef = useRef<Map<string, ImagePayload[]>>(new Map());
-  const [restarting, setRestarting] = useState(false);
-  const [refreshModalOpen, setRefreshModalOpen] = useState(false);
-  // Persistent (non-transient) surfacing of a failed in-app refresh —
-  // e.g. the backend 409 "requires the run.sh supervisor". A blocking
-  // window.alert is easy to dismiss and miss; this banner stays until
-  // the user closes it or a refresh succeeds.
-  const [restartError, setRestartError] = useState<string | null>(null);
+  // Prod-mode refresh flow (restart backend + hard-reload) lives in a shared
+  // hook so the main app and the standalone settings window drive one impl.
+  const {
+    restarting,
+    restartError,
+    dismissRestartError,
+    openRefreshModal,
+    refreshModal,
+  } = useRefreshApp();
   const [projectSettingsCwd, setProjectSettingsCwd] = useState<string | null>(null);
   // When the sidebar's AI search is active, the SessionList computes
   // its filtered list against ALL sessions (bypassing the project
   // filter) so cross-project matches surface. We dim ProjectTabs to
   // signal that selecting a project won't narrow the results.
   const [aiSearchActive, setAiSearchActive] = useState(false);
-
-  // Triggers the prod-mode refresh flow: POSTs /api/admin/restart (which
-  // SIGTERMs the backend), polls /api/build-info until the matching
-  // supervised build result is available, then hard-reloads the page
-  // so the browser pulls the new HTML+JS bundle. The supervisor waits for
-  // the new backend to become healthy before rebuilding the frontend. This
-  // full refresh is the user's only path to picking up code changes in this
-  // mode — there is no HMR and no uvicorn --reload.
-  const openRefreshModal = useCallback(() => {
-    if (restarting) return;
-    setRefreshModalOpen(true);
-  }, [restarting]);
-
-  const handleRefreshApp = useCallback(async (mode: RefreshMode) => {
-    if (restarting) return;
-    setRefreshModalOpen(false);
-    setRestartError(null);
-    setRestarting(true);
-    const requestId = globalThis.crypto?.randomUUID?.()
-      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    saveRefreshContext(requestId);
-    let accepted = false;
-    try {
-      const res = await fetch(`${API}/api/admin/restart`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_id: requestId, mode }),
-      });
-      if (!res.ok) {
-        clearRefreshContext();
-        setRestarting(false);
-        let detail = "";
-        try {
-          detail = ((await res.json()) as { detail?: string })?.detail ?? "";
-        } catch {
-          /* non-JSON body — fall back to the generic i18n message */
-        }
-        setRestartError(detail || t("app.refreshUnavailable"));
-        return;
-      }
-      accepted = true;
-    } catch {
-      accepted = false;
-    }
-    const deadline = Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 500));
-      try {
-        const res = await fetch(
-          `${API}/api/admin/restart-status/${encodeURIComponent(requestId)}`,
-          { cache: "no-store" },
-        );
-        const info = res.ok
-          ? await res.json() as RestartStatus
-          : null;
-        if (!accepted && info?.accepted === false) {
-          clearRefreshContext();
-          setRestarting(false);
-          setRestartError(t("app.refreshNotAccepted"));
-          return;
-        }
-        if (info?.accepted) {
-          accepted = true;
-        }
-        if (info?.refresh_result?.request_id === requestId) {
-          await hardRefreshCurrentPage(requestId);
-          return;
-        }
-      } catch {
-        // Backend still down — keep polling.
-      }
-    }
-    // Gave up waiting; surface the failure and let the user retry.
-    clearRefreshContext();
-    setRestarting(false);
-    setRestartError(t("app.refreshTimeout"));
-  }, [restarting, t]);
-  // Memoized (not mapped per render) so memo(MessageGroup)'s shallow
+  // Memoized (not mapped per render) so memo(TurnGroup)'s shallow
   // compare keeps working across per-WS-frame parent re-renders; the
   // frozen module-level singleton keeps the empty case reference-stable.
   // `displayNumber` is the 1-based footnote number shown in the comments
@@ -2219,6 +2721,10 @@ function AppMain({
         ? sessionInlineTags.map((t, i) => ({ ...t, displayNumber: i + 1 }))
         : (EMPTY_INLINE_TAGS as import("./types/inlineTag").InlineTag[]),
     [sessionInlineTags],
+  );
+  const currentTodoProgress = todoProgress(
+    currentSession?.current_todos ?? [],
+    currentSession?.current_tasks ?? [],
   );
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
   // Aggressively emphasize the focused comment's highlight spans.
@@ -2247,19 +2753,38 @@ function AppMain({
   const handleAddTag = useCallback(
     (text: string, comment: string, messageId: string) => {
       if (!currentSession) return;
-      const tag = {
+      const tag: import("./types/inlineTag").InlineTag = {
         id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         messageId,
         selectedText: text,
         comment,
         timestamp: new Date().toISOString(),
       };
-      applySessionMetadata(currentSession.id, (session) => ({
-        inline_tags: [...(session.inline_tags ?? []), tag],
-      }));
-      openRightPanelWithTab("comments");
+      const optimisticTagPatch = (session: Session): SessionMetadataPatch => {
+        const inlineTags = session.inline_tags ?? [];
+        const nextInlineTags = inlineTags.some((existing) => existing.id === tag.id)
+          ? inlineTags
+          : [...inlineTags, tag];
+        if (isMobile) return { inline_tags: nextInlineTags };
+        const autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
+        if (!autoOpenedBy.includes("comments")) autoOpenedBy.push("comments");
+        return {
+          inline_tags: nextInlineTags,
+          right_panel_open: true,
+          right_panel_active_tab: "comments" as const,
+          right_panel_auto_opened_by: autoOpenedBy,
+        };
+      };
+      const preserveKey = `tag:add:${currentSession.id}:${tag.id}`;
+      applySessionMetadata(currentSession.id, optimisticTagPatch);
+      preserveSessionMetadataThroughReconcile(currentSession.id, preserveKey, optimisticTagPatch);
+      if (isMobile) {
+        openRightPanelWithTab("comments");
+      } else {
+        setRightPanelTab("comments");
+      }
       if (!comment) setAutoEditId(tag.id);
-      progressTrackedFetch(
+      const tagRequest = progressTrackedFetch(
         `tag:add:${currentSession.id}:${tag.id}`,
         `${API}/api/sessions/${currentSession.id}/tags`,
         {
@@ -2267,9 +2792,34 @@ function AppMain({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...tag, client_id: clientId }),
         },
-      ).catch(() => {});
+      );
+      if (isMobile) {
+        tagRequest.finally(() => {
+          clearSessionMetadataReconcilePreserve(currentSession.id, preserveKey);
+        }).catch(() => {});
+      } else {
+        tagRequest.then(() => {
+          return patchRightPanel(currentSession.id, {
+            open: true,
+            tab: "comments",
+            addAutoReason: "comments",
+            optimistic: false,
+          });
+        }).finally(() => {
+          clearSessionMetadataReconcilePreserve(currentSession.id, preserveKey);
+        }).catch(() => {});
+      }
     },
-    [currentSession, applySessionMetadata, clientId]
+    [
+      currentSession,
+      applySessionMetadata,
+      preserveSessionMetadataThroughReconcile,
+      clearSessionMetadataReconcilePreserve,
+      clientId,
+      isMobile,
+      openRightPanelWithTab,
+      patchRightPanel,
+    ]
   );
   const handleRemoveTag = useCallback(
     (id: string) => {
@@ -2364,6 +2914,7 @@ function AppMain({
   const openFileEditorsRef = useRef<Map<string, FileEditorHandle>>(
     new Map(),
   );
+  const lastOpenFilesReminderKeyBySessionRef = useRef<Record<string, string>>({});
   const registerEditor = useCallback(
     (path: string, handle: FileEditorHandle | null) => {
       if (handle) openFileEditorsRef.current.set(path, handle);
@@ -2406,7 +2957,7 @@ function AppMain({
         selection: selection ?? null,
       };
       const next = existing
-        ? panels.map((p) => (p.path === resolved ? panel : p))
+        ? [...panels.filter((p) => p.path !== resolved), panel]
         : [...panels, panel];
       applySessionMetadata(currentSession.id, { open_file_panels: next });
       progressTrackedFetch(
@@ -2560,7 +3111,7 @@ function AppMain({
         fileAnchor.startCol = anchor.startCol;
         fileAnchor.endCol = anchor.endCol;
       }
-      const tag = {
+      const tag: import("./types/inlineTag").InlineTag = {
         id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         messageId: `__file__${anchor.filePath}`,
         selectedText: anchor.selectedText ?? "",
@@ -2584,12 +3135,11 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId]
   );
 
-  const handleStartFileDiscussion = useCallback(
-    async (filePath: string, line: number): Promise<FileDiscussion> => {
-      if (!currentSession) throw new Error("No active session");
+  const startFileDiscussionForSession = useCallback(
+    async (sessionId: string, filePath: string, line: number): Promise<FileDiscussion> => {
       const response = await progressTrackedFetch(
-        `file-discussion:start:${currentSession.id}:${filePath}:${line}`,
-        `${API}/api/file-editor/${currentSession.id}/discussions`,
+        `file-discussion:start:${sessionId}:${filePath}:${line}`,
+        `${API}/api/file-editor/${sessionId}/discussions`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2600,7 +3150,7 @@ function AppMain({
         throw new Error(await response.text());
       }
       const data = (await response.json()) as { discussion: FileDiscussion };
-      applySessionMetadata(currentSession.id, (session) => {
+      applySessionMetadata(sessionId, (session) => {
         return {
           working_mode_meta: upsertFileDiscussionMeta(
             session.working_mode_meta,
@@ -2610,7 +3160,15 @@ function AppMain({
       });
       return data.discussion;
     },
-    [currentSession, clientId, applySessionMetadata],
+    [clientId, applySessionMetadata],
+  );
+
+  const handleStartFileDiscussion = useCallback(
+    async (filePath: string, line: number): Promise<FileDiscussion> => {
+      if (!currentSession) throw new Error("No active session");
+      return startFileDiscussionForSession(currentSession.id, filePath, line);
+    },
+    [currentSession, startFileDiscussionForSession],
   );
 
   const handlePatchFileDiscussion = useCallback(
@@ -2656,6 +3214,27 @@ function AppMain({
       );
     },
     [currentSession],
+  );
+
+  const handleFilePanelStartDiscussion = useCallback(
+    async (filePath: string, line: number) => {
+      if (fileEditingState) {
+        return handleStartFileDiscussion(filePath, line);
+      }
+      if (isValidEmptyFileEditSession(currentSession)) {
+        const editorSessionId = await startFileEditor(filePath);
+        if (editorSessionId) {
+          return startFileDiscussionForSession(editorSessionId, filePath, line);
+        }
+      }
+    },
+    [
+      currentSession,
+      fileEditingState,
+      handleStartFileDiscussion,
+      startFileDiscussionForSession,
+      startFileEditor,
+    ],
   );
 
   // Per-session debounce timer for draft updates. Tracked so:
@@ -2733,32 +3312,52 @@ function AppMain({
   // destination): screenshot(s) handed in by the native share sheet,
   // awaiting a session to attach to.
   const [sharedImages, setSharedImages] = useState<PastedImage[]>([]);
+
+  // MERGE the shared image(s) into a target session's draft_images
+  // (never overwrites) and persist, preserving the TARGET session's own
+  // draft_input. applySessionMetadata runs synchronously so the patch is
+  // visible before any navigate. Shared by both the direct-attach path
+  // (open session) and the SharePicker path (chosen destination).
+  const mergeImagesIntoSession = useCallback(
+    (targetId: string, images: PastedImage[]) => {
+      const target = sessions.find((s) => s.id === targetId);
+      const { draft_input, draft_images } = buildShareDraftPatch(target, images);
+      applySessionMetadata(targetId, { draft_images });
+      flushDraftPatch(targetId, draft_input, draft_images);
+    },
+    [sessions, applySessionMetadata, flushDraftPatch]
+  );
+
   const handleSharedImages = useCallback(
     (incoming: PastedImage[]) => {
+      const open = currentSessionRef.current;
+      if (open) {
+        // A session is already focused — attach the screenshot(s)
+        // straight to its composer instead of routing through the share
+        // picker. InputArea reconciles the externally-injected
+        // draft_images into its local state without a remount.
+        mergeImagesIntoSession(open.id, incoming);
+        return;
+      }
       setSharedImages(incoming);
       navigate("/share");
     },
-    [navigate]
+    [mergeImagesIntoSession, navigate]
   );
   useShareTarget(handleSharedImages);
 
   // Attach the shared image(s) to a chosen session's composer and open
-  // it. MERGES with that session's existing draft_images (never
-  // overwrites) and preserves the TARGET session's own draft_input —
-  // reusing handleImagesChange would clobber it with currentSession's.
-  // applySessionMetadata runs synchronously BEFORE navigate so the
-  // optimistic select stub (useSession.selectSession) carries the merged
-  // images into InputArea at the sessionId-change mount.
+  // it (the SharePicker callback). applySessionMetadata runs before
+  // navigate so the optimistic select stub (useSession.selectSession)
+  // carries the merged images into InputArea at the sessionId-change
+  // mount.
   const attachImagesToSession = useCallback(
     (targetId: string) => {
-      const target = sessions.find((s) => s.id === targetId);
-      const { draft_input, draft_images } = buildShareDraftPatch(target, sharedImages);
-      applySessionMetadata(targetId, { draft_images });
-      flushDraftPatch(targetId, draft_input, draft_images);
+      mergeImagesIntoSession(targetId, sharedImages);
       setSharedImages([]);
       navigate(sessionPath(targetId));
     },
-    [sessions, sharedImages, applySessionMetadata, flushDraftPatch, navigate]
+    [mergeImagesIntoSession, sharedImages, navigate]
   );
 
   const cancelShare = useCallback(() => {
@@ -2926,7 +3525,11 @@ function AppMain({
     [projects],
   );
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
+  const [moveSessionId, setMoveSessionId] = useState<string | null>(null);
+  const [moveSessionBusy, setMoveSessionBusy] = useState(false);
+  const [moveSessionError, setMoveSessionError] = useState<string | null>(null);
   const [fileChooserOpen, setFileChooserOpen] = useState(false);
+  const [fileChooserMode, setFileChooserMode] = useState<"browse" | "fileEdit">("browse");
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -2937,7 +3540,7 @@ function AppMain({
       if (builtinExtensions.projectStructure && data.projects?.length) {
         const cwds = data.projects.map((p: Project) => p.path);
         try {
-          const countsRes = await fetch(`${API}/api/extensions/ofek-dev.project-structure/backend/project-updates/counts-batch`, {
+          const countsRes = await fetch(`${extBackendBase("projectStructure")}/project-updates/counts-batch`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ cwds }),
@@ -2964,6 +3567,65 @@ function AppMain({
     refreshProjects();
   }, [refreshProjects, authStatus]);
 
+  const resolveSessionForProject = useCallback(
+    async (path: string, nodeId: string = "primary") => {
+      const remembered = getRememberedSessionId(path, nodeId);
+      const localTarget = pickSessionForProject(
+        sessions,
+        path,
+        nodeId,
+        remembered,
+      );
+      if (remembered && localTarget?.id === remembered) return localTarget;
+
+      if (remembered) {
+        try {
+          const res = await progressTrackedFetch(
+            `session:restore:${remembered}`,
+            `${API}/api/sessions/${encodeURIComponent(remembered)}?msg_limit=1`,
+            { credentials: "include" },
+          );
+          if (res.ok) {
+            const session = (await res.json()) as Session;
+            const restored = pickSessionForProject(
+              [session],
+              path,
+              nodeId,
+              remembered,
+            );
+            if (restored) return restored;
+          }
+        } catch {}
+      }
+
+      try {
+        const params = new URLSearchParams({
+          offset: "0",
+          limit: "200",
+          project_path: path,
+        });
+        const res = await progressTrackedFetch(
+          `session:first:${nodeId}:${path}`,
+          `${API}/api/sessions?${params}`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const data = await res.json() as { sessions?: Session[] };
+          const target = pickSessionForProject(
+            data.sessions ?? [],
+            path,
+            nodeId,
+            remembered,
+          );
+          if (target) return target;
+        }
+      } catch {}
+
+      return localTarget;
+    },
+    [sessions],
+  );
+
   // Project list refetch on backend `projects_changed` is wired
   // directly through the WS handler (`onProjectsChanged` option above);
   // no buffer-scan effect needed.
@@ -2973,14 +3635,12 @@ function AppMain({
       setCwd(path);
       setSelectedProjectPath(path);
       setSelectedProjectNodeId(nodeId);
-      const target = pickSessionForProject(
-        sessions,
-        path,
-        nodeId,
-        getRememberedSessionId(path, nodeId),
-      );
+      const target = await resolveSessionForProject(path, nodeId);
       skipSidebarCloseOnNavRef.current = true;
-      navigate(target ? sessionPath(target.id) : "/");
+      // No session for this (machine, project) → show the empty-project
+      // surface instead of falling back to the Ask singleton. Ask is
+      // reachable only via its explicit button.
+      navigate(target ? sessionPath(target.id) : "/empty-project");
       try {
         await progressTrackedFetch(
           `project:touch:${path}`,
@@ -2996,7 +3656,7 @@ function AppMain({
         // ignore
       }
     },
-    [refreshProjects, sessions, navigate]
+    [refreshProjects, resolveSessionForProject, navigate]
   );
 
   const handleAddProject = useCallback(
@@ -3036,10 +3696,6 @@ function AppMain({
     [refreshProjects]
   );
 
-  // Resizable panels — all three sizes persist to localStorage.
-  // On mobile/tablet the resizers are inert (CSS hides them, hook
-  // gates onMouseDown). The persisted size is still kept so it
-  // restores on resize back to desktop.
   const sidebar = useResizable({
     storageKey: "better-agent-sidebar-width",
     defaultSize: 280,
@@ -3048,41 +3704,63 @@ function AppMain({
     axis: "x",
     enabled: !isMobile,
   });
-  const [sidebarMinimized, setSidebarMinimized] = useLocalStorage(
-    "better-agent-sidebar-minimized",
-    false,
+  const [homeSidebarMinimized, setHomeSidebarMinimized] = useState(false);
+  const sidebarMinimized = currentSession
+    ? Boolean(currentSession.sidebar_minimized)
+    : homeSidebarMinimized;
+  const setSidebarMinimized = useCallback(
+    (minimized: boolean) => {
+      if (!currentSession) {
+        setHomeSidebarMinimized(minimized);
+        return;
+      }
+      patchRightPanel(currentSession.id, { sidebarMinimized: minimized });
+    },
+    [currentSession, patchRightPanel],
   );
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers">(
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers" | "routines">(
     "sessions",
   );
-  const SIDEBAR_MINIMIZED_WIDTH = 52;
-  const sidebarWidthForSizing = !isMobile && sidebarMinimized
+  // DOM slot above the sidebar tabs where SessionList portals the pinned
+  // selected-session anchor. Lives above the tabs and only has content
+  // while SessionList is mounted (i.e. not on the Workers tab).
+  const [selectedAnchorEl, setSelectedAnchorEl] = useState<HTMLDivElement | null>(null);
+  const sidebarCollapsed = !isMobile && (sidebarMinimized || Boolean(fileEditingState));
+  const sidebarWidthForSizing = sidebarCollapsed
     ? SIDEBAR_MINIMIZED_WIDTH
     : sidebar.size;
   const rightPanel = useResizable({
-    storageKey: "better-agent-right-panel-width",
     defaultSize: 450,
     min: 280,
     max: Math.max(280, viewport.width - sidebarWidthForSizing - 360),
     axis: "x",
     direction: "reverse",
     enabled: !isMobile,
+    size: currentSession?.right_panel_width ?? 450,
+    onSizeChange: (size) => {
+      if (!currentSession || isMobile || currentSession.right_panel_width === size) return;
+      patchRightPanel(currentSession.id, { width: size });
+    },
   });
   const mobileRightPanel = useResizable({
-    storageKey: "better-agent-mobile-right-panel-height",
     defaultSize: Math.round(viewport.height * 0.5),
     min: 160,
     max: Math.max(160, viewport.height - 260),
     axis: "y",
     enabled: isMobile && isPortrait && mobileRightOpen && !mobileRightFullscreen,
+    size: currentSession?.right_panel_mobile_height ?? Math.round(viewport.height * 0.5),
+    onSizeChange: (size) => {
+      if (!currentSession || !isMobile || currentSession.right_panel_mobile_height === size) return;
+      patchRightPanel(currentSession.id, { mobileHeight: size });
+    },
   });
 
+  // Persist the selected project to the backend (single source of truth)
+  // and mirror to localStorage for offline first paint. The setter dedups,
+  // so re-renders with an unchanged selection don't re-PATCH.
   useEffect(() => {
-    localStorage.setItem("better-agent-selected-project", selectedProjectPath);
-  }, [selectedProjectPath]);
-  useEffect(() => {
-    localStorage.setItem("better-agent-selected-project-node", selectedProjectNodeId);
-  }, [selectedProjectNodeId]);
+    setSelectedProject(selectedProjectPath, selectedProjectNodeId);
+  }, [selectedProjectPath, selectedProjectNodeId]);
 
   // Persist the last-viewed session per project so re-entering a project
   // reopens it (handleSelectProject reads this on switch). Guarded so a
@@ -3092,7 +3770,7 @@ function AppMain({
     if (!currentSession || !selectedProjectPath) return;
     if (
       currentSession.id === ASK_SINGLETON_ID ||
-      currentSession.id === EDIT_SINGLETON_ID
+      currentSession.id === editSingletonId()
     ) {
       return;
     }
@@ -3114,7 +3792,91 @@ function AppMain({
   ]);
 
   const [openSessionRecords, setOpenSessionRecords] = useState<Record<string, Session>>({});
-  const [missingOpenSessionIds, setMissingOpenSessionIds] = useState<Record<string, true>>({});
+  const openSessionRecordFetchesRef = useRef<Set<string>>(new Set());
+  const openSessionRecordMissesRef = useRef<Map<string, number>>(new Map());
+  const openSessionRecordRetryTimerRef = useRef<number | null>(null);
+  const [openSessionRecordRetryNonce, setOpenSessionRecordRetryNonce] = useState(0);
+  const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
+  const sessionExistenceChecksRef = useRef<Map<string, "pending" | "missing">>(new Map());
+  const isOpenSessionTabEligible = useCallback((session: Session) => {
+    if (session.topbar_pinned) return true;
+    const openedMs = session.last_opened_at ? Date.parse(session.last_opened_at) : NaN;
+    return Number.isFinite(openedMs);
+  }, []);
+  const markSessionKnown = useCallback((id: string) => {
+    if (!id) return;
+    setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+  }, []);
+
+  const openSessionRecordSessionSignature = useMemo(
+    () => sessions.map((session) => [
+      session.id,
+      session.name,
+      session.cwd,
+      session.node_id || "primary",
+      session.model,
+      session.provider_id,
+      session.updated_at,
+      session.last_user_prompt_at,
+      session.last_opened_at,
+      session.topbar_pinned ? "1" : "0",
+      session.topbar_pinned_at ?? "",
+      session.pinned ? "1" : "0",
+      session.archived ? "1" : "0",
+      String(session.message_count ?? ""),
+    ].join("\u0000")).join("\u0001"),
+    [sessions],
+  );
+
+  useEffect(() => {
+    setOpenSessionRecords((prev) => {
+      let next: Record<string, Session> | null = null;
+      for (const session of sessions) {
+        if (!prev[session.id]) continue;
+        const merged = mergeOpenSessionRecord(prev[session.id], session);
+        if (merged === prev[session.id]) continue;
+        if (!next) next = { ...prev };
+        next[session.id] = merged;
+      }
+      return next ?? prev;
+    });
+  }, [openSessionRecordSessionSignature]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!currentTree?.id) return;
+    setOpenSessionRecords((prev) => {
+      const merged = mergeOpenSessionRecord(prev[currentTree.id], currentTree);
+      return merged === prev[currentTree.id]
+        ? prev
+        : { ...prev, [currentTree.id]: merged };
+    });
+  }, [currentTree]);
+
+  useEffect(() => () => {
+    if (openSessionRecordRetryTimerRef.current !== null) {
+      window.clearTimeout(openSessionRecordRetryTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const knownIds = Object.keys(knownRoutedSessionIds);
+    if (knownIds.length === 0) return;
+    const confirmed = new Set(sessions.map((s) => s.id));
+    if (currentTree?.id) confirmed.add(currentTree.id);
+    for (const id of Object.keys(openSessionRecords)) confirmed.add(id);
+    const staleKnownIds = knownIds.filter((id) => confirmed.has(id));
+    if (staleKnownIds.length === 0) return;
+    setKnownRoutedSessionIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const id of staleKnownIds) {
+        if (!next[id]) continue;
+        delete next[id];
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [currentTree?.id, knownRoutedSessionIds, openSessionRecords, sessions]);
 
   // -------------------------------------------------------------------
   // Route ↔ session sync
@@ -3123,9 +3885,10 @@ function AppMain({
   //   a session view doesn't show a stale tree on first paint, and so
   //   WS subscription state doesn't pin to an unviewed session.
   // - Route is `session:<id>`: pre-check the id against the
-  //   already-loaded sessions list. Unknown id → navigate back to `/`
-  //   (the Ask entry view). Known id but not the active tree →
-  //   `selectSession(id)`.
+  //   already-loaded sessions list. Unknown id → verify once against the
+  //   server (`/api/sessions/summaries`) before giving up, then navigate
+  //   back to `/` (the Ask entry view) only if the server doesn't know it
+  //   either. Known id but not the active tree → `selectSession(id)`.
   // - selectSession is internally de-duped via selectRequestIdRef so
   //   guarding here only protects against the redundant REST round-
   //   trip; correctness is unaffected.
@@ -3140,13 +3903,64 @@ function AppMain({
     // (its `working_mode` excludes it from the list), so it never
     // appears in `sessions`. Exempt it from the existence gate — the
     // session-view auto-detects the id and mounts Ask extension slots.
+    // `sessions` is the SEARCH-FILTERED list — a row absent from it may
+    // simply not match the active query, not be deleted. The currently
+    // loaded tree is authoritative proof the session exists; a genuine
+    // delete nulls `currentTree` via the `session_deleted` WS handler.
+    // Without this guard, typing a search that excludes the open session
+    // ejects to `/`, and the Ask auto-select effect jumps into the top
+    // search result.
     const exists =
       route.sessionId === ASK_SINGLETON_ID ||
-      route.sessionId === EDIT_SINGLETON_ID ||
+      route.sessionId === editSingletonId() ||
+      route.sessionId === currentTree?.id ||
       sessions.some((s) => s.id === route.sessionId) ||
-      openSessionRecords[route.sessionId];
+      openSessionRecords[route.sessionId] ||
+      knownRoutedSessionIds[route.sessionId];
     if (!exists) {
-      navigate("/");
+      const id = route.sessionId;
+      // Local lists can lag a freshly created/linked session (e.g. a deep
+      // link to a worker session this tab never listed). Before bouncing to
+      // `/`, confirm with the server once — only navigate away if the
+      // server itself doesn't know the id either.
+      //
+      // This effect re-runs on every `sessions`/`openSessionRecords`/
+      // `currentTree` change (e.g. live WS updates), which can easily land
+      // mid-flight while the fetch below is still pending. Track state as
+      // pending/missing rather than a bare "checked" flag — a re-run while
+      // pending must wait for the same in-flight fetch, not treat the
+      // fetch merely having STARTED as proof the session doesn't exist.
+      const state = sessionExistenceChecksRef.current.get(id);
+      if (state === "missing") {
+        navigate("/");
+        return;
+      }
+      if (state === "pending") return;
+      sessionExistenceChecksRef.current.set(id, "pending");
+      void fetch(`${API}/api/sessions/summaries?${new URLSearchParams({ ids: id })}`, {
+        credentials: "include",
+      })
+        .then((res) => (res.ok ? res.json() : undefined))
+        .then((data: { sessions?: Session[] } | undefined) => {
+          const found = data?.sessions?.find((s) => s?.id === id);
+          if (found) {
+            sessionExistenceChecksRef.current.delete(id);
+            markSessionKnown(id);
+            // Store the full record, not just the id — downstream project-
+            // scoping logic reads fields like `bare_config`/`cwd` off it.
+            setOpenSessionRecords((prev) => {
+              const merged = mergeOpenSessionRecord(prev[id], found);
+              return merged === prev[id] ? prev : { ...prev, [id]: merged };
+            });
+          } else {
+            sessionExistenceChecksRef.current.set(id, "missing");
+            navigate("/");
+          }
+        })
+        .catch(() => {
+          sessionExistenceChecksRef.current.set(id, "missing");
+          navigate("/");
+        });
       return;
     }
     if (route.sessionId !== currentTree?.id) {
@@ -3157,10 +3971,104 @@ function AppMain({
     sessionsLoaded,
     sessions,
     openSessionRecords,
+    knownRoutedSessionIds,
     currentTree,
     clearCurrentSession,
     navigate,
     selectSession,
+    markSessionKnown,
+  ]);
+
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    if (!selectedProjectPath) return;
+    if (route.kind !== "session") return;
+    if (
+      route.sessionId === ASK_SINGLETON_ID ||
+      route.sessionId === editSingletonId()
+    ) {
+      return;
+    }
+    const routed =
+      currentTree?.id === route.sessionId
+        ? currentTree
+        : sessions.find((s) => s.id === route.sessionId) ??
+          openSessionRecords[route.sessionId] ??
+          null;
+    if (!routed) return;
+    // bare_config sessions (e.g. TestApe-provisioned workers) never get their
+    // cwd auto-registered as a project, so they can never match
+    // selectedProjectPath — without this exemption every direct link to one
+    // gets redirected to whatever session the current project resolves to.
+    if (routed.bare_config) return;
+    if (
+      routed.cwd === selectedProjectPath &&
+      (routed.node_id || "primary") === selectedProjectNodeId &&
+      !routed.archived
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const target = await resolveSessionForProject(
+        selectedProjectPath,
+        selectedProjectNodeId,
+      );
+      if (cancelled) return;
+      skipSidebarCloseOnNavRef.current = true;
+      navigate(target ? sessionPath(target.id) : "/empty-project");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    route,
+    sessionsLoaded,
+    selectedProjectPath,
+    selectedProjectNodeId,
+    currentTree,
+    sessions,
+    openSessionRecords,
+    resolveSessionForProject,
+    navigate,
+  ]);
+
+  // Auto-select a session instead of sitting on the empty Ask "home".
+  // When the route resolves to the Ask singleton (the default no-session
+  // state) and the current project has sessions, redirect to the
+  // remembered session (or the first non-archived one). `handleAsk` sets
+  // `intentionalAskRef` so a deliberate Ask navigation is preserved; the
+  // flag is held until the route leaves Ask, then cleared so a later
+  // default landing on Ask auto-redirects again.
+  const intentionalAskRef = useRef(false);
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    if (route.kind !== "session" || route.sessionId !== ASK_SINGLETON_ID) {
+      intentionalAskRef.current = false;
+      return;
+    }
+    if (intentionalAskRef.current) return;
+    const remembered = selectedProjectPath
+      ? getRememberedSessionId(selectedProjectPath, selectedProjectNodeId)
+      : null;
+    let target = selectedProjectPath
+      ? pickSessionForProject(
+          sessions,
+          selectedProjectPath,
+          selectedProjectNodeId,
+          remembered,
+        )
+      : null;
+    if (!target) target = sessions.find((s) => !s.archived) ?? null;
+    if (target) navigate(sessionPath(target.id));
+  }, [
+    route,
+    sessionsLoaded,
+    sessions,
+    selectedProjectPath,
+    selectedProjectNodeId,
+    navigate,
   ]);
 
   // Force-open-on-navigate: every transition into a session with
@@ -3180,7 +4088,7 @@ function AppMain({
     lastNavigatedSidRef.current = currentSession.id;
     if (
       currentSession.id === ASK_SINGLETON_ID ||
-      currentSession.id === EDIT_SINGLETON_ID
+      currentSession.id === editSingletonId()
     ) {
       return;
     }
@@ -3191,9 +4099,9 @@ function AppMain({
       setMobileRightOpen(true);
       return;
     }
-    if (localRightPanelStates[currentSession.id]?.open === true) return;
+    if (currentSession.right_panel_open === true) return;
     patchRightPanel(currentSession.id, { open: true, addAutoReason: "navigate" });
-  }, [currentSession?.id, isMobile, patchRightPanel, localRightPanelStates]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSession?.id, isMobile, patchRightPanel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync local `rightPanelTab` to the session's persisted active tab
   // on every session switch. When local storage tab is null
@@ -3205,8 +4113,31 @@ function AppMain({
     if (!currentSession) return;
     if (lastTabSyncedSidRef.current === currentSession.id) return;
     lastTabSyncedSidRef.current = currentSession.id;
-    const persisted = localRightPanelStates[currentSession.id]?.tab;
-    if (persisted && (persisted !== "canvas" || builtinExtensions.canvas)) {
+    if (isMobile) {
+      setMobileRightOpen(Boolean(currentSession.right_panel_open));
+      setMobileRightFullscreen(false);
+    }
+    // The assistant board lives in the right-panel "Board" tab — when entering
+    // the assistant session, default to that tab and open the panel (unless the
+    // user persisted a different tab or an explicit open/closed choice).
+    if (currentSession.name === "Assistant") {
+      const persistedTab = currentSession.right_panel_active_tab;
+      if (persistedTab && persistedTab !== "board") {
+        setRightPanelTab(persistedTab);
+      } else {
+        setRightPanelTab("board");
+        if (!isMobile && currentSession.right_panel_active_tab == null) {
+          patchRightPanel(currentSession.id, { open: true, tab: "board" });
+        }
+      }
+      return;
+    }
+    const persisted = currentSession.right_panel_active_tab;
+    if (
+      persisted &&
+      (persisted !== "canvas" || builtinExtensions.canvas) &&
+      (persisted !== "screen" || builtinExtensions.testape)
+    ) {
       setRightPanelTab(persisted);
       return;
     }
@@ -3224,122 +4155,155 @@ function AppMain({
     } else {
       setRightPanelTab("files");
     }
-  }, [currentSession?.id, localRightPanelStates, builtinExtensions.canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSession?.id, builtinExtensions.canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [openSessionIds, setOpenSessionIds] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem("better-agent-open-session-ids");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [openSessionIds, setOpenSessionIds] = useState<string[]>(() =>
+    getOpenSessionTabIds(),
+  );
+  const [openSessionJoinedAt, setOpenSessionJoinedAt] = useState<Record<string, string>>(() =>
+    getOpenSessionTabJoinedAt(),
+  );
 
   useEffect(() => {
-    localStorage.setItem(
-      "better-agent-open-session-ids",
-      JSON.stringify(openSessionIds)
-    );
+    if (!uiSelectionLoadedRef.current) {
+      cacheOpenSessionTabIds(openSessionIds);
+      setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
+      return;
+    }
+    setOpenSessionTabIds(openSessionIds);
+    setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
   }, [openSessionIds]);
 
   useEffect(() => {
     if (!sessionsLoaded) return;
     const loadedIds = new Set(sessions.map((session) => session.id));
+    const invalidResolvedIds = new Set(
+      openSessionIds.filter((id) => {
+        const session = openSessionRecords[id] || sessions.find((s) => s.id === id);
+        return Boolean(session && !isOpenSessionTabEligible(session));
+      }),
+    );
+    if (invalidResolvedIds.size > 0) {
+      setOpenSessionIds((prev) => prev.filter((id) => !invalidResolvedIds.has(id)));
+    }
     const idsToFetch = openSessionIds.filter(
-      (id) => !loadedIds.has(id) && !openSessionRecords[id] && !missingOpenSessionIds[id],
+      (id) =>
+        !invalidResolvedIds.has(id) &&
+        !loadedIds.has(id) &&
+        !openSessionRecords[id] &&
+        !openSessionRecordFetchesRef.current.has(id),
     );
     if (idsToFetch.length === 0) return;
 
     let cancelled = false;
     for (const id of idsToFetch) {
-      fetch(`${API}/api/sessions/${encodeURIComponent(id)}`, {
-        credentials: "include",
-      })
-        .then((res) => {
-          if (res.status === 404) {
-            setMissingOpenSessionIds((prev) => ({ ...prev, [id]: true }));
-            return null;
-          }
-          if (!res.ok) return null;
-          return res.json();
-        })
-        .then((session: Session | null) => {
-          if (cancelled || !session?.id) return;
-          setOpenSessionRecords((prev) => ({ ...prev, [session.id]: session }));
-        })
-        .catch(() => {});
+      openSessionRecordFetchesRef.current.add(id);
     }
+    const params = new URLSearchParams({ ids: idsToFetch.join(",") });
+    fetch(`${API}/api/sessions/summaries?${params}`, {
+      credentials: "include",
+    })
+      .then((res) => (res.ok ? res.json() : undefined))
+      .then((data: { sessions?: Session[] } | undefined) => {
+        if (cancelled || !data) return;
+        const foundIds = new Set<string>();
+        const invalidIds = new Set<string>();
+        for (const session of data?.sessions ?? []) {
+          if (!session?.id) continue;
+          foundIds.add(session.id);
+          openSessionRecordMissesRef.current.delete(session.id);
+          if (!isOpenSessionTabEligible(session)) {
+            invalidIds.add(session.id);
+            continue;
+          }
+          setOpenSessionRecords((prev) => {
+            const merged = mergeOpenSessionRecord(prev[session.id], session);
+            return merged === prev[session.id]
+              ? prev
+              : { ...prev, [session.id]: merged };
+          });
+        }
+        const retryIds: string[] = [];
+        const staleIds = idsToFetch.filter((id) => {
+          if (invalidIds.has(id)) return true;
+          if (foundIds.has(id)) return false;
+          const misses = (openSessionRecordMissesRef.current.get(id) ?? 0) + 1;
+          openSessionRecordMissesRef.current.set(id, misses);
+          if (misses < 2) retryIds.push(id);
+          return misses >= 2;
+        });
+        if (
+          retryIds.length > 0 &&
+          openSessionRecordRetryTimerRef.current === null
+        ) {
+          openSessionRecordRetryTimerRef.current = window.setTimeout(() => {
+            openSessionRecordRetryTimerRef.current = null;
+            setOpenSessionRecordRetryNonce((value) => value + 1);
+          }, 0);
+        }
+        if (staleIds.length > 0) {
+          const stale = new Set(staleIds);
+          for (const id of staleIds) {
+            openSessionRecordMissesRef.current.delete(id);
+          }
+          setOpenSessionIds((prev) => prev.filter((id) => !stale.has(id)));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        for (const id of idsToFetch) {
+          openSessionRecordFetchesRef.current.delete(id);
+        }
+      });
 
     return () => {
       cancelled = true;
     };
   }, [
-    missingOpenSessionIds,
     openSessionIds,
     openSessionRecords,
+    openSessionRecordRetryNonce,
     sessions,
     sessionsLoaded,
+    isOpenSessionTabEligible,
   ]);
 
-  // When a session is selected, add it to the open tabs (LRU order).
-  // Evict the least-recently-used tab when exceeding the available space.
-  const maxOpenTabs = useMemo(() => {
-    const rightPanelOpenForSizing =
-      !promptEngState &&
-      !fileEditingState &&
-      (isMobile
-        ? mobileRightOpen
-        : (localRightPanelStates[currentSession?.id ?? ""]?.open ?? false) && !!currentSession);
-    const occupied = isMobile ? 0 : sidebar.size + (rightPanelOpenForSizing ? rightPanel.size : 0);
-    const panelWidth = Math.max(200, viewport.width - occupied);
-    return Math.min(MAX_TAB_CAP, Math.max(1, Math.floor(panelWidth / MIN_TAB_WIDTH_PX)));
-  }, [
-    currentSession,
-    fileEditingState,
-    isMobile,
-    localRightPanelStates,
-    mobileRightOpen,
-    promptEngState,
-    rightPanel.size,
-    sidebar.size,
-    viewport.width,
-  ]);
-
-  useEffect(() => {
-    if (currentTree?.id) {
-      setOpenSessionIds((prev) => {
-        const id = currentTree.id;
-        const idx = prev.indexOf(id);
-        if (idx >= 0 && idx === prev.length - 1) return prev; // already most recent
-        let next: string[];
-        if (idx >= 0) {
-          next = [...prev.slice(0, idx), ...prev.slice(idx + 1), id];
-        } else {
-          next = [...prev, id];
-        }
-        while (next.length > maxOpenTabs) next.shift();
-        return next;
-      });
-    }
-  }, [currentTree?.id, maxOpenTabs]);
-
-  // Re-evict tabs when viewport shrinks (sidebar drag, window resize, right panel toggle).
-  useEffect(() => {
+  const addOpenSessionId = useCallback((id: string) => {
     setOpenSessionIds((prev) => {
-      if (prev.length <= maxOpenTabs) return prev;
-      return prev.slice(prev.length - maxOpenTabs);
+      const idx = prev.indexOf(id);
+      if (idx >= 0 && idx === prev.length - 1) return prev;
+      const next = idx >= 0
+        ? [...prev.slice(0, idx), ...prev.slice(idx + 1), id]
+        : [...prev, id];
+      return next;
     });
-  }, [maxOpenTabs]);
+  }, []);
 
+  const lastViewedChatSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (sessionsLoaded) {
-      setOpenSessionIds((prev) => {
-        const valid = prev.filter((id) => !missingOpenSessionIds[id]);
-        if (valid.length !== prev.length) return valid;
-        return prev;
-      });
+    if (
+      route.kind !== "session" ||
+      !currentTree?.id ||
+      sessionLoadError?.sessionId === currentTree.id ||
+      currentTree.id === ASK_SINGLETON_ID ||
+      currentTree.id === editSingletonId() ||
+      !isOpenSessionTabEligible(currentTree)
+    ) {
+      lastViewedChatSessionIdRef.current = null;
+      return;
     }
-  }, [missingOpenSessionIds, sessionsLoaded]);
+    if (lastViewedChatSessionIdRef.current === currentTree.id) return;
+    lastViewedChatSessionIdRef.current = currentTree.id;
+    if (!currentTree.topbar_pinned) {
+      addOpenSessionId(currentTree.id);
+    }
+  }, [
+    addOpenSessionId,
+    currentTree,
+    isOpenSessionTabEligible,
+    route.kind,
+    sessionLoadError?.sessionId,
+  ]);
 
   const handleCloseTab = useCallback(
     (id: string) => {
@@ -3360,36 +4324,130 @@ function AppMain({
     [currentTree?.id, navigate]
   );
 
+  const handleCloseOtherTabs = useCallback(
+    (id: string) => {
+      setOpenSessionIds((prev) => prev.filter((tid) => tid === id));
+      if (currentTree?.id && currentTree.id !== id && !currentTree.topbar_pinned) {
+        navigate(sessionPath(id));
+      }
+    },
+    [currentTree?.id, currentTree?.topbar_pinned, navigate],
+  );
+
   const findOpenSessionRecord = useCallback(
-    (id: string) => sessions.find((s) => s.id === id) || openSessionRecords[id],
-    [openSessionRecords, sessions],
+    (id: string) =>
+      openSessionRecords[id] ||
+      findSessionNode(currentTree, id) ||
+      sessions.find((s) => s.id === id),
+    [currentTree, openSessionRecords, sessions],
+  );
+
+  const handleToggleTopbarPin = useCallback(
+    (id: string, pinned: boolean) => {
+      const session = findOpenSessionRecord(id);
+      if (session) {
+        const topbarPinnedAt = pinned ? new Date().toISOString() : null;
+        const nextSession = {
+          ...session,
+          topbar_pinned: pinned,
+          topbar_pinned_at: topbarPinnedAt,
+        };
+        setOpenSessionRecords((prev) => ({ ...prev, [id]: nextSession }));
+        setTopbarPinnedSessions((prev) => {
+          const next = { ...prev };
+          if (pinned) next[id] = nextSession;
+          else delete next[id];
+          return next;
+        });
+        applySessionMetadata(id, {
+          topbar_pinned: pinned,
+          topbar_pinned_at: topbarPinnedAt,
+        });
+      }
+      // Write-through to the backend via the durable backlog: offline pin
+      // toggles survive a disconnect and drain on reconnect instead of being
+      // reverted. The `session_metadata_updated` echo converges other tabs.
+      queueWrite({
+        method: "PUT",
+        url: `/api/sessions/${encodeURIComponent(id)}/topbar-pin`,
+        body: { pinned },
+        key: `topbar-pin:${id}`,
+      });
+    },
+    [applySessionMetadata, findOpenSessionRecord],
   );
 
   // Open-session tabs, ordered by the `sessions_tabs_sort` pref (descending
   // on the chosen timestamp). Open-order (newest-opened first) is the stable
   // tie-break for sessions sharing/lacking a timestamp.
   const sortedOpenSessions = useMemo(() => {
-    const openOrder = openSessionIds.slice().reverse();
+    const pinnedRecords = Object.values(topbarPinnedSessions)
+      .map((session) => findOpenSessionRecord(session.id) || session)
+      .filter((session): session is Session => Boolean(session?.topbar_pinned))
+      .sort((a, b) => {
+        const aPinnedAt = a.topbar_pinned_at ? Date.parse(a.topbar_pinned_at) : 0;
+        const bPinnedAt = b.topbar_pinned_at ? Date.parse(b.topbar_pinned_at) : 0;
+        const delta = bPinnedAt - aPinnedAt;
+        return delta !== 0 ? delta : a.id.localeCompare(b.id);
+      });
+    const pinnedIds = new Set(pinnedRecords.map((session) => session.id));
+    const openOrder = openSessionIds
+      .filter((id) => !pinnedIds.has(id))
+      .slice()
+      .reverse();
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
-      .filter((s): s is Session => !!s);
+      .filter((s): s is Session => Boolean(s && isOpenSessionTabEligible(s)));
     const tsOf = (s: Session) => {
+      if (sessionTabsSort === "tab_joined_at") {
+        const ms = Date.parse(openSessionJoinedAt[s.id] || "");
+        return Number.isNaN(ms) ? -Infinity : ms;
+      }
       const v = (s as unknown as Record<string, unknown>)[sessionTabsSort];
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
       return Number.isNaN(ms) ? -Infinity : ms;
     };
-    return records
+    const activeRecord = currentTree?.id
+      ? records.find((session) => session.id === currentTree.id)
+      : undefined;
+    const sortableRecords = activeRecord
+      ? records.filter((session) => session.id !== activeRecord.id)
+      : records;
+    const sortedRecords = sortableRecords
       .map((s, i) => ({ s, i }))
       .sort((a, b) => {
         const d = tsOf(b.s) - tsOf(a.s);
         return d !== 0 ? d : a.i - b.i; // stable: keep open-order on ties
       })
       .map((e) => e.s);
-  }, [openSessionIds, findOpenSessionRecord, sessionTabsSort]);
-
+    return [
+      ...pinnedRecords,
+      ...(activeRecord ? [activeRecord] : []),
+      ...sortedRecords,
+    ];
+  }, [
+    currentTree?.id,
+    openSessionIds,
+    openSessionJoinedAt,
+    findOpenSessionRecord,
+    isOpenSessionTabEligible,
+    sessionTabsSort,
+    topbarPinnedSessions,
+  ]);
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
-      setOpenSessionRecords((prev) => ({ ...prev, [session.id]: session }));
+      setOpenSessionRecords((prev) => {
+        const merged = mergeOpenSessionRecord(prev[session.id], session);
+        return merged === prev[session.id]
+          ? prev
+          : { ...prev, [session.id]: merged };
+      });
+      if (session.topbar_pinned) {
+        setTopbarPinnedSessions((prev) => ({
+          ...prev,
+          [session.id]: session,
+        }));
+      }
       navigate(sessionPath(session.id));
     },
     [navigate],
@@ -3418,19 +4476,20 @@ function AppMain({
   // state update). This flag tells it to skip one cycle.
   const skipDriftRef = useRef(false);
   useEffect(() => {
-    if (!currentSession) return;
-    setSessionTokenUsage(currentSession.token_usage_total || null);
-    setSessionTokenUsageLast(currentSession.token_usage_last || null);
+    if (!currentSession) {
+      lastSyncedSessionIdRef.current = null;
+      return;
+    }
     if (currentSession.id !== lastSyncedSessionIdRef.current) {
       lastSyncedSessionIdRef.current = currentSession.id;
-      // Sync model from the session so the global selector reflects the
-      // session's actual provider/model. Without this, the drift detector
-      // below sees a mismatch (active provider default vs session model)
-      // and PATCHes the wrong model back, breaking cross-provider sessions.
-      if (currentSession.model) {
-        setModel(currentSession.model);
-        skipDriftRef.current = true;
-      }
+      // Re-establish the global selector from the focused session
+      // UNCONDITIONALLY on every switch, and always arm the skip. Arming
+      // lastSynced without overwriting `model` left a leaked active-provider
+      // default (e.g. glm-5.2 after switching the default provider) sitting in
+      // `model`, which the drift detector then PATCHed onto a different-provider
+      // session — corrupting its model while provider_id stayed put.
+      setModel(currentSession.model || "");
+      skipDriftRef.current = true;
       if (currentSession.cwd) setCwd(currentSession.cwd);
     }
   }, [currentSession]);
@@ -3447,6 +4506,10 @@ function AppMain({
       return;
     }
     if (currentSession.id !== lastSyncedSessionIdRef.current) return;
+    // Never persist a model that leaked from the active/default-provider
+    // mirror onto a session whose own provider differs — that write would
+    // corrupt the session's model (and now 400s at the backend, spamming).
+    if (isLeakedProviderMirror(model, currentProvider, defaultProvider)) return;
     // Gate on `model` being non-empty. Until the active provider's
     // default_model is pulled from /api/providers, local `model` is "" —
     // comparing against the session's stored model would always look
@@ -3467,7 +4530,7 @@ function AppMain({
       },
       { silent: true },
     ).then(() => refreshSessions()).catch(() => {});
-  }, [model, currentSession, refreshSessions, clientId]);
+  }, [model, currentSession, refreshSessions, clientId, defaultProvider, currentProvider]);
 
   // user_message_persisted ack is now handled imperatively by
   // `handleUserMessagePersisted` (passed to useWebSocket above) —
@@ -3551,6 +4614,19 @@ function AppMain({
   // every subscribe sends `since_seq` and the backend responds with
   // `messages_replay` carrying everything we missed (including the
   // live in-flight assistant message). No REST refetch needed here.
+
+  const getCurrentOpenFileSnapshots = useCallback((): OpenFileSnapshot[] => {
+    if (!currentSession || !rightPanelVisible) return [];
+    return (currentSession.open_file_panels ?? []).map((panel) => {
+      const handle = openFileEditorsRef.current.get(panel.path);
+      return {
+        path: panel.path,
+        visible: handle?.getVisibleRange() ?? null,
+        caret: handle?.getCaretPosition() ?? null,
+        selection: handle?.getSelection() ?? null,
+      };
+    });
+  }, [currentSession, rightPanelVisible]);
 
   const sendPrompt = useCallback(
     async (
@@ -3642,107 +4718,34 @@ function AppMain({
       let filePayloads: FilePayload[] = effFiles.map(toFilePayload);
 
       const sessionTags = currentSession.inline_tags ?? [];
-      const withTags = mergeTagsIntoPrompt(prompt, sessionTags);
+      const queuedBase = queuedBySession[currentSession.id]?.length
+        ? queuedBySession[currentSession.id]!
+        : persistedQueuedPrompts;
+      const latestQueued = queuedBase[queuedBase.length - 1] ?? null;
+      const final = buildFinalPrompt({
+        prompt,
+        tags: sessionTags,
+        sendMode,
+        latestQueued,
+        openFileSnapshots: getCurrentOpenFileSnapshots(),
+        previousOpenFilesStateKey:
+          lastOpenFilesReminderKeyBySessionRef.current[currentSession.id] ?? "",
+      });
+      sendMode = final.sendMode;
 
-      const openFileSnapshots = rightPanelVisible
-        ? (currentSession.open_file_panels ?? []).map((p) => {
-            const h = openFileEditorsRef.current.get(p.path);
-            return {
-              path: p.path,
-              visible: h?.getVisibleRange() ?? null,
-              caret: h?.getCaretPosition() ?? null,
-              selection: h?.getSelection() ?? null,
-            };
-          })
-        : [];
-      const openFilesPreamble = buildOpenFilesPreamble(openFileSnapshots);
-      const finalPrompt = openFilesPreamble
-        ? `${openFilesPreamble}\n${withTags}`
-        : withTags;
-
-      let sendForm = buildSendPromptForm({ finalPrompt, sendMode });
-      if (sendMode === "queue") {
-        // Queue merging: backend decides queued vs immediate via
-        // `coordinator.has_active_turn(app_session_id)`. The frontend
-        // does NOT guess — it always sends with `send_mode=queue` and
-        // lets the backend route. For merge UX, read the canonical
-        // text from either source: `queuedBySession` (backend-confirmed
-        // queue entry) or `pendingQueueTextBySession` (the in-flight
-        // textbox-merge slot for a send that hasn't been acked yet).
-        const existingQueued = queuedBySession[currentSession.id];
-        const existingPendingText =
-          pendingQueueTextBySession[currentSession.id];
-        sendForm = buildSendPromptForm({
-          finalPrompt,
-          sendMode,
-          existingQueuedPreview: existingQueued?.preview,
-          existingPendingText,
-        });
-        if (sendForm.replacedQueuedPrompt) {
-          // The merge cancels the previously-queued backend entry and
-          // re-dispatches a single merged prompt. Carry the previous
-          // prompt's attachments forward (mirroring the text merge) so the
-          // re-dispatch doesn't drop them. Source priority matches the text
-          // merge: backend-confirmed queue entry first, else the not-yet-
-          // acked stash slot. Both hold PastedImage/FileAttachment shapes.
-          const prevImages =
-            (existingQueued?.images as PastedImage[] | undefined) ??
-            pendingQueueImagesRef.current[currentSession.id];
-          const prevFiles =
-            (existingQueued?.files as FileAttachment[] | undefined) ??
-            pendingQueueFilesRef.current[currentSession.id];
-          const merged = mergeQueuedAttachments(
-            prevImages,
-            prevFiles,
-            images,
-            files,
-          );
-          effImages = merged.images;
-          effFiles = merged.files;
-          imagePayloads = effImages.map(toImagePayload);
-          filePayloads = effFiles.map(toFilePayload);
-          // Drop the backend-confirmed entry (if any) so we re-submit a
-          // single merged prompt. If only the textbox-merge slot is
-          // populated (no backend ack yet), there's nothing to cancel on
-          // the backend — the slot is cleared synchronously below.
-          if (existingQueued) {
-            sendCancelQueued(currentSession.id);
-          }
-          // Remove any pending bubbles for the previous prompt — the merged
-          // bubble replaces them. Without this, the old bubble leaks when
-          // prompt_queued arrives for the OLD client_id but the merged prompt
-          // carries a NEW client_id.
-          setPendingBySession((all) => {
-            const prev = all[currentSession.id];
-            if (!prev || prev.length === 0) return all;
-            const { [currentSession.id]: _drop, ...rest } = all;
-            void _drop;
-            return rest;
-          });
-        }
-
-        // Synchronously seed the textbox-merge slot with the full text so
-        // a fast double-send can merge against it before the backend ack
-        // arrives. `writePendingQueueText` updates BOTH the ref and the
-        // state in a single tick — closes the race where `prompt_queued`
-        // arrives before React commits and `onPromptQueued` would read
-        // a stale ref. Cleared on `prompt_queued` (text moves into
-        // `queuedBySession.preview`) or `user_message_persisted`.
-        writePendingQueueText(currentSession.id, sendForm.prompt);
-        // Stash attachments for the banner alongside the merge-slot text.
-        pendingQueueImagesRef.current = {
-          ...pendingQueueImagesRef.current,
-          [currentSession.id]: effImages.length > 0 ? effImages : [],
-        };
-        pendingQueueFilesRef.current = {
-          ...pendingQueueFilesRef.current,
-          [currentSession.id]: effFiles.length > 0 ? effFiles : [],
-        };
-      }
-
+      const sendForm = { prompt: final.prompt };
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
       const clientIdForMsg = `pending-${Date.now()}`;
+      if (sendMode === "queue") {
+        appendPendingQueueDraft(currentSession.id, {
+          id: clientIdForMsg,
+          clientId: clientIdForMsg,
+          preview: sendForm.prompt,
+          ...(effImages.length > 0 ? { images: effImages } : {}),
+          ...(effFiles.length > 0 ? { files: effFiles } : {}),
+        });
+      }
 
       const sessionId = currentSession.id;
       const capabilityContexts = turnCapabilityContextsBySession[sessionId] ?? [];
@@ -3758,7 +4761,6 @@ function AppMain({
         image_count: imagePayloads.length,
         file_count: filePayloads.length,
         capability_context_count: capabilityContexts.length,
-        replaced_queued_prompt: sendForm.replacedQueuedPrompt,
       });
       // Always add an optimistic user bubble. Backend will either
       // echo `user_message_persisted` (immediate dispatch) which
@@ -3815,13 +4817,39 @@ function AppMain({
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
         capabilityContexts,
       };
-      if (sendMode === "queue") {
-        offlineQueue.replaceBySession(sessionId, offlineEntry);
-      } else {
-        offlineQueue.enqueue(offlineEntry);
-      }
+      // Buffer to durable localStorage FIRST so a reconnect/reload can replay
+      // the action even if this tab never gets to dispatch it. `offlineQueued`
+      // is false only when localStorage could not persist it (quota / private
+      // mode); `persistFailed` then drives the degraded-buffering warning.
+      const offlineQueued = offlineQueue.enqueue(offlineEntry);
+
+      // The action is neither deliverable now nor durably buffered, so
+      // accepting it would risk silent loss on reload. Fail closed: drop the
+      // optimistic surfaces and return false so InputArea restores the draft
+      // (text + attachments) and the user can retry after freeing space. A
+      // full buffer must NEVER block a deliverable online send, so this only
+      // fires on the two paths where the WS cannot carry the prompt.
+      const abandonUndeliverableUndurable = () => {
+        logPromptSend("app_offline_persist_failed", {
+          app_session_id: sessionId,
+          client_id: clientIdForMsg,
+          connected,
+          queue_size: offlineQueue.queue.length,
+        }, "error");
+        retryPayloadsRef.current.delete(clientIdForMsg);
+        if (sendMode === "queue") takePendingQueueDraft(sessionId, clientIdForMsg);
+        setPendingForSession(sessionId, (prev) =>
+          prev.filter((m) => m.id !== clientIdForMsg)
+        );
+      };
 
       if (currentSession.offline_pending) {
+        // No backend session exists yet, so the WS path is unavailable by
+        // construction: localStorage is the ONLY carrier across a reload.
+        if (!offlineQueued) {
+          abandonUndeliverableUndurable();
+          return false;
+        }
         logPromptSend("app_offline_pending_session", {
           app_session_id: sessionId,
           client_id: clientIdForMsg,
@@ -3840,6 +4868,8 @@ function AppMain({
             return rest;
           });
         }
+        lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
+          final.openFilesStateKey;
         return true;
       }
 
@@ -3862,6 +4892,13 @@ function AppMain({
       // offline delivery. The optimistic bubble stays visible with
       // status "offline" and is promoted to "sending" on reconnect.
       if (!sent) {
+        // WS not open. If the action is also not durably buffered it cannot
+        // survive a reload — fail closed so the draft is preserved instead of
+        // a phantom "offline" bubble that will never actually send.
+        if (!offlineQueued) {
+          abandonUndeliverableUndurable();
+          return false;
+        }
         logPromptSend("app_ws_send_failed_offline", {
           app_session_id: sessionId,
           client_id: clientIdForMsg,
@@ -3896,17 +4933,116 @@ function AppMain({
           return rest;
         });
       }
+      lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
+        final.openFilesStateKey;
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, sendCancelQueued, queuedBySession, pendingQueueTextBySession, writePendingQueueText, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
   );
 
-  const handleSend = useCallback(
-    (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPrompt(prompt, images, files, "queue"),
-    [sendPrompt],
+  // One-time bypass-permission warning on the first prompt send. The user
+  // either changes it in Settings (don't send) or sends anyway — sending
+  // acknowledges so the dialog never reappears. Pure UI ack (no backend state).
+  const [bypassPermAck, setBypassPermAck] = useState<boolean>(
+    () => localStorage.getItem("ba_bypass_perm_ack") === "1",
   );
+  const [bypassPermPending, setBypassPermPending] = useState<{
+    prompt: string;
+    images: import("./components/InputArea").PastedImage[];
+    files: import("./components/InputArea").FileAttachment[];
+    // Resolves the Promise handleSend returned to InputArea.submitDraft, so
+    // submitDraft stays the single authority that clears the draft/images/
+    // files (on confirm) or restores them (on cancel/dismiss).
+    resolve: (sent: boolean) => void;
+  } | null>(null);
+
+  // Pre-send advisories (e.g. quota nearly exhausted) reported by extensions.
+  // Purely a decision bridge between user action and send — the draft stays
+  // owned by submitDraft, mirroring the bypass-permission pending pattern.
+  const [preSendAdvisoryPending, setPreSendAdvisoryPending] = useState<{
+    advisories: PreSendAdvisory[];
+    resolve: (proceed: boolean) => void;
+  } | null>(null);
+
+  const handleSend = useCallback(
+    async (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
+      if (currentSession && !isPreSendAdvisorySnoozed(currentProvider?.id, model)) {
+        // Always attempt; fetchPreSendAdvisories fail-softs to [] on any
+        // error/timeout so a WS flap or slow backend never blocks sending.
+        const advisories = await fetchPreSendAdvisories(
+          API,
+          currentSession.id,
+          currentProvider?.id,
+          model,
+        );
+        if (advisories.length > 0) {
+          const proceed = await new Promise<boolean>((resolve) => {
+            setPreSendAdvisoryPending({ advisories, resolve });
+          });
+          if (!proceed) return false;
+        }
+      }
+      if (
+        !bypassPermAck &&
+        currentSession &&
+        currentProvider &&
+        sessionIsBypass(currentProvider.kind, currentSession.permission, currentProvider.default_permission)
+      ) {
+        return new Promise<boolean>((resolve) => {
+          setBypassPermPending({ prompt, images, files, resolve });
+        });
+      }
+      return sendPrompt(prompt, images, files, "queue");
+    },
+    [sendPrompt, bypassPermAck, currentSession, currentProvider, model],
+  );
+
+  const confirmPreSendAdvisory = useCallback(() => {
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(true);
+      return null;
+    });
+  }, []);
+
+  const dismissPreSendAdvisory = useCallback(() => {
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(false);
+      return null;
+    });
+  }, []);
+
+  // Snooze the advisory for this (provider, model) for 5 hours, then proceed
+  // to send. The dialog won't resurface for that combination until it expires.
+  const snoozePreSendAdvisoryAndSend = useCallback(() => {
+    snoozePreSendAdvisory(currentProvider?.id, model);
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(true);
+      return null;
+    });
+  }, [currentProvider, model]);
+
+  const confirmBypassAndSend = useCallback(async () => {
+    const pending = bypassPermPending;
+    if (!pending) return;
+    localStorage.setItem("ba_bypass_perm_ack", "1");
+    setBypassPermAck(true);
+    setBypassPermPending(null);
+    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, "queue");
+    pending.resolve(sent === true);
+  }, [bypassPermPending, sendPrompt]);
+
+  const dismissBypassPending = useCallback(() => {
+    setBypassPermPending((pending) => {
+      pending?.resolve(false);
+      return null;
+    });
+  }, []);
+
+  const bypassGoToSettings = useCallback(() => {
+    dismissBypassPending();
+    navigate("/settings");
+  }, [dismissBypassPending, navigate]);
 
   const handleSteer = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
@@ -3969,19 +5105,17 @@ function AppMain({
       currentSession?.orchestration_mode ?? (provider?.supports_manager_mode ? "team" : "native");
     if (!connected || !nextModel || !nextCwd) return;
 
-    const session = await createSession(
-      "",
-      nextModel,
-      nextCwd,
-      nextMode,
-      currentSession?.browser_harness_enabled ?? true,
-      nextProviderId,
-      currentSession?.browser_harness_headless ?? true,
-      false,
-      undefined,
-      currentSession?.node_id ?? "primary",
-      currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
-    );
+    const session = await createSession({
+      name: "",
+      model: nextModel,
+      cwd: nextCwd,
+      orchestrationMode: nextMode,
+      browserHarnessEnabled: currentSession?.browser_harness_enabled ?? true,
+      providerId: nextProviderId,
+      browserHarnessHeadless: currentSession?.browser_harness_headless ?? true,
+      nodeId: currentSession?.node_id ?? "primary",
+      reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
+    });
     if (session?.id) {
       navigateToCreatedSession(session);
     }
@@ -4076,56 +5210,212 @@ function AppMain({
     // Stop only cancels the active turn. Any queued prompt stays
     // queued — the user explicitly opted to keep it; cancelling the
     // queue is a separate action via the queue banner's own controls.
-    stopStreaming(currentSession.id);
-  }, [currentSession, stopStreaming]);
+    if (stopStreaming(currentSession.id)) return;
+    void progressTrackedFetch(
+      stopSessionOpId(currentSession.id),
+      `${API}/api/sessions/${encodeURIComponent(currentSession.id)}/stop`,
+      { method: "POST", credentials: "include" },
+    ).catch(() => {
+      refreshSessions();
+    });
+  }, [currentSession, refreshSessions, stopStreaming]);
 
-  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt") => {
-    if (!currentSession) return;
-    const sent = sendPromoteQueued(currentSession.id, action);
-    if (!sent) return;
-    if (action === "steer") return;
-    setQueuedForSession(currentSession.id, null);
-    // Drop the textbox-merge slot too — once promoted, there's no
-    // pre-ack text to merge against on a future send.
-    writePendingQueueText(currentSession.id, null);
-    delete pendingQueueImagesRef.current[currentSession.id];
-    delete pendingQueueFilesRef.current[currentSession.id];
-  }, [currentSession, sendPromoteQueued, setQueuedForSession, writePendingQueueText]);
+  // Single source of truth for the one-click rate-limit fallback: which
+  // provider/model/effort "Continue on another provider" will use. Drives
+  // both the POST body and the button label.
+  const rateLimitFallbackTarget = useMemo(() => {
+    if (!currentSession) return null;
+    const currentProviderId = currentSession.provider_id ?? defaultProviderId;
+    const nextProvider = providers.find((provider) => {
+      if (provider.id === currentProviderId || provider.suspended) return false;
+      return !!(provider.last_model || provider.default_model);
+    });
+    if (!nextProvider) return null;
+    const model = nextProvider.last_model || nextProvider.default_model;
+    const effort =
+      nextProvider.default_reasoning_effort ||
+      currentSession.reasoning_effort ||
+      "";
+    return { provider: nextProvider, model, effort };
+  }, [currentSession, defaultProviderId, providers]);
 
-  const handleCancelQueued = useCallback(() => {
+  const rateLimitFallbackLabel = useMemo(() => {
+    const target = rateLimitFallbackTarget;
+    if (!target) return null;
+    const base = t("rateLimit.continueOnTarget", {
+      defaultValue: "Continue on {{provider}} · {{model}}",
+      provider: target.provider.name,
+      model: target.model,
+    });
+    if (!target.effort) return base;
+    return `${base} · ${t(`reasoningEffort.${target.effort}`, target.effort)}`;
+  }, [rateLimitFallbackTarget, t]);
+
+  const handleContinueRateLimitOnAnotherProvider = useCallback(
+    async (assistantMessage: ChatMessage) => {
+      if (!currentSession || !rateLimitFallbackTarget) return;
+      const { provider, model, effort } = rateLimitFallbackTarget;
+      try {
+        await progressTrackedFetch(
+          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              assistant_message_id: assistantMessage.id,
+              provider_id: provider.id,
+              model,
+              reasoning_effort: effort || undefined,
+              client_id: clientId,
+            }),
+          },
+        );
+        await refreshSessions();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [clientId, currentSession, rateLimitFallbackTarget, refreshSessions],
+  );
+
+  const [rateLimitPickFor, setRateLimitPickFor] = useState<ChatMessage | null>(null);
+  const [rateLimitPickSaving, setRateLimitPickSaving] = useState(false);
+
+  const handleConfirmRateLimitPick = useCallback(
+    async (updates: SelectorUpdates) => {
+      const assistantMessage = rateLimitPickFor;
+      if (!currentSession || !assistantMessage) return;
+      if (!updates.provider_id || !updates.model) return;
+      setRateLimitPickSaving(true);
+      try {
+        await progressTrackedFetch(
+          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              assistant_message_id: assistantMessage.id,
+              provider_id: updates.provider_id,
+              model: updates.model,
+              client_id: clientId,
+            }),
+          },
+        );
+        setRateLimitPickFor(null);
+        await refreshSessions();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e));
+      } finally {
+        setRateLimitPickSaving(false);
+      }
+    },
+    [clientId, currentSession, rateLimitPickFor, refreshSessions],
+  );
+
+  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string, queuedIds?: string[]) => {
     if (!currentSession) return;
-    const sent = sendCancelQueued(currentSession.id);
+    const sent = sendPromoteQueued(currentSession.id, action, queuedId, queuedIds);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, null);
-    writePendingQueueText(currentSession.id, null);
-    delete pendingQueueImagesRef.current[currentSession.id];
-    delete pendingQueueFilesRef.current[currentSession.id];
-  }, [currentSession, sendCancelQueued, setQueuedForSession, writePendingQueueText]);
+    setQueuedForSession(currentSession.id, (prev) => {
+      const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+      if (queuedIds && queuedIds.length > 0) {
+        const idSet = new Set(queuedIds);
+        const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[currentSession.id];
+        for (const id of idSet) metadataUnseenIds?.delete(id);
+        return base.filter((item) => !idSet.has(item.id));
+      }
+      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId ?? base[0]?.id);
+      if (!queuedId) return base.slice(1);
+      return base.filter((item) => item.id !== queuedId);
+    }, "promote");
+  }, [currentSession, persistedQueuedPrompts, sendPromoteQueued, setQueuedForSession]);
+
+  const handlePromoteQueuedMulti = useCallback((queuedIds: string[]) => {
+    handlePromoteQueued("interrupt", undefined, queuedIds);
+  }, [handlePromoteQueued]);
+
+  const handleCancelQueued = useCallback((queuedId?: string) => {
+    if (!currentSession) return;
+    const sent = sendCancelQueued(currentSession.id, queuedId);
+    if (!sent) return;
+    if (queuedId) {
+      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId);
+      setQueuedForSession(currentSession.id, (prev) => {
+        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+        return base.filter((item) => item.id !== queuedId);
+      }, "cancel_item");
+    } else {
+      delete metadataUnseenQueuedIdsRef.current[currentSession.id];
+      setQueuedForSession(currentSession.id, null, "cancel");
+      clearPendingQueueDrafts(currentSession.id);
+    }
+  }, [currentSession, persistedQueuedPrompts, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
 
   const handleQueuedTextEdit = useCallback(
-    (text: string) => {
+    (text: string, queuedId?: string) => {
       if (!currentSession) return;
-      const existing = queuedBySession[currentSession.id];
+      const base = queuedBySession[currentSession.id]?.length
+        ? queuedBySession[currentSession.id]!
+        : persistedQueuedPrompts;
+      const existing = queuedId
+        ? base.find((item) => item.id === queuedId) ?? null
+        : base[0] ?? null;
       if (!existing) return;
       const sent = sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
-      setQueuedForSession(currentSession.id, {
-        id: existing.id,
-        preview: text,
-      });
+      setQueuedForSession(currentSession.id, (prev) => {
+        const current = prev.length > 0 ? prev : base;
+        return current.map((item) => item.id === existing.id ? { ...item, preview: text } : item);
+      }, "text_edit");
     },
-    [currentSession, queuedBySession, setQueuedForSession, sendUpdateQueued]
+    [currentSession, persistedQueuedPrompts, queuedBySession, setQueuedForSession, sendUpdateQueued]
   );
 
-  /** Rewind past a stopped/failed assistant turn and immediately re-send
-   * the prior user prompt as a fresh turn. Backend deletes the old
-   * user+assistant pair (rewinding all involved agents) and returns the
-   * prompt to retry; we round-trip through the existing WS send path so
-   * orchestration stays on a single code path. */
+  const handleQueuedEditStart = useCallback((queuedId?: string) => {
+    if (!currentSession || !queuedId) return;
+    sendBeginQueuedEdit(currentSession.id, queuedId);
+  }, [currentSession, sendBeginQueuedEdit]);
+
+  const handleQueuedEditFinish = useCallback((queuedId?: string) => {
+    if (!currentSession || !queuedId) return;
+    sendFinishQueuedEdit(currentSession.id, queuedId);
+  }, [currentSession, sendFinishQueuedEdit]);
+
+  /** Rewind past a stopped/failed assistant turn and retry it. The backend
+   * atomically rewinds the session AND durably re-enqueues the recovered
+   * prompt through the normal send path (it never depends on this client
+   * resending anything), so a dropped WS cannot lose the prompt. We only
+   * show an optimistic pending bubble, correlated via client_id, until the
+   * backend's user_message_persisted resolves it. */
   const handleRetryStopped = useCallback(
     async (assistantMessage: ChatMessage) => {
       if (!currentSession) return;
       const sessionId = currentSession.id;
+      const msgs = currentSession.messages ?? [];
+      const asstIdx = msgs.findIndex((m) => m.id === assistantMessage.id);
+      const priorUser =
+        asstIdx >= 0
+          ? msgs
+              .slice(0, asstIdx)
+              .reverse()
+              .find((m) => m.role === "user")
+          : undefined;
+      const pendingMsg: ChatMessage = {
+        id: `pending-${Date.now()}`,
+        role: "user",
+        content: priorUser?.content ?? "",
+        events: [],
+        timestamp: new Date().toISOString(),
+        isStreaming: false,
+        status: "sending",
+      };
+      appendPendingForSession(sessionId, pendingMsg);
+      const dropPending = () =>
+        setPendingForSession(sessionId, (prev) =>
+          prev.filter((m) => m.id !== pendingMsg.id)
+        );
       try {
         const res = await progressTrackPromise(
           `session:rewindAndRetry:${sessionId}`,
@@ -4133,10 +5423,14 @@ function AppMain({
             fetch(`${API}/api/sessions/${sessionId}/rewind_and_retry`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ assistant_message_id: assistantMessage.id }),
+              body: JSON.stringify({
+                assistant_message_id: assistantMessage.id,
+                client_id: pendingMsg.id,
+              }),
             }),
         ).promise;
         if (!res.ok) {
+          dropPending();
           let detail = await res.text();
           try {
             detail = JSON.parse(detail).detail ?? detail;
@@ -4148,49 +5442,14 @@ function AppMain({
           // Retry is a foreground action — the user clicked it and
           // expects to know why nothing happened.
           alert(t("app.retryFailedStatus", { status: res.status }) + detail);
-          return;
-        }
-        const data = (await res.json()) as {
-          retry_prompt?: string;
-          retry_model?: string;
-          retry_cwd?: string;
-          retry_orchestration_mode?: import("./types").OrchestrationMode;
-        };
-        const prompt = data.retry_prompt ?? "";
-        if (!prompt) return;
-
-        const pendingMsg: ChatMessage = {
-          id: `pending-${Date.now()}`,
-          role: "user",
-          content: prompt,
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-          status: "sending",
-        };
-        appendPendingForSession(sessionId, pendingMsg);
-
-        const sent = sendMessage(
-          prompt,
-          data.retry_model ?? model,
-          data.retry_cwd ?? cwd ?? currentSession.cwd,
-          null,
-          sessionId,
-          undefined,
-          data.retry_orchestration_mode ?? currentSession?.orchestration_mode ?? undefined,
-          pendingMsg.id
-        );
-        if (!sent) {
-          setPendingForSession(sessionId, (prev) =>
-            prev.filter((m) => m.id !== pendingMsg.id)
-          );
         }
       } catch (e) {
+        dropPending();
         console.error("rewind_and_retry error:", e);
         alert(t("app.retryFailedError") + (e instanceof Error ? e.message : String(e)));
       }
     },
-    [currentSession, model, cwd, sendMessage, setPendingForSession]
+    [currentSession, appendPendingForSession, setPendingForSession]
   );
 
   /** Sidebar ⚙ badge handler. Re-enters the engineering overlay for an
@@ -4202,7 +5461,7 @@ function AppMain({
       try {
         const r = await progressTrackPromise(
           `session:resumeEng:${parentSessionId}`,
-          () => fetch(`${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${parentSessionId}/prompt-engineer`),
+          () => fetch(`${extBackendBase("promptEngineer")}/sessions/${parentSessionId}/prompt-engineer`),
         ).promise;
         if (!r.ok) {
           // Stale badge (eng was cleaned up by a sibling tab). Refresh
@@ -4235,9 +5494,9 @@ function AppMain({
     ) => {
       if (config.fileEditEnabled) {
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
-        return;
+        return false;
       }
-      const id = crypto.randomUUID();
+      const id = uuidv4();
       const now = new Date().toISOString();
       const clientId = `offline-create-${id}`;
       const localName = initialPrompt
@@ -4248,6 +5507,7 @@ function AppMain({
         name: localName,
         model: config.main.model,
         reasoning_effort: config.main.reasoningEffort,
+        permission: config.main.permission,
         cwd: config.cwd,
         orchestration_mode: config.orchestrationMode,
         provider_id: config.main.providerId,
@@ -4256,13 +5516,17 @@ function AppMain({
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
+        last_opened_at: now,
         messages: [],
+        // Mirror the backend default: new sessions start UNPINNED. While
+        // empty (0 messages) the sidebar sort already floats them to the
+        // top, so they stay visible without sticking there permanently.
+        pinned: false,
         offline_pending: true,
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
       };
-      addOfflineSession(localSession);
-      offlineQueue.enqueue({
+      const offlineQueued = offlineQueue.enqueue({
         type: "create_session",
         clientId,
         session: localSession,
@@ -4271,6 +5535,8 @@ function AppMain({
         files: files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
       });
+      if (!offlineQueued) return false;
+      addOfflineSession(localSession);
       if (initialPrompt) {
         setPendingForSession(id, () => [{
           id: clientId,
@@ -4285,8 +5551,9 @@ function AppMain({
       setNewSessionModalOpen(false);
       setInvestigationCtx(undefined);
       navigate(sessionPath(id));
+      return true;
     },
-    [addOfflineSession, offlineQueue, navigate, setPendingForSession],
+    [addOfflineSession, offlineQueue, navigate, setPendingForSession, t],
   );
 
   const queueInitialPromptForSession = useCallback(
@@ -4298,7 +5565,7 @@ function AppMain({
       files: FilePayload[],
     ) => {
       const clientId = `investigate-${Date.now()}`;
-      offlineQueue.enqueue({
+      const offlineQueued = offlineQueue.enqueue({
         sessionId,
         clientId,
         prompt: initialPrompt,
@@ -4310,6 +5577,7 @@ function AppMain({
         sendMode: "queue",
         capabilityContexts: config.capabilityContexts,
       });
+      if (!offlineQueued) return false;
       setPendingForSession(sessionId, (prev) => [
         ...prev,
         {
@@ -4322,6 +5590,7 @@ function AppMain({
           status: "offline",
         },
       ]);
+      return true;
     },
     [offlineQueue, setPendingForSession],
   );
@@ -4339,44 +5608,47 @@ function AppMain({
         media_type: file.mediaType,
         size: file.size,
       }));
+
+      const finishCreatedSession = (session: Session) => {
+        if (!session?.id) return true;
+        if (initialPrompt) {
+          const pending = {
+            sessionId: session.id,
+            prompt: initialPrompt,
+            images,
+            files,
+            model: config.main.model,
+            cwd: config.cwd,
+            orchestrationMode: config.orchestrationMode,
+            capabilityContexts: config.capabilityContexts,
+          };
+          const promptAccepted = sendInitialPromptToSession(pending)
+            || queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
+          if (!promptAccepted) return false;
+        }
+        setNewSessionModalOpen(false);
+        setInvestigationCtx(undefined);
+        navigateToCreatedSession(session);
+        return true;
+      };
+
       if (!config.fileEditEnabled) {
         try {
-          const session = await createSession(
-            "",
-            config.main.model,
-            config.cwd,
-            config.orchestrationMode,
-            config.browserHarnessEnabled,
-            config.main.providerId,
-            config.browserHarnessHeadless,
-            false,
-            undefined,
-            config.nodeId,
-            config.main.reasoningEffort,
-            undefined,
-            config.capabilityContexts,
-            config.folderId,
-          );
-          setNewSessionModalOpen(false);
-          setInvestigationCtx(undefined);
-          if (session?.id) {
-            navigateToCreatedSession(session);
-            if (initialPrompt) {
-              const pending = {
-                sessionId: session.id,
-                prompt: initialPrompt,
-                images,
-                files,
-                model: config.main.model,
-                cwd: config.cwd,
-                orchestrationMode: config.orchestrationMode,
-                capabilityContexts: config.capabilityContexts,
-              };
-              if (!sendInitialPromptToSession(pending)) {
-                queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
-              }
-            }
-          }
+          const session = await createSession({
+            name: "",
+            model: config.main.model,
+            cwd: config.cwd,
+            orchestrationMode: config.orchestrationMode,
+            browserHarnessEnabled: config.browserHarnessEnabled,
+            providerId: config.main.providerId,
+            browserHarnessHeadless: config.browserHarnessHeadless,
+            nodeId: config.nodeId,
+            reasoningEffort: config.main.reasoningEffort,
+            permission: config.main.permission,
+            capabilityContexts: config.capabilityContexts,
+            folderId: config.folderId,
+          });
+          finishCreatedSession(session);
         } catch (e) {
           if (isRetryableOfflineError(e)) {
             queueLocalFirstSession(
@@ -4393,48 +5665,30 @@ function AppMain({
         }
         return;
       }
+
       if (!connected) {
         queueLocalFirstSession(config, initialPrompt, images, files);
         return;
       }
-      try {
 
-        const session = await createSession(
-          "",
-          config.main.model,
-          config.cwd,
-          config.orchestrationMode,
-          config.browserHarnessEnabled,
-          config.main.providerId,
-          config.browserHarnessHeadless,
-          true,
-          config.fileEditPath,
-          config.nodeId,
-          config.main.reasoningEffort,
-          undefined,
-          config.capabilityContexts,
-          config.folderId,
-        );
-        setNewSessionModalOpen(false);
-        setInvestigationCtx(undefined);
-        if (session?.id) {
-          navigateToCreatedSession(session);
-          if (initialPrompt) {
-            const pending = {
-              sessionId: session.id,
-              prompt: initialPrompt,
-              images,
-              files,
-              model: config.main.model,
-              cwd: config.cwd,
-              orchestrationMode: config.orchestrationMode,
-              capabilityContexts: config.capabilityContexts,
-            };
-            if (!sendInitialPromptToSession(pending)) {
-              queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
-            }
-          }
-        }
+      try {
+        const session = await createSession({
+          name: "",
+          model: config.main.model,
+          cwd: config.cwd,
+          orchestrationMode: config.orchestrationMode,
+          browserHarnessEnabled: config.browserHarnessEnabled,
+          providerId: config.main.providerId,
+          browserHarnessHeadless: config.browserHarnessHeadless,
+          fileEditEnabled: true,
+          fileEditPath: config.fileEditPath,
+          nodeId: config.nodeId,
+          reasoningEffort: config.main.reasoningEffort,
+          permission: config.main.permission,
+          capabilityContexts: config.capabilityContexts,
+          folderId: config.folderId,
+        });
+        finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
           queueLocalFirstSession(config, initialPrompt, images, files);
@@ -4447,15 +5701,45 @@ function AppMain({
     [connected, createSession, queueInitialPromptForSession, queueLocalFirstSession, navigateToCreatedSession, sendInitialPromptToSession],
   );
 
+
   const handleInvestigate = useCallback((data: InvestigationData) => {
     setInvestigationCtx({ prompt: data.prompt, images: data.images });
     setNewSessionModalOpen(true);
   }, []);
 
+  const handleSendToNewSession = useCallback(
+    (
+      prompt: string,
+      images: import("./components/InputArea").PastedImage[],
+      files: import("./components/InputArea").FileAttachment[],
+    ) => {
+      if (!currentSession) return false;
+      const final = buildFinalPrompt({
+        prompt,
+        tags: currentSession.inline_tags ?? [],
+        sendMode: "interrupt",
+        openFileSnapshots: getCurrentOpenFileSnapshots(),
+      });
+      setInvestigationCtx({ prompt: final.prompt, images, files });
+      setAskProposedProjectPath(undefined);
+      setAskProposedProjectNodeId(undefined);
+      handleDraftClearImmediate(currentSession.id);
+      if ((currentSession.inline_tags ?? []).length > 0) {
+        clearSessionInlineTags(currentSession.id);
+      }
+      setNewSessionModalOpen(true);
+      return true;
+    },
+    [currentSession, clearSessionInlineTags, getCurrentOpenFileSnapshots, handleDraftClearImmediate],
+  );
+
   /** Ask entry. Ensure the singleton exists backend-side, then route
    * to its session view. The view auto-detects the singleton id and
    * mounts Ask extension slots. */
   const handleAsk = useCallback(async () => {
+    // Mark this Ask navigation as intentional so the auto-select effect
+    // doesn't immediately redirect away from the Ask view.
+    intentionalAskRef.current = true;
     try {
       await fetch(`${API}/api/extensions/ofek-dev.ask/backend/ask/ensure`, { method: "POST" });
     } catch (e) {
@@ -4483,13 +5767,15 @@ function AppMain({
       cwd: selectedProjectPath || cwd || "",
       openAsk: handleAsk,
       askSessionPath: sessionPath(ASK_SINGLETON_ID),
+      markSessionKnown,
+      t,
     }),
-    [navigate, selectedProjectPath, cwd, handleAsk],
+    [navigate, selectedProjectPath, cwd, handleAsk, markSessionKnown, t],
   );
   const teamSidebarContext = useMemo(
     () => ({
       sessionId: currentSession?.id ?? "",
-      cwd,
+      cwd: currentSession?.cwd || selectedProjectPath || cwd || "",
       model,
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
@@ -4504,28 +5790,106 @@ function AppMain({
       currentSession?.reasoning_effort,
       currentSession?.node_id,
       currentSession?.worker_creation_policy,
+      currentSession?.cwd,
+      selectedProjectPath,
       cwd,
       model,
       sessions,
       events,
     ],
   );
+  // Context for the Routines sidebar module. `onOpenSession` lets a launched
+  // (or recent) run deep-link into the chat. `events` carries the live WS
+  // frames so the panel converges on `tasks_changed` without polling.
+  const routinesSidebarContext = useMemo(
+    () => ({
+      cwd: currentSession?.cwd || selectedProjectPath || cwd || "",
+      nodeId: selectedProjectNodeId,
+      model,
+      providerId: currentSession?.provider_id ?? "",
+      reasoningEffort: currentSession?.reasoning_effort ?? "",
+      events,
+      activeExtensionPanel:
+        route.kind === "extensionPanel"
+          ? {
+              extensionId: route.extensionId,
+              panelId: route.panelId,
+              resourceId: route.resourceId,
+            }
+          : null,
+      openExtensionPanel: (target: { extensionId?: string; panelId?: string; resourceId?: string }) => {
+        const extensionId = target && typeof target.extensionId === "string" ? target.extensionId : "";
+        const panelId = target && typeof target.panelId === "string" ? target.panelId : "";
+        const resourceId = target && typeof target.resourceId === "string" ? target.resourceId : "";
+        if (!extensionId || !panelId) return;
+        navigate(extensionPanelPath(extensionId, panelId, resourceId));
+        if (isMobile) setMobileSidebarOpen(false);
+      },
+      onOpenSession: (sessionId: string) => {
+        if (!sessionId) return;
+        navigate(sessionPath(sessionId));
+        if (isMobile) setMobileSidebarOpen(false);
+      },
+    }),
+    [
+      currentSession?.cwd,
+      selectedProjectPath,
+      cwd,
+      selectedProjectNodeId,
+      model,
+      currentSession?.provider_id,
+      currentSession?.reasoning_effort,
+      events,
+      route,
+      navigate,
+      isMobile,
+    ],
+  );
+  const extensionPanelContext = useMemo(
+    () => ({
+      extensionId: route.kind === "extensionPanel" ? route.extensionId : "",
+      panelId: route.kind === "extensionPanel" ? route.panelId : "",
+      panelResourceId: route.kind === "extensionPanel" ? route.resourceId : "",
+      cwd: selectedProjectPath || cwd || currentSession?.cwd || "",
+      nodeId: selectedProjectNodeId,
+      events,
+      onOpenSession: (sessionId: string) => {
+        if (!sessionId) return;
+        navigate(sessionPath(sessionId));
+      },
+      onBack: () => navigate("/"),
+    }),
+    [
+      route,
+      selectedProjectPath,
+      cwd,
+      currentSession?.cwd,
+      selectedProjectNodeId,
+      events,
+      navigate,
+    ],
+  );
   const machinePageContext = useMemo(
     () => ({
       activePage: "machines",
+      machines,
+      syncExtensionsToNode,
+      syncExtensionsToConnectedNodes,
+      syncProvidersToNode,
+      syncProvidersToConnectedNodes,
       onBack: () => {
         if (window.history.length > 1) window.history.back();
         else navigate("/");
       },
     }),
-    [navigate],
+    [machines, navigate],
   );
   /** Navigate to the project structure edit singleton. The backend owns
    *  queuing the maintainer review so the browser cannot duplicate-send it. */
   const handleProjectStructureEdit = useCallback(async () => {
     try {
       const projectCwd = selectedProjectPath || cwd;
-      const res = await fetch(`${API}/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure`, {
+      const res = await fetch(`${extBackendBase("projectStructure")}/project-structure-edit/ensure`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectCwd }),
@@ -4536,7 +5900,7 @@ function AppMain({
         window.alert(message);
         return;
       }
-      const sessionId = data.session_id || EDIT_SINGLETON_ID;
+      const sessionId = data.session_id || editSingletonId();
       navigate(sessionPath(sessionId));
     } catch (e) {
       console.warn("project-structure-edit/ensure failed", e);
@@ -4933,16 +6297,10 @@ function AppMain({
     }
   }, [handleOpenFilePanel, isMobile, currentSession, patchRightPanel]);
 
-  // Trim the outer sidebar while the file-edit overlay is active so the
-  // chat + file panels get more room. The user's persisted preference
-  // (sidebar.size) is left untouched so it restores on exit. 200px matches
-  // useResizable's `min` so contents that already fit at the minimum
-  // still render correctly.
-  const FILE_EDIT_SIDEBAR_WIDTH = 200;
-  const effectiveSidebarWidth = !isMobile && sidebarMinimized
+  // File-edit mode temporarily collapses the outer sidebar without changing
+  // the user's persisted sidebar preference, so regular sessions restore it.
+  const effectiveSidebarWidth = sidebarCollapsed
     ? SIDEBAR_MINIMIZED_WIDTH
-    : fileEditingState
-    ? FILE_EDIT_SIDEBAR_WIDTH
     : sidebar.size;
 
   // Inline width is desktop-only. On mobile/tablet the CSS overrides
@@ -4957,7 +6315,7 @@ function AppMain({
     : { width: rightPanel.size, minWidth: rightPanel.size };
   const mobileRightPanelStyle =
     isMobile && isPortrait && rightPanelVisible && !mobileRightFullscreen
-      ? { height: mobileRightPanel.size, minHeight: mobileRightPanel.size }
+      ? mobileRightPanelSizingStyle(mobileRightPanel.size)
       : undefined;
 
   const sessionsForProject = useMemo(
@@ -5003,8 +6361,18 @@ function AppMain({
   // the Sessions list whenever the extension + its sidebar module are present.
   const workersTabAvailable = !!(
     builtinExtensions.team &&
-    cwd &&
+    (currentSession?.cwd || selectedProjectPath || cwd) &&
     teamSidebarModules.length > 0
+  );
+
+  // The Routines tab is surfaced next to Sessions/Workers whenever the routines
+  // extension + its sidebar module are present and a project is selected
+  // (routines are project-scoped). Routines are reusable natural-language
+  // definitions that launch autonomous sessions.
+  const routinesTabAvailable = !!(
+    builtinExtensions.routines &&
+    (currentSession?.cwd || selectedProjectPath || cwd) &&
+    routinesSidebarModules.length > 0
   );
 
   return (
@@ -5026,6 +6394,19 @@ function AppMain({
         </div>
       )}
       <StartupTasksBanner />
+      {authStatus === "authed" &&
+        sessionDragOverlayModules.map((module) => (
+          <ExtensionModuleSlot
+            key={`${module.extension_id}:${module.id}`}
+            module={module}
+            className="extension-module-slot--overlay"
+            context={{
+              draggingSessionId: draggingSession?.id ?? null,
+              draggingSessionName: draggingSession?.name ?? null,
+              sessionDragMime: SESSION_DRAG_MIME,
+            }}
+          />
+        ))}
       {builtinExtensions.machineNodes &&
         globalApprovalModules.map((module) => (
           <ExtensionModuleSlot
@@ -5048,7 +6429,18 @@ function AppMain({
       {!connected && offlineQueue.queue.length > 0 && (
         <div className="offline-banner">
           <span className="offline-banner-dot" />
-          Offline — {offlineQueue.queue.length} action{offlineQueue.queue.length !== 1 ? "s" : ""} queued
+          {t(offlineQueue.queue.length === 1 ? "app.offlineQueued_1" : "app.offlineQueued_other", {
+            count: offlineQueue.queue.length,
+          })}
+        </div>
+      )}
+      {offlineQueue.persistFailed && (
+        <div className="offline-banner offline-banner--warn" role="alert">
+          <span className="offline-banner-dot" />
+          {t(
+            "app.offlinePersistFailed",
+            "Storage is full — queued actions can't be saved offline and may be lost if you reload. Free up space or get back online soon.",
+          )}
         </div>
       )}
       {restartError && (
@@ -5056,7 +6448,7 @@ function AppMain({
           <span className="restart-error-banner-text">{restartError}</span>
           <button
             className="restart-error-banner-close"
-            onClick={() => setRestartError(null)}
+            onClick={dismissRestartError}
             aria-label={t("startup_tasks.dismiss")}
             title={t("startup_tasks.dismiss")}
           >
@@ -5084,6 +6476,29 @@ function AppMain({
           />
         </Suspense>
       )}
+      {authStatus === "authed" && route.kind === "communications" && (
+        <Suspense fallback={<LazySurfaceFallback />}>
+          <CommunicationsView
+            mode="page"
+            senderSessionId={currentSession?.id}
+            onBack={() => {
+              if (window.history.length > 1) window.history.back();
+              else navigate("/");
+            }}
+          />
+        </Suspense>
+      )}
+      {authStatus === "authed" && route.kind === "schedules" && (
+        <Suspense fallback={<LazySurfaceFallback />}>
+          <SchedulesPage
+            onBack={() => {
+              if (window.history.length > 1) window.history.back();
+              else navigate("/");
+            }}
+            onOpenSession={(path) => navigate(path)}
+          />
+        </Suspense>
+      )}
       {authStatus === "authed" && route.kind === "settings" && (
         <SettingsPage
           onClose={() => {
@@ -5092,6 +6507,7 @@ function AppMain({
           }}
           onRefreshApp={openRefreshModal}
           refreshAppDisabled={restarting}
+          hookActionContext={hookActionContext}
           teamEnabled={builtinExtensions.team}
           credentialBrokerEnabled={builtinExtensions.credentialBroker}
           providerConfigSyncEnabled={builtinExtensions.providerConfigSync}
@@ -5129,7 +6545,8 @@ function AppMain({
           />
         </Suspense>
       )}
-      {authStatus === "authed" && route.kind === "session" && (
+      {authStatus === "authed" &&
+        (route.kind === "session" || route.kind === "emptyProject" || route.kind === "extensionPanel") && (
     <div className="app">
       {isMobile && (
         <header className="mobile-topbar">
@@ -5149,7 +6566,7 @@ function AppMain({
           <span className="mobile-topbar-title">
             {currentSession?.name ?? t("app.title")}
           </span>
-          <ExtensionQuickButtons context={hookActionContext} variant="topbar" />
+          <ExtensionQuickButtons context={hookActionContext} variant="topbar" placement="session" />
           {builtinExtensions.ask &&
             currentSession?.id !== ASK_SINGLETON_ID &&
             mobileSessionTopbarModules.map((module) => (
@@ -5189,7 +6606,7 @@ function AppMain({
         className={
           "sidebar"
             + (isMobile && mobileSidebarOpen ? " mobile-drawer-open" : "")
-            + (!isMobile && sidebarMinimized ? " sidebar-minimized" : "")
+            + (sidebarCollapsed ? " sidebar-minimized" : "")
         }
         style={sidebarStyle}
         role={isMobile ? "dialog" : undefined}
@@ -5197,22 +6614,25 @@ function AppMain({
         aria-label={isMobile ? t("sidebar.drawerLabel") : undefined}
         aria-hidden={isMobile && !mobileSidebarOpen ? true : undefined}
       >
-        {!isMobile && sidebarMinimized ? (
+        {sidebarCollapsed ? (
           <div className="sidebar-minimized-rail">
-            <button
-              className="setup-btn sidebar-minimize-btn"
-              onClick={() => setSidebarMinimized(false)}
-              title={t("sidebar.expand")}
-              aria-label={t("sidebar.expand")}
-            >
-              <Icon name="chevron-right" size={18} />
-            </button>
+            {!fileEditingState && (
+              <button
+                className="setup-btn sidebar-minimize-btn"
+                onClick={() => setSidebarMinimized(false)}
+                title={t("sidebar.expand")}
+                aria-label={t("sidebar.expand")}
+              >
+                <Icon name="chevron-right" size={18} />
+              </button>
+            )}
           </div>
         ) : (
         <>
         <div className="sidebar-top">
-          <div className="sidebar-header-row">
-            {!isMobile && (
+          {(() => {
+            const closeMenu = () => setHeaderMenuOpen(false);
+            const minimizeBtn = !isMobile && (
               <button
                 className="setup-btn sidebar-minimize-btn"
                 onClick={() => setSidebarMinimized(true)}
@@ -5221,58 +6641,152 @@ function AppMain({
               >
                 <Icon name="chevron-left" size={18} />
               </button>
-            )}
-            <div className="app-title-brand">
-              <BetterAgentBrandMark className="sidebar-brand-mark" />
-              <h1 className="app-title">{t("app.title")}</h1>
-            </div>
-            {Object.keys(processingByRoot).length > 0 && (
-              <span
-                className="reconciling-chip"
-                title={t("app.reconcilingTitle")}
-              >
+            );
+            const brand = (
+              <div className="app-title-brand">
+                <span
+                  className={`brand-connection-dot${connected ? " connected" : ""}`}
+                  title={connected ? t("tokens.connected") : t("tokens.disconnected")}
+                  aria-label={connected ? t("tokens.connected") : t("tokens.disconnected")}
+                />
+                <BetterAgentBrandMark className="sidebar-brand-mark" />
+                <h1 className="app-title">{t("app.title")}</h1>
+              </div>
+            );
+            const chip = Object.keys(processingByRoot).length > 0 && (
+              <span className="reconciling-chip" title={t("app.reconcilingTitle")}>
                 {t("app.reconciling")}
               </span>
-            )}
-            {showMachinesLink && (
+            );
+            const filesBtn = cwd && (
               <button
                 className="setup-btn"
-                onClick={() => navigate("/machines")}
-                title={t("sidebar.machinesLink")}
-                aria-label={t("sidebar.machinesLink")}
+                onClick={() => {
+                  setFileChooserMode("browse");
+                  setFileChooserOpen(true);
+                }}
+                title={t("sidebar.toolsTitle")}
+                aria-label={t("sidebar.toolsTitle")}
               >
-                <Icon name="server" size={18} />
+                <Icon name="folder" size={18} />
               </button>
-            )}
-            <button
-              className="setup-btn"
-              onClick={() => navigate("/analytics")}
-              title={t("analytics.title")}
-              aria-label={t("analytics.title")}
-            >
-              <Icon name="chart" size={18} />
-            </button>
-            {!isMobile && (
+            );
+            const secondary = (
+              <>
+                {showMachinesLink && (
+                  <button
+                    className="setup-btn"
+                    onClick={() => {
+                      navigate("/machines");
+                      closeMenu();
+                    }}
+                    title={t("sidebar.machinesLink")}
+                    aria-label={t("sidebar.machinesLink")}
+                  >
+                    <Icon name="server" size={18} />
+                  </button>
+                )}
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/analytics");
+                    closeMenu();
+                  }}
+                  title={t("analytics.title")}
+                  aria-label={t("analytics.title")}
+                >
+                  <Icon name="chart" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/communications");
+                    closeMenu();
+                  }}
+                  title={t("communications.title")}
+                  aria-label={t("communications.title")}
+                >
+                  <Icon name="chat" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/schedules");
+                    closeMenu();
+                  }}
+                  title={t("schedulesPage.title")}
+                  aria-label={t("schedulesPage.title")}
+                >
+                  <Icon name="clock" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    openRefreshModal();
+                    closeMenu();
+                  }}
+                  disabled={restarting}
+                  title={t("app.refreshButtonTitle")}
+                  aria-label={t("app.refreshButtonTitle")}
+                >
+                  {restarting ? "…" : <Icon name="refresh" size={18} />}
+                </button>
+                <ExtensionPageIcons context={hookActionContext} />
+              </>
+            );
+            const configBtn = (
               <button
                 className="setup-btn"
-                onClick={openRefreshModal}
-                disabled={restarting}
-                title={t("app.refreshButtonTitle")}
-                aria-label={t("app.refreshButtonTitle")}
+                onClick={() => navigate("/settings")}
+                title={t("app.settingsButtonTitle")}
+                aria-label={t("app.settingsButtonTitle")}
               >
-                {restarting ? "…" : <Icon name="refresh" size={18} />}
+                <Icon name="settings" size={18} />
               </button>
-            )}
-            <button
-              className="setup-btn"
-              onClick={() => navigate("/settings")}
-              title={t("app.settingsButtonTitle")}
-              aria-label={t("app.settingsButtonTitle")}
-            >
-              <Icon name="settings" size={18} />
-            </button>
-            <ExtensionPageIcons context={hookActionContext} />
-          </div>
+            );
+            return (
+              <div className="sidebar-header-row" ref={headerRowRef}>
+                {minimizeBtn}
+                {brand}
+                {chip}
+                <div className="header-actions">
+                  {filesBtn}
+                  {!headerOverflow && secondary}
+                  {configBtn}
+                  {headerOverflow && (
+                    <div className="header-overflow-wrapper" ref={headerMenuRef}>
+                      <button
+                        className="setup-btn header-overflow-trigger"
+                        onClick={() => setHeaderMenuOpen((v) => !v)}
+                        aria-label={t("app.moreActions")}
+                        aria-expanded={headerMenuOpen}
+                        title={t("app.moreActions")}
+                      >
+                        <Icon name="more-vertical" size={18} />
+                      </button>
+                      {headerMenuOpen && (
+                        <div
+                          className="header-overflow-menu"
+                          onClick={() => setHeaderMenuOpen(false)}
+                        >
+                          {secondary}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {/* Hidden natural-width copy; drives overflow detection. */}
+                <div className="sidebar-header-ghost" aria-hidden="true">
+                  {minimizeBtn}
+                  {brand}
+                  {chip}
+                  {filesBtn}
+                  {secondary}
+                  {configBtn}
+                </div>
+              </div>
+            );
+          })()}
           {builtinExtensions.machineNodes && machines.length > 1 && (
             <>
               <div className="sidebar-tab-group-title">{t("machines.title")}</div>
@@ -5318,7 +6832,9 @@ function AppMain({
           </div>
         )}
 
-        {workersTabAvailable ? (
+        <div ref={setSelectedAnchorEl} className="sidebar-selected-anchor" />
+
+        {workersTabAvailable || routinesTabAvailable ? (
           <div className="sidebar-tabs" role="tablist">
             <button
               type="button"
@@ -5329,22 +6845,32 @@ function AppMain({
             >
               {t("sidebar.sessionsTab")}
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sidebarTab === "workers"}
-              className={`sidebar-tab${sidebarTab === "workers" ? " active" : ""}`}
-              onClick={() => setSidebarTab("workers")}
-            >
-              {t("sidebar.workersTab")}
-            </button>
+            {workersTabAvailable ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "workers"}
+                className={`sidebar-tab${sidebarTab === "workers" ? " active" : ""}`}
+                onClick={() => setSidebarTab("workers")}
+              >
+                {t("sidebar.workersTab")}
+              </button>
+            ) : null}
+            {routinesTabAvailable ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "routines"}
+                className={`sidebar-tab${sidebarTab === "routines" ? " active" : ""}`}
+                onClick={() => setSidebarTab("routines")}
+              >
+                {t("sidebar.routinesTab")}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
-        <div
-          className="session-list-wrapper"
-          style={{ flex: "1 1 auto", minHeight: 0 }}
-        >
+        <div className="session-list-wrapper">
           {workersTabAvailable && sidebarTab === "workers" ? (
             <div className="sidebar-workers-panel">
               {teamSidebarModules.map((module) => (
@@ -5355,14 +6881,27 @@ function AppMain({
                 />
               ))}
             </div>
+          ) : routinesTabAvailable && sidebarTab === "routines" ? (
+            <div className="sidebar-routines-panel">
+              {routinesSidebarModules.map((module) => (
+                <ExtensionModuleSlot
+                  key={`${module.extension_id}:${module.id}`}
+                  module={module}
+                  context={routinesSidebarContext}
+                />
+              ))}
+            </div>
           ) : (
             <SessionList
               sessions={sessionsForProject}
               allSessions={sessions}
               currentSessionId={currentSession?.id}
+              selectedSession={currentSession}
+              selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
-              onSelect={(id) => {
-                const s = sessions.find((s) => s.id === id);
+              onSelect={(id, row) => {
+                markSessionKnown(id);
+                const s = row ?? sessions.find((s) => s.id === id);
                 if (s) {
                   setSelectedProjectPath(s.cwd);
                   setSelectedProjectNodeId(s.node_id || "primary");
@@ -5375,7 +6914,11 @@ function AppMain({
               onPin={togglePin}
               onUnpinOthers={unpinOtherSessions}
               onArchive={archiveSession}
+              onMoveToProject={setMoveSessionId}
               onWorkerEligible={toggleWorkerEligible}
+              onAgentRenameAllowed={toggleAgentRenameAllowed}
+              teamWorkersBySession={teamWorkersBySession}
+              onWorkerCreationPolicyChange={updateWorkerCreationPolicy}
               onDetails={setDetailsSessionId}
               onResumeEng={handleResumeEng}
               onAiSearch={searchSessions}
@@ -5392,24 +6935,6 @@ function AppMain({
         </div>
 
         <div className="sidebar-bottom">
-          {cwd && (
-            <button
-              className="sidebar-tools-btn"
-              onClick={() => setFileChooserOpen(true)}
-              title={t("sidebar.toolsTitle")}
-              aria-label={t("sidebar.toolsTitle")}
-            >
-              <Icon name="folder" size={14} /> {t("sidebar.tools")}
-            </button>
-          )}
-          <TokenUsageDisplay
-            usage={sessionTokenUsage}
-            usageLast={sessionTokenUsageLast}
-            rearrangerStats={currentSession?.rearranger_stats ?? null}
-            connected={connected}
-            contextWindow={currentSession?.context_window ?? null}
-            collapsible={isMobile}
-          />
           <div className="sidebar-user-row" title={authedUser?.username}>
             <span className="sidebar-user-name">{authedUser?.username}</span>
             <button
@@ -5427,13 +6952,87 @@ function AppMain({
 
       {/* Sidebar / main-panel divider — drag disabled while file-edit overlay
           overrides the sidebar width. Hidden on mobile (drawer mode). */}
-      {!fileEditingState && !isMobile && !sidebarMinimized && (
+      {!fileEditingState && !isMobile && !sidebarCollapsed && (
         <div className="sidebar-resizer" onMouseDown={sidebar.onMouseDown} />
       )}
 
       {/* Center Panel */}
       <div className="main-panel">
         {(() => {
+          if (route.kind === "extensionPanel") {
+            const matchingPanelModules = extensionPanelModules.filter(
+              (module) =>
+                module.extension_id === route.extensionId &&
+                module.id === route.panelId,
+            );
+            return (
+              <div className="extension-main-panel">
+                {matchingPanelModules.length
+                  ? matchingPanelModules.map((module) => (
+                      <ExtensionModuleSlot
+                        key={`${module.extension_id}:${module.id}`}
+                        module={module}
+                        className="extension-module-slot--extension-panel"
+                        context={extensionPanelContext}
+                      />
+                    ))
+                  : null}
+              </div>
+            );
+          }
+          // Empty-project surface: the selected (machine, project) has no
+          // sessions. Shown instead of falling back to Ask. The New
+          // session button opens the modal pre-filled with this project.
+          if (route.kind === "emptyProject") {
+            const project = projects.find(
+              (p) =>
+                p.path === selectedProjectPath &&
+                (p.node_id || "primary") === selectedProjectNodeId,
+            );
+            const projectLabel =
+              project?.name ||
+              selectedProjectPath.replace(/\/+$/, "").split("/").pop() ||
+              selectedProjectPath;
+            const machineLabel =
+              machines.length > 1
+                ? selectedProjectNodeId === "primary"
+                  ? t("dirPicker.thisMachine")
+                  : selectedProjectNodeId
+                : null;
+            const tabsNode = sessionTabsVisible && sortedOpenSessions.length > 0 ? (
+              <SessionTabs
+                sessions={sortedOpenSessions}
+                providers={providers}
+                sortField={sessionTabsSort}
+                onSelect={handleSelectTab}
+                onClose={handleCloseTab}
+                onCloseOthers={handleCloseOtherTabs}
+                onToggleTopbarPin={handleToggleTopbarPin}
+              />
+            ) : null;
+            return (
+              <>
+                {tabsNode}
+                <div className="empty-project">
+                  <div className="empty-project-card">
+                    <div className="empty-project-project">{projectLabel}</div>
+                    {machineLabel && (
+                      <div className="empty-project-machine">{machineLabel}</div>
+                    )}
+                    <div className="empty-project-body">
+                      {t("emptyProject.body")}
+                    </div>
+                    <button
+                      className="empty-project-new-btn"
+                      onClick={() => setNewSessionModalOpen(true)}
+                    >
+                      {t("session.newButton")}
+                    </button>
+                  </div>
+                </div>
+              </>
+            );
+          }
           const streamBelongsToCurrentSession =
             !!streamingAppSessionId &&
             currentSession?.id === streamingAppSessionId;
@@ -5456,10 +7055,47 @@ function AppMain({
               </button>
             </div>
           ) : null;
+          const prToastElement = prToast ? (
+            <div className="pr-toast" role="status">
+              <svg
+                className="pr-toast-icon"
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M3.25 1A2.25 2.25 0 0 0 2.5 5.372V10.628a2.25 2.25 0 1 0 1.5 0V5.372A2.25 2.25 0 0 0 3.25 1Zm0 1.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm0 9.25a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM12.75 3a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v4.756a2.25 2.25 0 1 1-1.5 0V5.872A2.25 2.25 0 0 1 10.5 3.75Zm2.25 8a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+              </svg>
+              <a
+                className="pr-toast-link"
+                href={prToast.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={prToast.prUrl}
+              >
+                <span className="pr-toast-title">
+                  {prToast.prNumber
+                    ? `Pull request #${prToast.prNumber} created`
+                    : "Pull request created"}
+                </span>
+                {prToast.prRepository && (
+                  <span className="pr-toast-repo">{prToast.prRepository}</span>
+                )}
+              </a>
+              <button
+                className="pr-toast-close"
+                onClick={() => setPrToast(null)}
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          ) : null;
           // Ask-singleton view: the regular <Chat> rendered for the
           // singleton. The greeting box is injected as the chat's header
           // slot; the inline session picker is injected PER TURN via
-          // `renderGroupFooter` (each ask turn carries its own
+          // `renderTurnFooter` (each ask turn carries its own
           // `ask_result` on its assistant message), so previous turns keep
           // their picker + chosen highlight. The user's RAW prompt is the
           // persisted user_msg.content (the index+contract wrapper goes to
@@ -5499,6 +7135,25 @@ function AppMain({
                 ? <div className="ask-hero-wrap">{askGreetingSlots}</div>
                 : askGreetingSlots
               : undefined;
+          const emptyFileEditPickerNode = emptyFileEditingSession ? (
+            <div className="empty-file-edit-picker">
+              <button
+                type="button"
+                className="btn-primary empty-file-edit-picker__button"
+                data-testid="empty-file-editor-pick-files"
+                onClick={() => {
+                  setFileChooserMode("fileEdit");
+                  setFileChooserOpen(true);
+                }}
+              >
+                <Icon name="folder" size={16} />
+                {t("fileEditor.pickFiles")}
+              </button>
+            </div>
+          ) : undefined;
+          // The assistant board renders in the right-panel "Board" tab, not the
+          // header (see assistantSummaryModules usage in the right panel).
+          const headerNode = askDescriptionNode || undefined;
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
@@ -5518,16 +7173,17 @@ function AppMain({
               }}
             >
             <Chat
-              headerNode={askDescriptionNode}
-              getGroupClassName={(g) => {
+              headerNode={headerNode}
+              getTurnGroupClassName={(g) => {
                 if (!isAskView) return undefined;
-                const ar = g.assistantMessage?.ask_result;
-                const isResolved = ar?.resolved || g.assistantMessage?.chosen_session_id;
+                const ar = g.responseMessage?.ask_result;
+                const isResolved = ar?.resolved || g.responseMessage?.chosen_session_id;
                 return isResolved ? "ask-group ask-group--resolved" : "ask-group";
               }}
-              renderGroupFooter={(g) => {
-                const ar = g.assistantMessage?.ask_result;
-                if (!ar || !g.assistantMessage) return null;
+              renderTurnFooter={(g) => {
+                if (emptyFileEditPickerNode && g.isLatest) return emptyFileEditPickerNode;
+                const ar = g.responseMessage?.ask_result;
+                if (!ar || !g.responseMessage) return null;
                 // Delegate-approval picker: renders in ANY session when a
                 // session-bridge delegation is awaiting the user's pick.
                 if (ar.purpose === "delegate_approval") {
@@ -5542,7 +7198,7 @@ function AppMain({
                         module={module}
                         context={{
                           askResult: ar,
-                          chosenSessionId: g.assistantMessage?.chosen_session_id ?? null,
+                          chosenSessionId: g.responseMessage?.chosen_session_id ?? null,
                           allSessions: sessions,
                           onView: handleAskView,
                           onChoose: (picked: Session) => resolveDelegation(delegationId, picked.id),
@@ -5563,39 +7219,40 @@ function AppMain({
                       module={module}
                       context={{
                         askResult: ar,
-                        chosenSessionId: g.assistantMessage?.chosen_session_id ?? null,
+                        chosenSessionId: g.responseMessage?.chosen_session_id ?? null,
                         allSessions: sessions,
                         onView: handleAskView,
                         onChoose: (picked: Session) =>
                           handleAskChoose(
                             picked,
-                            resolveAskPrompt(g.userMessage.content, ar.prompt_preview),
-                            g.userMessage.images ?? [],
-                            g.assistantMessage!.id,
+                            resolveAskPrompt(g.initiatorMessage.content, ar.prompt_preview),
+                            g.initiatorMessage.images ?? [],
+                            g.responseMessage!.id,
                           ),
                         onCreateNew: () =>
                           handleAskCreateNew(
-                            resolveAskPrompt(g.userMessage.content, ar.prompt_preview),
-                            g.userMessage.images ?? [],
+                            resolveAskPrompt(g.initiatorMessage.content, ar.prompt_preview),
+                            g.initiatorMessage.images ?? [],
                             ar.proposed_project_path || undefined,
                             ar.proposed_project_node_id || undefined,
-                            g.assistantMessage!.id,
+                            g.responseMessage!.id,
                           ),
-                        onDismiss: () => handleAskDismiss(g.assistantMessage!.id),
+                        onDismiss: () => handleAskDismiss(g.responseMessage!.id),
                       }}
                     />
                   ))
                 );
               }}
-              openSessions={
-                isAskView ? [] : sortedOpenSessions
-              }
+              openSessions={sortedOpenSessions}
               sessionTabsVisible={sessionTabsVisible}
               sessionTabsSort={sessionTabsSort}
               providers={providers}
               onCloseTab={handleCloseTab}
+              onCloseOtherTabs={handleCloseOtherTabs}
+              onToggleTopbarPin={handleToggleTopbarPin}
               onSelectTab={handleSelectTab}
               messages={chatMessages}
+              userDisplayName={userDisplayName ?? authedUser?.username ?? null}
               pendingMessages={chatPendingMessages}
               runs={
                 (currentSession
@@ -5607,15 +7264,14 @@ function AppMain({
                   ? events
                   : (EMPTY_EVENTS as import("./types").WSEvent[])
               }
-              traceSteps={
-                streamBelongsToCurrentSession
-                  ? traceSteps
-                  : (EMPTY_EVENTS as import("./types").WSEvent[])
-              }
               isStreaming={streamBelongsToCurrentSession ? isStreaming : false}
-              isStopping={streamBelongsToCurrentSession ? isStopping : false}
+              isStopping={
+                (streamBelongsToCurrentSession ? isStopping : false) ||
+                currentStopProgress.inflight
+              }
               streamingLoadPhase={streamBelongsToCurrentSession ? streamingLoadPhase : null}
               onSend={handleSend}
+              onSendToNewSession={handleSendToNewSession}
               onSteer={currentSessionCanSteer ? handleSteer : undefined}
               onInterrupt={handleInterrupt}
               onAlterUserMessage={handleAlterUserMessage}
@@ -5623,37 +7279,27 @@ function AppMain({
               onStop={handleStop}
               onRetry={handleRetry}
               onRetryStopped={handleRetryStopped}
+              onContinueRateLimitOnAnotherProvider={handleContinueRateLimitOnAnotherProvider}
+              rateLimitFallbackLabel={rateLimitFallbackLabel}
+              onChooseAnotherProviderForRateLimit={
+                currentSession ? (msg) => setRateLimitPickFor(msg) : undefined
+              }
               onFileClick={handleFileClick}
               onViewDiff={handleViewDiff}
               disabled={!currentSession}
               session={currentSession}
-              onToggleRearranger={
-                builtinExtensions.rearranger
-                  ? (enabled) => {
-                      if (!currentSession) return;
-                      updateRearranger(currentSession.id, { enabled });
-                      void fetch(`${REARRANGER_API}/toggle`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          app_session_id: currentSession.id,
-                          enabled,
-                        }),
-                      });
-                    }
-                  : undefined
-              }
               onToggleSupervisor={
                 builtinExtensions.supervisor
                   ? (enabled) => {
                       if (!currentSession) return;
                       if (enabled) {
+                        setSupervisorPromptModalMode("enable");
                         setSupervisorPromptModalOpen(true);
                       } else {
                         applySessionMetadata(currentSession.id, { supervisor_enabled: false });
                         void progressTrackedFetch(
                           `session:supervisorToggle:${currentSession.id}`,
-                          `${SUPERVISOR_API}/sessions/${currentSession.id}/supervisor-toggle`,
+                          `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
                           {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
@@ -5664,6 +7310,15 @@ function AppMain({
                     }
                   : undefined
               }
+              onEditSupervisorPrompt={
+                builtinExtensions.supervisor
+                  ? () => {
+                      if (!currentSession) return;
+                      setSupervisorPromptModalMode("edit");
+                      setSupervisorPromptModalOpen(true);
+                    }
+                  : undefined
+              }
               onSeparateSupervisor={
                 builtinExtensions.supervisor
                   ? async () => {
@@ -5671,7 +7326,7 @@ function AppMain({
                       try {
                         const res = await progressTrackedFetch(
                           `session:separateSupervisor:${currentSession.id}`,
-                          `${SUPERVISOR_API}/sessions/${currentSession.id}/separate_supervisor`,
+                          `${supervisorApi()}/sessions/${currentSession.id}/separate_supervisor`,
                           { method: "POST" },
                         );
                         if (!res.ok) {
@@ -5717,6 +7372,7 @@ function AppMain({
               onAdvSync={handleAdvSync}
               onAdvSyncClick={handleAdvSyncClick}
               onRemoveTag={handleRemoveTag}
+              onRename={renameSession}
               draft={currentSession?.draft_input ?? ""}
               onDraftChange={(value) => {
                 if (!currentSession) return;
@@ -5747,15 +7403,16 @@ function AppMain({
               onDeleteFork={handleDeleteSession}
               runStateBySession={runStateBySession}
               onForkAndSend={handleForkAndSend}
+              canForkSession={currentSessionCanFork}
               queuedPrompt={queuedPrompt}
-              onPromoteQueued={() => handlePromoteQueued("interrupt")}
-              onSteerQueued={
-                currentSessionCanSteer
-                  ? () => handlePromoteQueued("steer")
-                  : undefined
-              }
+              queuedPrompts={queuedPrompts}
+              onPromoteQueued={(queuedId) => handlePromoteQueued("interrupt", queuedId)}
+              onPromoteQueuedMulti={handlePromoteQueuedMulti}
+              onSteerQueued={(queuedId) => handlePromoteQueued("steer", queuedId)}
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
+              onQueuedEditStart={handleQueuedEditStart}
+              onQueuedEditFinish={handleQueuedEditFinish}
               onReviewLastWork={
                 builtinExtensions.supervisor &&
                 currentSession?.supervisor_enabled &&
@@ -5763,7 +7420,7 @@ function AppMain({
                   ? () => {
                       void progressTrackedFetch(
                         `session:supervisorReview:${currentSession.id}`,
-                        `${SUPERVISOR_API}/sessions/${currentSession.id}/review-last-work`,
+                        `${supervisorApi()}/sessions/${currentSession.id}/review-last-work`,
                         { method: "POST" },
                       );
                     }
@@ -5786,6 +7443,8 @@ function AppMain({
               }
               hasOlderMessages={currentSession?.pagination?.has_older}
               sessionLoading={sessionLoading}
+              sessionLoadError={sessionLoadError}
+              onRetrySessionLoad={selectSession}
               onAddNote={
                 currentSession
                   ? (text) => handleAddNote(currentSession.id, text)
@@ -5793,17 +7452,34 @@ function AppMain({
               }
               onQueuedToNote={
                 currentSession
-                  ? (text) => {
+                  ? (text, queuedId) => {
                       handleAddNote(currentSession.id, text);
-                      handleCancelQueued();
+                      handleCancelQueued(queuedId);
                     }
                   : undefined
               }
               onShowNotes={() => openRightPanelWithTab("notes")}
               onShowComments={() => openRightPanelWithTab("comments")}
+              composerOverflowNode={
+                currentSession && !isAskView ? (
+                  <SessionSelectorControls
+                    session={currentSession}
+                    providers={providers}
+                    disabled={!!currentSession.offline_pending}
+                    clientId={clientId}
+                    onChange={(updates) => {
+                      applySessionMetadata(currentSession.id, updates);
+                      if (typeof updates.model === "string") {
+                        setModel(updates.model);
+                      }
+                    }}
+                    onSaved={refreshSessions}
+                  />
+                ) : null
+              }
               toolbarActionsNode={
                 <>
-                  <ExtensionQuickButtons context={hookActionContext} variant="toolbar" />
+                  <ExtensionQuickButtons context={hookActionContext} variant="toolbar" placement="session" />
                   {builtinExtensions.ask && !isAskView && !isMobile
                     ? sessionToolbarModules.map((module) => (
                         <ExtensionModuleSlot
@@ -5832,6 +7508,7 @@ function AppMain({
               <>
                 {supervisorBannerElement}
                 {chatElement}
+                {prToastElement}
               </>
             );
           }
@@ -5884,7 +7561,7 @@ function AppMain({
             try {
               const r = await progressTrackPromise(
                 `promptEng:fetchResult:${engId}`,
-                () => fetch(`${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-eng-result`),
+                () => fetch(`${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-eng-result`),
               ).promise;
               if (!r.ok) {
                 throw new Error(
@@ -5949,7 +7626,7 @@ function AppMain({
             try {
               await progressTrackedFetch(
                 `promptEng:cancel:${engId}`,
-                `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-engineer`,
+                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
                 { method: "DELETE" },
               );
             } catch {
@@ -5964,7 +7641,7 @@ function AppMain({
             try {
               await progressTrackedFetch(
                 `promptEng:cancel:${engId}`,
-                `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-engineer`,
+                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
                 { method: "DELETE" },
               );
             } catch {
@@ -6104,6 +7781,18 @@ function AppMain({
                   ? `${t("rightPanel.files")} (${currentSession?.open_file_panels?.length})`
                   : t("rightPanel.files")}
               </button>
+              {currentSession?.name === "Assistant" && (
+                <button
+                  className={`right-panel-tab ${rightPanelTab === "board" ? "active" : ""}`}
+                  onClick={() => {
+                    setRightPanelTab("board");
+                    if (currentSession && !isMobile)
+                      patchRightPanel(currentSession.id, { tab: "board", clearAutoReasons: true });
+                  }}
+                >
+                  {t("rightPanel.board", "Board")}
+                </button>
+              )}
               <button
                 className={`right-panel-tab ${rightPanelTab === "todos" ? "active" : ""}`}
                 onClick={() => {
@@ -6112,13 +7801,8 @@ function AppMain({
                     patchRightPanel(currentSession.id, { tab: "todos", clearAutoReasons: true });
                 }}
               >
-                {visibleTodoCount(currentSession?.current_todos ?? []) +
-                  visibleTodoCount(currentSession?.current_tasks ?? []) >
-                0
-                  ? `${t("rightPanel.todos")} (${
-                      visibleTodoCount(currentSession?.current_todos ?? []) +
-                      visibleTodoCount(currentSession?.current_tasks ?? [])
-                    })`
+                {currentTodoProgress.visible > 0
+                  ? `${t("rightPanel.todos")} (${currentTodoProgress.visible})`
                   : t("rightPanel.todos")}
               </button>
               <button
@@ -6145,6 +7829,18 @@ function AppMain({
                   {t("rightPanel.canvas")}
                 </button>
               )}
+              {builtinExtensions.testape && screenPanelModules.length > 0 && (
+                <button
+                  className={`right-panel-tab ${rightPanelTab === "screen" ? "active" : ""}`}
+                  onClick={() => {
+                    setRightPanelTab("screen");
+                    if (currentSession && !isMobile)
+                      patchRightPanel(currentSession.id, { tab: "screen", clearAutoReasons: true });
+                  }}
+                >
+                  {t("rightPanel.screen", "Screen")}
+                </button>
+              )}
               <button
                 className={`right-panel-tab ${rightPanelTab === "comments" ? "active" : ""}`}
                 onClick={() => {
@@ -6157,8 +7853,46 @@ function AppMain({
                   ? `${t("rightPanel.comments")} (${tags.length})`
                   : t("rightPanel.comments")}
               </button>
+              <button
+                className={`right-panel-tab ${rightPanelTab === "changes" ? "active" : ""}`}
+                onClick={() => {
+                  setRightPanelTab("changes");
+                  if (currentSession && !isMobile)
+                    patchRightPanel(currentSession.id, { tab: "changes", clearAutoReasons: true });
+                }}
+              >
+                {t("rightPanel.changes", "Changes")}
+              </button>
+              <button
+                className={`right-panel-tab ${rightPanelTab === "communications" ? "active" : ""}`}
+                onClick={() => {
+                  setRightPanelTab("communications");
+                  if (currentSession && !isMobile)
+                    patchRightPanel(currentSession.id, { tab: "communications", clearAutoReasons: true });
+                }}
+              >
+                {t("rightPanel.communications", "Communications")}
+              </button>
             </div>
-            {rightPanelTab === "comments" ? (
+            {rightPanelTab === "board" ? (
+              currentSession?.name === "Assistant" ? (
+                assistantSummaryModules.map((module) => (
+                  <ExtensionModuleSlot
+                    key={`${module.extension_id}:${module.id}`}
+                    module={module}
+                    className="extension-module-slot--right-panel-fill"
+                    context={{
+                      sessionId: currentSession?.id ?? "",
+                      sessionName: currentSession?.name ?? "",
+                      isAssistantSession: true,
+                      allSessions: sessions,
+                    }}
+                  />
+                ))
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : rightPanelTab === "comments" ? (
               <CommentsPanel
                 tags={tags}
                 onRemove={handleRemoveTag}
@@ -6174,6 +7908,19 @@ function AppMain({
                   <ExtensionModuleSlot
                     key={`${module.extension_id}:${module.id}`}
                     module={module}
+                    context={{ sessionId: currentSession.id }}
+                  />
+                ))
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : builtinExtensions.testape && rightPanelTab === "screen" ? (
+              currentSession ? (
+                screenPanelModules.map((module) => (
+                  <ExtensionModuleSlot
+                    key={`${module.extension_id}:${module.id}`}
+                    module={module}
+                    className="extension-module-slot--right-panel-fill"
                     context={{ sessionId: currentSession.id }}
                   />
                 ))
@@ -6196,6 +7943,24 @@ function AppMain({
               ) : (
                 <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
               )
+            ) : rightPanelTab === "changes" ? (
+              currentSession ? (
+                <ChangesPanel sessionId={currentSession.id} />
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : rightPanelTab === "communications" ? (
+              currentSession ? (
+                <Suspense fallback={<LazySurfaceFallback />}>
+                  <CommunicationsView
+                    mode="panel"
+                    sessionId={currentSession.id}
+                    senderSessionId={currentSession.id}
+                  />
+                </Suspense>
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
             ) : viewingFile ? (
               /* Transient before/after diff view (handleViewDiff) —
                  NOT a backend-owned panel, by design. */
@@ -6209,7 +7974,9 @@ function AppMain({
                   onClose={() => setViewingFile(null)}
                   onAddFileTag={handleAddFileAnchoredTag}
                   onStartDiscussion={
-                    fileEditingState ? handleStartFileDiscussion : undefined
+                    fileEditingState || isValidEmptyFileEditSession(currentSession)
+                      ? handleFilePanelStartDiscussion
+                      : undefined
                   }
                   pendingTagCount={
                     (currentSession?.inline_tags ?? []).filter(
@@ -6240,7 +8007,9 @@ function AppMain({
                   registerEditor={registerEditor}
                   onAddFileTag={handleAddFileAnchoredTag}
                   onStartDiscussion={
-                    fileEditingState ? handleStartFileDiscussion : undefined
+                    fileEditingState || isValidEmptyFileEditSession(currentSession)
+                      ? handleFilePanelStartDiscussion
+                      : undefined
                   }
                   pendingTagCountFor={(path) =>
                     (currentSession?.inline_tags ?? []).filter(
@@ -6280,8 +8049,19 @@ function AppMain({
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
             browserHarnessEnabled={builtinExtensions.browserHarness}
+            allowOfflineCreate={!connected}
           />
         </Suspense>
+      )}
+      {rateLimitPickFor && currentSession && (
+        <ModelPickerModal
+          session={currentSession}
+          providers={providers.filter((p) => !p.suspended || p.id === currentSession.provider_id)}
+          saving={rateLimitPickSaving}
+          title={t("rateLimit.pickProviderModel", "Continue on another provider")}
+          onConfirm={(updates) => void handleConfirmRateLimitPick(updates)}
+          onClose={() => setRateLimitPickFor(null)}
+        />
       )}
       {turnCapabilityPickerOpen && currentSession && builtinExtensions.providerConfigSync && (
         <div className="modal-overlay capability-picker-overlay" onClick={() => setTurnCapabilityPickerOpen(false)}>
@@ -6339,7 +8119,7 @@ function AppMain({
           open={fileChooserOpen}
           cwd={cwd}
           nodeId={currentSession?.node_id ?? selectedProjectNodeId}
-          onFileClick={handleFileClick}
+          onFileClick={fileChooserMode === "fileEdit" ? startFileEditor : handleFileClick}
           onEngineerFile={startFileEditor}
           onClose={() => setFileChooserOpen(false)}
         />
@@ -6353,10 +8133,7 @@ function AppMain({
               activeModal: "prompt-engineer-start",
               open: promptEngModalDraft !== null,
               parentName: currentSession?.name ?? "",
-              parentHasClaudeSid: !!(
-                currentSession?.manager_agent_session_id ||
-                currentSession?.native_agent_session_id
-              ),
+              parentHasClaudeSid: sessionHasForkSource(currentSession),
               onCancel: () => {
                 setPromptEngModalDraft(null);
                 setPromptEngStartError("");
@@ -6370,7 +8147,7 @@ function AppMain({
                     `promptEng:start:${parentId}`,
                     async () => {
                       const r = await fetch(
-                        `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${parentId}/prompt-engineer`,
+                        `${extBackendBase("promptEngineer")}/sessions/${parentId}/prompt-engineer`,
                         {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
@@ -6406,6 +8183,19 @@ function AppMain({
             }}
           />
         ))}
+      <BypassPermissionDialog
+        open={bypassPermPending !== null}
+        onSendAnyway={confirmBypassAndSend}
+        onChangeInSettings={bypassGoToSettings}
+        onDismiss={dismissBypassPending}
+      />
+      <PreSendAdvisoryDialog
+        open={preSendAdvisoryPending !== null}
+        advisories={preSendAdvisoryPending?.advisories ?? []}
+        onSendAnyway={confirmPreSendAdvisory}
+        onCancel={dismissPreSendAdvisory}
+        onSnoozeFiveHours={snoozePreSendAdvisoryAndSend}
+      />
       {sessionToDelete && (
         <ConfirmModal
           open={!!sessionToDelete}
@@ -6425,61 +8215,39 @@ function AppMain({
           onCancel={() => projectSuggestion.resolve("cancel")}
         />
       )}
-      {refreshModalOpen && (
-        <div className="modal-overlay" onClick={() => setRefreshModalOpen(false)}>
-          <div
-            className="modal-content refresh-choice-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="refresh-choice-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-header">
-              <h2 id="refresh-choice-title">{t("app.refreshModalTitle")}</h2>
-              <button
-                className="modal-close"
-                onClick={() => setRefreshModalOpen(false)}
-                aria-label={t("startup_tasks.dismiss")}
-              >
-                &times;
-              </button>
-            </div>
-            <div className="modal-body refresh-choice-body">
-              <button
-                type="button"
-                className="refresh-choice-option"
-                onClick={() => void handleRefreshApp("now")}
-              >
-                <span className="refresh-choice-icon">
-                  <Icon name="refresh" size={18} />
-                </span>
-                <span>
-                  <strong>{t("app.refreshNowTitle")}</strong>
-                  <small>{t("app.refreshNowDescription")}</small>
-                </span>
-              </button>
-              <button
-                type="button"
-                className="refresh-choice-option"
-                onClick={() => void handleRefreshApp("idle")}
-              >
-                <span className="refresh-choice-icon">
-                  <Icon name="clock" size={18} />
-                </span>
-                <span>
-                  <strong>{t("app.refreshIdleTitle")}</strong>
-                  <small>{t("app.refreshIdleDescription")}</small>
-                </span>
-              </button>
-            </div>
-            <div className="modal-footer">
-              <button className="btn-secondary" onClick={() => setRefreshModalOpen(false)}>
-                {t("app.cancel")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {moveSessionId && (() => {
+        const moveTarget = sessions.find((s) => s.id === moveSessionId);
+        if (!moveTarget) return null;
+        return (
+          <MoveSessionModal
+            sessionName={moveTarget.name || "Untitled"}
+            currentCwd={moveTarget.cwd}
+            projects={projects}
+            busy={moveSessionBusy}
+            error={moveSessionError}
+            onConfirm={async (targetCwd) => {
+              setMoveSessionBusy(true);
+              setMoveSessionError(null);
+              try {
+                const created = await moveSessionToProject(moveTarget.id, targetCwd);
+                setMoveSessionId(null);
+                setSelectedProjectPath(created.cwd);
+                setSelectedProjectNodeId(created.node_id || "primary");
+                navigate(sessionPath(created.id));
+              } catch (e) {
+                setMoveSessionError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setMoveSessionBusy(false);
+              }
+            }}
+            onCancel={() => {
+              setMoveSessionId(null);
+              setMoveSessionError(null);
+            }}
+          />
+        );
+      })()}
+      {refreshModal}
       {detailsSessionId && (
         <SessionDetailsPanel
           open={!!detailsSessionId}
@@ -6495,6 +8263,7 @@ function AppMain({
             context={{
               activeModal: "supervisor-prompt",
               open: supervisorPromptModalOpen,
+              mode: supervisorPromptModalMode,
               defaultPrompt: currentSession?.supervisor_custom_prompt ?? "",
               onConfirm: (prompt: string) => {
                 if (!currentSession) return;
@@ -6505,7 +8274,7 @@ function AppMain({
                 });
                 void progressTrackedFetch(
                   `session:supervisorToggle:${currentSession.id}`,
-                  `${SUPERVISOR_API}/sessions/${currentSession.id}/supervisor-toggle`,
+                  `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
                   {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { advSyncForksFor } from "../hooks/useSession";
 import type { AdvSyncOverlay, ChatMessage, Session } from "../types";
-import { MessageGroup } from "./MessageBubble";
+import { TurnGroup } from "./MessageBubble";
 
 interface Props {
   overlayId: string;
@@ -161,7 +161,7 @@ interface PaneProps {
 }
 
 /** Renders one fork's post-fork-point messages as user/assistant
- *  groups via the shared `MessageGroup` so tool calls, code blocks,
+ *  turn groups via the shared `TurnGroup` so tool calls, code blocks,
  *  thinking, etc. all render identically to the main chat view. */
 function AdvSyncPane({ label, session, parentTree }: PaneProps) {
   const fp = session.fork_point_seq;
@@ -172,16 +172,16 @@ function AdvSyncPane({ label, session, parentTree }: PaneProps) {
   }, [session.messages, fp]);
 
   const groups = useMemo(() => {
-    const out: { user: ChatMessage; assistant?: ChatMessage }[] = [];
+    const out: { initiator: ChatMessage; response?: ChatMessage }[] = [];
     for (let i = 0; i < postForkMessages.length; i++) {
       const m = postForkMessages[i];
       if (m.role === "user") {
         const next = postForkMessages[i + 1];
         if (next && next.role === "assistant") {
-          out.push({ user: m, assistant: next });
+          out.push({ initiator: m, response: next });
           i++;
         } else {
-          out.push({ user: m });
+          out.push({ initiator: m });
         }
       }
     }
@@ -198,13 +198,13 @@ function AdvSyncPane({ label, session, parentTree }: PaneProps) {
           </div>
         ) : (
           groups.map((g) => (
-            <MessageGroup
-              key={g.user.id}
-              userMessage={g.user}
-              assistantMessage={g.assistant}
+            <TurnGroup
+              key={g.initiator.id}
+              initiatorMessage={g.initiator}
+              responseMessage={g.response}
               sessionId={session.id}
               threadColorMap={undefined}
-              defaultCollapsed={!!g.assistant}
+              defaultCollapsed={!!g.response}
               orchestrationMode={parentTree.orchestration_mode}
               runs={[]}
             />

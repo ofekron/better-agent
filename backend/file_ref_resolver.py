@@ -106,6 +106,28 @@ class _ExistsCache:
 _cache = _ExistsCache()
 
 
+class _CwdPathCache:
+    _MAX_ENTRIES = 256
+
+    def __init__(self) -> None:
+        self._d: dict[str, Path] = {}
+
+    def resolve(self, cwd: str) -> Path:
+        cached = self._d.get(cwd)
+        if cached is not None:
+            return cached
+        resolved = Path(cwd).resolve()
+        if len(self._d) >= self._MAX_ENTRIES:
+            drop = list(self._d.keys())[: self._MAX_ENTRIES // 4]
+            for key in drop:
+                self._d.pop(key, None)
+        self._d[cwd] = resolved
+        return resolved
+
+
+_cwd_path_cache = _CwdPathCache()
+
+
 # ─── Extension tag rules (declarative, auto-reverting) ──────────────────
 #
 # Installed/enabled extensions can declare `applied_config.tag_rules`: tags
@@ -118,10 +140,11 @@ _cache = _ExistsCache()
 #
 # A rule: {"tag": "NEEDS_USER_DECISION", "bold": True, "font_scale": 1.3,
 # "highlight": {"color": "#ff8c00", "alpha": 0.18}}.
-# Styling that the markdown renderer can express safely is applied here
-# (bold via **…**); font scaling + background highlight are carried as a
+# All styling (bold, font scaling, background highlight) is carried as a
 # frontend-recognized sentinel span the conversation renderer maps to CSS —
-# never raw HTML (the markdown pipeline escapes raw HTML by design).
+# never raw HTML (the markdown pipeline escapes raw HTML by design) and never
+# raw markdown like **…**, which would collide with markdown the agent already
+# wrote inside the tag and corrupt the emphasis parse.
 
 _tag_rules: dict[str, dict] = {}
 _tag_scan_re: Optional[re.Pattern[str]] = None
@@ -139,6 +162,8 @@ def _style_attrs(rule: dict) -> str:
     """Serialize a rule's inline-style attrs into the bcstyle sentinel's
     attribute string. Only emits attrs the rule actually declares."""
     parts: list[str] = []
+    if rule.get("bold"):
+        parts.append("b=1")
     scale = rule.get("font_scale")
     if isinstance(scale, (int, float)) and scale and scale != 1:
         parts.append(f"s={scale}")
@@ -175,7 +200,10 @@ def _apply_tag_rules(text: str) -> str:
     """Strip declared tag wrappers and apply their styling. Hot path: a
     cheap fast-path bails before any regex work when no rules are
     registered or the text cannot contain a tag."""
-    if not _tag_scan_re or "<" not in text:
+    if "<" not in text:
+        return text
+    text = strip_session_name_tag(text)
+    if not _tag_scan_re:
         return text
 
     def _sub(m: re.Match[str]) -> str:
@@ -183,14 +211,42 @@ def _apply_tag_rules(text: str) -> str:
         inner = m.group(2)
         if not rule.get("strip_wrapper", True):
             return m.group(0)
-        if rule.get("bold"):
-            inner = f"**{inner.strip()}**"
+        inner = inner.strip()
         attrs = _style_attrs(rule)
         if attrs:
             inner = _STYLE_SENTINEL_OPEN.format(attrs=attrs) + inner + _STYLE_SENTINEL_CLOSE
         return inner
 
     return _tag_scan_re.sub(_sub, text)
+
+
+# Core (non-extension) session-name tag: the agent wraps a proposed session
+# name in <SESSION_NAME>…</SESSION_NAME>. Detection runs on RAW provider text
+# (orchs/base.apply_event) and triggers a session rename; the whole tag —
+# including its inner text — is stripped from the rendered message since the
+# name is metadata, not prose.
+_SESSION_NAME_TAG = "SESSION_NAME"
+_SESSION_NAME_RE = re.compile(
+    rf"<{_SESSION_NAME_TAG}>(.*?)</{_SESSION_NAME_TAG}>\n?", re.DOTALL
+)
+
+
+def extract_session_name(text: str) -> Optional[str]:
+    """First ``<SESSION_NAME>…</SESSION_NAME>`` inner text in RAW provider
+    text, or None. Must run pre-strip — `_apply_tag_rules` removes the tag."""
+    if not text or f"<{_SESSION_NAME_TAG}>" not in text:
+        return None
+    m = _SESSION_NAME_RE.search(text)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    return name or None
+
+
+def strip_session_name_tag(text: str) -> str:
+    if f"<{_SESSION_NAME_TAG}>" not in text:
+        return text
+    return _SESSION_NAME_RE.sub("", text)
 
 
 def tag_names() -> frozenset[str]:
@@ -209,7 +265,10 @@ def detect_markers(text: str) -> list[tuple[str, dict]]:
     for tag, rule in _tag_rules.items():
         marker = rule.get("marker")
         if marker and f"<{tag}>" in text:
-            out.append((rule.get("_extension_id", ""), marker))
+            # New dict — never mutate the shared rule["marker"] ref. The tag
+            # rides the projection so consumers (status sort) classify by tag,
+            # not by drifting color/tooltip.
+            out.append((rule.get("_extension_id", ""), {**marker, "tag": tag}))
     return out
 
 
@@ -223,6 +282,11 @@ def assume_exists_for_session(sess: Optional[dict]) -> bool:
     """Single home for the rule: sessions hosted on a worker-node skip
     the local-disk existence check (their files live on the node)."""
     node_id = (sess or {}).get("node_id") or "primary"
+    return assume_exists_for_node(node_id)
+
+
+def assume_exists_for_node(node_id: Optional[str]) -> bool:
+    node_id = node_id or "primary"
     if node_id == "primary":
         return False
     try:
@@ -260,7 +324,7 @@ def rewrite_text(
     if "." not in text:  # cheap negative early-out
         return text
 
-    cwd_path = Path(cwd).resolve() if cwd else None
+    cwd_path = _cwd_path_cache.resolve(cwd) if cwd else None
 
     def _sub(m: re.Match[str]) -> str:
         if m.group("existing_bt"):
@@ -370,6 +434,76 @@ def rewrite_event_data(
     return data
 
 
+def _isolate_content_blocks(blocks: list) -> list:
+    """Shallow-copy each content block dict so rewrites that reassign a
+    block field (`text`, `thinking`, or string `content`) land on owned
+    objects, and recurse into `tool_result.content` lists (rewritten in
+    place by `_rewrite_content_blocks`). Shares immutable leaf values."""
+    out = []
+    for block in blocks:
+        if isinstance(block, dict):
+            block = dict(block)
+            if block.get("type") == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    block["content"] = _isolate_content_blocks(inner)
+        out.append(block)
+    return out
+
+
+def _isolate_for_rewrite(event_type: str, data: dict) -> dict:
+    """Narrow copy-on-write of exactly the containers `rewrite_event_data`
+    mutates, sharing the rest of the payload by reference. This replaces a
+    full `copy.deepcopy(data)` on the per-event ingest path, which copied
+    entire large payloads (multi-MB worker/message transcripts) just to
+    protect a few leaf strings and blocked the asyncio loop for seconds.
+
+    MUST stay in lockstep with `rewrite_event_data`'s mutation set: the
+    top-level shallow copy covers the legacy `text/output/thought/error/
+    content` reassignments; the `agent_message` branch copies
+    `message -> content blocks`; the `manager_event` branch copies
+    `event -> inner data` and recurses. If `rewrite_event_data` gains a
+    new mutated field, extend this copier too."""
+    top = dict(data)
+    if event_type == "manager_event":
+        inner = top.get("event")
+        if isinstance(inner, dict):
+            inner = dict(inner)
+            top["event"] = inner
+            inner_data = inner.get("data")
+            if isinstance(inner_data, dict):
+                inner["data"] = _isolate_for_rewrite(
+                    inner.get("type", ""), inner_data,
+                )
+        return top
+    if event_type == "agent_message":
+        message = top.get("message")
+        if isinstance(message, dict):
+            message = dict(message)
+            top["message"] = message
+            content = message.get("content")
+            if isinstance(content, list):
+                message["content"] = _isolate_content_blocks(content)
+        return top
+    return top
+
+
+def rewrite_event_data_isolated(
+    event_type: str, data: dict, cwd: Optional[str],
+    *, assume_exists: bool = False,
+) -> dict:
+    """Isolated variant of `rewrite_event_data`: returns rewritten data
+    WITHOUT mutating the caller's `data`, using narrow copy-on-write
+    (`_isolate_for_rewrite`) instead of a full deepcopy. Used on the ingest
+    hot path where the caller's live event feeds the render tree / WS /
+    dedup and must not be mutated."""
+    if not isinstance(data, dict):
+        return data
+    isolated = _isolate_for_rewrite(event_type, data)
+    rewrite_event_data(event_type, isolated, cwd, assume_exists=assume_exists)
+    return isolated
+
+
 # ─── One-time migration ─────────────────────────────────────────────────
 #
 # Rewrites historical events on disk in-place so existing sessions get
@@ -377,7 +511,7 @@ def rewrite_event_data(
 #   1. Session JSON files (`<ba_home>/sessions/*.json`) — message
 #      `content` strings + each `events[].data` payload + recursively
 #      every embedded fork's messages/events.
-#   2. Per-root events JSONL files (`<ba_home>/sessions/<root_id>/events.jsonl`).
+#   2. Per-root events JSONL files beside each session root.
 # Run once; gated by a sentinel file so a backend restart doesn't
 # repeat the work. The resolver itself is idempotent, so an interrupted
 # migration can be safely resumed by removing the sentinel.
@@ -504,10 +638,6 @@ def migrate_all(ba_home_dir: Path) -> dict:
     and rewrite recognized file refs to bcfile: links. Idempotent (safe
     to re-run). Returns {"sessions_changed", "events_files_changed"}."""
     import json
-    sessions_dir = ba_home_dir / "sessions"
-    if not sessions_dir.is_dir():
-        return {"sessions_changed": 0, "events_files_changed": 0}
-
     sessions_changed = 0
     events_changed = 0
 
@@ -515,10 +645,11 @@ def migrate_all(ba_home_dir: Path) -> dict:
     # before rewriting the per-root events.jsonl files.
     cwd_by_root: dict[str, Optional[str]] = {}
 
-    from session_store import _is_sidecar_json
-    for jpath in sessions_dir.glob("*.json"):
-        if _is_sidecar_json(jpath.name):
-            continue
+    from session_store import _session_json_files
+    session_files = list(_session_json_files())
+    if not session_files:
+        return {"sessions_changed": 0, "events_files_changed": 0}
+    for jpath in session_files:
         try:
             node = json.loads(jpath.read_text(encoding="utf-8"))
         except Exception:
@@ -543,18 +674,15 @@ def migrate_all(ba_home_dir: Path) -> dict:
                 _collect_forks(fk)
         _collect_forks(node)
 
-    for jpath in sessions_dir.glob("*.json"):
-        if _is_sidecar_json(jpath.name):
-            continue
+    for jpath in session_files:
         try:
             if _migrate_session_file(jpath):
                 sessions_changed += 1
         except Exception:
             continue
 
-    for sub in sessions_dir.iterdir():
-        if not sub.is_dir():
-            continue
+    for jpath in session_files:
+        sub = jpath.parent / jpath.stem
         events_path = sub / "events.jsonl"
         if not events_path.exists():
             continue

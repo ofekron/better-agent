@@ -205,6 +205,7 @@ async def test_recovery_skips_replay_for_legitimately_completed_run() -> bool:
         app_sid, asst_id, "real finalized content",
     )
     session_manager.set_streaming(app_sid, asst_id, False)
+    session_manager.set_completed_at(app_sid, asst_id, "2026-06-28T10:00:00")
     session_manager.set_agent_sid_on_msg(app_sid, asst_id, claude_sid)
     session_manager.set_agent_sid(app_sid, "native", claude_sid)
 
@@ -237,9 +238,104 @@ async def test_recovery_skips_replay_for_legitimately_completed_run() -> bool:
     return True
 
 
+async def test_completed_run_without_terminal_stamp_is_not_consistent() -> bool:
+    """A fully-ingested successful run with no assistant terminal stamp is
+    NOT consistent; recovery must run completion finalization and set
+    completed_at before reconciling it."""
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant()
+    claude_sid = str(uuid.uuid4())
+
+    finalized_event = {
+        "type": "agent_message",
+        "data": _make_assistant_text_event("real finalized content"),
+    }
+    session_manager.set_native_events(app_sid, asst_id, [finalized_event])
+    session_manager.update_running_content(app_sid, asst_id, "real finalized content")
+    session_manager.set_streaming(app_sid, asst_id, False)
+    session_manager.set_agent_sid_on_msg(app_sid, asst_id, claude_sid)
+    session_manager.set_agent_sid(app_sid, "native", claude_sid)
+
+    run_id = _seed_orphan_run(app_sid, claude_sid, [_make_assistant_text_event("garbage")])
+    run_dir = _runs_root() / run_id
+    bs_path = run_dir / "backend_state.json"
+    bs = json.loads(bs_path.read_text())
+    bs["processed_byte"] = Path(bs["jsonl_path"]).stat().st_size
+    bs["ingestion_version"] = CLAUDE_INGESTION_VERSION
+    bs["target_message_id"] = asst_id
+    bs_path.write_text(json.dumps(bs))
+    (run_dir / "complete.json").write_text(json.dumps({
+        "success": True,
+        "session_id": claude_sid,
+        "error": None,
+        "token_usage": None,
+        "finished_at": "2026-06-28T10:00:02",
+    }))
+
+    bridge = default_provider()
+    recovered = bridge.recover_in_flight()
+    await integrate_recovered_runs(coordinator=None, recovered=recovered)
+
+    sess = session_manager.get(app_sid)
+    asst = next((m for m in sess["messages"] if m["id"] == asst_id), None)
+    if asst is None:
+        print("  assistant disappeared")
+        return False
+    if not asst.get("completed_at"):
+        print(f"  missing recovered completed_at: {asst!r}")
+        return False
+    return True
+
+
+async def test_failed_run_without_terminal_stamp_is_not_consistent() -> bool:
+    """A fully-ingested failed run with no assistant error must also go
+    through recovery finalization; this catches `_is_consistent` regressions
+    before they leave failed turns unreconciled/stuck."""
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant()
+    claude_sid = str(uuid.uuid4())
+
+    session_manager.set_streaming(app_sid, asst_id, False)
+    session_manager.set_agent_sid_on_msg(app_sid, asst_id, claude_sid)
+    session_manager.set_agent_sid(app_sid, "native", claude_sid)
+
+    run_id = _seed_orphan_run(app_sid, claude_sid, [_make_assistant_text_event("partial")])
+    run_dir = _runs_root() / run_id
+    bs_path = run_dir / "backend_state.json"
+    bs = json.loads(bs_path.read_text())
+    bs["processed_byte"] = Path(bs["jsonl_path"]).stat().st_size
+    bs["ingestion_version"] = CLAUDE_INGESTION_VERSION
+    bs["target_message_id"] = asst_id
+    bs_path.write_text(json.dumps(bs))
+    (run_dir / "complete.json").write_text(json.dumps({
+        "success": False,
+        "session_id": claude_sid,
+        "error": "HTTP 500: upstream",
+        "token_usage": None,
+        "finished_at": "2026-06-28T10:00:03",
+    }))
+
+    bridge = default_provider()
+    recovered = bridge.recover_in_flight()
+    await integrate_recovered_runs(coordinator=None, recovered=recovered)
+
+    sess = session_manager.get(app_sid)
+    asst = next((m for m in sess["messages"] if m["id"] == asst_id), None)
+    if asst is None:
+        print("  assistant disappeared")
+        return False
+    if not asst.get("error") or asst.get("errorText") != "HTTP 500: upstream":
+        print(f"  missing recovered assistant error: {asst!r}")
+        return False
+    if not (_runs_root() / run_id / "reconciled.marker").exists():
+        print("  recovered failed run did not write reconciled marker")
+        return False
+    return True
+
+
 TESTS = [
     ("dead orphan replays events.jsonl into assistant_msg", test_dead_orphan_replays_events_jsonl_into_assistant_msg),
     ("completed run is not clobbered by recovery", test_recovery_skips_replay_for_legitimately_completed_run),
+    ("completed run without terminal stamp is finalized by recovery", test_completed_run_without_terminal_stamp_is_not_consistent),
+    ("failed run without terminal stamp is finalized by recovery", test_failed_run_without_terminal_stamp_is_not_consistent),
 ]
 
 
@@ -258,6 +354,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     if failed:

@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import perf
 from paths import ba_home
 
 _lock = threading.Lock()
@@ -17,14 +19,24 @@ _VIRTUAL_PREFIX = "virtual:"
 _MAX_SYNTHETIC_MESSAGES = 500
 _MAX_BACKING_SESSIONS = 25
 _MAX_METADATA_BYTES = 64 * 1024
+_SUMMARY_CACHE_HOT_TTL_SECONDS = 1.0
 _cache_signature: tuple[int, int] | None = None
 _cache_data: dict[str, Any] | None = None
 _summary_cache_signature: tuple[int, int] | None = None
 _summary_cache: list[dict[str, Any]] | None = None
+_summary_cache_fresh_until = 0.0
 
 
 def _path() -> Path:
     return ba_home() / "virtual_sessions.json"
+
+
+def version_token() -> tuple[int, int] | None:
+    try:
+        st = _path().stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _now() -> str:
@@ -32,6 +44,10 @@ def _now() -> str:
 
 
 def _load() -> dict[str, Any]:
+    return deepcopy(_load_shared_locked())
+
+
+def _load_shared_locked() -> dict[str, Any]:
     global _cache_data, _cache_signature
     path = _path()
     try:
@@ -42,7 +58,7 @@ def _load() -> dict[str, Any]:
         return {"version": 1, "sessions": {}}
     signature = (st.st_mtime_ns, st.st_size)
     if _cache_signature == signature and _cache_data is not None:
-        return deepcopy(_cache_data)
+        return _cache_data
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -57,24 +73,30 @@ def _load() -> dict[str, Any]:
     if not isinstance(sessions, dict):
         data["sessions"] = {}
     _cache_signature = signature
-    _cache_data = deepcopy(data)
-    return deepcopy(data)
+    _cache_data = data
+    return _cache_data
 
 
 def _save(data: dict[str, Any]) -> None:
     global _cache_data, _cache_signature, _summary_cache, _summary_cache_signature
+    global _summary_cache_fresh_until
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
     try:
         st = path.stat()
         _cache_signature = (st.st_mtime_ns, st.st_size)
-        _cache_data = deepcopy(data)
+        _cache_data = data
+        _summary_cache_signature = _cache_signature
+        _summary_cache = _project_summaries(data)
+        _summary_cache.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
+        _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
     except OSError:
         _cache_signature = None
         _cache_data = None
-    _summary_cache_signature = None
-    _summary_cache = None
+        _summary_cache_signature = None
+        _summary_cache = None
+        _summary_cache_fresh_until = 0.0
 
 
 def _clean_extension_id(extension_id: str) -> str:
@@ -293,34 +315,113 @@ def _materialize(stored: dict[str, Any], *, include_messages: bool) -> dict[str,
     return session
 
 
-def list_all() -> list[dict[str, Any]]:
-    global _summary_cache, _summary_cache_signature
-    with _lock:
-        data = _load()
+def _copy_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(summary)
+    backing_session_ids = copied.get("backing_session_ids")
+    if isinstance(backing_session_ids, list):
+        copied["backing_session_ids"] = list(backing_session_ids)
+    metadata = copied.get("metadata")
+    if isinstance(metadata, dict):
+        copied["metadata"] = deepcopy(metadata)
+    return copied
+
+
+def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_copy_summary(summary) for summary in summaries]
+
+
+def _project_summaries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    sessions = data.get("sessions") or {}
+    out: list[dict[str, Any]] = []
+    for session in sessions.values():
+        if not (
+            isinstance(session, dict)
+            and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
+        ):
+            continue
+        summary = dict(session)
+        summary.pop("synthetic_messages", None)
+        summary.pop("messages", None)
+        out.append(summary)
+    return out
+
+
+def _summary_cache_slice(
+    summaries: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    exclude_id: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    total = 0
+    selected: list[dict[str, Any]] = []
+    for summary in summaries:
+        if exclude_id and summary.get("id") == exclude_id:
+            continue
+        total += 1
+        if limit is None or len(selected) < limit:
+            selected.append(summary)
+    return _copy_summaries(selected), total
+
+
+def _list_summaries(*, limit: int | None = None, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    global _summary_cache, _summary_cache_signature, _summary_cache_fresh_until
+    if limit is not None and limit < 1:
+        limit = 1
+    cached = _summary_cache
+    if cached is not None and time.monotonic() < _summary_cache_fresh_until:
+        with perf.timed("virtual_sessions.list.hot_cached"):
+            return _summary_cache_slice(cached, limit=limit, exclude_id=exclude_id)
+    acquired = _lock.acquire(blocking=False)
+    if not acquired:
+        with perf.timed("virtual_sessions.list.lock_busy_cached"):
+            if _summary_cache is not None:
+                return _summary_cache_slice(_summary_cache, limit=limit, exclude_id=exclude_id)
+        _lock.acquire()
+    try:
+        with perf.timed("virtual_sessions.list.load"):
+            data = _load_shared_locked()
         signature = _cache_signature
         if (
             signature is not None
             and _summary_cache_signature == signature
             and _summary_cache is not None
         ):
-            return deepcopy(_summary_cache)
-        sessions = data.get("sessions") or {}
-        out: list[dict[str, Any]] = []
-        for session in sessions.values():
-            if not (
-                isinstance(session, dict)
-                and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
-            ):
-                continue
-            summary = dict(session)
-            summary.pop("synthetic_messages", None)
-            summary.pop("messages", None)
-            out.append(summary)
-        out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
+            _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
+            with perf.timed("virtual_sessions.list.copy_cached"):
+                return _summary_cache_slice(_summary_cache, limit=limit, exclude_id=exclude_id)
+        with perf.timed("virtual_sessions.list.project"):
+            out = _project_summaries(data)
+        with perf.timed("virtual_sessions.list.sort"):
+            out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
         if signature is not None:
             _summary_cache_signature = signature
-            _summary_cache = deepcopy(out)
-        return deepcopy(out)
+            with perf.timed("virtual_sessions.list.cache_copy"):
+                _summary_cache = _copy_summaries(out)
+            _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
+        with perf.timed("virtual_sessions.list.copy_result"):
+            return _summary_cache_slice(out, limit=limit, exclude_id=exclude_id)
+    finally:
+        _lock.release()
+
+
+def list_recent(limit: int, *, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    with perf.timed("virtual_sessions.list.recent"):
+        return _list_summaries(limit=limit, exclude_id=exclude_id)
+
+
+def list_recent_cached(limit: int, *, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int] | None:
+    if limit < 1:
+        limit = 1
+    cached = _summary_cache
+    if cached is None:
+        return None
+    with perf.timed("virtual_sessions.list.cached_only"):
+        return _summary_cache_slice(cached, limit=limit, exclude_id=exclude_id)
+
+
+def list_all() -> list[dict[str, Any]]:
+    summaries, _total = _list_summaries()
+    return summaries
 
 
 def get(session_id: str) -> dict[str, Any] | None:

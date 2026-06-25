@@ -31,6 +31,7 @@ datas = [
     # `sys._MEIPASS / "frontend_dist"` (see backend/main.py).
     (os.path.join(_REPO, "frontend", "dist"), "frontend_dist"),
     (os.path.join(_BACKEND, "prompts"), "prompts"),
+    (os.path.join(_BACKEND, "provisioning", "prompts"), os.path.join("prompts", "provisioning")),
 ]
 _TUFUP_ROOT = os.path.join(_DESKTOP, "tufup_root.json")
 if os.path.exists(_TUFUP_ROOT):
@@ -40,7 +41,11 @@ if os.path.exists(_UPDATE_URL):
     datas.append((_UPDATE_URL, "."))
 binaries = []
 hiddenimports = [
+    # Runner modules are loaded via importlib in app_entry (dynamic — not
+    # visible to static analysis), so every provider_manifest runner_module
+    # must be listed here explicitly.
     "main", "main_node", "app_entry", "runner", "runner_gemini",
+    "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "updater", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
@@ -68,9 +73,19 @@ for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "fastapi",
     binaries += _b
     hiddenimports += _h
 
+hiddenimports += [
+    "daemonhost",
+    "daemonhost.host",
+    "daemonhost.install",
+    "daemonhost.jsonio",
+    "daemonhost.paths",
+    "daemonhost.pointer",
+    "daemonhost.switch_control",
+]
+
 a = Analysis(                                            # noqa: F821
     [os.path.join(_DESKTOP, "app_main.py")],
-    pathex=[_BACKEND, _DESKTOP],
+    pathex=[_BACKEND, _DESKTOP, _REPO],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

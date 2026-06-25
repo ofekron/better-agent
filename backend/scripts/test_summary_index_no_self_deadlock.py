@@ -10,9 +10,8 @@ lock on the same thread -> permanent hang). Fires for any dirty session
 Checks:
   1. `list_sessions()` over a v7 session completes (no self-deadlock).
   2. Phase-3 persisted the v7 -> v8 strip to disk (schema 8, empty events).
-  3. An eng-pointer collected from a Pass-2 (full-file) child is applied
-     to its parent even when the parent was loaded via Pass-1 (summary
-     file) — the two-phase build keeps both passes in one `built` dict.
+  3. Eng-pointers collected from both Pass-1 (summary-file) and Pass-2
+     (full-file) children are applied to parents.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_summary_index_no_self_deadlock.py
@@ -144,6 +143,8 @@ def _run() -> bool:
     # .summary.json), child via Pass-2 (full file with working_mode).
     parent_sid = "eng-parent"
     child_sid = "eng-child"
+    pass1_parent_sid = "eng-pass1-parent"
+    pass1_child_sid = "eng-pass1-child"
     _write_full(_v8_record(parent_sid))
     _write_summary(parent_sid, {
         "id": parent_sid, "name": parent_sid, "cwd": CWD,
@@ -156,6 +157,25 @@ def _run() -> bool:
         working_mode="prompt_engineering",
         working_mode_meta={"parent_session_id": parent_sid},
     ))
+    _write_full(_v8_record(pass1_parent_sid))
+    _write_summary(pass1_parent_sid, {
+        "id": pass1_parent_sid, "name": pass1_parent_sid, "cwd": CWD,
+        "working_mode": None, "working_mode_meta": None,
+        "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
+        "last_seen_event_uid": None, "fork_count": 0, "fork_ids": [],
+    })
+    _write_full(_v8_record(
+        pass1_child_sid,
+        working_mode="prompt_engineering",
+        working_mode_meta={"parent_session_id": pass1_parent_sid},
+    ))
+    _write_summary(pass1_child_sid, {
+        "id": pass1_child_sid, "name": pass1_child_sid, "cwd": CWD,
+        "working_mode": "prompt_engineering",
+        "working_mode_meta": {"parent_session_id": pass1_parent_sid},
+        "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
+        "last_seen_event_uid": None, "fork_count": 0, "fork_ids": [],
+    })
 
     # --- Check 1: the blocking first build must NOT self-deadlock. ---
     box: dict = {}
@@ -201,6 +221,11 @@ def _run() -> bool:
     results.append((
         "eng-pointer applied to Pass-1 parent from Pass-2 child",
         got == child_sid, f"got {got}",
+    ))
+    got_pass1 = sessions.get(pass1_parent_sid, {}).get("pending_eng_session_id")
+    results.append((
+        "eng-pointer applied to Pass-1 parent from Pass-1 child",
+        got_pass1 == pass1_child_sid, f"got {got_pass1}",
     ))
 
     return _report(results)

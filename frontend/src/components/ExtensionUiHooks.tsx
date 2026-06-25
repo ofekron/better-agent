@@ -21,12 +21,15 @@ export interface HookAction {
   module_url?: string;
 }
 
+export type QuickButtonPlacement = "session" | "settings";
+
 export interface QuickButtonHook {
   extension_id: string;
   extension_name: string;
   label: string;
   icon?: string;
   action: HookAction;
+  placements: QuickButtonPlacement[];
 }
 
 export interface PageHook {
@@ -53,16 +56,81 @@ export interface HookActionContext {
   cwd: string;
   openAsk?: () => void;
   askSessionPath?: string;
+  /** Marks a freshly-created/ensured session id as routeable before the
+   * sessions list catches up, preventing the route guard from bouncing the
+   * navigation back to the default view. */
+  markSessionKnown?: (id: string) => void;
 }
 
 function isKnownIcon(name: unknown): name is IconName {
   return typeof name === "string" && (ICON_NAMES as readonly string[]).includes(name);
 }
 
+function sessionPathForId(sessionId: string): string {
+  return `/s/${encodeURIComponent(sessionId)}`;
+}
+
+function parseVirtualSingletonPath(path: string): { extensionId: string; slug: string } | null {
+  const match = path.match(/^\/s\/([^/]+)\/?$/);
+  if (!match) return null;
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  const virtual = sessionId.match(/^virtual:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)$/);
+  if (!virtual) return null;
+  return { extensionId: virtual[1], slug: virtual[2] };
+}
+
+async function tryEnsureAssistantSingleton(path: string, ctx: HookActionContext): Promise<boolean> {
+  const parsed = parseVirtualSingletonPath(path);
+  if (!parsed || parsed.slug !== "assistant") return false;
+  try {
+    const endpoint = `/api/extensions/${encodeURIComponent(parsed.extensionId)}/backend/${encodeURIComponent(parsed.slug)}/ensure`;
+    const res = await fetch(`${API}${endpoint}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = res.ok ? await res.json().catch(() => ({})) : {};
+    if (!res.ok || data?.error) return false;
+    const idValue = data?.id ?? data?.session_id;
+    if (idValue == null || String(idValue) === "") return false;
+    const sessionId = String(idValue);
+    ctx.markSessionKnown?.(sessionId);
+    ctx.navigate(sessionPathForId(sessionId));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Execute a navigate/ensure action. `module` actions are rendered inline by
  *  the caller (ExtensionModuleSlot), never run imperatively. */
 export async function runHookAction(action: HookAction, ctx: HookActionContext): Promise<void> {
   if (action.type === "navigate" && action.path) {
+    // Opening the Ask singleton must go through openAsk so the navigation is
+    // marked intentional; a bare navigate is bounced by the auto-select-first
+    // effect that redirects the default Ask landing to a real session.
+    // askSessionPath is URL-encoded (colons → %3A); manifests may declare the
+    // raw form. Match against both so either spelling routes through openAsk.
+    const askRaw = ctx.askSessionPath && decodeURIComponent(ctx.askSessionPath);
+    if (
+      ctx.openAsk &&
+      ctx.askSessionPath &&
+      (action.path === ctx.askSessionPath || action.path === askRaw)
+    ) {
+      ctx.openAsk();
+      return;
+    }
+    // Back-compat for stale/dev-installed Assistant manifests that still
+    // declare the old virtual route even though the backing UI is a real
+    // ensured session. Ensure first and navigate to the returned session id;
+    // if the endpoint is unavailable, fall back to the literal route.
+    if (await tryEnsureAssistantSingleton(action.path, ctx)) return;
     ctx.navigate(action.path);
     return;
   }
@@ -70,6 +138,7 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
     try {
       const res = await fetch(`${API}${action.endpoint}`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(action.include_cwd ? { cwd: ctx.cwd } : {}),
       });
@@ -80,6 +149,7 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
       }
       const idField = action.id_field || "session_id";
       const idValue = data[idField] != null ? String(data[idField]) : "";
+      if (idValue) ctx.markSessionKnown?.(idValue);
       const path = action.path_template.replace(
         `{${idField}}`,
         idValue ? encodeURIComponent(idValue) : "",
@@ -119,7 +189,7 @@ export function useExtensionUiHooks(): UiHooks {
   return hooks;
 }
 
-const BADGE_POLL_MS = 20_000;
+const BADGE_POLL_MS = 120_000;
 
 /** Polls each page's badge endpoint (GET → {count}) and returns the latest
  *  number keyed by `${extension_id}:${page_id}`. */
@@ -175,22 +245,31 @@ function HookGlyph({ icon, label, size }: { icon?: string; label: string; size: 
   return <span className="extension-hook-glyph">{label.slice(0, 1).toUpperCase()}</span>;
 }
 
+function quickButtonIconClass(icon?: string): string {
+  if (!isKnownIcon(icon)) return "";
+  return `extension-quick-button--icon-${icon}`;
+}
+
 interface QuickButtonProps {
   context: HookActionContext;
   className?: string;
   variant: "toolbar" | "topbar";
+  /** Which mount surface this instance renders; buttons whose manifest
+   * `placements` excludes it are skipped. */
+  placement: QuickButtonPlacement;
 }
 
-/** Renders every active extension's quick button in the session toolbar. */
-export function ExtensionQuickButtons({ context, className = "", variant }: QuickButtonProps) {
+/** Renders every active extension's quick button placed on this surface. */
+export function ExtensionQuickButtons({ context, className = "", variant, placement }: QuickButtonProps) {
   const { quick_buttons } = useExtensionUiHooks();
+  const placed = quick_buttons.filter((qb) => (qb.placements ?? []).includes(placement));
   const cls = ["extension-quick-buttons", `extension-quick-buttons--${variant}`, className]
     .filter(Boolean)
     .join(" ");
 
   return (
     <span className={cls}>
-      {quick_buttons.map((qb) => {
+      {placed.map((qb) => {
         const moduleUrl = qb.action.type === "module" ? qb.action.module_url : "";
         if (moduleUrl) {
           return (
@@ -204,6 +283,7 @@ export function ExtensionQuickButtons({ context, className = "", variant }: Quic
                 label: qb.label,
                 kind: "module",
                 module_url: moduleUrl,
+                payments: false,
               }}
               className={`extension-module-slot--${variant} extension-quick-button--module`}
               context={{ ...context, variant }}
@@ -214,7 +294,7 @@ export function ExtensionQuickButtons({ context, className = "", variant }: Quic
           <button
             key={`${qb.extension_id}:quick-button`}
             type="button"
-            className={`extension-quick-button extension-quick-button--${variant}`}
+            className={`extension-quick-button extension-quick-button--${variant} ${quickButtonIconClass(qb.icon)}`}
             title={qb.label}
             aria-label={qb.label}
             onClick={() => void runHookAction(qb.action, context)}

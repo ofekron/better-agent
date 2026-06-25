@@ -13,15 +13,67 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
+import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
+import delegation_status_store
 import httpx
+from runs_dir import read_best_complete, runs_root
 
 from provisioning.config import ProvisionedConfig
 from provisioning.spec import ProvisionedSessionSpec
+
+logger = logging.getLogger(__name__)
+
+_AUTHORIZED_TOOL_PROFILE_TTL_SECONDS = 900.0
+_AUTHORIZED_TOOL_PROFILE_DISPATCHES: dict[str, tuple[str, float]] = {}
+_AUTHORIZED_TOOL_PROFILE_LOCK = threading.Lock()
+
+
+def authorize_tool_profile_dispatch(client_delegation_id: str, profile: str) -> None:
+    client_delegation_id = str(client_delegation_id or "").strip()
+    profile = str(profile or "").strip()
+    if not client_delegation_id or not profile:
+        return
+    with _AUTHORIZED_TOOL_PROFILE_LOCK:
+        _cleanup_authorized_tool_profiles_locked(time.monotonic())
+        _AUTHORIZED_TOOL_PROFILE_DISPATCHES[client_delegation_id] = (
+            profile,
+            time.monotonic() + _AUTHORIZED_TOOL_PROFILE_TTL_SECONDS,
+        )
+
+
+def is_authorized_tool_profile_dispatch(client_delegation_id: str, profile: str) -> bool:
+    client_delegation_id = str(client_delegation_id or "").strip()
+    profile = str(profile or "").strip()
+    if not client_delegation_id or not profile:
+        return False
+    with _AUTHORIZED_TOOL_PROFILE_LOCK:
+        _cleanup_authorized_tool_profiles_locked(time.monotonic())
+        entry = _AUTHORIZED_TOOL_PROFILE_DISPATCHES.get(client_delegation_id)
+    return bool(entry and entry[0] == profile)
+
+
+def _cleanup_authorized_tool_profiles_locked(now: float) -> None:
+    stale = [
+        client_delegation_id
+        for client_delegation_id, (_profile, expires_at) in _AUTHORIZED_TOOL_PROFILE_DISPATCHES.items()
+        if expires_at <= now
+    ]
+    for client_delegation_id in stale:
+        _AUTHORIZED_TOOL_PROFILE_DISPATCHES.pop(client_delegation_id, None)
+
+
+def client_delegation_id_for_request(spec_key: str, request_id: str) -> str:
+    safe = "".join(ch for ch in str(request_id or "") if ch.isalnum() or ch in ("-", "_"))
+    if not safe:
+        return f"{spec_key}_{uuid.uuid4().hex[:10]}"
+    return f"{spec_key}_{safe[:64]}"
 
 
 async def dispatch(
@@ -32,6 +84,7 @@ async def dispatch(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     """Run one fork off the provisioned base. Returns the result payload."""
     if cfg.dispatch == "http":
@@ -41,6 +94,7 @@ async def dispatch(
             caller_session_id=caller_session_id,
             instructions=instructions,
             provision_prompt=provision_prompt,
+            client_delegation_id=client_delegation_id,
         )
     return await _dispatch_in_process(
         spec, cfg,
@@ -48,6 +102,7 @@ async def dispatch(
         caller_session_id=caller_session_id,
         instructions=instructions,
         provision_prompt=provision_prompt,
+        client_delegation_id=client_delegation_id,
     )
 
 
@@ -61,9 +116,12 @@ async def _dispatch_http(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     if not cfg.internal_token:
         raise RuntimeError(f"{spec.env_prefix} http dispatch needs an internal token")
+    client_delegation_id = client_delegation_id or client_delegation_id_for_request(spec.key, "")
+    authorize_tool_profile_dispatch(client_delegation_id, spec.tool_profile)
     payload = {
         "app_session_id": caller_session_id,
         "instructions": instructions,
@@ -71,24 +129,36 @@ async def _dispatch_http(
         "worker_description": cfg.worker_description,
         "model": cfg.model,
         "cwd": cfg.cwd,
-        "client_delegation_id": f"{spec.key}_{uuid.uuid4().hex[:10]}",
+        "client_delegation_id": client_delegation_id,
         "run_mode": cfg.run_mode,
         "worker_registry_cwd": cfg.cwd,
         "ephemeral": cfg.run_mode == "fork" and spec.ephemeral_forks,
         "machine_completion": spec.machine_completion,
         "provision_prompt": provision_prompt,
+        "provisioned_tool_profile": spec.tool_profile,
         "include_events": True,
     }
     last_error = f"{spec.key} provisioned dispatch failed"
     for attempt in range(1, spec.retry_attempts + 1):
         started = time.monotonic()
         try:
-            result = await _post_ask_fork(cfg, payload, timeout=spec.provision_timeout)
+            result = await _post_ask_fork(cfg, payload, timeout=spec.effective_dispatch_timeout)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             duration = time.monotonic() - started
             last_error = type(exc).__name__
             _log_attempt(spec, cfg, attempt, duration, error=last_error)
             if attempt == spec.retry_attempts:
+                raise
+            await _sleep_before_retry(spec, attempt, last_error)
+            continue
+        except httpx.HTTPStatusError as exc:
+            duration = time.monotonic() - started
+            status_code = exc.response.status_code
+            last_error = f"HTTPStatusError:{status_code}"
+            _log_attempt(spec, cfg, attempt, duration, error=last_error)
+            # Only server-side failures are transient; 4xx (incl. 429 — the
+            # rate-limit message path owns that) fails fast.
+            if status_code < 500 or attempt == spec.retry_attempts:
                 raise
             await _sleep_before_retry(spec, attempt, last_error)
             continue
@@ -134,6 +204,7 @@ async def _dispatch_in_process(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     from main import coordinator as _coordinator
     return await _coordinator.run_delegation(
@@ -143,12 +214,13 @@ async def _dispatch_in_process(
         worker_description=cfg.worker_description,
         model=cfg.model,
         cwd=cfg.cwd,
-        client_delegation_id=f"{spec.key}_{uuid.uuid4().hex[:10]}",
+        client_delegation_id=client_delegation_id or client_delegation_id_for_request(spec.key, ""),
         run_mode=cfg.run_mode,
         worker_registry_cwd=cfg.cwd,
         ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
         machine_completion=spec.machine_completion,
         provision_prompt=provision_prompt,
+        provisioned_tool_profile=spec.tool_profile,
         include_events=True,
     )
 
@@ -279,6 +351,121 @@ def _extract_assistant_text_from_row(row: Any) -> str:
     if row.get("type") == "assistant":
         return _text_from_content((row.get("message") or {}).get("content"))
     return ""
+
+
+def recover_delegation_result(client_delegation_id: str) -> dict[str, Any] | None:
+    status = delegation_status_store.read_status(str(client_delegation_id or ""))
+    if not isinstance(status, dict):
+        return None
+    result = status.get("result")
+    if isinstance(result, dict) and result.get("success"):
+        return result
+    run_dir_value = status.get("provider_run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        return None
+    run_dir = _owned_run_dir(run_dir_value)
+    if run_dir is None:
+        return None
+    complete = read_best_complete(run_dir)
+    if not isinstance(complete, dict) or not complete.get("success"):
+        return None
+    sdk_output = complete.get("sdk_output")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        sdk_output = complete.get("final_assistant_text")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        return None
+    return {
+        "success": True,
+        "worker_session_id": status.get("worker_agent_session_id"),
+        "worker_description": status.get("worker_description"),
+        "fork_agent_sid": complete.get("session_id") or status.get("fork_agent_sid"),
+        "run_mode": status.get("run_mode"),
+        "ephemeral": status.get("ephemeral"),
+        "jsonl_path": status.get("jsonl_path"),
+        "new_byte_offset": status.get("new_byte_offset") or 1,
+        "total_bytes_now": status.get("total_bytes_now") or 0,
+        "token_usage": complete.get("token_usage"),
+        "sdk_output": sdk_output,
+    }
+
+
+def request_delegation_cancel(client_delegation_id: str) -> bool:
+    delegation_id = str(client_delegation_id or "").strip()
+    if not delegation_id:
+        return False
+    status = delegation_status_store.read_status(delegation_id)
+    if isinstance(status, dict) and _delegation_status_terminal(status):
+        return False
+    delegation_status_store.write_status(
+        delegation_id,
+        cancel_requested=True,
+        cancel_requested_at=time.time(),
+    )
+    status = delegation_status_store.read_status(delegation_id)
+    if not isinstance(status, dict):
+        return False
+    return _cancel_delegation_status_run(status)
+
+
+def _delegation_status_terminal(status: dict[str, Any]) -> bool:
+    return status.get("status") == "complete" or isinstance(status.get("result"), dict)
+
+
+def _cancel_delegation_status_run(status: dict[str, Any]) -> bool:
+    run_id = status.get("provider_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    run_dir_value = status.get("provider_run_dir")
+    run_dir = _owned_run_dir(run_dir_value) if isinstance(run_dir_value, str) else None
+    if run_dir is None or run_dir.name != run_id:
+        return False
+    provider_id = status.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id:
+        provider_id = _provider_id_from_run_dir(run_dir)
+    if isinstance(provider_id, str) and provider_id:
+        try:
+            from provider import get_provider
+
+            provider = get_provider(provider_id)
+            if provider.cancel_turn(run_id):
+                return True
+        except Exception:
+            logger.debug(
+                "request_delegation_cancel provider cancel failed run_id=%s provider_id=%s",
+                run_id,
+                provider_id,
+                exc_info=True,
+            )
+    if run_dir is None:
+        return False
+    try:
+        (run_dir / "cancel").touch()
+    except OSError:
+        logger.debug("request_delegation_cancel sentinel write failed run_id=%s", run_id, exc_info=True)
+        return False
+    return True
+
+
+def _provider_id_from_run_dir(run_dir: Path | None) -> str:
+    if run_dir is None:
+        return ""
+    try:
+        data = json.loads((run_dir / "backend_state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    provider_id = data.get("provider_id") if isinstance(data, dict) else ""
+    return provider_id if isinstance(provider_id, str) else ""
+
+
+def _owned_run_dir(value: str) -> Path | None:
+    try:
+        path = Path(value).resolve()
+        root = runs_root().resolve()
+    except OSError:
+        return None
+    if path == root or root in path.parents:
+        return path
+    return None
 
 
 def _text_from_content(content: Any) -> str:

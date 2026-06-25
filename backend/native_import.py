@@ -9,6 +9,7 @@ a Better Agent session by replaying its events through the same
   - agy:    `~/.gemini/antigravity-cli/conversations/*.db` (main-thread
             extractor in runner_agy.extract_main_conversation_events)
   - gemini:`~/.gemini/tmp/*/chats/session-*.jsonl` chat-history normalizer
+  - pi:     `~/.pi/agent/sessions/**/*.jsonl` tree session normalizer
 
 Runs as a single-flight background job; progress is exposed via
 `get_status()` for the REST layer. agy/gemini only carry what the native
@@ -18,13 +19,18 @@ faithfully within that constraint.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import tempfile
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -64,7 +70,24 @@ class NativeSession:
 
     @property
     def registry_key(self) -> str:
+        return f"{self.provider_id or self.provider_kind}:{self.provider_kind}:{self.source_identity_hash}"
+
+    @property
+    def legacy_registry_key(self) -> str:
         return f"{self.provider_kind}:{self.native_id}"
+
+    @property
+    def source_identity_hash(self) -> str:
+        return hashlib.sha256(self.source_identity.encode("utf-8")).hexdigest()[:24]
+
+    @property
+    def source_identity(self) -> str:
+        if self.jsonl_path:
+            try:
+                return str(Path(self.jsonl_path).expanduser().resolve())
+            except OSError:
+                return str(Path(self.jsonl_path).expanduser())
+        return self.native_id
 
 
 def _provider_records(provider_ids: Optional[list[str]]) -> list[dict]:
@@ -97,6 +120,29 @@ def _is_junk_cwd(cwd: str) -> bool:
     return False
 
 
+# Encoded-cwd prefixes for system-temp roots. Claude stores each session
+# under projects/<encoded-cwd>/, encoding path separators as '-', so a temp
+# cwd like /private/tmp/... becomes a '-private-tmp-...' dir. Trailing '-'
+# avoids matching real dirs like /tmpwork.
+_JUNK_DIR_PREFIXES = ("-tmp-", "-private-tmp-", "-var-folders-", "-private-var-folders-")
+_UUID_PATH_RE = re.compile(r"/agents/agents_workspaces/[0-9a-fA-F-]{36}$")
+_AGENT_STRATEGY_PATH_RE = re.compile(
+    r"/(?:agents|technical_analysis)/agents_strategies/[^/]+$"
+)
+
+
+def _is_junk_session(sess: NativeSession) -> bool:
+    """Temp / BA-internal sessions that aren't real conversations. Uses the
+    real cwd when hydrated; for claude's un-hydrated count path (cwd=""),
+    infers junk from the encoded project-dir name so counts stay cheap."""
+    if sess.cwd:
+        return _is_junk_cwd(sess.cwd)
+    if sess.provider_kind == "claude":
+        name = Path(sess.jsonl_path).parent.name
+        return any(name.startswith(p) for p in _JUNK_DIR_PREFIXES)
+    return False
+
+
 def _under_projects(cwd: str, project_paths: list[str]) -> bool:
     if not cwd:
         return False
@@ -114,6 +160,49 @@ def _under_projects(cwd: str, project_paths: list[str]) -> bool:
     return False
 
 
+def _is_generated_project_path(project_path: str) -> bool:
+    try:
+        p = Path(project_path).expanduser().resolve()
+    except OSError:
+        return True
+    text = str(p)
+    if p == Path.home().resolve():
+        return True
+    if _is_junk_cwd(text):
+        return True
+    return bool(_UUID_PATH_RE.search(text) or _AGENT_STRATEGY_PATH_RE.search(text))
+
+
+def loaded_project_paths() -> list[str]:
+    try:
+        import project_store
+        projects = project_store.list_projects()
+    except Exception:
+        logger.exception("native_import: project_store scan failed")
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        if (project.get("node_id") or "primary") != "primary":
+            continue
+        path = project.get("path") or project.get("cwd")
+        if not isinstance(path, str) or not path:
+            continue
+        if _is_generated_project_path(path):
+            continue
+        try:
+            norm = str(Path(path).expanduser().resolve())
+        except OSError:
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
 def _ba_managed_native_ids() -> set[str]:
     """Native session ids Better Agent itself spawned or manages — its own
     user sessions plus internal agent sessions (delegate forks, sub-sessions,
@@ -121,43 +210,38 @@ def _ba_managed_native_ids() -> set[str]:
     in BA (or did), so importing their native transcripts would duplicate
     agent/internal sessions rather than recover a real user conversation.
 
-    Detected two ways: every BA-spawned provider session has a run dir whose
-    `state.json` records its `session_id`; and current BA session trees
-    reference their provider sid as `agent_session_id`. A native session
-    matching either is BA-managed and skipped at import."""
+    Detected two ways: the durable spawn ledger records BA-spawned provider
+    session ids, and current BA session trees reference their provider sid as
+    `agent_session_id`. A native session matching either is BA-managed and
+    skipped at import."""
     ids: set[str] = set()
-    try:
-        from runs_dir import runs_root
-        root = runs_root()
-        if root.exists():
-            for d in root.iterdir():
-                st = d / "state.json" if d.is_dir() else None
-                if not st or not st.exists():
-                    continue
-                try:
-                    o = json.loads(st.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                sid = o.get("session_id") if isinstance(o, dict) else None
-                if isinstance(sid, str) and sid:
-                    ids.add(sid)
-    except Exception:
-        logger.exception("native_import: runs scan failed")
+    import spawn_ledger
+    spawn_ledger.bootstrap_from_run_dirs_once()
     try:
         import session_store
         for s in session_store.list_sessions():
-            for k in ("agent_session_id", "supervisor_agent_session_id"):
+            # Only provider native sids that list_sessions() actually projects.
+            # (caller_agent_session_id is a BA app-session id, not a native sid;
+            # forked_from_supervisor_agent_sid isn't in the summary — both would
+            # be dead/wrong here. The prior supervisor sid is captured anyway via
+            # its run dir / the durable ledger.)
+            for k in ("agent_session_id", "supervisor_agent_session_id",
+                      "forked_from_agent_sid"):
                 v = s.get(k)
                 if isinstance(v, str) and v:
                     ids.add(v)
     except Exception:
         logger.exception("native_import: session_store scan failed")
+    # Durable provenance: sids harvested at run-dir reap time survive the
+    # 7-day prune / session delete that erase live run dirs above.
+    ids |= spawn_ledger.all_sids()
     return ids
 
 
 def enumerate_native_sessions(
     provider_ids: Optional[list[str]] = None,
     project_paths: Optional[list[str]] = None,
+    hydrate: bool = True,
 ) -> list[NativeSession]:
     """List native sessions for the given providers (all if None).
 
@@ -165,6 +249,13 @@ def enumerate_native_sessions(
     under one of those project roots are returned, and junk cwds (system
     temp, the BA state home) are excluded. None disables both (legacy
     "import everything" behavior). Unknown provider kinds are skipped.
+
+    `hydrate=False` skips the per-session display reads that are not needed
+    to identify a session (claude's first-`cwd` jsonl scan). Identity fields
+    (`provider_kind`, `native_id`) are always populated. Used by
+    `count_native_sessions` so a counts-only preview avoids reading every
+    jsonl on disk. MUST stay True whenever `project_paths` is set — the
+    project filter needs `cwd`.
     """
     out: list[NativeSession] = []
     for provider in _provider_records(provider_ids):
@@ -172,7 +263,7 @@ def enumerate_native_sessions(
         pid = provider.get("id") or ""
         try:
             if kind == "claude":
-                out.extend(_enumerate_claude(pid, provider))
+                out.extend(_enumerate_claude(pid, provider, hydrate=hydrate))
             elif kind == "codex":
                 out.extend(_enumerate_codex(pid, provider))
             elif kind == "agy":
@@ -181,11 +272,15 @@ def enumerate_native_sessions(
                 out.extend(_enumerate_gemini(pid, provider))
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
+    if provider_ids is None:
+        out.extend(_enumerate_pi())
     if project_paths is not None:
-        out = [s for s in out if _under_projects(s.cwd, project_paths) and not _is_junk_cwd(s.cwd)]
-    # Always skip native sessions Better Agent itself spawned/manages — they
-    # are agent/internal sessions (or already-in-BA user sessions), not real
-    # external conversations worth importing.
+        out = [s for s in out if _under_projects(s.cwd, project_paths)]
+    # Always skip junk (system-temp / BA-internal) and BA-spawned sessions —
+    # both are orchestration artifacts, not real external conversations. The
+    # junk filter runs regardless of `project_paths`; the global import path
+    # used to skip it and offered BA's own integration-test runs for import.
+    out = [s for s in out if not _is_junk_session(s)]
     managed = _ba_managed_native_ids()
     if managed:
         out = [s for s in out if s.native_id not in managed]
@@ -199,8 +294,7 @@ def _claude_projects_dir(provider: dict) -> Path:
     if cfg:
         base = Path(os.path.expandvars(cfg)).expanduser()
     else:
-        raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
-        base = Path(os.path.expandvars(raw)).expanduser() if raw else Path.home() / ".claude"
+        base = Path.home() / ".claude"
     return base / "projects"
 
 
@@ -226,7 +320,7 @@ def _first_cwd_from_jsonl(path: Path, *, max_lines: int = 40) -> str:
     return ""
 
 
-def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
+def _enumerate_claude(provider_id: str, provider: dict, *, hydrate: bool = True) -> list[NativeSession]:
     projects = _claude_projects_dir(provider)
     out: list[NativeSession] = []
     if not projects.exists():
@@ -241,7 +335,7 @@ def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
             provider_kind="claude",
             native_id=jsonl_path.stem,
             jsonl_path=str(jsonl_path),
-            cwd=_first_cwd_from_jsonl(jsonl_path),
+            cwd=_first_cwd_from_jsonl(jsonl_path) if hydrate else "",
             created_at=datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
         ))
     return out
@@ -444,6 +538,71 @@ def _enumerate_gemini(provider_id: str, provider: dict) -> list[NativeSession]:
     return out
 
 
+# ------------------------------------ pi ----------------------------------- #
+
+def _pi_sessions_root() -> Path:
+    from native_elements import _pi_sessions_root as root
+    return root()
+
+
+def _pi_read_meta(path: Path) -> tuple[str, str, str, str]:
+    session_id = path.stem
+    cwd = ""
+    started_at = ""
+    first_prompt = ""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "session":
+                    if isinstance(obj.get("id"), str):
+                        session_id = obj["id"]
+                    if isinstance(obj.get("cwd"), str):
+                        cwd = obj["cwd"]
+                    if isinstance(obj.get("timestamp"), str):
+                        started_at = obj["timestamp"]
+                    continue
+                if first_prompt or obj.get("type") != "message":
+                    continue
+                message = obj.get("message")
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                first_prompt = _pi_text(message.get("content")).strip()
+                if first_prompt and cwd and started_at:
+                    break
+    except OSError:
+        pass
+    return session_id, cwd, started_at, first_prompt
+
+
+def _enumerate_pi() -> list[NativeSession]:
+    root = _pi_sessions_root()
+    if not root.exists():
+        return []
+    out: list[NativeSession] = []
+    for session_path in root.rglob("*.jsonl"):
+        try:
+            st = session_path.stat()
+        except OSError:
+            continue
+        session_id, cwd, started_at, first_prompt = _pi_read_meta(session_path)
+        out.append(NativeSession(
+            provider_id="",
+            provider_kind="pi",
+            native_id=session_id or session_path.stem,
+            jsonl_path=str(session_path),
+            cwd=cwd,
+            title=first_prompt[:80],
+            created_at=started_at or datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+        ))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Replay -> segment -> apply (reuses the recovery funnel)
 # --------------------------------------------------------------------------- #
@@ -458,6 +617,8 @@ def _replay_events(sess: NativeSession) -> list[dict]:
         return runner_agy.extract_main_conversation_events(Path(sess.jsonl_path))
     if sess.provider_kind == "gemini":
         return _gemini_native_events(Path(sess.jsonl_path))
+    if sess.provider_kind == "pi":
+        return _pi_native_events(Path(sess.jsonl_path))
 
     from run_recovery import _replay_from_claude_jsonl, _replay_from_codex_rollout
 
@@ -483,6 +644,7 @@ def _replay_events(sess: NativeSession) -> list[dict]:
 
 
 _GEMINI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.gemini")
+_PI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.pi")
 
 
 def _wrapped(role: str, content: list[dict], *, uid: str) -> dict:
@@ -547,9 +709,133 @@ def _gemini_native_events(path: Path) -> list[dict]:
     return events
 
 
+def _pi_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+
+
+def _pi_uid(path: Path, obj: dict, index: int, suffix: str = "") -> str:
+    raw = obj.get("id") if isinstance(obj.get("id"), str) else ""
+    if not raw:
+        raw = f"{index}"
+    return str(uuid.uuid5(_PI_UUID_NAMESPACE, f"{path}|{raw}|{suffix}"))
+
+
+def _pi_ts(obj: dict, message: Optional[dict] = None) -> str:
+    if message:
+        raw = message.get("timestamp")
+        if isinstance(raw, (int, float)):
+            return datetime.utcfromtimestamp(raw / 1000).isoformat() + "Z"
+        if isinstance(raw, str):
+            return raw
+    return obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+
+
+def _pi_content_to_claude(content: object) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return []
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            out.append({"type": "text", "text": block["text"]})
+        elif kind == "thinking" and isinstance(block.get("thinking"), str):
+            out.append({"type": "thinking", "thinking": block["thinking"]})
+        elif kind == "toolCall":
+            out.append({
+                "type": "tool_use",
+                "id": str(block.get("id") or ""),
+                "name": str(block.get("name") or ""),
+                "input": block.get("arguments") if isinstance(block.get("arguments"), dict) else {},
+            })
+    return out
+
+
+def _pi_event(role: str, content: list[dict], *, uid: str, timestamp: str) -> dict:
+    event = _wrapped(role, content, uid=uid)
+    event["timestamp"] = timestamp
+    data = event["data"]
+    data["timestamp"] = timestamp
+    data["message"]["timestamp"] = timestamp
+    return event
+
+
+def _pi_native_events(path: Path) -> list[dict]:
+    events: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for index, raw in enumerate(f):
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                etype = obj.get("type")
+                timestamp = _pi_ts(obj)
+                if etype == "message":
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    role = message.get("role")
+                    timestamp = _pi_ts(obj, message)
+                    uid = _pi_uid(path, obj, index, str(role))
+                    if role == "user":
+                        text = _pi_text(message.get("content")).strip()
+                        if text:
+                            events.append(_pi_event("user", [{"type": "text", "text": text}], uid=uid, timestamp=timestamp))
+                    elif role == "assistant":
+                        content = _pi_content_to_claude(message.get("content"))
+                        if content:
+                            events.append(_pi_event("assistant", content, uid=uid, timestamp=timestamp))
+                    elif role == "toolResult":
+                        text = _pi_text(message.get("content")).strip()
+                        if text:
+                            events.append(_pi_event("user", [{
+                                "type": "tool_result",
+                                "tool_use_id": str(message.get("toolCallId") or ""),
+                                "content": text,
+                            }], uid=uid, timestamp=timestamp))
+                    elif role == "bashExecution":
+                        command = message.get("command") if isinstance(message.get("command"), str) else ""
+                        output = message.get("output") if isinstance(message.get("output"), str) else ""
+                        text = "\n".join(part for part in (command, output) if part).strip()
+                        if text:
+                            events.append(_pi_event("user", [{
+                                "type": "tool_result",
+                                "tool_use_id": uid,
+                                "content": text,
+                            }], uid=uid, timestamp=timestamp))
+                elif etype in {"compaction", "branch_summary"}:
+                    summary = obj.get("summary") if isinstance(obj.get("summary"), str) else ""
+                    if summary.strip():
+                        events.append(_pi_event("assistant", [{"type": "text", "text": summary.strip()}],
+                                                uid=_pi_uid(path, obj, index, etype), timestamp=timestamp))
+                elif etype == "custom_message":
+                    content = _pi_text(obj.get("content")).strip()
+                    if content:
+                        events.append(_pi_event("user", [{"type": "text", "text": content}],
+                                                uid=_pi_uid(path, obj, index, etype), timestamp=timestamp))
+    except OSError:
+        logger.exception("native_import: pi read failed for %s", path)
+    return events
+
+
 @dataclass
 class _Turn:
     prompt: str = ""
+    timestamp: str = ""
     events: list[dict] = field(default_factory=list)
 
 
@@ -588,6 +874,50 @@ def _extract_text(data: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _event_timestamp(event: dict) -> str:
+    data = _event_data(event)
+    containers = [event, data]
+    message = data.get("message")
+    if isinstance(message, dict):
+        containers.append(message)
+    for container in containers:
+        raw = container.get("timestamp") or container.get("created_at")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ""
+
+
+def _local_iso(raw: str) -> Optional[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.isoformat()
+
+
+def _fallback_prompt(sess: NativeSession) -> str:
+    return _normalize_import_prompt(sess.title or "")
+
+
+from native_internal_prompt import (
+    is_internal_import_prompt as _is_internal_import_prompt,
+    normalize_import_prompt as _normalize_import_prompt,
+)
+
+
+class SkippedNativeSession(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+
+
 def _segment_turns(events: list[dict]) -> list[_Turn]:
     """Group a flat event stream into user-prompt → assistant-event turns.
 
@@ -607,11 +937,13 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
     for event in events:
         data = _event_data(event)
         if _is_user_prompt(data):
-            prompt = _extract_text(data)
+            prompt = _normalize_import_prompt(_extract_text(data))
+            timestamp = _event_timestamp(event)
             if turns and not turns[-1].events:
                 turns[-1].prompt = prompt  # collapse consecutive prompt-only turn
+                turns[-1].timestamp = timestamp
             else:
-                turns.append(_Turn(prompt=prompt))
+                turns.append(_Turn(prompt=prompt, timestamp=timestamp))
                 if leading:
                     turns[-1].events[:0] = leading
                     leading = []
@@ -619,14 +951,156 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
             turns[-1].events.append(event)
         else:
             leading.append(event)
-    if not turns and leading:
-        turns.append(_Turn(events=leading))  # no prompt at all → one synthetic turn
     return turns
 
 
+def _native_created_iso(sess: NativeSession, turns: Optional[list[_Turn]] = None) -> Optional[str]:
+    """The native conversation's creation time as a naive-local ISO string
+    matching the session-record convention, so analytics bucket imported
+    sessions under their REAL date, not the import time. Native timestamps
+    are UTC (ISO, often trailing 'Z'); convert to local. None when unknown."""
+    if turns:
+        for turn in turns:
+            created = _local_iso(turn.timestamp)
+            if created:
+                return created
+    return _local_iso(sess.created_at)
+
+
+def _max_native_iso(values: list[str]) -> Optional[str]:
+    best = ""
+    for raw in values:
+        value = _local_iso(raw)
+        if value and value > best:
+            best = value
+    return best or None
+
+
+def _native_turn_activity_iso(turn: _Turn) -> Optional[str]:
+    return _max_native_iso([turn.timestamp, *[_event_timestamp(ev) for ev in turn.events]])
+
+
+def _native_last_activity_iso(sess: NativeSession, turns: list[_Turn]) -> Optional[str]:
+    values = [sess.created_at]
+    for turn in turns:
+        values.append(turn.timestamp)
+        values.extend(_event_timestamp(ev) for ev in turn.events)
+    return _max_native_iso(values)
+
+
+def _imported_last_user_prompt_iso(session: dict) -> Optional[str]:
+    values = [
+        str(m.get("timestamp") or "")
+        for m in (session.get("messages") or [])
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    return _max_native_iso(values)
+
+
+def _imported_first_user_prompt_iso(session: dict) -> Optional[str]:
+    best = ""
+    for message in session.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        value = _local_iso(str(message.get("timestamp") or ""))
+        if value and (not best or value < best):
+            best = value
+    return best or None
+
+
+def _repair_imported_root_timestamps(root_id: str, fallback: Optional[str] = None) -> None:
+    session_manager.flush_pending_persists()
+    root = session_manager.get_ref(root_id)
+    if not isinstance(root, dict):
+        return
+    first_prompt = _imported_first_user_prompt_iso(root)
+    last_activity = _imported_last_user_prompt_iso(root) or fallback
+    if not first_prompt and not last_activity:
+        return
+    if first_prompt:
+        root["created_at"] = first_prompt
+    if last_activity:
+        root["updated_at"] = last_activity
+    import session_store
+    session_store.write_session_full(
+        root,
+        bump_updated_at=False,
+        preserve_projection_fields=True,
+    )
+
+
+def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
+    import session_store
+    repaired = 0
+    deleted = 0
+    removed_projects = 0
+    project_filtered = project_paths if project_paths is not None else loaded_project_paths()
+    try:
+        import project_store
+        for project in project_store.list_projects():
+            path = project.get("path") if isinstance(project, dict) else None
+            node_id = project.get("node_id") if isinstance(project, dict) else None
+            if isinstance(path, str) and _is_generated_project_path(path):
+                if project_store.remove_project(path, node_id=node_id or "primary"):
+                    removed_projects += 1
+    except Exception:
+        logger.exception("native_import: imported-project cleanup failed")
+    registry = _registry_load()
+    deleted_roots: set[str] = set()
+    import session_store
+    for path in session_store._session_json_files():
+        try:
+            root = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if root.get("source") != "import":
+            continue
+        if project_filtered and not _under_projects(root.get("cwd") or "", project_filtered):
+            session_manager.delete(root["id"])
+            deleted_roots.add(root["id"])
+            deleted += 1
+            continue
+        users = [
+            m for m in (root.get("messages") or [])
+            if isinstance(m, dict) and m.get("role") == "user"
+        ]
+        first_raw_prompt = _extract_text({"message": {"content": users[0].get("content")}}) if users else ""
+        first_prompt = _normalize_import_prompt(first_raw_prompt)
+        first_user_ts = _imported_first_user_prompt_iso(root)
+        last_user_ts = _imported_last_user_prompt_iso(root)
+        if not first_prompt or _is_internal_import_prompt(first_prompt) or not last_user_ts:
+            session_manager.delete(root["id"])
+            deleted_roots.add(root["id"])
+            deleted += 1
+            continue
+        changed = False
+        if first_raw_prompt != first_prompt:
+            users[0]["content"] = first_prompt
+            changed = True
+            if not root.get("name") or root.get("name") == first_raw_prompt[:80]:
+                root["name"] = first_prompt[:80]
+        if first_user_ts and root.get("created_at") != first_user_ts:
+            root["created_at"] = first_user_ts
+            changed = True
+        if root.get("updated_at") != last_user_ts:
+            root["updated_at"] = last_user_ts
+            changed = True
+        if changed:
+            session_store.write_session_full(
+                root,
+                bump_updated_at=False,
+                preserve_projection_fields=True,
+            )
+            repaired += 1
+    if deleted_roots:
+        _registry_save({k: v for k, v in registry.items() if v not in deleted_roots})
+    return {"repaired": repaired, "deleted": deleted, "removed_projects": removed_projects}
+
+
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
-    if sess.title:
-        return sess.title[:80]
+    title = _normalize_import_prompt(sess.title or "")
+    if title and not _is_internal_import_prompt(title):
+        return title[:80]
     for turn in turns:
         if turn.prompt:
             return turn.prompt[:80]
@@ -642,7 +1116,7 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
     """
     with _import_lock_for(sess.registry_key):
         if not force:
-            existing = _registry_get(sess.registry_key)
+            existing = _registry_get_for(sess)
             if existing:
                 return existing
         return _import_session_locked(sess)
@@ -651,10 +1125,17 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
 def _import_session_locked(sess: NativeSession) -> str:
     events = _replay_events(sess)
     turns = _segment_turns(events)
-    # Drop turns that carry neither a prompt nor any events (noise).
-    turns = [t for t in turns if t.prompt or t.events]
+    fallback_prompt = _fallback_prompt(sess)
+    if not turns and fallback_prompt and events:
+        turns = [_Turn(prompt=fallback_prompt, timestamp=sess.created_at, events=events)]
+    if fallback_prompt and turns and not turns[0].prompt:
+        turns[0].prompt = fallback_prompt
+    turns = [t for t in turns if t.prompt]
     if not turns:
-        raise ValueError("native session has no importable events")
+        raise SkippedNativeSession("native session has no recovered user prompt")
+    first_prompt = next((t.prompt for t in turns if t.prompt), "")
+    if _is_internal_import_prompt(first_prompt):
+        raise SkippedNativeSession("internal Better Agent native session")
 
     created = session_manager.create(
         name=_derive_title(sess, turns),
@@ -665,15 +1146,19 @@ def _import_session_locked(sess: NativeSession) -> str:
         # idempotency registry is the source of truth for "already imported".
         source="import",
         provider_id=sess.provider_id or None,
+        # The user explicitly triggered the import; they are aware of and
+        # own the resulting session.
+        user_initiated=True,
+        # Preserve the native conversation's date so usage analytics bucket it
+        # under when it actually happened, not the import moment.
+        created_at=_native_created_iso(sess, turns),
     )
     root_id = created["id"]
 
     from orchs import ApplyEventCtx, get_strategy
-    from run_recovery import _max_event_timestamp, _repair_updated_at_to_last_activity
-
     strategy = get_strategy("native")
     failures = 0
-    with session_manager.batch(root_id):
+    with session_manager.batch(root_id, bump_updated_at=False):
         session = session_manager.get_ref(root_id)
         if session is None:
             raise RuntimeError("created session vanished before import")
@@ -682,14 +1167,15 @@ def _import_session_locked(sess: NativeSession) -> str:
             user_msg = {
                 "id": str(__import__("uuid").uuid4()),
                 "role": "user",
-                "content": turn.prompt or "(imported turn)",
+                "content": turn.prompt,
                 "events": [],
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": _native_created_iso(sess, [turn]) or datetime.now().isoformat(),
                 "isStreaming": False,
                 "agent_message_uuid": None,
                 "source": "native_import",
             }
             assistant_msg = strategy.build_assistant_scaffold()
+            assistant_msg["timestamp"] = _native_turn_activity_iso(turn) or user_msg["timestamp"]
             messages.append(user_msg)
             messages.append(assistant_msg)
             ctx = ApplyEventCtx(
@@ -719,6 +1205,9 @@ def _import_session_locked(sess: NativeSession) -> str:
             if not assistant_msg.get("events"):
                 messages.pop()
                 messages.pop()
+        last_activity = _imported_last_user_prompt_iso(session) or _native_last_activity_iso(sess, turns)
+        if last_activity:
+            session["updated_at"] = last_activity
 
     # Every turn collapsed to pure metadata → nothing renderable. Tear down
     # the just-created empty session rather than leave an orphan bubble.
@@ -729,8 +1218,8 @@ def _import_session_locked(sess: NativeSession) -> str:
             logger.exception("native_import: failed to delete empty session %s", root_id)
         raise ValueError("native session has no importable events")
 
-    _repair_updated_at_to_last_activity(root_id, _max_event_timestamp(events))
-    _registry_set(sess.registry_key, root_id)
+    _repair_imported_root_timestamps(root_id, _native_last_activity_iso(sess, turns))
+    _registry_set_for(sess, root_id)
     if failures:
         logger.warning(
             "native_import: %s applied with %d failed event(s)", sess.registry_key, failures,
@@ -783,7 +1272,15 @@ def _registry_save(data: dict) -> None:
 
 def _registry_get(key: str) -> Optional[str]:
     with _REGISTRY_LOCK:
-        return _registry_load().get(key) or None
+        data = _registry_load()
+        root_id = data.get(key)
+        if not root_id:
+            return None
+        if _registry_root_exists(root_id):
+            return root_id
+        data.pop(key, None)
+        _registry_save(data)
+        return None
 
 
 def _registry_set(key: str, root_id: str) -> None:
@@ -793,9 +1290,119 @@ def _registry_set(key: str, root_id: str) -> None:
         _registry_save(data)
 
 
+def _registry_root_exists(root_id: str) -> bool:
+    if not root_id:
+        return False
+    import session_store
+    return Path(session_store.session_file_path(root_id)).exists()
+
+
+def _prune_stale_registry_locked(data: dict) -> bool:
+    stale = [
+        key for key, root_id in data.items()
+        if not isinstance(root_id, str) or not _registry_root_exists(root_id)
+    ]
+    for key in stale:
+        data.pop(key, None)
+    return bool(stale)
+
+
+def _registry_get_for(sess: NativeSession) -> Optional[str]:
+    with _REGISTRY_LOCK:
+        data = _registry_load()
+        for key in (sess.registry_key, sess.legacy_registry_key):
+            root_id = data.get(key)
+            if not root_id:
+                continue
+            if _registry_root_exists(root_id):
+                return root_id
+            data.pop(key, None)
+            _registry_save(data)
+        return None
+
+
+def _registry_set_for(sess: NativeSession, root_id: str) -> None:
+    with _REGISTRY_LOCK:
+        data = _registry_load()
+        data[sess.registry_key] = root_id
+        data.pop(sess.legacy_registry_key, None)
+        _registry_save(data)
+
+
+def _is_imported(sess: NativeSession, keys: set[str]) -> bool:
+    return sess.registry_key in keys or sess.legacy_registry_key in keys
+
+
 def already_imported_keys() -> set[str]:
     with _REGISTRY_LOCK:
-        return set(_registry_load().keys())
+        data = _registry_load()
+        if _prune_stale_registry_locked(data):
+            _registry_save(data)
+        return set(data.keys())
+
+
+# Isolates the recursive native-session directory scan (rglob across
+# Claude+Codex+Gemini+pi session dirs, reading hundreds of MB of jsonl/db
+# headers on a full history) from the process-wide default executor, so a
+# scan in flight can't delay unrelated `asyncio.to_thread` callers elsewhere
+# in the backend that happen to share the default pool. Not latency-sensitive
+# itself, so a small worker count is fine.
+_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="native-import-scan",
+)
+
+
+async def count_native_sessions_async(
+    provider_ids: Optional[list[str]] = None,
+    project_paths: Optional[list[str]] = None,
+) -> dict:
+    """Async wrapper for `count_native_sessions`, run on the dedicated scan
+    executor instead of the shared default `asyncio.to_thread` pool."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        _SCAN_EXECUTOR,
+        lambda: ctx.run(count_native_sessions, provider_ids, project_paths),
+    )
+
+
+def count_native_sessions(
+    provider_ids: Optional[list[str]] = None,
+    project_paths: Optional[list[str]] = None,
+) -> dict:
+    """Counts-only preview of importable native sessions, grouped by provider.
+
+    Returns `{total, imported, pending, by_provider:{kind:{total,imported,
+    pending}}}`. Drives the settings panel without shipping one row per
+    session — the per-session list can reach hundreds of MB across a full
+    Claude+Codex history. Uses `hydrate=False` so identifying the sessions
+    never reads their jsonl bodies.
+    """
+    sessions = enumerate_native_sessions(
+        provider_ids,
+        project_paths,
+        hydrate=project_paths is not None,
+    )
+    imported = already_imported_keys()
+    by_provider: dict[str, dict] = {}
+    for s in sessions:
+        g = by_provider.setdefault(
+            s.provider_kind, {"total": 0, "imported": 0, "pending": 0}
+        )
+        g["total"] += 1
+        if _is_imported(s, imported):
+            g["imported"] += 1
+        else:
+            g["pending"] += 1
+    total = sum(g["total"] for g in by_provider.values())
+    imported_n = sum(g["imported"] for g in by_provider.values())
+    return {
+        "total": total,
+        "imported": imported_n,
+        "pending": total - imported_n,
+        "by_provider": by_provider,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -813,6 +1420,8 @@ class JobStatus:
     started_at: str = ""
     finished_at: str = ""
     provider_ids: list[str] = field(default_factory=list)
+    project_paths: list[str] = field(default_factory=list)
+    all_projects: bool = True
     errors: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -826,6 +1435,8 @@ class JobStatus:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "provider_ids": list(self.provider_ids),
+            "project_paths": list(self.project_paths),
+            "all_projects": bool(self.all_projects),
             "errors": list(self.errors),
         }
 
@@ -880,7 +1491,7 @@ def start_import(
     `limit` caps the number of NEW sessions imported (already-imported
     sessions are still skipped, not counted against the limit).
     `project_paths` opts into the project filter (see
-    `enumerate_native_sessions`); resume ignores it and finishes all."""
+    `enumerate_native_sessions`)."""
     with _JOB_LOCK:
         global _JOB
         if _JOB is not None and _JOB.status == "running":
@@ -888,6 +1499,8 @@ def start_import(
         _JOB = JobStatus(
             status="running",
             provider_ids=list(provider_ids or []),
+            project_paths=list(project_paths or []),
+            all_projects=project_paths is None,
             started_at=datetime.now().isoformat(),
         )
         status_ref = _JOB
@@ -914,8 +1527,15 @@ def resume_if_interrupted() -> None:
     if not persisted or persisted.get("status") != "running":
         return
     provider_ids = persisted.get("provider_ids") or None
-    logger.info("native_import: resuming interrupted import (providers=%s)", provider_ids)
-    start_import(provider_ids)
+    if "all_projects" not in persisted and "project_paths" not in persisted:
+        project_paths = None
+    else:
+        project_paths = None if persisted.get("all_projects") else persisted.get("project_paths")
+    logger.info(
+        "native_import: resuming interrupted import (providers=%s project_paths=%s)",
+        provider_ids, project_paths,
+    )
+    start_import(provider_ids, project_paths=project_paths)
 
 
 def _run_import(
@@ -924,25 +1544,37 @@ def _run_import(
 ) -> None:
     imported_keys = already_imported_keys()
     sessions = enumerate_native_sessions(provider_ids, project_paths)
+    # Import newest first so the most recent conversations land first and a
+    # `limit` cap keeps the most recent N. created_at is ISO-8601 (sorts
+    # chronologically); unknown ("") timestamps fall to the end.
+    sessions.sort(key=lambda s: s.created_at or "", reverse=True)
     status.total = len(sessions)
     _persist_job(status)
     try:
         for sess in sessions:
             if limit is not None and status.imported >= limit:
                 break  # cap reached — stop importing new sessions
-            if sess.registry_key in imported_keys:
+            if _is_imported(sess, imported_keys):
                 status.skipped += 1
             else:
                 status.current = sess.registry_key
                 try:
-                    import_session(sess)
+                    rid = import_session(sess)
                     status.imported += 1
                     imported_keys.add(sess.registry_key)
+                    # Unpin the just-imported root so the resident cache stays
+                    # bounded — without this the loop would hold every imported
+                    # session in RAM and OOM on a large import.
+                    session_manager.trim_resident_roots(keep_rid=rid)
+                except SkippedNativeSession as exc:
+                    status.skipped += 1
+                    logger.info("native_import: skipped %s: %s", sess.registry_key, exc.reason)
                 except Exception as exc:
                     status.failed += 1
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})
                     logger.exception("native_import: failed %s", sess.registry_key)
             _persist_job(status)  # checkpoint so a crash here resumes cleanly
+        repair_imported_roots()
         status.status = "done"
     except Exception:
         status.status = "error"

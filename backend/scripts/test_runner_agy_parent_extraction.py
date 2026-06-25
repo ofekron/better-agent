@@ -268,6 +268,234 @@ def main() -> int:
                 failures += 1
         finally:
             shutil.rmtree(home2, ignore_errors=True)
+
+        # ----- inline call+result: a tool's output attaches to ITS OWN id -----
+        # agy bundles each tool call and its output in the SAME step (types
+        # 7/8/9/23). The result must be keyed on the step's own tool_id, never
+        # on a previous tool's id (the off-by-one "mix of other events" bug).
+        home3 = Path(tempfile.mkdtemp(prefix="bc-test-agy-inline-"))
+        try:
+            inline_db = runner_agy._conversation_db(home3, _PARENT_SID)
+            _SEP = b"\x02"  # protobuf field separator -> separate printable strings
+            _write_steps_db(inline_db, [
+                (0, 14, b"Please look at x.txt and grep for foo"),
+                # type 8 view_file: tool_id + name + input JSON + inline content
+                (
+                    1, 8,
+                    _SEP.join([
+                        b"viewtool1", b"view_file",
+                        b'{"AbsolutePath":"/tmp/x.txt","toolAction":"Reading x.txt"}',
+                        b"The first paragraph of the file describes the project setup in detail.",
+                        b"The second paragraph continues with configuration notes for the build.",
+                    ]),
+                ),
+                # type 7 grep_search: tool_id + name + input JSON + inline matches
+                (
+                    2, 7,
+                    _SEP.join([
+                        b"greptool2", b"grep_search",
+                        b'{"Query":"foo","SearchPath":"/tmp","toolAction":"Searching for foo"}',
+                        b"src/main.py line ten contains the foo symbol we were searching for above.",
+                    ]),
+                ),
+                # type 15 narration AFTER the tools (must NOT become a tool_result)
+                (
+                    3, 15,
+                    b"\x01I have analyzed the file and the search results above."
+                    b"2(bot-550e8400-e29b-41d4-a716-446655440000)",
+                ),
+            ])
+            inline_events = runner_agy._extract_parent_main_events(inline_db, "root")
+
+            # Every tool_result's tool_use_id must belong to a tool_use emitted
+            # in the SAME step. Pre-fix this fails: the grep step's result was
+            # glued onto the previous view_file tool id. Check per step, since
+            # tool_use and tool_result are separate events from one step.
+            inline_state = runner_agy._ParentMainState("root")
+            inline_bad = 0
+            inline_result_ids: list[str] = []
+            for step in runner_agy._read_agy_steps(inline_db):
+                step_events = inline_state.events_for_step(step)
+                use_ids = {
+                    b.get("id")
+                    for ev in step_events
+                    for b in ev.get("data", {}).get("message", {}).get("content", [])
+                    if b.get("type") == "tool_use"
+                }
+                for ev in step_events:
+                    for b in ev.get("data", {}).get("message", {}).get("content", []):
+                        if b.get("type") == "tool_result":
+                            inline_result_ids.append(b.get("tool_use_id"))
+                            if b.get("tool_use_id") not in use_ids:
+                                inline_bad += 1
+            if inline_bad == 0 and set(inline_result_ids) == {"viewtool1", "greptool2"}:
+                print(f"{PASS}  inline tool_result keyed on its own tool_id "
+                      f"(no cross-step misroute)")
+            else:
+                print(f"{FAIL}  inline result misroute: bad={inline_bad} "
+                      f"result_ids={inline_result_ids}")
+                failures += 1
+        finally:
+            shutil.rmtree(home3, ignore_errors=True)
+
+        # ----- send_message inline text is the sent message, NOT a result -----
+        # A messaging tool's inline text is the message being sent (the input).
+        # It must emit a tool_use only — never a tool_result labeling the sent
+        # message as the reply. Pre-fix-the-regression it emitted a bogus result.
+        home4 = Path(tempfile.mkdtemp(prefix="bc-test-agy-sendmsg-"))
+        try:
+            sendmsg_db = runner_agy._conversation_db(home4, _PARENT_SID)
+            _write_steps_db(sendmsg_db, [
+                (0, 14, b"Tell the subagent to inspect the file"),
+                (
+                    1, 132,
+                    b"\x02".join([
+                        b"sendtool3", b"send_message",
+                        b'{"Message":"please inspect the sessions json file now",'
+                        b'"Recipient":"worker-1","toolAction":"Sending message",'
+                        b'"toolSummary":"Send"}',
+                    ]),
+                ),
+            ])
+            sendmsg_state = runner_agy._ParentMainState("root")
+            sendmsg_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(sendmsg_db):
+                sendmsg_events.extend(sendmsg_state.events_for_step(step))
+            sendmsg_uses = [
+                b for ev in sendmsg_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_use" and b.get("name") == "send_message"
+            ]
+            sendmsg_results = [
+                b for ev in sendmsg_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+            ]
+            if len(sendmsg_uses) == 1 and not sendmsg_results:
+                print(f"{PASS}  send_message emits tool_use only (sent message "
+                      f"not labeled as a result)")
+            else:
+                print(f"{FAIL}  send_message misrendered: uses={len(sendmsg_uses)} "
+                      f"results={len(sendmsg_results)}")
+                failures += 1
+        finally:
+            shutil.rmtree(home4, ignore_errors=True)
+
+        # ----- DEFERRED tool model: type-15 call -> later type-101 result -----
+        # agy tool calls on step types 15/127/132 defer the result to a later
+        # step. The call step must emit tool_use ONLY (its reassembled text is
+        # the call line, not output); the later result step attaches to that
+        # tool_id. The first over-correction of the inline fix regressed this:
+        # it emitted the call line as the result and orphaned the real result.
+        home5 = Path(tempfile.mkdtemp(prefix="bc-test-agy-deferred-"))
+        try:
+            deferred_db = runner_agy._conversation_db(home5, _PARENT_SID)
+            _write_steps_db(deferred_db, [
+                (0, 14, b"Read the file and tell me"),
+                # type 15: deferred read_file call (single-string serialization).
+                (
+                    1, 15,
+                    b'readtool9 read_file {"Action":"read_file","Path":"/tmp/h.txt"}:',
+                ),
+                # type 101: the deferred result lands in a later step.
+                (
+                    2, 101,
+                    b"The file contents are hello world and more details follow here.",
+                ),
+                # type 15: trailing narration must render as assistant text.
+                (
+                    3, 15,
+                    b"\x01Now I will summarize the findings for the user."
+                    b"2(bot-550e8400-e29b-41d4-a716-446655440000)",
+                ),
+            ])
+            deferred_state = runner_agy._ParentMainState("root")
+            deferred_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(deferred_db):
+                deferred_events.extend(deferred_state.events_for_step(step))
+            df_results = [
+                b for ev in deferred_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+            ]
+            df_read_results = [b for b in df_results if b.get("tool_use_id") == "readtool9"]
+            df_call_line_results = [
+                b for b in df_read_results if "read_file" in (b.get("content") or "")
+            ]
+            df_has_output = any("hello world" in (b.get("content") or "") for b in df_read_results)
+            df_texts = [
+                (b.get("text") or "")
+                for ev in deferred_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "text"
+            ]
+            df_narration_is_text = any("summarize the findings" in t for t in df_texts)
+            if (
+                len(df_read_results) == 1
+                and df_has_output
+                and not df_call_line_results
+                and df_narration_is_text
+            ):
+                print(f"{PASS}  deferred tool result attaches from later step "
+                      f"(call line not emitted as result)")
+            else:
+                print(f"{FAIL}  deferred model wrong: read_results={len(df_read_results)} "
+                      f"has_output={df_has_output} call_line_results="
+                      f"{len(df_call_line_results)} narration_is_text={df_narration_is_text}")
+                failures += 1
+        finally:
+            shutil.rmtree(home5, ignore_errors=True)
+
+        # ----- tool_result content strips agy's display header -----
+        # agy prepends a [UI label, toolAction] header (often twice for the
+        # streaming + final copy) before the real output. The result must keep
+        # only the output -- the toolAction description is UI chrome, not data.
+        home6 = Path(tempfile.mkdtemp(prefix="bc-test-agy-toolout-"))
+        try:
+            toolout_db = runner_agy._conversation_db(home6, _PARENT_SID)
+            _write_steps_db(toolout_db, [
+                (0, 14, b"Read the config file"),
+                (
+                    1, 8,
+                    b"\x02".join([
+                        b"viewtoolX", b"view_file",
+                        b'{"AbsolutePath":"/tmp/c.txt",'
+                        b'"toolAction":"Reading the config file header"}',
+                        # duplicated [UI label, toolAction] header (streaming+final)
+                        b"Read config.txt",
+                        b"-Reading the config file header",
+                        b"Read config.txt",
+                        b"-Reading the config file header",
+                        # real output
+                        b"The first configuration section describes the defaults in detail.",
+                        b"The second configuration section covers override behavior.",
+                    ]),
+                ),
+            ])
+            toolout_state = runner_agy._ParentMainState("root")
+            toolout_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(toolout_db):
+                toolout_events.extend(toolout_state.events_for_step(step))
+            to_results = [
+                b for ev in toolout_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+                and b.get("tool_use_id") == "viewtoolX"
+            ]
+            assert len(to_results) == 1, to_results
+            content = to_results[0].get("content") or ""
+            has_output = "first configuration section" in content
+            has_header = "Reading the config file header" in content
+            if has_output and not has_header:
+                print(f"{PASS}  tool_result content strips the display header "
+                      f"(keeps the output)")
+            else:
+                print(f"{FAIL}  tool_result header not stripped: "
+                      f"has_output={has_output} has_header={has_header} "
+                      f"content={content[:120]!r}")
+                failures += 1
+        finally:
+            shutil.rmtree(home6, ignore_errors=True)
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

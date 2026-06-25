@@ -2,7 +2,6 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { execSync } from 'node:child_process'
-import { fileURLToPath, URL } from 'node:url'
 
 // Build-time version identifiers injected as global constants.
 function buildVersion(): string {
@@ -65,12 +64,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      'src': fileURLToPath(new URL('./src', import.meta.url)),
-      '@better-agent/provider-config-sync-core/diff': fileURLToPath(new URL('../provider-config-sync/packages/provider-config-sync-core/src/diff.ts', import.meta.url)),
-      '@better-agent/provider-config-sync-core/items': fileURLToPath(new URL('../provider-config-sync/packages/provider-config-sync-core/src/items.ts', import.meta.url)),
-      '@better-agent/provider-config-sync-core': fileURLToPath(new URL('../provider-config-sync/packages/provider-config-sync-core/src/index.ts', import.meta.url)),
-      '@better-agent/provider-config-sync-ui/styles.css': fileURLToPath(new URL('../provider-config-sync/packages/provider-config-sync-ui/src/styles.css', import.meta.url)),
-      '@better-agent/provider-config-sync-ui': fileURLToPath(new URL('../provider-config-sync/packages/provider-config-sync-ui/src/index.ts', import.meta.url)),
+      'src': '/src',
     },
     dedupe: ['react', 'react-dom'],
   },

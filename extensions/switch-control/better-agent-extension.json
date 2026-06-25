@@ -1,0 +1,57 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.switch-control",
+  "name": "Line Switch",
+  "version": "0.1.1",
+  "description": "Switch the running backend+frontend between the main and dev worktrees from the UI. The launcher owns the durable active-checkout pointer and auto-reverts failed starts.",
+  "surfaces": [
+    "backend_feature",
+    "frontend_feature",
+    "instructions"
+  ],
+  "entrypoints": {
+    "backend_module": "backend.routes",
+    "frontend": "ui/index.html",
+    "quick_button": {
+      "label": "Line",
+      "placements": ["settings"],
+      "action": {
+        "type": "module",
+        "module_url": "ui/switch.entry.js"
+      }
+    },
+    "instructions": [
+      {
+        "name": "switch-lines",
+        "path": "instructions/global.md",
+        "level": "global"
+      }
+    ]
+  },
+  "permissions": {
+    "backend_routes": true,
+    "capabilities": [
+      "switch-control.state.get",
+      "switch-control.switch.request"
+    ]
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json",
+        "ui/index.html",
+        "ui/switch.entry.js",
+        "instructions/global.md"
+      ],
+      "python_modules": [
+        "backend.routes"
+      ]
+    }
+  }
+}

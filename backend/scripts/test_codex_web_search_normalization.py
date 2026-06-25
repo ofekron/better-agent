@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
 
-from runner_codex import (  # noqa: E402
+from codex_normalize import (  # noqa: E402
     _attach_collab_parent_from_thread,
     _normalize_agent_message,
     _normalize_collab_agent_completed,
@@ -28,6 +33,7 @@ from runner_codex import (  # noqa: E402
 )
 from codex_native import (  # noqa: E402
     CodexRolloutNormalizer,
+    CodexRolloutTailer,
     codex_subagent_delegation_id,
     codex_subagent_id_from_event,
     codex_subagent_ids_from_event,
@@ -223,6 +229,7 @@ def test_response_item_assistant_message_becomes_text_event() -> bool:
     event = _normalize_response_item_event(
         {
             "type": "message",
+            "id": "msg_1",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "done"}],
         },
@@ -232,6 +239,112 @@ def test_response_item_assistant_message_becomes_text_event() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "text"
     assert block["text"] == "done"
+    return True
+
+
+def test_response_item_assistant_message_uuid_is_stable() -> bool:
+    payload = {
+        "type": "message",
+        "id": "msg_stable",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "done"}],
+    }
+    first = _normalize_response_item_event(payload, "parent")
+    second = _normalize_response_item_event(payload, "parent")
+    assert first is not None
+    assert second is not None
+    assert first["uuid"] == second["uuid"]
+    return True
+
+
+def test_response_item_render_branches_keep_stable_uuids() -> bool:
+    payloads = [
+        {
+            "type": "reasoning",
+            "id": "reasoning_1",
+            "summary": [{"type": "summary_text", "text": "checked parser"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "exec_command",
+            "arguments": {"cmd": "pwd"},
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "/tmp/project",
+        },
+        {
+            "type": "web_search_call",
+            "id": "search_1",
+            "action": {"query": "Better Agent"},
+        },
+        {
+            "type": "future_shape",
+            "id": "future_1",
+            "value": {"ok": True},
+        },
+    ]
+    for payload in payloads:
+        first = _normalize_response_item_event(payload, "parent")
+        second = _normalize_response_item_event(payload, "parent")
+        assert first is not None, payload
+        assert second is not None, payload
+        assert first["uuid"] == second["uuid"], payload
+        assert first["parentUuid"] == second["parentUuid"], payload
+    return True
+
+
+def test_codex_rollout_item_replay_keeps_stable_uuids() -> bool:
+    raw_events = [
+        {
+            "type": "item.started",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "item": {
+                "id": "cmd_1",
+                "type": "command_execution",
+                "command": "pwd",
+            },
+        },
+        {
+            "type": "item.completed",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "item": {
+                "id": "msg_1",
+                "type": "agent_message",
+                "text": "Progress update",
+            },
+        },
+    ]
+    first = CodexRolloutNormalizer(namespace="thread-1")
+    second = CodexRolloutNormalizer(namespace="thread-1")
+    first_rows = [row for raw in raw_events for row in first.normalize_event(raw)]
+    second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
+    assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
+    assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
+    return True
+
+
+def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> bool:
+    raw_events = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"type": "agent_message", "message": "Progress update"},
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "payload": {"type": "agent_reasoning", "message": "checking"},
+        },
+    ]
+    first = CodexRolloutNormalizer(namespace="thread-1")
+    second = CodexRolloutNormalizer(namespace="thread-1")
+    first_rows = [row for raw in raw_events for row in first.normalize_event(raw)]
+    second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
+    assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
+    assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
     return True
 
 
@@ -322,7 +435,7 @@ def test_codex_rollout_digests_known_event_msg_primitives() -> bool:
         rows = normalizer.normalize_event({"type": "event_msg", "payload": payload})
         assert len(rows) == 1
         block = rows[0]["message"]["content"][0]
-        text = block.get("text") or block.get("content")
+        text = block.get("text") or block.get("content") or block.get("thinking")
         assert expected in text, (payload, text)
         if payload["type"] != "patch_apply_end":
             assert not str(text).startswith("Codex native event_msg."), text
@@ -466,7 +579,120 @@ def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> bool:
     assert result_block["tool_use_id"] == "call_mcp"
     assert result_block["content"] == "{\"ok\":true}"
     assert rows[1]["parentUuid"] == rows[0]["uuid"]
+    assert rows[1]["uuid"] != rows[0]["uuid"]
     assert "Codex native event_msg.mcp_tool_call_end" not in str(rows)
+    return True
+
+
+def _codex_tool_call_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "lock_ops",
+            "call_id": call_id,
+            "arguments": json.dumps({"release": True}),
+        },
+    }
+
+
+def _codex_mcp_tool_call_end_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "event_msg",
+        "timestamp": "2026-06-14T08:36:50.902Z",
+        "payload": {
+            "type": "mcp_tool_call_end",
+            "call_id": call_id,
+            "invocation": {
+                "server": "better_agent_coordination",
+                "tool": "lock_ops",
+                "arguments": {"release": True},
+            },
+            "result": {
+                "Ok": {
+                    "content": [{"type": "text", "text": "{\"success\":false}"}],
+                    "isError": False,
+                },
+            },
+        },
+    }
+
+
+def _codex_function_call_output_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": "Wall time: 0.0056 seconds\nOutput:\n{\"success\":false}",
+        },
+    }
+
+
+def _tool_result_rows(rows: list[dict]) -> list[dict]:
+    return [
+        row for row in rows
+        if ((row.get("message") or {}).get("content") or [{}])[0].get("type") == "tool_result"
+    ]
+
+
+def test_codex_rollout_mcp_end_suppresses_response_output_duplicate() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    block = result_rows[0]["message"]["content"][0]
+    assert block["tool_use_id"] == "call_mcp"
+    assert block["content"] == "{\"success\":false}"
+    assert "Wall time" not in str(rows)
+    return True
+
+
+def test_codex_rollout_response_output_without_mcp_end_still_emits() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    block = result_rows[0]["message"]["content"][0]
+    assert block["tool_use_id"] == "call_mcp"
+    assert "Wall time" in block["content"]
+    return True
+
+
+def test_codex_rollout_distinct_tool_results_both_emit() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event("call_one")))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event("call_one")))
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event("call_two")))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event("call_two")))
+
+    ids = [
+        row["message"]["content"][0]["tool_use_id"]
+        for row in _tool_result_rows(rows)
+    ]
+    assert ids == ["call_one", "call_two"]
+    return True
+
+
+def test_codex_rollout_response_first_suppresses_late_mcp_end() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    assert result_rows[0]["message"]["content"][0]["content"].startswith("Wall time")
+    assert len([row for row in rows if ((row.get("message") or {}).get("content") or [{}])[0].get("type") == "tool_use"]) == 1
     return True
 
 
@@ -511,6 +737,173 @@ def test_codex_rollout_token_count_captures_context_window_and_fill() -> bool:
     })
     assert normalizer.context_window == 200000
     assert normalizer.context_tokens == 170000
+    return True
+
+
+def test_codex_rollout_tailer_emits_context_updates() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        path.write_text(
+            json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "model_context_window": 200000,
+                    "last_token_usage": {"total_tokens": 180000},
+                }},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        updates: list[tuple[int | None, int | None]] = []
+        rendered: list[dict] = []
+
+        async def _go() -> None:
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+                on_context_update=lambda window, tokens: updates.append((window, tokens)),
+            )
+            await tailer.drain_available()
+
+        asyncio.run(_go())
+    assert updates == [(200000, 180000)]
+    assert rendered == []
+    return True
+
+
+def _rollout_agent_line(text: str) -> str:
+    return json.dumps({
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "message": text},
+    }) + "\n"
+
+
+def test_codex_rollout_tailer_keeps_partial_line_pending() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        first = _rollout_agent_line("complete")
+        partial = json.dumps({
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "partial"},
+        })
+        path.write_text(first + partial, encoding="utf-8")
+        rendered: list[dict] = []
+        cursors: list[int] = []
+
+        async def _go() -> CodexRolloutTailer:
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+                on_cursor_advance=lambda cursor: cursors.append(cursor),
+            )
+            assert await tailer.drain_available() is True
+            return tailer
+
+        tailer = asyncio.run(_go())
+        first_cursor = len(first.encode("utf-8"))
+        assert tailer.processed_byte == first_cursor
+        assert cursors == [first_cursor]
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == ["complete"]
+
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+
+        async def _again() -> None:
+            assert await tailer.drain_available() is True
+
+        asyncio.run(_again())
+        final_cursor = len((first + partial + "\n").encode("utf-8"))
+        assert tailer.processed_byte == final_cursor
+        assert cursors == [first_cursor, final_cursor]
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == [
+            "complete",
+            "partial",
+        ]
+    return True
+
+
+def test_codex_rollout_tailer_advances_cursor_after_dispatch() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        first = _rollout_agent_line("one")
+        second = _rollout_agent_line("two")
+        path.write_text(first + second, encoding="utf-8")
+        order: list[tuple[str, int]] = []
+
+        async def _go() -> None:
+            tailer: CodexRolloutTailer | None = None
+
+            def _dispatch(_event: dict) -> None:
+                assert tailer is not None
+                order.append(("dispatch", tailer.processed_byte))
+
+            def _cursor(cursor: int) -> None:
+                order.append(("cursor", cursor))
+
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=_dispatch,
+                on_cursor_advance=_cursor,
+            )
+            assert await tailer.drain_available() is True
+
+        asyncio.run(_go())
+        first_cursor = len(first.encode("utf-8"))
+        second_cursor = len((first + second).encode("utf-8"))
+        assert order == [
+            ("dispatch", 0),
+            ("cursor", first_cursor),
+            ("dispatch", first_cursor),
+            ("cursor", second_cursor),
+        ]
+    return True
+
+
+class _BlockingOpenPath:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.release = threading.Event()
+
+    def open(self, *args, **kwargs):
+        self.release.wait(timeout=0.35)
+        return self.path.open(*args, **kwargs)
+
+
+def test_codex_rollout_tailer_file_read_does_not_block_loop() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        path.write_text(_rollout_agent_line("nonblocking"), encoding="utf-8")
+        blocking_path = _BlockingOpenPath(path)
+        rendered: list[dict] = []
+
+        async def _go() -> float:
+            tailer = CodexRolloutTailer(
+                path=blocking_path,  # type: ignore[arg-type]
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+            )
+            timer = threading.Timer(0.35, blocking_path.release.set)
+            timer.start()
+            task = asyncio.create_task(tailer.drain_available())
+            started = time.perf_counter()
+            try:
+                await asyncio.sleep(0.05)
+                elapsed = time.perf_counter() - started
+            finally:
+                blocking_path.release.set()
+                timer.cancel()
+            assert await asyncio.wait_for(task, timeout=2) is True
+            return elapsed
+
+        elapsed = asyncio.run(_go())
+        assert elapsed < 0.22
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == ["nonblocking"]
     return True
 
 
@@ -836,6 +1229,13 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "child.jsonl"
         with path.open("wb") as f:
+            agent_path = "/root/reviewer"
+            f.write((_json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": agent_path,
+                }}}},
+            }) + "\n").encode())
             f.write((_json.dumps({
                 "type": "response_item",
                 "payload": {
@@ -845,8 +1245,20 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
                 },
             }) + "\n").encode())
             f.write((_json.dumps({
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": "child prompt"},
+                "type": "response_item",
+                "payload": {"type": "reasoning", "summary": ["parent reasoning"]},
+            }) + "\n").encode())
+            f.write((_json.dumps({
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "parent_tool"},
+            }) + "\n").encode())
+            f.write((_json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "agent_message",
+                    "recipient": agent_path,
+                    "content": "child prompt",
+                },
             }) + "\n").encode())
             expected = f.tell()
             f.write((_json.dumps({
@@ -854,6 +1266,31 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
                 "payload": {"type": "agent_message", "message": "child work"},
             }) + "\n").encode())
         assert codex_subagent_rollout_start_byte(path) == expected
+        mismatch = Path(td) / "mismatch.jsonl"
+        mismatch.write_text(
+            path.read_text().replace(agent_path, "/root/other", 1),
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(mismatch) == 0
+        malformed = Path(td) / "malformed.jsonl"
+        malformed.write_text(
+            _json.dumps({"type": "session_meta", "payload": {"source": {
+                "subagent": "invalid",
+            }}}) + "\n",
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(malformed) == 0
+        non_object = Path(td) / "non-object.jsonl"
+        non_object.write_text(
+            _json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": agent_path,
+                }}}},
+            }) + "\n[]\n",
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(non_object) == 0
     return True
 
 
@@ -1222,6 +1659,22 @@ TESTS = [
         test_response_item_assistant_message_becomes_text_event,
     ),
     (
+        "response_item assistant message uuid is stable",
+        test_response_item_assistant_message_uuid_is_stable,
+    ),
+    (
+        "response_item render branches keep stable uuids",
+        test_response_item_render_branches_keep_stable_uuids,
+    ),
+    (
+        "codex rollout item replay keeps stable uuids",
+        test_codex_rollout_item_replay_keeps_stable_uuids,
+    ),
+    (
+        "codex rollout event_msg replay keeps stable parent chain",
+        test_codex_rollout_event_msg_replay_keeps_stable_parent_chain,
+    ),
+    (
         "response_item user message without subagent notification is skipped",
         test_response_item_user_message_without_subagent_notification_is_skipped,
     ),
@@ -1262,8 +1715,40 @@ TESTS = [
         test_codex_rollout_mcp_tool_call_end_becomes_tool_pair,
     ),
     (
+        "codex rollout mcp_tool_call_end suppresses duplicate response output",
+        test_codex_rollout_mcp_end_suppresses_response_output_duplicate,
+    ),
+    (
+        "codex rollout response output without mcp_tool_call_end still emits",
+        test_codex_rollout_response_output_without_mcp_end_still_emits,
+    ),
+    (
+        "codex rollout distinct tool results both emit",
+        test_codex_rollout_distinct_tool_results_both_emit,
+    ),
+    (
+        "codex rollout response-first duplicate keeps one tool pair",
+        test_codex_rollout_response_first_suppresses_late_mcp_end,
+    ),
+    (
         "codex rollout token_count captures context window and fill",
         test_codex_rollout_token_count_captures_context_window_and_fill,
+    ),
+    (
+        "codex rollout tailer emits context updates",
+        test_codex_rollout_tailer_emits_context_updates,
+    ),
+    (
+        "codex rollout tailer keeps partial line pending",
+        test_codex_rollout_tailer_keeps_partial_line_pending,
+    ),
+    (
+        "codex rollout tailer advances cursor after dispatch",
+        test_codex_rollout_tailer_advances_cursor_after_dispatch,
+    ),
+    (
+        "codex rollout tailer file read does not block loop",
+        test_codex_rollout_tailer_file_read_does_not_block_loop,
     ),
     (
         "codex rollout assistant text dedup is lossless",

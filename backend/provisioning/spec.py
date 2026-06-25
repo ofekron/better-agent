@@ -52,6 +52,7 @@ class ProvisionedSessionSpec:
     bare_config: bool = True            # False ⇒ load skills/CLAUDE.md (e.g. tool-using sessions)
     worker_creation_policy: str = "deny"
     machine_completion: bool = True     # True ⇒ raw-instructions prompt (no tools expected)
+    tool_profile: str = ""              # Optional run-scoped MCP/tool surface profile
 
     # ── Lifecycle ────────────────────────────────────────────────────
     run_mode: str = "fork"              # "fork" | "direct"
@@ -61,12 +62,22 @@ class ProvisionedSessionSpec:
     default_model: str = ""
     default_cwd: str = ""               # base cwd (e.g. repo root to load a skill); "" ⇒ project cwd
     node_id: str = "primary"            # target node; "primary" runs locally, else routes via RemoteProviderProxy
+    storage_scope: dict | None = None
     dirty_policy: DirtyPolicy = DirtyPolicy()
+    lifetime_seconds: float | None = None   # None ⇒ never recycle by age; else recycle the base after this many seconds since provisioning
 
     # ── Timing ───────────────────────────────────────────────────────
+    # provision_timeout budgets the lifecycle phase (base/caller ensure,
+    # lifecycle locks, warm-up). dispatch_timeout budgets one dispatch
+    # attempt; None ⇒ same as provision_timeout.
     provision_timeout: float = 24.0 * 60.0 * 60.0
+    dispatch_timeout: float | None = None
     retry_attempts: int = 3
     retry_backoff: tuple[float, ...] = (2.0, 8.0)
+
+    @property
+    def effective_dispatch_timeout(self) -> float:
+        return float(self.dispatch_timeout if self.dispatch_timeout is not None else self.provision_timeout)
 
     # ── Hooks (override) ─────────────────────────────────────────────
     def build_provision_prompt(self, ctx: dict) -> str:

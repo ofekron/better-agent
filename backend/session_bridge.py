@@ -35,7 +35,6 @@ from typing import Any, Optional
 
 import config_store
 from event_bus import bus
-import session_recall
 import session_search
 import user_prefs
 from session_manager import manager as session_manager
@@ -92,6 +91,9 @@ async def _run_turn(
     display_prompt: str | None = None,
     source: str | None = None,
     client_id: str | None = None,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
     """Submit `prompt` to session `sid`, await turn completion, return the
     final assistant message text + id. Reuses session_search's in-process
@@ -141,7 +143,10 @@ async def _run_turn(
         _coordinator.submit_prompt(sid, {
             "prompt": display_prompt or prompt,
             "app_session_id": sid,
-            "model": sess.get("model"),
+            "provider_id": provider_id or sess.get("provider_id") or "",
+            "model": model or sess.get("model"),
+            "reasoning_effort": reasoning_effort or sess.get("reasoning_effort") or "",
+            "allow_model_override": bool(provider_id or model or reasoning_effort),
             "cwd": sess.get("cwd"),
             "ws_callback": _ws,
             "lifecycle_msg_id": lifecycle_msg_id,
@@ -166,6 +171,45 @@ async def _run_turn(
     return {"text": _msg_text(m) if m else "", "turn_id": (m or {}).get("id", "")}
 
 
+def _resolve_bridge_run_config(
+    *,
+    caller: dict,
+    target: dict | None = None,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+) -> dict[str, str]:
+    provider_id = str(provider_id or "").strip()
+    model = str(model or "").strip()
+    reasoning_effort = str(reasoning_effort or "").strip()
+    assignment = config_store.get_internal_llm_task("delegation_session_bridge")
+    if assignment:
+        resolved = config_store.resolve_internal_llm("delegation_session_bridge")
+        provider_id = provider_id or str(resolved.get("provider_id") or "").strip()
+        model = model or str(resolved.get("model") or "").strip()
+        reasoning_effort = (
+            reasoning_effort
+            or str(resolved.get("reasoning_effort") or "").strip()
+        )
+    if provider_id and not model:
+        provider = config_store.get_provider(provider_id) or {}
+        model = str(provider.get("default_model") or "").strip()
+    target = target or {}
+    return {
+        "provider_id": provider_id or str(target.get("provider_id") or caller.get("provider_id") or "").strip(),
+        "model": model or str(target.get("model") or caller.get("model") or "").strip(),
+        "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or caller.get("reasoning_effort") or "").strip(),
+    }
+
+
+async def run_for_extension(target_sid: str, prompt: str, *, source: str) -> dict:
+    """Public entry for a trusted builtin extension to deliver a prompt to an
+    existing session and run its turn (continue mode). Unlike `delegate`, there
+    is no caller turn — the trigger is a direct user action surfaced by the
+    extension. Refuses if the target is busy (continue-mode contract)."""
+    return await _run(target_sid, prompt, "continue", source=source)
+
+
 async def _run(
     target_sid: str,
     prompt: str,
@@ -174,11 +218,26 @@ async def _run(
     display_prompt: str | None = None,
     source: str | None = None,
     client_id: str | None = None,
+    caller_sid: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
+    caller = session_manager.get(caller_sid) or {}
+    target_session = session_manager.get(target_sid) or {}
+    run_config = _resolve_bridge_run_config(
+        caller=caller,
+        target=target_session,
+        provider_id=provider_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     if run_mode == "fork":
         config_store.apply_env_vars()
         try:
-            child = session_manager.fork(target_sid)
+            # This fork is spawned by an agent delegation into another
+            # session, not by the user opening the Fork action.
+            child = session_manager.fork(target_sid, user_initiated=False)
         except KeyError:
             return {"error": "unknown_session"}
         except ValueError as e:
@@ -193,23 +252,15 @@ async def _run(
             return {"error": "target_busy"}
         run_sid = target_sid
 
-    # Per-session semantic recall: index the chain's prior transcript so the
-    # delegated turn can `recall_history` over its own past. Built BEFORE the
-    # turn so the backend cache is warm when the runner's tool calls in.
-    # Best-effort — a recall-index failure must never block the delegation.
-    if run_mode == "continue":
-        try:
-            session_recall.build_index(run_sid)
-        except Exception:
-            logger.warning("session_recall.build_index failed for %s",
-                           run_sid[:8], exc_info=True)
-
     final = await _run_turn(
         run_sid,
         prompt,
         display_prompt=display_prompt,
         source=source,
         client_id=client_id,
+        provider_id=run_config.get("provider_id") or "",
+        model=run_config.get("model") or "",
+        reasoning_effort=run_config.get("reasoning_effort") or "",
     )
     if final.get("error"):
         return {"error": final["error"]}
@@ -228,17 +279,30 @@ async def _run_new(
     display_prompt: str | None = None,
     source: str | None = None,
     client_id: str | None = None,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
     """Create a brand-new session inheriting the caller's config and run
     the prompt in it. Returns the same shape as `_run`."""
     caller = session_manager.get(caller_sid) or {}
+    run_config = _resolve_bridge_run_config(
+        caller=caller,
+        provider_id=provider_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     config_store.apply_env_vars()
     sess = session_manager.create(
         name=f"Delegated from {caller.get('name', '') or 'session'}".strip()[:80],
-        model=caller.get("model", ""),
+        model=run_config.get("model") or caller.get("model", ""),
         cwd=caller.get("cwd", ""),
         orchestration_mode=caller.get("orchestration_mode", "native"),
-        provider_id=caller.get("provider_id"),
+        provider_id=run_config.get("provider_id") or caller.get("provider_id"),
+        reasoning_effort=run_config.get("reasoning_effort") or caller.get("reasoning_effort"),
+        # New-session mode always reaches here only after the user approves
+        # the picker, so this session is user-aware.
+        user_initiated=True,
     )
     run_sid = sess["id"]
     final = await _run_turn(
@@ -247,6 +311,9 @@ async def _run_new(
         display_prompt=display_prompt,
         source=source,
         client_id=client_id,
+        provider_id=run_config.get("provider_id") or "",
+        model=run_config.get("model") or "",
+        reasoning_effort=run_config.get("reasoning_effort") or "",
     )
     if final.get("error"):
         return {"error": final["error"]}
@@ -396,6 +463,9 @@ async def delegate(
     display_prompt: str | None = None,
     source: str | None = None,
     client_id: str | None = None,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
     """Entry point for the `delegate_to_session` MCP tool. Returns either
     `{session_id, run_mode, final_message, turn_id}` or `{error: ...}`.
@@ -443,6 +513,9 @@ async def delegate(
             display_prompt=display_prompt,
             source=source,
             client_id=client_id,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     auto_ok = (
@@ -461,6 +534,10 @@ async def delegate(
             display_prompt=display_prompt,
             source=source,
             client_id=client_id,
+            caller_sid=caller_sid,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     try:
@@ -477,5 +554,9 @@ async def delegate(
         run_mode,
         display_prompt=display_prompt,
         source=source,
-        client_id=client_id,
-    )
+            client_id=client_id,
+            caller_sid=caller_sid,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )

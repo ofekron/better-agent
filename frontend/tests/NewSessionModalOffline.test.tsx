@@ -26,8 +26,13 @@ const provider: Provider = {
   config_dir: "",
   custom_models: [],
   default_model: "cached-default",
+  runner: "native",
+  runner_options: ["native"],
+  suspended: false,
   reasoning_effort_options: ["low", "medium", "high", "xhigh"],
   default_reasoning_effort: "medium",
+  permission_options: {},
+  default_permission: {},
   has_api_key: false,
   supports_fork: true,
   supports_manager_mode: true,
@@ -35,6 +40,7 @@ const provider: Provider = {
   supports_steering: true,
   supports_native_subagents: false,
   supports_reasoning_effort: true,
+  capability_overrides: {},
 };
 
 const nativeOnlyProvider: Provider = {
@@ -104,7 +110,7 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high" },
+        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
       }),
       undefined,
     );

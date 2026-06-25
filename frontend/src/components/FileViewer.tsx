@@ -1,25 +1,27 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import Editor from "@monaco-editor/react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor, Editor } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import Papa from "papaparse";
 import type { FileFocus } from "../types";
 import "highlight.js/styles/github-dark.css";
-import { markdownLinkifyComponents } from "../utils/linkifyFilePaths";
 import {
   FileCommentBar,
   type CommentSelection,
   type SubmittedComment,
 } from "./FileCommentBar";
+import { MarkdownFileEditor } from "./FileEditorPrimitives";
+import { useMonacoSelectionCapture } from "./useMonacoSelectionCapture";
+import Icon from "./Icon";
 import { ProgressButton } from "../progress/ProgressButton";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
+import { useSaveShortcut } from "../hooks/useSaveShortcut";
+import { useViewport } from "../hooks/useViewport";
 
 import { API } from "../api";
+import { rawFileUrl } from "../utils/rawFileUrl";
+import { copyToClipboard } from "../utils/clipboard";
 
 export interface FileTagAnchor {
   filePath: string;
@@ -73,6 +75,17 @@ interface Props {
 // File-type category drives which viewer component renders the file.
 type ViewerKind = "markdown" | "csv" | "tsv" | "json" | "pdf" | "video" | "code";
 type FileIdentity = { mtime_ns?: number; size?: number };
+type LoadedTextFile = {
+  path: string;
+  content: string;
+  language: string;
+  identity: FileIdentity | null;
+};
+type LoadedViewFile = LoadedTextFile & {
+  diskContent: string;
+  diskIdentity: FileIdentity | null;
+  hasDraft: boolean;
+};
 
 const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "avi", "mkv", "m4v", "ogv", "3gp"]);
 
@@ -122,6 +135,100 @@ async function fetchFileIdentity(
   return identityFromPayload(await response.json());
 }
 
+async function fetchTextFile(
+  path: string,
+  nodeId: string,
+  opId: string,
+): Promise<LoadedTextFile> {
+  const response = await trackedFetch(
+    opId,
+    `${API}/api/file?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+  );
+  const data = await response.json();
+  return {
+    path,
+    content: data.content || "",
+    language: data.language || "plaintext",
+    identity: identityFromPayload(data),
+  };
+}
+
+async function fetchDraft(path: string, nodeId: string): Promise<{
+  exists: boolean;
+  content?: string;
+  base_identity?: FileIdentity | null;
+}> {
+  const response = await fetch(
+    `${API}/api/file/draft?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+  );
+  return response.json();
+}
+
+async function fetchViewedTextFile(
+  path: string,
+  nodeId: string,
+  opId: string,
+): Promise<LoadedViewFile> {
+  const disk = await fetchTextFile(path, nodeId, opId);
+  const draft = await fetchDraft(path, nodeId);
+  if (!draft.exists || typeof draft.content !== "string") {
+    return {
+      ...disk,
+      diskContent: disk.content,
+      diskIdentity: disk.identity,
+      hasDraft: false,
+    };
+  }
+  return {
+    path,
+    content: draft.content,
+    language: disk.language,
+    identity: identityFromPayload(draft.base_identity) ?? disk.identity,
+    diskContent: disk.content,
+    diskIdentity: disk.identity,
+    hasDraft: true,
+  };
+}
+
+const CLIPBOARD_STYLE_PROPS = [
+  "background-color",
+  "border",
+  "border-collapse",
+  "color",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+  "line-height",
+  "padding",
+  "text-decoration",
+  "white-space",
+];
+
+function selectionHtmlWithInlineStyles(container: HTMLElement, range: Range): string {
+  const wrapper = document.createElement("div");
+  wrapper.appendChild(range.cloneContents());
+  const staging = document.createElement("div");
+  staging.className = container.className;
+  staging.style.position = "fixed";
+  staging.style.left = "-10000px";
+  staging.style.top = "0";
+  staging.appendChild(wrapper);
+  document.body.appendChild(staging);
+  try {
+    wrapper.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      const computed = window.getComputedStyle(el);
+      CLIPBOARD_STYLE_PROPS.forEach((prop) => {
+        const value = computed.getPropertyValue(prop);
+        if (value) el.style.setProperty(prop, value);
+      });
+    });
+    return wrapper.innerHTML;
+  } finally {
+    document.body.removeChild(staging);
+  }
+}
+
 export function FileViewer({
   filePath,
   diffBefore,
@@ -142,12 +249,28 @@ export function FileViewer({
   const [dirty, setDirty] = useState(false);
   const [loadedIdentity, setLoadedIdentity] = useState<FileIdentity | null>(null);
   const [currentIdentity, setCurrentIdentity] = useState<FileIdentity | null>(null);
+  const [rawVersion, setRawVersion] = useState(0);
+  const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const [copiedOriginal, setCopiedOriginal] = useState(false);
+  const viewport = useViewport();
+  const isTouchLayout = viewport.mode !== "desktop";
+  // Live text of the Monaco selection — drives the mobile "Copy selection"
+  // pill. On touch, Monaco owns its selection model and never surfaces the
+  // OS copy sheet, so we copy the selected range ourselves.
+  const [selectionText, setSelectionText] = useState("");
+  const [copiedSelection, setCopiedSelection] = useState(false);
+  const copySelectionResetRef = useRef<number | null>(null);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
+  const latestDiffOpId = filePath ? `file:latest-diff:${filePath}` : "file:latest-diff:none";
   const { inflight: saving } = useOpProgress(saveOpId);
   const isDiffMode = diffBefore !== undefined && diffAfter !== undefined;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const [activeEditor, setActiveEditor] =
+    useState<editor.IStandaloneCodeEditor | null>(null);
   const decorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const appliedRevealKeyRef = useRef<string | null>(null);
   const contextMenuLineRef = useRef<number | null>(null);
   // Editor readiness is a React state (not just a ref) so mounting the
   // Monaco editor re-triggers the decoration effect below — otherwise, on
@@ -159,10 +282,12 @@ export function FileViewer({
   // Container ref used for DOM-selection capture in markdown / CSV /
   // TSV views (those don't go through Monaco).
   const renderedContainerRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
   // Md edit-view: when the user double-clicks the rendered markdown,
   // we switch into a raw Monaco editor. Edits auto-save after 1s of idle.
   const [mdEditing, setMdEditing] = useState(false);
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyResetRef = useRef<number | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
   // Mirror `dirty` into a ref so the load-effect cleanup (whose closure
@@ -174,16 +299,20 @@ export function FileViewer({
   // churn) — clobbering the real file on disk with an empty string.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  const loadedIdentityRef = useRef<FileIdentity | null>(loadedIdentity);
+  loadedIdentityRef.current = loadedIdentity;
 
-  // Save the current `content` state to disk. Reads from contentRef so a
-  // debounced timer firing post-mdEditing-flip still has the right value
-  // (Monaco's value/ref is gone by then). Best-effort; overlapping saves
-  // are tolerated (last-write-wins server-side).
-  const flushSaveAt = useCallback(async (path: string) => {
+  useEffect(() => {
+    return () => {
+      if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    };
+  }, []);
+
+  const flushDraftAt = useCallback(async (path: string) => {
     try {
       await trackedFetch(
-        `file:save:${path}`,
-        `${API}/api/file`,
+        `file:draft:${path}`,
+        `${API}/api/file/draft`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -191,14 +320,13 @@ export function FileViewer({
             path,
             content: contentRef.current,
             node_id: nodeId,
+            base_identity: loadedIdentityRef.current,
           }),
         },
         { silent: true },
       );
       setDirty(false);
-      const identity = await fetchFileIdentity(path, nodeId);
-      setLoadedIdentity(identity);
-      setCurrentIdentity(identity);
+      setHasDraft(true);
     } catch {
       // best effort
     }
@@ -213,7 +341,11 @@ export function FileViewer({
     setDirty(false);
     setLoadedIdentity(null);
     setCurrentIdentity(null);
+    setLatestPreview(null);
+    setHasDraft(false);
     setMdEditing(false);
+    setActiveEditor(null);
+    setEditorReady(false);
     // Media files are served via /api/file/raw — no text fetch needed.
     const currentKind = filePath ? categorize(filePath, "plaintext") : "code";
     if (currentKind === "pdf" || currentKind === "video") {
@@ -234,18 +366,14 @@ export function FileViewer({
       };
     }
     let cancelled = false;
-    trackedFetch(
-      loadOpId,
-      `${API}/api/file?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
-    )
-      .then((r) => r.json())
-      .then((d) => {
+    fetchViewedTextFile(filePath, nodeId, loadOpId)
+      .then((loaded) => {
         if (cancelled) return;
-        setContent(d.content || "");
-        setLanguage(d.language || "plaintext");
-        const identity = identityFromPayload(d);
-        setLoadedIdentity(identity);
-        setCurrentIdentity(identity);
+        setContent(loaded.content);
+        setLanguage(loaded.language);
+        setLoadedIdentity(loaded.identity);
+        setCurrentIdentity(loaded.diskIdentity);
+        setHasDraft(loaded.hasDraft);
       })
       .catch(() => {
         if (!cancelled) setContent(t("fileViewer.failedToLoad"));
@@ -263,21 +391,25 @@ export function FileViewer({
       // Only persist on teardown when there are actual unsaved edits.
       // A clean / still-loading viewer must NEVER write back (its
       // buffer is "" pre-fetch → would empty the file on disk).
-      if (dirtyRef.current) void flushSaveAt(oldPath);
+      if (dirtyRef.current) void flushDraftAt(oldPath);
     };
-  }, [filePath, nodeId, t, flushSaveAt, loadOpId]);
+  }, [filePath, nodeId, t, flushDraftAt, loadOpId]);
 
   const save = useCallback(async () => {
-    const ed = editorRef.current;
-    if (!ed || !filePath || saving) return;
-    const value = ed.getValue();
+    if (!filePath || saving) return;
+    const value = contentRef.current;
     await trackedFetch(saveOpId, `${API}/api/file`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: filePath, content: value, node_id: nodeId }),
     });
+    await fetch(
+      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
+      { method: "DELETE" },
+    );
     setContent(value);
     setDirty(false);
+    setHasDraft(false);
     const identity = await fetchFileIdentity(filePath, nodeId);
     setLoadedIdentity(identity);
     setCurrentIdentity(identity);
@@ -285,15 +417,72 @@ export function FileViewer({
 
   const saveRef = useRef(save);
   useEffect(() => { saveRef.current = save; }, [save]);
+  useSaveShortcut({
+    enabled: Boolean(filePath && dirty && !saving),
+    targetRef: viewerRef,
+    onSave: () => {
+      void saveRef.current();
+    },
+  });
+
+  const applyLoadedTextFile = useCallback((loaded: LoadedTextFile) => {
+    setContent(loaded.content);
+    setLanguage(loaded.language);
+    setDirty(false);
+    setLoadedIdentity(loaded.identity);
+    setCurrentIdentity(loaded.identity);
+    setLatestPreview(null);
+    setHasDraft(false);
+    setMdEditing(false);
+  }, []);
+
+  const loadLatestFromDisk = useCallback(async () => {
+    if (!filePath || dirtyRef.current || isDiffMode) return;
+    const currentKind = categorize(filePath, language);
+    if (currentKind === "pdf" || currentKind === "video") {
+      const identity = await fetchFileIdentity(filePath, nodeId);
+      setLoadedIdentity(identity);
+      setCurrentIdentity(identity);
+      setHasDraft(false);
+      setRawVersion((v) => v + 1);
+      return;
+    }
+    await fetch(
+      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
+      { method: "DELETE" },
+    );
+    if (latestPreview?.path === filePath) {
+      applyLoadedTextFile(latestPreview);
+      return;
+    }
+    applyLoadedTextFile(await fetchTextFile(filePath, nodeId, loadOpId));
+  }, [applyLoadedTextFile, filePath, isDiffMode, language, latestPreview, loadOpId, nodeId]);
+
+  const previewLatestDiff = useCallback(async () => {
+    if (!filePath || dirtyRef.current || isDiffMode) return;
+    const currentKind = categorize(filePath, language);
+    if (currentKind === "pdf" || currentKind === "video") return;
+    setLatestPreview(await fetchTextFile(filePath, nodeId, latestDiffOpId));
+  }, [filePath, isDiffMode, language, latestDiffOpId, nodeId]);
 
   const returnToFormattedView = useCallback(async () => {
     if (saveDebounceRef.current) {
       clearTimeout(saveDebounceRef.current);
       saveDebounceRef.current = null;
     }
-    if (filePath && dirtyRef.current) await flushSaveAt(filePath);
+    if (filePath && dirtyRef.current) await flushDraftAt(filePath);
     setMdEditing(false);
-  }, [filePath, flushSaveAt]);
+  }, [filePath, flushDraftAt]);
+
+  const copyOriginalContent = useCallback(async () => {
+    await copyToClipboard(contentRef.current);
+    setCopiedOriginal(true);
+    if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => {
+      setCopiedOriginal(false);
+      copyResetRef.current = null;
+    }, 1200);
+  }, []);
 
   // Apply / clear the focus highlight whenever the target range, the loaded
   // content, or the mounted editor changes. Monaco can't decorate lines that
@@ -309,6 +498,8 @@ export function FileViewer({
   const endLine = focus?.endLine;
   const selStart = select?.startLine;
   const selEnd = select?.endLine;
+  const selStartColumn = select?.startColumn;
+  const selEndColumn = select?.endColumn;
   useEffect(() => {
     const ed = editorRef.current;
     if (!ed) return;
@@ -337,6 +528,16 @@ export function FileViewer({
       }
       const start = Math.max(1, Math.min(startLine, maxLine));
       const end = Math.max(start, Math.min(endLine, maxLine));
+      const revealKey = [
+        filePath ?? "",
+        startLine,
+        endLine,
+        selStart ?? "",
+        selStartColumn ?? "",
+        selEnd ?? "",
+        selEndColumn ?? "",
+      ].join(":");
+      const shouldApplyReveal = appliedRevealKeyRef.current !== revealKey;
 
       // Decoration is safe to apply even when the editor has zero size —
       // it just isn't visible yet. Scrolling into a zero-size viewport, on
@@ -371,16 +572,21 @@ export function FileViewer({
       // Agent-/user-requested real Monaco selection (separate from the
       // focus highlight decoration). Applied once when the file loads;
       // not re-applied on scroll (deps are primitive selStart/selEnd).
-      if (selStart !== undefined && selEnd !== undefined) {
+      if (shouldApplyReveal && selStart !== undefined && selEnd !== undefined) {
         const ss = Math.max(1, Math.min(selStart, maxLine));
         const se = Math.max(ss, Math.min(selEnd, maxLine));
+        const ssMaxColumn = model.getLineMaxColumn(ss);
+        const seMaxColumn = model.getLineMaxColumn(se);
         ed.setSelection({
           startLineNumber: ss,
-          startColumn: 1,
+          startColumn: Math.max(1, Math.min(selStartColumn ?? 1, ssMaxColumn)),
           endLineNumber: se,
-          endColumn: model.getLineMaxColumn(se),
+          endColumn: Math.max(1, Math.min(selEndColumn ?? seMaxColumn, seMaxColumn)),
         });
       }
+
+      if (!shouldApplyReveal) return;
+      appliedRevealKeyRef.current = revealKey;
 
       const reveal = () => {
         if (cancelled) return;
@@ -419,7 +625,7 @@ export function FileViewer({
       cancelled = true;
       cancelAnimationFrame(rafId);
     };
-  }, [startLine, endLine, selStart, selEnd, content, editorReady]);
+  }, [filePath, startLine, endLine, selStart, selEnd, selStartColumn, selEndColumn, content, editorReady]);
 
   // Expose a live handle to the parent (FilePanels) so prompt-send can
   // snapshot this panel's current viewport + selection. Re-registers on
@@ -477,44 +683,66 @@ export function FileViewer({
     setPendingSelection(null);
   }, [filePath, isDiffMode]);
 
-  // Monaco-side selection capture: latch on mouseup / shift-keyup so we
-  // don't fire mid-drag (which would steal focus into the comment
-  // textarea and kill the drag). Same approach as FileEditor.
-  // Collapsed selections are ignored — once the user has a real range,
-  // a stray click shouldn't wipe their pending range; Cancel/Submit
-  // are the only way out.
-  useEffect(() => {
-    if (!onAddFileTag) return;
-    const ed = editorRef.current;
-    if (!ed) return;
-
-    const capture = () => {
-      const sel = ed.getSelection();
-      if (!sel) return;
-      if (
-        sel.startLineNumber === sel.endLineNumber &&
-        sel.startColumn === sel.endColumn
-      ) {
-        return;
-      }
+  useMonacoSelectionCapture({
+    editor: activeEditor,
+    enabled: editorReady && Boolean(onAddFileTag),
+    onCapture: useCallback((selection) => {
       setPendingSelection({
         kind: "monaco",
-        startLine: sel.startLineNumber,
-        endLine: sel.endLineNumber,
-        startCol: sel.startColumn,
-        endCol: sel.endColumn,
+        startLine: selection.startLine,
+        endLine: selection.endLine,
+        startCol: selection.startCol,
+        endCol: selection.endCol,
       });
-    };
+    }, []),
+  });
 
-    const mouseUp = ed.onMouseUp(capture);
-    const keyUp = ed.onKeyUp((e) => {
-      if (e.shiftKey) capture();
-    });
-    return () => {
-      mouseUp.dispose();
-      keyUp.dispose();
+  // Track the Monaco selection's text live so a touch user can copy it.
+  // activeEditor is non-null only while a Monaco editor is mounted, so this
+  // safely no-ops for markdown / csv / media views.
+  useEffect(() => {
+    if (!isTouchLayout || !activeEditor) {
+      setSelectionText("");
+      return;
+    }
+    const ed = activeEditor;
+    const read = () => {
+      const sel = ed.getSelection();
+      const model = ed.getModel();
+      if (!sel || !model || sel.isEmpty()) {
+        setSelectionText("");
+        return;
+      }
+      setSelectionText(model.getValueInRange(sel));
     };
-  }, [editorReady, onAddFileTag]);
+    read();
+    const sub = ed.onDidChangeCursorSelection(read);
+    return () => {
+      sub.dispose();
+      setSelectionText("");
+    };
+  }, [isTouchLayout, activeEditor]);
+
+  const copySelection = useCallback(async () => {
+    if (!selectionText) return;
+    await copyToClipboard(selectionText);
+    setCopiedSelection(true);
+    if (copySelectionResetRef.current) {
+      window.clearTimeout(copySelectionResetRef.current);
+    }
+    copySelectionResetRef.current = window.setTimeout(() => {
+      setCopiedSelection(false);
+      copySelectionResetRef.current = null;
+    }, 1200);
+  }, [selectionText]);
+
+  useEffect(() => {
+    return () => {
+      if (copySelectionResetRef.current) {
+        window.clearTimeout(copySelectionResetRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const ed = editorRef.current;
@@ -579,6 +807,26 @@ export function FileViewer({
     // different DOM node) or the file path changes.
   }, [onAddFileTag, kind, filePath]);
 
+  useEffect(() => {
+    const el = renderedContainerRef.current;
+    if (!el) return;
+
+    const handler = (event: ClipboardEvent) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) return;
+      const text = selection.toString();
+      if (!text.trim()) return;
+      event.preventDefault();
+      event.clipboardData?.setData("text/plain", text);
+      event.clipboardData?.setData("text/html", selectionHtmlWithInlineStyles(el, range));
+    };
+
+    document.addEventListener("copy", handler, true);
+    return () => document.removeEventListener("copy", handler, true);
+  }, [kind, filePath, content, mdEditing, isDiffMode]);
+
   const handleSubmitComment = useCallback(
     async ({ selection, comment }: SubmittedComment) => {
       if (!onAddFileTag || !filePath) return;
@@ -623,6 +871,8 @@ export function FileViewer({
   );
 
   const stale = identitiesDiffer(loadedIdentity, currentIdentity);
+  const canPreviewLatestDiff = stale && !dirty && !isDiffMode && kind !== "pdf" && kind !== "video";
+  const showLatestDiff = canPreviewLatestDiff && latestPreview !== null;
 
   useEffect(() => {
     if (!filePath || isDiffMode || !loadedIdentity) return;
@@ -648,51 +898,136 @@ export function FileViewer({
   const fileName = filePath.split("/").pop() || filePath;
   // Diff mode always stays in Monaco — side-by-side diff is only meaningful for source.
   const showMonaco = isDiffMode || kind === "code" || kind === "json";
+  const canSaveViewedContent = !isDiffMode && !showLatestDiff && (showMonaco || kind === "markdown");
+  const canCopyOriginalContent = !isDiffMode && !showLatestDiff && kind !== "pdf" && kind !== "video";
+  const canCommentOnFile = !!onAddFileTag && !isDiffMode && !showLatestDiff;
+  const hasUnsavedOriginalChanges = dirty || hasDraft;
+  const synced = !stale && !hasUnsavedOriginalChanges && !showLatestDiff;
+  const rawUrl = rawFileUrl(API, filePath, nodeId, rawVersion);
 
   return (
-    <div className="file-viewer">
+    <div className="file-viewer" ref={viewerRef}>
       <div className="file-viewer-header">
         <div className="file-viewer-title">
           <span className="file-viewer-path">
-            {dirty && <span className="file-viewer-dirty" title={t("fileViewer.unsavedChangesTitle")}>●</span>}
+            {hasUnsavedOriginalChanges && <span className="file-viewer-dirty" title={t("fileViewer.unsavedChangesTitle")}>●</span>}
             {filePath}
           </span>
           <span className={`file-viewer-kind kind-${kind}`}>{kind}</span>
+          {synced && (
+            <span className="file-viewer-sync-state state-synced" title={t("fileViewer.syncedTitle")}>
+              {t("fileViewer.synced")}
+            </span>
+          )}
+          {hasUnsavedOriginalChanges && (
+            <span className="file-viewer-sync-state state-draft" title={t("fileViewer.draftSavedTitle")}>
+              {t("fileViewer.draftSaved")}
+            </span>
+          )}
           {stale && (
             <span className="file-viewer-stale" title={t("fileViewer.changedSinceLoadedTitle")}>
               {t("fileViewer.changedSinceLoaded")}
             </span>
           )}
           {isDiffMode && <span className="file-viewer-diff-badge">{t("fileViewer.beforeAfter")}</span>}
+          {showLatestDiff && <span className="file-viewer-diff-badge">{t("fileViewer.loadedToLatest")}</span>}
         </div>
-        {!isDiffMode && showMonaco && (
-          <ProgressButton
-            opId={saveOpId}
-            className="btn-small"
-            onClick={save}
-            extraDisabled={!dirty}
-            loadingChildren={t("fileViewer.saving")}
-            title="Save (Cmd+S)"
-          >
-            {t("fileViewer.save")}
-          </ProgressButton>
-        )}
-        {!isDiffMode && kind === "markdown" && mdEditing && (
-          <button
-            type="button"
-            className="btn-small"
-            onClick={() => void returnToFormattedView()}
-            data-testid="file-viewer-md-view"
-          >
-            View
+        <div className="file-viewer-actions">
+          {showLatestDiff && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => setLatestPreview(null)}
+            >
+              {t("fileViewer.backToFile")}
+            </button>
+          )}
+          {canPreviewLatestDiff && !showLatestDiff && (
+            <ProgressButton
+              opId={latestDiffOpId}
+              className="btn-small"
+              onClick={() => void previewLatestDiff()}
+              loadingChildren={t("fileViewer.loadingLatest")}
+              title={t("fileViewer.viewLatestDiffTitle")}
+            >
+              {t("fileViewer.viewLatestDiff")}
+            </ProgressButton>
+          )}
+          {stale && !dirty && !isDiffMode && (
+            <ProgressButton
+              opId={loadOpId}
+              className="btn-small"
+              onClick={() => void loadLatestFromDisk()}
+              loadingChildren={t("fileViewer.loadingLatest")}
+              title={t("fileViewer.updateToLatestTitle")}
+            >
+              {t("fileViewer.updateToLatest")}
+            </ProgressButton>
+          )}
+          {canSaveViewedContent && (
+            <ProgressButton
+              opId={saveOpId}
+              className="btn-small"
+              onClick={save}
+              extraDisabled={!hasUnsavedOriginalChanges}
+              loadingChildren={t("fileViewer.saving")}
+              title="Save (Cmd+S)"
+            >
+              {t("fileViewer.save")}
+            </ProgressButton>
+          )}
+          {canCopyOriginalContent && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => void copyOriginalContent()}
+              title={t("fileViewer.copyOriginalTitle")}
+            >
+              <Icon name="clipboard" size={13} />
+              {copiedOriginal ? t("fileViewer.copied") : t("fileViewer.copyOriginal")}
+            </button>
+          )}
+          {!isDiffMode && kind === "markdown" && mdEditing && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => void returnToFormattedView()}
+              data-testid="file-viewer-md-view"
+            >
+              View
+            </button>
+          )}
+          <button className="btn-small" onClick={onClose}>
+            {t("fileViewer.close")}
           </button>
-        )}
-        <button className="btn-small" onClick={onClose}>
-          {t("fileViewer.close")}
-        </button>
+        </div>
       </div>
 
-      {isDiffMode ? (
+      {showLatestDiff && latestPreview ? (
+        <div className="file-viewer-latest-diff" data-testid="file-viewer-latest-diff">
+          <DiffEditor
+            height="100%"
+            language={latestPreview.language || language}
+            original={content}
+            modified={latestPreview.content}
+            theme={monacoThemeFor(kind)}
+            onMount={(diffEd) => {
+              const modified = diffEd.getModifiedEditor();
+              editorRef.current = modified;
+              setActiveEditor(modified);
+              setEditorReady(true);
+            }}
+            options={{
+              readOnly: true,
+              minimap: { enabled: false },
+              fontSize: monacoFontSize,
+              scrollBeyondLastLine: false,
+              wordWrap: "on",
+              renderSideBySide: true,
+            }}
+          />
+        </div>
+      ) : isDiffMode ? (
         <DiffEditor
           height="100%"
           language={language}
@@ -702,6 +1037,7 @@ export function FileViewer({
           onMount={(diffEd) => {
             const modified = diffEd.getModifiedEditor();
             editorRef.current = modified;
+            setActiveEditor(modified);
             setEditorReady(true);
           }}
           options={{
@@ -714,58 +1050,37 @@ export function FileViewer({
           }}
         />
       ) : kind === "markdown" ? (
-        mdEditing ? (
-          <div className="file-viewer-md-edit" data-testid="file-viewer-md-monaco">
-            <Editor
-              height="100%"
-              language="markdown"
-              value={content}
-              theme={monacoThemeFor(kind)}
-              onMount={(ed) => {
-                editorRef.current = ed;
-                setEditorReady(true);
-                ed.focus();
-              }}
-              onChange={(v) => {
-                const next = v ?? "";
-                setContent(next);
-                setDirty(true);
-                if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
-                saveDebounceRef.current = setTimeout(() => {
-                  saveDebounceRef.current = null;
-                  if (filePath) void flushSaveAt(filePath);
-                }, 1000);
-              }}
-              options={{
-                readOnly: false,
-                minimap: { enabled: false },
-                fontSize: monacoFontSize,
-                lineNumbers: "on",
-                scrollBeyondLastLine: false,
-                wordWrap: "on",
-                automaticLayout: true,
-              }}
-            />
-          </div>
-        ) : (
-          <div
-            className="file-viewer-markdown"
-            ref={renderedContainerRef}
-            onDoubleClick={() => {
-              setPendingSelection(null);
-              setMdEditing(true);
-            }}
-            data-testid="file-viewer-md-formatted"
-          >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={markdownLinkifyComponents()}
-            >
-              {content}
-            </ReactMarkdown>
-          </div>
-        )
+        <MarkdownFileEditor
+          value={content}
+          editing={mdEditing}
+          readOnly={false}
+          fontSize={monacoFontSize}
+          theme={monacoThemeFor(kind)}
+          editClassName="file-viewer-md-edit"
+          formattedClassName="file-viewer-markdown"
+          editTestId="file-viewer-md-monaco"
+          formattedTestId="file-viewer-md-formatted"
+          renderedRef={renderedContainerRef}
+          autoFocus
+          onRequestEdit={() => {
+            setPendingSelection(null);
+            setMdEditing(true);
+          }}
+          onMount={(ed) => {
+            editorRef.current = ed;
+            setActiveEditor(ed);
+            setEditorReady(true);
+          }}
+          onChange={(next) => {
+            setContent(next);
+            setDirty(true);
+            if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+            saveDebounceRef.current = setTimeout(() => {
+              saveDebounceRef.current = null;
+              if (filePath) void flushDraftAt(filePath);
+            }, 1000);
+          }}
+        />
       ) : kind === "csv" || kind === "tsv" ? (
         <div className="file-viewer-rendered-wrap" ref={renderedContainerRef}>
           <CsvTable content={content} delimiter={kind === "tsv" ? "\t" : ","} />
@@ -773,7 +1088,7 @@ export function FileViewer({
       ) : kind === "pdf" ? (
         <div className="file-viewer-pdf">
           <iframe
-            src={`${API}/api/file/raw?path=${encodeURIComponent(filePath!)}&node_id=${encodeURIComponent(nodeId)}`}
+            src={rawUrl}
             title={fileName}
             className="file-viewer-pdf-iframe"
           />
@@ -781,7 +1096,7 @@ export function FileViewer({
       ) : kind === "video" ? (
         <div className="file-viewer-video">
           <video
-            src={`${API}/api/file/raw?path=${encodeURIComponent(filePath!)}&node_id=${encodeURIComponent(nodeId)}`}
+            src={rawUrl}
             controls
             preload="metadata"
             className="file-viewer-video-player"
@@ -797,13 +1112,23 @@ export function FileViewer({
           theme={monacoThemeFor(kind)}
           onMount={(ed, monaco) => {
             editorRef.current = ed;
+            setActiveEditor(ed);
             setEditorReady(true);
             ed.addCommand(
               monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
               () => { void saveRef.current(); },
             );
           }}
-          onChange={(v) => setDirty(v !== content)}
+          onChange={(v) => {
+            const next = v ?? "";
+            setContent(next);
+            setDirty(true);
+            if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+            saveDebounceRef.current = setTimeout(() => {
+              saveDebounceRef.current = null;
+              if (filePath) void flushDraftAt(filePath);
+            }, 1000);
+          }}
           options={{
             readOnly: false,
             minimap: { enabled: false },
@@ -816,7 +1141,7 @@ export function FileViewer({
         />
       ) : null}
 
-      {onAddFileTag && (
+      {canCommentOnFile && (
         <FileCommentBar
           selection={pendingSelection}
           onSubmit={handleSubmitComment}
@@ -824,6 +1149,17 @@ export function FileViewer({
           pendingTagCount={pendingTagCount}
           draftKey={filePath}
         />
+      )}
+      {isTouchLayout && selectionText && (
+        <button
+          type="button"
+          className="file-viewer-copy-selection"
+          onClick={() => void copySelection()}
+          title={t("fileViewer.copySelectionTitle")}
+        >
+          <Icon name="clipboard" size={13} />
+          {copiedSelection ? t("fileViewer.copied") : t("fileViewer.copySelection")}
+        </button>
       )}
     </div>
   );

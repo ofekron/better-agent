@@ -14,12 +14,18 @@ import {
   MediaPreviewInline,
   getMediaType,
 } from "../components/MediaPreviewInline";
+import { requestMessageFocus } from "src/utils/messageFocus";
 
 const WIN_ABS_RE = /^[A-Za-z]:[/\\]/;
 const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const FILE_LIKE_RE = /(?:^|[/\\])[^/\\?#]+\.[A-Za-z0-9]{1,8}(?::\d+(?:-\d+)?)?$/;
 const REL_FILE_WITH_LINE_RE = /^[^:/\\?#]+\.[A-Za-z0-9]{1,8}:\d+(?:-\d+)?$/;
 const TRAILING_SLASH_RE = /[/\\]+$/;
+const BA_LINK_MARKER_RE = /\[\[(ba-session|ba-event):([^\]\n]*)\]\]/g;
+
+type ParsedBaMarker =
+  | { kind: "session"; sessionId: string; name: string }
+  | { kind: "event"; sessionId: string; messageId: string; name: string };
 
 /** True for POSIX (`/x`), Windows drive (`C:\x`, `C:/x`) and UNC
  * (`\\server`) absolute paths. Mirrors the backend file_ref_resolver
@@ -93,6 +99,10 @@ function focusSuffix(focus?: FileFocus): string {
   return `:${focus.startLine}-${focus.endLine}`;
 }
 
+function fileLinkTitle(path: string, focus?: FileFocus): string {
+  return `${path}${focusSuffix(focus)}`;
+}
+
 function pathBasename(path: string): string {
   const clean = path.replace(TRAILING_SLASH_RE, "");
   const parts = clean.split(/[/\\]/);
@@ -116,6 +126,108 @@ function plainText(children: ReactNode): string | null {
 
 function normalizeComparableLink(value: string): string {
   return value.trim().replace(TRAILING_SLASH_RE, "");
+}
+
+function decodeMarkerPart(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseBaLinkMarker(kind: string, body: string): ParsedBaMarker | null {
+  const parts = body.split("|");
+  if (kind === "ba-session" && parts.length === 2) {
+    return {
+      kind: "session",
+      sessionId: decodeMarkerPart(parts[0]),
+      name: decodeMarkerPart(parts[1]),
+    };
+  }
+  if (kind === "ba-event" && parts.length === 3) {
+    return {
+      kind: "event",
+      sessionId: decodeMarkerPart(parts[0]),
+      messageId: decodeMarkerPart(parts[1]),
+      name: decodeMarkerPart(parts[2]),
+    };
+  }
+  return null;
+}
+
+function sessionLinkLabel(sessionId: string, name: string): string {
+  const label = name.trim() || "Session";
+  return `${label} · ${sessionId.slice(0, 4)}`;
+}
+
+function eventLinkLabel(messageId: string, name: string): string {
+  const label = name.trim() || "Event";
+  return `${label} · ${messageId.slice(0, 6)}`;
+}
+
+function sessionPath(sessionId: string): string {
+  return `/s/${encodeURIComponent(sessionId)}`;
+}
+
+function eventPath(sessionId: string, messageId: string): string {
+  return `${sessionPath(sessionId)}?m=${encodeURIComponent(messageId)}`;
+}
+
+function parseSessionHref(href: string): { sessionId: string; messageId?: string } | null {
+  const m = href.match(/^\/s\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/);
+  if (!m) return null;
+  const params = new URLSearchParams(m[2] ?? "");
+  try {
+    return {
+      sessionId: decodeURIComponent(m[1]),
+      messageId: params.get("m") || undefined,
+    };
+  } catch {
+    return {
+      sessionId: m[1],
+      messageId: params.get("m") || undefined,
+    };
+  }
+}
+
+function openSession(sessionId: string) {
+  const path = sessionPath(sessionId);
+  if (window.location.pathname !== path) window.history.pushState(null, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+/** A name is never allowed to carry raw copy-id marker syntax — embedding an
+ * already-marker name inside a new marker renders as unreadable nested
+ * percent-encoded garbage. Backend now strips this at the rename source
+ * (`session_manager.strip_link_marker_syntax`), but this stays as
+ * defense-in-depth for names persisted before that fix and for the
+ * extension-owned virtual-session rename path. */
+function sanitizeMarkerName(name: string): string {
+  return name.replace(BA_LINK_MARKER_RE, "").trim();
+}
+
+export function sessionLinkMarker(sessionId: string, name: string): string {
+  return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(sanitizeMarkerName(name))}]]`;
+}
+
+export function eventLinkMarker(sessionId: string, messageId: string, name: string): string {
+  return `[[ba-event:${encodeURIComponent(sessionId)}|${encodeURIComponent(messageId)}|${encodeURIComponent(sanitizeMarkerName(name))}]]`;
+}
+
+export function baMarkersToMarkdown(text: string): string {
+  return text.replace(BA_LINK_MARKER_RE, (whole, kind, body) => {
+    const parsed = parseBaLinkMarker(kind, body);
+    if (!parsed) return whole;
+    if (parsed.kind === "session") {
+      return `[${sessionLinkLabel(parsed.sessionId, parsed.name)}](${sessionPath(parsed.sessionId)})`;
+    }
+    return `[${eventLinkLabel(parsed.messageId, parsed.name)}](${eventPath(parsed.sessionId, parsed.messageId)})`;
+  });
+}
+
+export function sessionMarkersToMarkdown(text: string): string {
+  return baMarkersToMarkdown(text);
 }
 
 export function compactLinkLabel(href: string, label?: string | null): string {
@@ -163,8 +275,19 @@ function FileLinkButton({
   label: ReactNode;
   path: string;
   focus?: FileFocus;
-  onFileClick: (path: string, focus?: FileFocus) => void;
+  onFileClick?: (path: string, focus?: FileFocus) => void;
 }) {
+  if (!onFileClick) {
+    return (
+      <span
+        className="file-path-link file-path-link-static"
+        title={fileLinkTitle(path, focus)}
+      >
+        <span className="file-path-link-icon" aria-hidden="true" />
+        <span className="file-path-link-label">{label}</span>
+      </span>
+    );
+  }
   const activate = (e: SyntheticEvent) => {
     e.stopPropagation();
     onFileClick(path, focus);
@@ -174,12 +297,44 @@ function FileLinkButton({
       role="link"
       tabIndex={0}
       className="file-path-link"
+      title={fileLinkTitle(path, focus)}
       onClick={activate}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           activate(e);
         }
+      }}
+    >
+      <span className="file-path-link-icon" aria-hidden="true" />
+      <span className="file-path-link-label">{label}</span>
+    </span>
+  );
+}
+
+function SessionLinkButton({
+  sessionId,
+  messageId,
+  label,
+}: {
+  sessionId: string;
+  messageId?: string;
+  label: ReactNode;
+}) {
+  const activate = (e: SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    openSession(sessionId);
+    if (messageId) requestMessageFocus(sessionId, messageId);
+  };
+  return (
+    <span
+      role="link"
+      tabIndex={0}
+      className="session-smart-link"
+      onClick={activate}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") activate(e);
       }}
     >
       {label}
@@ -195,9 +350,24 @@ function FileLinkButton({
  * `markdownLinkifyComponents` instead. */
 const RAW_MARKDOWN_FILE_LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
 
-function linkifyRawString(
+function preserveTextBreaks(text: string, key: string): ReactNode {
+  if (!text.includes("\n")) return text;
+  const parts = text.split("\n");
+  return (
+    <Fragment key={key}>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {index > 0 && <br />}
+          {part}
+        </Fragment>
+      ))}
+    </Fragment>
+  );
+}
+
+function linkifyRawFileString(
   text: string,
-  onFileClick: (path: string, focus?: FileFocus) => void,
+  onFileClick?: (path: string, focus?: FileFocus) => void,
 ): ReactNode {
   const parts: ReactNode[] = [];
   let last = 0;
@@ -206,11 +376,11 @@ function linkifyRawString(
   while ((m = re.exec(text)) !== null) {
     const [whole, label, href] = m;
     const start = m.index;
-    if (start > last) parts.push(text.slice(last, start));
+    if (start > last) parts.push(preserveTextBreaks(text.slice(last, start), `text-${last}`));
     const parsed = parseMarkdownFileHref(href);
     if (parsed) {
       const mediaType = getMediaType(parsed.path);
-      if (mediaType) {
+      if (mediaType && onFileClick) {
         parts.push(
           <MediaPreviewInline
             key={`media-${start}-${label}`}
@@ -236,7 +406,46 @@ function linkifyRawString(
     last = start + whole.length;
   }
   if (last === 0) return text;
-  if (last < text.length) parts.push(text.slice(last));
+  if (last < text.length) parts.push(preserveTextBreaks(text.slice(last), `text-${last}`));
+  return <>{parts}</>;
+}
+
+function linkifyRawString(
+  text: string,
+  onFileClick?: (path: string, focus?: FileFocus) => void,
+): ReactNode {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const re = new RegExp(BA_LINK_MARKER_RE.source, "g");
+  while ((m = re.exec(text)) !== null) {
+    const [whole, kind, body] = m;
+    const start = m.index;
+    if (start > last) {
+      parts.push(linkifyRawFileString(text.slice(last, start), onFileClick));
+    }
+    const parsed = parseBaLinkMarker(kind, body);
+    if (!parsed) {
+      parts.push(linkifyRawFileString(whole, onFileClick));
+      last = start + whole.length;
+      continue;
+    }
+    const label =
+      parsed.kind === "session"
+        ? sessionLinkLabel(parsed.sessionId, parsed.name)
+        : eventLinkLabel(parsed.messageId, parsed.name);
+    parts.push(
+      <SessionLinkButton
+        key={`ba-${start}-${parsed.sessionId}-${parsed.kind === "event" ? parsed.messageId : ""}`}
+        sessionId={parsed.sessionId}
+        messageId={parsed.kind === "event" ? parsed.messageId : undefined}
+        label={label}
+      />,
+    );
+    last = start + whole.length;
+  }
+  if (last === 0) return linkifyRawFileString(text, onFileClick);
+  if (last < text.length) parts.push(linkifyRawFileString(text.slice(last), onFileClick));
   return <>{parts}</>;
 }
 
@@ -247,7 +456,6 @@ export function linkifyFilePaths(
   children: ReactNode,
   onFileClick?: (path: string, focus?: FileFocus) => void,
 ): ReactNode {
-  if (!onFileClick) return children;
   if (children === null || children === undefined || typeof children === "boolean") {
     return children;
   }
@@ -293,9 +501,24 @@ export function markdownLinkifyComponents(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function Anchor({ href, children, ...props }: any) {
     const parsed = typeof href === "string" ? parseMarkdownFileHref(href) : null;
-    if (parsed && onFileClick) {
+    const parsedSession = typeof href === "string" ? parseSessionHref(href) : null;
+    if (parsedSession) {
+      return (
+        <SessionLinkButton
+          sessionId={parsedSession.sessionId}
+          messageId={parsedSession.messageId}
+          label={
+            plainText(children) ??
+            (parsedSession.messageId
+              ? eventLinkLabel(parsedSession.messageId, "")
+              : sessionLinkLabel(parsedSession.sessionId, ""))
+          }
+        />
+      );
+    }
+    if (parsed) {
       const mediaType = getMediaType(parsed.path);
-      if (mediaType) {
+      if (mediaType && onFileClick) {
         return (
           <MediaPreviewInline
             path={parsed.path}

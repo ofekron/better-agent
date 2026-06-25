@@ -15,6 +15,78 @@ deferred-import dodge from `main.py` goes away.
 
 from __future__ import annotations
 
+RENDER_EVENT_TYPES = frozenset({
+    "agent_message",
+    "manager_event",
+    "model_switched",
+    "steer_prompt",
+    "lifecycle_notice",
+    "worker_event",
+})
+
+
+def event_uuid(event: dict) -> str | None:
+    if not isinstance(event, dict):
+        return None
+    uid = event.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    uid = data.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
+    inner = data.get("event")
+    if isinstance(inner, dict):
+        inner_data = inner.get("data")
+        if isinstance(inner_data, dict):
+            uid = inner_data.get("uuid")
+            if isinstance(uid, str) and uid:
+                return uid
+    return None
+
+
+_event_uuid = event_uuid
+
+
+def frontend_event_from_journal_row(
+    row: dict, *, include_seq: bool = False,
+) -> dict | None:
+    event_type = row.get("type")
+    if event_type not in RENDER_EVENT_TYPES:
+        return None
+    data = row.get("data", {})
+    if event_type == "manager_event" and isinstance(data, dict):
+        inner = data.get("event")
+        if not isinstance(inner, dict):
+            return None
+        event = dict(inner)
+    else:
+        event = {"type": event_type, "data": data}
+    if include_seq:
+        event["seq"] = row.get("seq")
+    return event
+
+
+def frontend_events_from_journal_rows(
+    rows: list[dict], *, include_seq: bool = False,
+) -> list[dict]:
+    events: list[dict] = []
+    uuid_idx: dict[str, int] = {}
+    for row in rows:
+        event = frontend_event_from_journal_row(row, include_seq=include_seq)
+        if event is None:
+            continue
+        uid = event_uuid(event)
+        if uid and uid in uuid_idx:
+            events[uuid_idx[uid]] = event
+            continue
+        if uid:
+            uuid_idx[uid] = len(events)
+        events.append(event)
+    return events
+
 
 def is_synthetic_event(event: dict) -> bool:
     if not isinstance(event, dict):
@@ -80,8 +152,16 @@ def strip_synthetic_events(events: list[dict]) -> list[dict]:
     return [e for e in events if not is_synthetic_event(e)]
 
 
-def _assistant_text_units(event: dict) -> list[tuple[str, str | None, list[str] | None]]:
+_TextUnit = tuple[str, str | None, list[str] | None, bool, str]
+
+
+def _assistant_text_units(event: dict) -> list[_TextUnit]:
     """Flatten one assistant event into text runs and non-text boundaries.
+
+    Each unit is `(kind, uuid, parts, final, origin)`. `final` is True for
+    events the provider marked as final-answer emissions (Codex
+    `phase: final_answer`); `origin` names the emitting agent when it is
+    not the main agent.
 
     The assistant message's `content` snapshot is the final answer text,
     not every bit of prose the model wrote before/interleaved with tools.
@@ -111,12 +191,15 @@ def _assistant_text_units(event: dict) -> list[tuple[str, str | None, list[str] 
 
     uid = data.get("uuid")
     uid = uid if isinstance(uid, str) and uid else None
-    units: list[tuple[str, str | None, list[str] | None]] = []
+    final = data.get("final_answer") is True
+    origin = data.get("final_answer_origin")
+    origin = origin if isinstance(origin, str) else ""
+    units: list[_TextUnit] = []
 
     content = message.get("content")
     if isinstance(content, str):
         if content:
-            units.append(("text", uid, [content]))
+            units.append(("text", uid, [content], final, origin))
         return units
 
     if not isinstance(content, list):
@@ -127,7 +210,7 @@ def _assistant_text_units(event: dict) -> list[tuple[str, str | None, list[str] 
     def flush_text() -> None:
         nonlocal pending
         if pending:
-            units.append(("text", uid, pending))
+            units.append(("text", uid, pending, final, origin))
             pending = []
 
     for block in content:
@@ -137,35 +220,82 @@ def _assistant_text_units(event: dict) -> list[tuple[str, str | None, list[str] 
                 pending.append(t)
             continue
         flush_text()
-        units.append(("boundary", None, None))
+        units.append(("boundary", None, None, False, ""))
     flush_text()
     return units
 
 
-def extract_output_text(events: list[dict]) -> str:
-    """Return the final contiguous assistant text batch.
+def _final_marked_text(units: list[_TextUnit]) -> str:
+    """Concatenate final-marked text units, labeling origins when needed.
+
+    Per-uuid last snapshot wins (streaming providers re-emit cumulative
+    text under one stable uuid). A single final from the main agent
+    renders plain; multiple finals and/or non-main origins render each
+    part under an explicit origin label.
+    """
+    by_uuid: dict[str, tuple[list[str], str]] = {}
+    order: list[str] = []
+    anonymous: list[tuple[list[str], str]] = []
+    for kind, uid, parts, final, origin in units:
+        if kind != "text" or not final or not parts:
+            continue
+        if uid:
+            if uid not in by_uuid:
+                order.append(uid)
+            by_uuid[uid] = (parts, origin)
+        else:
+            anonymous.append((parts, origin))
+    # The same final can exist twice with different uuids (Codex streams
+    # it as event_msg AND re-emits it as the finalized response_item; the
+    # in-memory echo dedup does not survive a mid-turn tailer restart).
+    # Collapse exact (origin, text) duplicates so a durable echo never
+    # flips a single final into a double-labeled snapshot.
+    finals: list[tuple[list[str], str]] = []
+    seen: set[tuple[str, str]] = set()
+    for parts, origin in [by_uuid[uid] for uid in order] + anonymous:
+        key = (origin, " ".join(parts).strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        finals.append((parts, origin))
+    if not finals:
+        return ""
+    if len(finals) == 1 and not finals[0][1]:
+        return " ".join(finals[0][0]).strip()
+    labeled: list[str] = []
+    for parts, origin in finals:
+        text = " ".join(parts).strip()
+        if not text:
+            continue
+        labeled.append(f"[final answer · {origin or 'main agent'}]\n{text}")
+    return "\n\n".join(labeled).strip()
+
+
+def _collect_text_units(events: list[dict]) -> list[_TextUnit]:
+    """Flatten events into ordered text units with inter-message boundaries.
 
     INVARIANT: when multiple events carry the SAME `uuid` (gemini
     streams cumulative text snapshots — every delta re-emits the
     growing buffer under one stable per-message uuid), only the LAST
-    occurrence per uuid counts. Without this, a turn that ends with
-    "pong" appears as "p po pon pong" because every snapshot is
-    concatenated. Claude emits one event per assistant message so the
-    dedup is a no-op for it.
+    occurrence per uuid counts downstream. Text before or between
+    tool/thinking blocks is renderable in `msg.events`, but it is not
+    the assistant bubble's plain-content snapshot.
 
-    Text before or between tool/thinking blocks is renderable in
-    `msg.events`, but it is not the assistant bubble's plain-content
-    snapshot. The snapshot is the trailing maximal run of primary-agent
-    text blocks. If the primary agent ends on a tool/thinking block,
-    there is no plain-content final answer.
+    Final-answer marks override the trailing-run heuristic in
+    `extract_output_text`: when any event is provider-marked final
+    (`final_answer` on the event data), the snapshot is the
+    concatenation of ALL final-marked text, in order. With more than
+    one final emission — or a final from other than the main agent —
+    each part is labeled with its origin so the reader can tell where
+    every message came from.
     """
-    units: list[tuple[str, str | None, list[str] | None]] = []
+    units: list[_TextUnit] = []
     prev_uuid: str | None = None
     for e in events:
         ev_units = _assistant_text_units(e)
         if ev_units:
             ev_uuid = next(
-                (uid for _, uid, _ in ev_units if uid is not None),
+                (uid for _, uid, _, _, _ in ev_units if uid is not None),
                 None,
             )
             # Different UUIDs mean different API messages — a tool round-trip
@@ -176,18 +306,41 @@ def extract_output_text(events: list[dict]) -> str:
                 and prev_uuid is not None
                 and ev_uuid != prev_uuid
             ):
-                units.append(("boundary", None, None))
+                units.append(("boundary", None, None, False, ""))
             prev_uuid = ev_uuid
         units.extend(ev_units)
 
+    return units
+
+
+def extract_output_text(events: list[dict]) -> str:
+    """Final-answer snapshot: provider final-answer marks when present,
+    otherwise the trailing-text-run heuristic (`extract_trailing_output_text`).
+    """
+    units = _collect_text_units(events)
+    final_text = _final_marked_text(units)
+    if final_text:
+        return final_text
+    return _trailing_run_text(units)
+
+
+def extract_trailing_output_text(events: list[dict]) -> str:
+    """Trailing maximal text run ONLY — ignores final-answer marks.
+
+    For machine consumers that must see the literally-last text (e.g.
+    rate-limit/transient-error sniffing in turn_helpers), where an earlier
+    final-marked answer must not mask trailing error text.
+    """
+    return _trailing_run_text(_collect_text_units(events))
+
+
+def _trailing_run_text(units: list[_TextUnit]) -> str:
     batch_reversed: list[tuple[str | None, list[str]]] = []
-    seen_text = False
-    for kind, uid, parts in reversed(units):
+    for kind, uid, parts, _final, _origin in reversed(units):
         if kind == "boundary":
             break
         if not parts:
             continue
-        seen_text = True
         batch_reversed.append((uid, parts))
 
     batch = list(reversed(batch_reversed))
@@ -209,6 +362,43 @@ def extract_output_text(events: list[dict]) -> str:
         out.extend(by_uuid[uid])
     out.extend(anonymous)
     return " ".join(out).strip()
+
+
+def has_final_answer_event(events: list[dict]) -> bool:
+    """True when any event data carries a provider final-answer mark."""
+    for e in events or []:
+        if not isinstance(e, dict):
+            continue
+        data = e.get("data")
+        if isinstance(data, dict) and data.get("final_answer") is True:
+            return True
+    return False
+
+
+def has_assistant_text(events: list[dict]) -> bool:
+    """True when any event carries primary-agent text (regardless of
+    whether it survives the trailing-run projection)."""
+    return any(
+        kind == "text"
+        for e in events or []
+        for kind, _uid, _parts, _final, _origin in _assistant_text_units(e)
+    )
+
+
+def project_content_snapshot(events: list[dict], current: str | None) -> str:
+    """Final-answer content snapshot for an assistant message.
+
+    Single source of truth for every content (re-)projection site.
+    `extract_output_text` is empty when the event list ends on a
+    tool/thinking boundary — e.g. events late-flushed after the turn
+    finalized, or a turn cut off mid-tools. An empty
+    projection must never clobber an already-set non-empty snapshot, so
+    the caller's current content wins in that case.
+    """
+    projected = extract_output_text(strip_synthetic_events(events or []))
+    if projected:
+        return projected
+    return current or ""
 
 
 def extract_subagent_types(events: list[dict]) -> list[str]:

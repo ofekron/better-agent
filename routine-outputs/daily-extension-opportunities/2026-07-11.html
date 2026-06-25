@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Better Agent — Daily Open-Source Extension Opportunities · 2026-07-11</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a21;
+    --panel-2: #1d222b;
+    --border: #2a313d;
+    --text: #e7ecf3;
+    --muted: #9aa4b2;
+    --accent: #4f9cf9;
+    --accent-2: #8b5cf6;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: linear-gradient(180deg, #0c0e13 0%, var(--bg) 100%);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 20px;
+    margin-bottom: 28px;
+  }
+  .eyebrow { color: var(--accent); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; }
+  h1 { font-size: 28px; margin: 8px 0 6px; letter-spacing: -.01em; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .meta b { color: var(--text); }
+  .badges { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  .badge b { color: var(--text); }
+
+  section { margin: 36px 0; }
+  h2 { font-size: 20px; margin: 0 0 16px; display: flex; align-items: center; gap: 10px; }
+  h2 .n { color: var(--muted); font-size: 13px; font-weight: 600; }
+
+  .exec { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .exec p { margin: 0 0 10px; }
+  .exec p:last-child { margin: 0; }
+  .exec strong { color: var(--accent); }
+
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+  .kpi { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .kpi .v { font-size: 22px; font-weight: 700; }
+  .kpi .l { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  td.rank { font-weight: 700; color: var(--accent); width: 38px; }
+  td.score { font-weight: 700; width: 56px; }
+  .bar { height: 7px; border-radius: 4px; background: #0c0f14; overflow: hidden; min-width: 70px; }
+  .bar > span { display: block; height: 100%; border-radius: 4px; }
+  .b-impact { background: var(--accent); }
+  .b-feas { background: var(--green); }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; margin: 16px 0; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 4px; font-size: 17px; }
+  .card .tag { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 999px; margin-right: 6px; border: 1px solid var(--border); color: var(--muted); }
+  .tag.cat { background: rgba(79,156,249,.12); color: var(--accent); border-color: rgba(79,156,249,.3); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; margin: 14px 0 6px; }
+  .field { font-size: 13px; }
+  .field .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; display: block; margin-bottom: 2px; }
+  .complexity { font-weight: 700; }
+  .c-low { color: var(--green); } .c-med { color: var(--amber); } .c-high { color: var(--red); }
+  .cite { font-size: 12px; color: var(--muted); margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  .cite a { color: var(--accent); text-decoration: none; word-break: break-word; }
+  .cite a:hover { text-decoration: underline; }
+
+  .watchlist { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .watchlist li { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 13.5px; }
+  .watchlist li b { color: var(--accent-2); }
+
+  .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .risk { background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--red); border-radius: 10px; padding: 12px 14px; font-size: 13.5px; }
+  .risk b { color: var(--red); }
+
+  .chart-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+  .legend { display: flex; gap: 18px; justify-content: center; margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+  footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  a.code { color: var(--accent); }
+  @media (max-width: 720px) {
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    .grid2, .risk-grid { grid-template-columns: 1fr; }
+    table { font-size: 12px; }
+    th, td { padding: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Daily Open-Source Extension Opportunities</div>
+    <h1>Better Agent — Opportunity Scan</h1>
+    <div class="meta">
+      Report date: <b>2026-07-11</b> &nbsp;·&nbsp; Routine: <b>daily-open-source-extension-opportunities</b> &nbsp;·&nbsp; Routine ID: <b>11d6338a0127</b><br/>
+      Scope: public, citable sources only — official docs, GitHub, package registries, standards bodies, engineering blogs, OSS communities.
+    </div>
+    <div class="badges">
+      <span class="badge">Sources scanned: <b>~40</b></span>
+      <span class="badge">Opportunities: <b>8 ranked</b></span>
+      <span class="badge">Watchlist: <b>5 trends</b></span>
+      <span class="badge">Highest-value: <b>MCP Registry + security gateway</b></span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Executive summary <span class="n">TL;DR</span></h2>
+    <div class="exec">
+      <p>The single highest-value opening this week sits at the intersection of <strong>MCP's explosive growth and its acute security gap</strong>. The official MCP Registry neared <b>9,652 server records</b> (May 2026) while independent analysis found <b>36.7% of ~7,000 MCP servers vulnerable to SSRF</b>, with documented STDIO-RCE and supply-chain compromises (postmark-mcp, ClawHub). Better Agent — which already spawns real CLI subprocesses and treats security as the overriding constraint — is uniquely positioned to ship a <strong>vetted MCP registry browser + hardened gateway</strong> as a first-class extension.</p>
+      <p>Three further opportunities are high-feasibility same-turn wins: a <strong>spec-driven-development runtime skill</strong> (GitHub Spec Kit / Agent OS v2 patterns), <strong>native parallel-worktree orchestration</strong> (aligning with Claude Code's <code>--worktree/--tmux</code> and the community <code>parallel-worktrees</code> skill), and wiring <strong>Opus 4.8 dynamic workflows + <code>/goal</code></strong> as a provider capability.</p>
+      <p>One item is a <strong>must-handle risk, not optional</strong>: Google <strong>retired the open-source Gemini CLI in June 2026</strong> for a closed-source successor. Better Agent is multi-provider (Claude/Codex/Gemini), so Gemini parity needs a deliberate migration path — the only provider of the three whose open CLI disappeared.</p>
+      <div class="kpi-row">
+        <div class="kpi"><div class="v">9.6K+</div><div class="l">MCP servers in official registry (May 2026)</div></div>
+        <div class="kpi"><div class="v">36.7%</div><div class="l">MCP servers SSRF-vulnerable (BlueRock, 7K sample)</div></div>
+        <div class="kpi"><div class="v">~300K★</div><div class="l">OpenClaw — fastest-growing OSS on GitHub</div></div>
+        <div class="kpi"><div class="v">Jun 2026</div><div class="l">Google retired open-source Gemini CLI</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ranking — impact × feasibility <span class="n">score = impact (1–5) × feasibility (1–5)</span></h2>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Opportunity</th><th>Impact</th><th>Feasibility</th><th>Score</th><th>Type</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="rank">1</td><td>MCP Registry browser + security vetting</td>
+          <td><div class="bar"><span class="b-impact" style="width:100%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:80%"></span></div></td><td class="score">20</td><td>Extension / MCP</td></tr>
+        <tr><td class="rank">2</td><td>Spec-driven-development runtime skill</td>
+          <td><div class="bar"><span class="b-impact" style="width:80%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:100%"></span></div></td><td class="score">20</td><td>Runtime skill</td></tr>
+        <tr><td class="rank">3</td><td>Native parallel-worktree orchestration</td>
+          <td><div class="bar"><span class="b-impact" style="width:80%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:80%"></span></div></td><td class="score">16</td><td>Workflow / skill</td></tr>
+        <tr><td class="rank">4</td><td>Hardened MCP gateway (sandbox + supply-chain)</td>
+          <td><div class="bar"><span class="b-impact" style="width:100%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:60%"></span></div></td><td class="score">15</td><td>Security / MCP</td></tr>
+        <tr><td class="rank">5</td><td>Gemini CLI retirement → successor migration</td>
+          <td><div class="bar"><span class="b-impact" style="width:100%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:60%"></span></div></td><td class="score">15</td><td>Provider parity (risk)</td></tr>
+        <tr><td class="rank">6</td><td>Universal agent-memory layer (mem0 / cognee)</td>
+          <td><div class="bar"><span class="b-impact" style="width:80%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:60%"></span></div></td><td class="score">12</td><td>Product improvement</td></tr>
+        <tr><td class="rank">7</td><td>Opus 4.8 dynamic workflows + <code>/goal</code></td>
+          <td><div class="bar"><span class="b-impact" style="width:60%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:80%"></span></div></td><td class="score">12</td><td>Provider capability</td></tr>
+        <tr><td class="rank">8</td><td>OpenClaw-style comms-channel surface</td>
+          <td><div class="bar"><span class="b-impact" style="width:60%"></span></div></td>
+          <td><div class="bar"><span class="b-feas" style="width:40%"></span></div></td><td class="score">6</td><td>Watchlist / inspiration</td></tr>
+      </tbody>
+    </table>
+
+    <div class="chart-wrap">
+      <svg viewBox="0 0 720 260" width="100%" height="260" role="img" aria-label="Opportunity impact vs feasibility scatter">
+        <line x1="60" y1="220" x2="700" y2="220" stroke="#2a313d"/>
+        <line x1="60" y1="20" x2="60" y2="220" stroke="#2a313d"/>
+        <text x="370" y="248" fill="#9aa4b2" font-size="12" text-anchor="middle">Feasibility →</text>
+        <text x="20" y="120" fill="#9aa4b2" font-size="12" text-anchor="middle" transform="rotate(-90 20 120)">Impact →</text>
+        <!-- gridlines -->
+        <g stroke="#1d222b" stroke-dasharray="3 4">
+          <line x1="60" y1="60" x2="700" y2="60"/>
+          <line x1="60" y1="140" x2="700" y2="140"/>
+          <line x1="220" y1="20" x2="220" y2="220"/>
+          <line x1="460" y1="20" x2="460" y2="220"/>
+        </g>
+        <!-- points: x=feasibility(1-5)->60..700, y=impact(1-5)->220..20 -->
+        <!-- 1: feas4 impact5 -->
+        <circle cx="580" cy="36" r="9" fill="#4f9cf9"/><text x="595" y="40" fill="#e7ecf3" font-size="12">1 MCP Registry</text>
+        <!-- 2: feas5 impact4 -->
+        <circle cx="700" cy="76" r="9" fill="#4f9cf9"/><text x="640" y="64" fill="#e7ecf3" font-size="12">2 Spec-Driven</text>
+        <!-- 3: feas4 impact4 -->
+        <circle cx="580" cy="76" r="9" fill="#8b5cf6"/><text x="595" y="80" fill="#e7ecf3" font-size="12">3 Parallel worktrees</text>
+        <!-- 4: feas3 impact5 -->
+        <circle cx="460" cy="36" r="9" fill="#f87171"/><text x="475" y="30" fill="#e7ecf3" font-size="12">4 MCP gateway</text>
+        <!-- 5: feas3 impact5 -->
+        <circle cx="460" cy="52" r="9" fill="#fbbf24"/><text x="475" y="56" fill="#e7ecf3" font-size="12">5 Gemini migration</text>
+        <!-- 6: feas3 impact4 -->
+        <circle cx="460" cy="92" r="9" fill="#8b5cf6"/><text x="475" y="96" fill="#e7ecf3" font-size="12">6 Memory layer</text>
+        <!-- 7: feas4 impact3 -->
+        <circle cx="580" cy="124" r="9" fill="#4f9cf9"/><text x="595" y="128" fill="#e7ecf3" font-size="12">7 Opus 4.8 workflows</text>
+        <!-- 8: feas2 impact3 -->
+        <circle cx="340" cy="124" r="9" fill="#9aa4b2"/><text x="355" y="128" fill="#e7ecf3" font-size="12">8 OpenClaw surface</text>
+      </svg>
+      <div class="legend">
+        <span><i style="background:#4f9cf9"></i>Extension / skill</span>
+        <span><i style="background:#8b5cf6"></i>Workflow / product</span>
+        <span><i style="background:#f87171"></i>Security</span>
+        <span><i style="background:#fbbf24"></i>Provider parity (risk)</span>
+        <span><i style="background:#9aa4b2"></i>Watchlist</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Top opportunities — detail cards</h2>
+
+    <div class="card">
+      <h3>#1 · MCP Registry browser + security vetting <span class="tag cat">Extension / MCP</span></h3>
+      <p>The official MCP Registry (<code>registry.modelcontextprotocol.io</code>) is now the centralized, Anthropic-backed catalog nearing 10K servers. Better Agent could add a first-class registry browser: search, inspect, one-click install — but with a <strong>vetting gate</strong> (sig/publisher checks, egress allow-list, scoped tokens) before any server is attached to a session.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>New <code>mcp_registry</code> extension: REST browse → install dialog → scoped attach to a session/worker. Reuse <code>provider_bridge</code> MCP plumbing already in the backend.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-med">Medium</span> — registry API is public; the vetting policy + UI is the bulk of the work.</div>
+        <div class="field"><span class="k">Why now</span>Registry crossed 9.6K records (May 2026); GitHub MCP Registry (Sep 2025) made discovery trivial — demand is here.</div>
+        <div class="field"><span class="k">Risks</span>Tool poisoning, over-privileged servers, SSRF (36.7% of sampled servers). Mitigate with sandbox + pinning (see #4).</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://registry.modelcontextprotocol.io/">Official MCP Registry</a> · <a href="https://modelcontextprotocol.io/registry/about">MCP Registry about</a> · <a href="https://www.digitalapplied.com/blog/mcp-adoption-statistics-2026-model-context-protocol">MCP Adoption Statistics 2026 (9,652 records)</a> · <a href="https://github.blog/changelog/2025-09-16-github-mcp-registry-the-fastest-way-to-discover-ai-tools/">GitHub MCP Registry announcement</a> · <a href="https://blog.cyberdesserts.com/ai-agent-security-risks/">BlueRock: 36.7% SSRF</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#2 · Spec-driven-development runtime skill <span class="tag cat">Runtime skill</span></h3>
+      <p>Spec-driven development (SDD) has matured into a documented methodology: GitHub's open-source <strong>Spec Kit</strong>, Microsoft's <strong>spec-first</strong> tooling, and <strong>Agent OS v2</strong> (tool-agnostic, works with Claude Code/Cursor). Better Agent already has a requirement-corpus pipeline — an SDD skill that turns a requirement into spec → plan → tasks → deliverable is a natural, high-feasibility fit.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Runtime skill (<code>spec-driven-dev</code>) + workflow: <code>/spec</code> command produces a spec doc, then delegates plan/tasks to existing workers. Pairs with the requirements MCP.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-low">Low–Medium</span> — mostly prompt + workflow glue over existing worker delegation.</div>
+        <div class="field"><span class="k">Why now</span>GitHub + Microsoft both shipped open SDD toolkits in late 2025; 2026 saw 30+ agentic-coding frameworks converge on it.</div>
+        <div class="field"><span class="k">Risks</span>Spec drift from code; mitigate by treating spec as a disposable projection of the requirement corpus (single source of truth).</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://github.blog/ai-and-ml/generative-ai/spec-driven-development-with-ai-get-started-with-a-new-open-source-toolkit/">GitHub Blog — Spec Kit</a> · <a href="https://developer.microsoft.com/blog/spec-driven-development-ai-native-engineering">Microsoft Developer — spec-first</a> · <a href="https://www.augmentcode.com/guides/what-is-spec-driven-development">Augment — What is SDD</a> · <a href="https://arxiv.org/html/2602.00180v1">arXiv: SDD executable contracts (2026)</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#3 · Native parallel-worktree orchestration <span class="tag cat">Workflow / skill</span></h3>
+      <p>Claude Code's <code>--worktree/--tmux</code> flags and the community <code>parallel-worktrees</code> skill show the winning isolation pattern: one <code>.git</code> DB, N working directories, N agents. Reports of 200–1,000 parallel subagents across dozens of repos. Better Agent already does multi-agent/worktree delegation — formalize it as a documented, first-class workflow.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Built-in <code>parallel-worktrees</code> skill + manager workflow: fan out N workers across git worktrees, gate merges via <code>git_ops</code> lock, aggregate results. Reuses existing <code>EnterWorktree</code> + worker delegation.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-med">Medium</span> — orchestration exists; the gap is a polished user-facing workflow + conflict policy.</div>
+        <div class="field"><span class="k">Why now</span>Mainstream in 2026 with documented scale (200+ subagents / 35 repos).</div>
+        <div class="field"><span class="k">Risks</span>Branch conflicts, lock contention, runaway cost. Gate with bounded concurrency caps + precise <code>file_edit:</code> locks.</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://www.github.com/spillwavesolutions/parallel-worktrees">parallel-worktrees skill (GitHub)</a> · <a href="https://www.developersdigest.tech/blog/git-worktrees-claude-code-parallel-agents-guide">Developers Digest — 200+ subagents across 35 repos (May 2026)</a> · <a href="https://www.tembo.io/blog/claude-code-multi-agent-orchestration">Tembo — Claude Code multi-agent 2026</a> · <a href="https://pub.towardsai.net/claude-code-now-spawns-1-000-subagents-and-it-quietly-killed-my-langgraph-stack-e73a4a1c1912">Towards AI — 1,000 subagents</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#4 · Hardened MCP gateway (sandbox + supply-chain) <span class="tag cat">Security / MCP</span></h3>
+      <p>CSA Labs documented <strong>STDIO-based RCE</strong> in MCP (April 2026); Bishop Fox detailed supply-chain compromises of <code>postmark-mcp</code> and ClawHub; CoSAI cataloged "MCP-T11: Supply Chain & Lifecycle Security Failures." Better Agent's CLAUDE.md already mandates fail-closed security for subprocess spawning — a hardened MCP gateway is the defensive complement to #1.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>MCP gateway layer: version-pinned installs, egress allow-list, per-server capability scoping, stdio sandbox (no shell, arg-list only), provenance/signature checks before attach.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-high">High</span> — real sandboxing (OS-level) is non-trivial; start with policy + pinning + egress.</div>
+        <div class="field"><span class="k">Why now</span>Active exploitation documented in 2026; CoSAI + CSA published mitigations this year.</div>
+        <div class="field"><span class="k">Risks</span>Over-blocking breaks legit servers; mitigate with per-session opt-in scopes and audit logs.</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://labs.cloudsecurityalliance.org/wp-content/uploads/2026/04/mcp-design-rce-supply-chain-v1-csa-styled.pdf">CSA Labs — STDIO RCE & supply chain (Apr 2026)</a> · <a href="https://bishopfox.com/blog/otto-support-supply-chain-risks-mcp-servers">Bishop Fox — supply-chain risks</a> · <a href="https://www.coalitionforsecureai.org/wp-content/uploads/2026/03/model-context-protocol-security-1.pdf">CoSAI — MCP Security (MCP-T11)</a> · <a href="https://cloudsecurityalliance.org/articles/7-mcp-risks-cisos-should-consider-and-how-to-prepare">CSA — 7 MCP risks</a> · <a href="https://www.pomerium.com/blog/mcp-server-security-risks-what-development-teams-need-to-know-in-2026">Pomerium — MCP security 2026</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#5 · Gemini CLI retirement → successor migration <span class="tag cat">Provider parity (risk)</span></h3>
+      <p>Google <strong>retired the open-source Gemini CLI for most public users in June 2026</strong> (105K+ stars) in favor of a closed-source successor. Better Agent is multi-provider (Claude/Codex/Gemini) and ingests Gemini via its CLI stream. This is the only provider of the three whose open CLI vanished — a parity decision, not a feature choice.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Migrate <code>provider_gemini</code> + <code>runner_gemini</code> to the closed-source successor's interface, or adopt the Gemini API directly. Preserve the Claude-shaped event normalization funnel.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-high">High</span> — depends on successor's stability/API surface; may need a fork-in resilience plan.</div>
+        <div class="field"><span class="k">Why now</span>Retirement was June 2026; the longer Gemini parity drifts, the more the convergence invariant is at risk.</div>
+        <div class="field"><span class="k">Risks</span>Closed-source = less control, possible telemetry/licensing constraints. If parity impossible, stop and ask per project rules.</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://github.com/google-gemini/gemini-cli">google-gemini/gemini-cli (GitHub)</a> · <a href="https://geminicli.com/docs/changelogs/">Gemini CLI changelogs (v0.37, Apr 2026)</a> · <a href="https://dev.to/lightningdev123/best-open-source-cli-coding-agents-to-explore-in-2026-5bn7">DEV — Gemini CLI shutdown (June 2026)</a> · <a href="https://blog.arcbjorn.com/state-of-cli-coding-agents-2026">State of CLI coding agents mid-2026</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#6 · Universal agent-memory layer (mem0 / cognee) <span class="tag cat">Product improvement</span></h3>
+      <p><strong>mem0</strong> is the leading open-source universal memory layer for agents; <strong>cognee</strong> provides a persistent memory framework. Better Agent already has a requirement corpus + per-session state — a memory layer could unify cross-session recall (decisions, preferences, facts) behind one owner, consistent with the single-source-of-truth rule.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Adopt mem0 as an optional memory backend; project cross-session facts as a disposable cache over the requirement corpus (source wins on conflict).</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-med">Medium</span> — integration is straightforward; the design discipline is keeping one owner.</div>
+        <div class="field"><span class="k">Why now</span>mem0's 2026 state-of-memory benchmark matured the category; cognee published persistent-memory guides.</div>
+        <div class="field"><span class="k">Risks</span>Second source of truth drift; mitigate by never persisting derived state, only facts, and invalidating on conflict.</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://github.com/mem0ai/mem0">mem0ai/mem0 (GitHub)</a> · <a href="https://mem0.ai/blog/state-of-ai-agent-memory-2026">mem0 — State of AI Agent Memory 2026</a> · <a href="https://www.cognee.ai/blog/guides/open-source-memory-frameworks-llm-agents">Cognee — persistent memory</a> · <a href="https://machinelearningmastery.com/the-6-best-ai-agent-memory-frameworks-you-should-try-in-2026/">ML Mastery — 6 memory frameworks 2026</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#7 · Opus 4.8 dynamic workflows + <code>/goal</code> <span class="tag cat">Provider capability</span></h3>
+      <p>Claude Opus 4.8 shipped <strong>dynamic workflows</strong> in Claude Code for very large-scale problems, plus a fast mode; the <code>/goal</code> command was called "the most underrated AI feature of 2026." Wire these as provider capabilities available to Better Agent manager turns.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Expose <code>/goal</code> + dynamic-workflow mode in <code>provider_claude</code>; surface as a manager turn option. Keep Codex/Gemini parity via equivalent planning primitives.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-low">Low</span> — capability wiring, not new infrastructure.</div>
+        <div class="field"><span class="k">Why now</span>Opus 4.8 is current frontier; dynamic workflows are the new large-task primitive.</div>
+        <div class="field"><span class="k">Risks</span>Cost blowup on large workflows; gate with budget caps + visible progress (per the >200ms UI rule).</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://www.anthropic.com/news/claude-opus-4-8">Anthropic — Claude Opus 4.8</a> · <a href="https://linas.substack.com/p/anthropic-claude-2026-every-launch-guide">Linas — Anthropic 2026 launches (/goal)</a> · <a href="https://www.anthropic.com/news">Anthropic Newsroom</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>#8 · OpenClaw-style comms-channel surface <span class="tag cat">Watchlist / inspiration</span></h3>
+      <p><strong>OpenClaw</strong> — an open-source personal AI assistant/autonomous-agent framework by the PSPDFKit founder — became GitHub's fastest-growing project ever (~9K → 300K+ stars in early 2026) by bringing AI into everyday communication channels. Not an immediate build, but a signal worth tracking for Better Agent's surface strategy.</p>
+      <div class="grid2">
+        <div class="field"><span class="k">Integration shape</span>Speculative: a Better Agent "channel bridge" extension (Slack/email/IM inbound) that routes into existing sessions/workers.</div>
+        <div class="field"><span class="k">Complexity</span><span class="complexity c-high">High</span> — new trust boundary; deferred to watchlist.</div>
+        <div class="field"><span class="k">Why now</span>Validates massive demand for agents that meet users where they already communicate.</div>
+        <div class="field"><span class="k">Risks</span>Inbound untrusted content → prompt injection; needs strict content-injection defenses before any build.</div>
+      </div>
+      <div class="cite">
+        Sources: <a href="https://github.com/openclaw">github.com/openclaw</a> · <a href="https://thesoogroup.com/blog/openclaw-github-phenomenon-autonomous-agent-framework">OpenClaw 302K stars overview</a> · <a href="https://blog.bytebytego.com/p/top-ai-github-repositories-in-2026">ByteByteGo — top AI repos 2026</a>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Risks &amp; security considerations <span class="n">cross-cutting</span></h2>
+    <div class="risk-grid">
+      <div class="risk"><b>MCP supply chain</b> — Compromised servers (<code>postmark-mcp</code>, ClawHub) and registry tool-poisoning. Pin versions, verify publisher, fail closed on unsigned servers.</div>
+      <div class="risk"><b>STDIO RCE</b> — CSA Labs (Apr 2026) documented stdio-based remote code execution via MCP. Never shell-concatenate untrusted args; pass arg lists; confine to <code>bc_home()</code>.</div>
+      <div class="risk"><b>SSRF exposure</b> — 36.7% of ~7,000 MCP servers SSRF-vulnerable (BlueRock). Egress allow-lists and network isolation for any attached server.</div>
+      <div class="risk"><b>Over-privileged agents</b> — CSA + TrueFoundry flag tool abuse &amp; cross-agent contamination. Least-privilege per-server scopes; per-session opt-in.</div>
+      <div class="risk"><b>Provider-parity drift</b> — Gemini CLI retirement (June 2026) breaks the open-CLI assumption. Decide migration path before parity silently degrades.</div>
+      <div class="risk"><b>Parallel-agent cost/conflict</b> — 200–1,000 subagent runs risk runaway cost and branch conflicts. Bounded concurrency caps + <code>git_ops</code> + <code>file_edit:</code> locks.</div>
+    </div>
+    <p style="color:var(--muted);font-size:13px;margin-top:14px">These map directly to Better Agent's existing security rules (CLAUDE.md: security is the overriding constraint, fail closed, <code>paths.bc_home()</code> confinement, no secret leakage). Opportunities #1 and #4 are the offensive and defensive halves of the same MCP story.</p>
+  </section>
+
+  <section>
+    <h2>Watchlist — trends to monitor <span class="n">next 30–60 days</span></h2>
+    <ul class="watchlist">
+      <li><b>MCP Registry → 10K milestone + security standards.</b> Track CoSAI/CSA hardening specs and whether the official registry adopts mandatory signing. (<a class="code" href="https://modelcontextprotocol.io/registry/about">registry</a>, <a class="code" href="https://www.coalitionforsecureai.org/wp-content/uploads/2026/03/model-context-protocol-security-1.pdf">CoSAI</a>)</li>
+      <li><b>Agent-framework consolidation.</b> Microsoft Agent Framework 1.0 (AutoGen evolution), LangGraph 1.0, CrewAI 1.14 — watch for shared tool-calling/memory standards Better Agent could adopt. (<a class="code" href="https://alicelabs.ai/en/insights/best-ai-agent-frameworks-2026">Alice Labs ranking</a>)</li>
+      <li><b>OpenClaw trajectory.</b> ~300K★ and rising — does the comms-channel pattern spawn a standard Better Agent could integrate? (<a class="code" href="https://github.com/openclaw">github.com/openclaw</a>)</li>
+      <li><b>Gemini closed-source successor.</b> Feature parity vs. the retired open CLI — determines whether Better Agent's Gemini path stays CLI-based or moves to API. (<a class="code" href="https://dev.to/lightningdev123/best-open-source-cli-coding-agents-to-explore-in-2026-5bn7">DEV</a>)</li>
+      <li><b>Agent-memory benchmarks.</b> mem0's 2026 benchmarks may establish a memory-layer standard worth aligning the requirement corpus with. (<a class="code" href="https://mem0.ai/blog/state-of-ai-agent-memory-2026">mem0 state-of-memory</a>)</li>
+    </ul>
+  </section>
+
+  <footer>
+    Generated by routine <b>daily-open-source-extension-opportunities</b> (id <b>11d6338a0127</b>) on <b>2026-07-11</b>.<br/>
+    All sources are public and citable. This report is a standalone HTML artifact — no external dependencies. Open in any browser.
+  </footer>
+
+</div>
+</body>
+</html>

@@ -14,6 +14,7 @@ TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-runtime-skills-"))
 os.environ["HOME"] = str(TMP_HOME)
 
 import runtime_skills  # noqa: E402
+import turn_manager  # noqa: E402
 from turn_manager import _provider_capability_contexts  # noqa: E402
 
 
@@ -50,6 +51,11 @@ def t_global_runtime_skill_context_includes_get_requirements() -> None:
         "get-requirements",
         "Search requirements before planning.",
     )
+    write_skill(
+        TMP_HOME / ".agents" / "skills",
+        "local-runtime-test-skill",
+        "Local test skill.",
+    )
     contexts = runtime_skills.runtime_skill_contexts(str(TMP_HOME))
     check(len(contexts) == 1, "runtime skills create one capability context")
     content = contexts[0]["content"]
@@ -58,7 +64,7 @@ def t_global_runtime_skill_context_includes_get_requirements() -> None:
         "better-agent-runtime-skills:get-requirements" in content,
         "runtime skill list includes Claude native skill id",
     )
-    check(str(TMP_HOME / ".agents" / "skills" / "get-requirements" / "SKILL.md") in content, "runtime skill list includes file path")
+    check(str(TMP_HOME / ".agents" / "skills" / "local-runtime-test-skill" / "SKILL.md") in content, "runtime skill list includes file path")
 
 
 def t_multiline_description_is_not_truncated() -> None:
@@ -102,6 +108,54 @@ def t_bare_config_skips_runtime_skills() -> None:
     check(contexts == [], "bare config skips runtime skills")
 
 
+def t_runtime_skill_discovery_is_cached_until_roots_change() -> None:
+    runtime_skills._DISCOVERY_CACHE.clear()
+    calls = 0
+    original_extension_skills = runtime_skills._extension_runtime_skills
+    original_read_description = runtime_skills._read_description
+
+    def counted_extension_skills():
+        nonlocal calls
+        calls += 1
+        return []
+
+    def fail_read_description(_path):
+        raise AssertionError("cached runtime skills should not reread SKILL.md")
+
+    try:
+        runtime_skills._extension_runtime_skills = counted_extension_skills
+        first = runtime_skills.runtime_skill_contexts(str(TMP_HOME))
+        runtime_skills._read_description = fail_read_description
+        second = runtime_skills.runtime_skill_contexts(str(TMP_HOME))
+    finally:
+        runtime_skills._extension_runtime_skills = original_extension_skills
+        runtime_skills._read_description = original_read_description
+
+    check(first == second, "runtime skill discovery cache preserves context")
+    check(calls == 1, "runtime skill discovery cache skips extension lookup")
+
+
+def t_runtime_skill_cache_invalidates_on_skill_edit() -> None:
+    runtime_skills._DISCOVERY_CACHE.clear()
+    skill_md = write_skill(
+        TMP_HOME / ".agents" / "skills",
+        "cache-edit-skill",
+        "Before edit.",
+    )
+    before = runtime_skills.runtime_skill_contexts(str(TMP_HOME))[0]["content"]
+    skill_md.write_text(
+        "---\n"
+        "name: cache-edit-skill\n"
+        "description: After edit.\n"
+        "---\n"
+        "# cache-edit-skill\n",
+        encoding="utf-8",
+    )
+    after = runtime_skills.runtime_skill_contexts(str(TMP_HOME))[0]["content"]
+    check("Before edit." in before, "runtime skill cache captures initial description")
+    check("After edit." in after, "runtime skill cache invalidates on skill edit")
+
+
 def t_materialize_runtime_skills_copies_skill_dirs() -> None:
     root = TMP_HOME / "materialized"
     count = runtime_skills.materialize_runtime_skills(root, str(TMP_HOME))
@@ -129,6 +183,33 @@ def t_runtime_context_survives_provider_filtering() -> None:
     check("get-requirements" in selected[0]["content"], "runtime context content survives provider filtering")
 
 
+def t_dynamic_audit_context_follows_runtime_skills() -> None:
+    old_audit_context = turn_manager.extension_audit_context
+    try:
+        turn_manager.extension_audit_context = lambda _cwd, bare_config=False: [] if bare_config else [{
+            "name": "Dynamic Harness Audit",
+            "category": "dynamic",
+            "content": "Use tool mix carefully.",
+        }]
+        selected = [
+            *runtime_skills.runtime_skill_contexts(str(TMP_HOME)),
+            *turn_manager.extension_audit_context(str(TMP_HOME)),
+            *_provider_capability_contexts([
+                {
+                    "source_id": "manual",
+                    "capability_id": "manual",
+                    "name": "Manual",
+                    "outputs": [{"provider_kind": "codex", "content": "Codex only"}],
+                }
+            ], "codex"),
+        ]
+    finally:
+        turn_manager.extension_audit_context = old_audit_context
+    check(selected[0]["name"] == "Runtime Skills", "runtime skills stay first")
+    check(selected[1]["name"] == "Dynamic Harness Audit", "dynamic audit follows runtime skills")
+    check(selected[2]["name"] == "Manual", "manual provider context follows dynamic audit")
+
+
 def main() -> None:
     try:
         t_global_runtime_skill_context_includes_get_requirements()
@@ -136,8 +217,11 @@ def main() -> None:
         t_long_description_is_not_clipped()
         t_project_skill_context_is_included_after_global()
         t_bare_config_skips_runtime_skills()
+        t_runtime_skill_discovery_is_cached_until_roots_change()
+        t_runtime_skill_cache_invalidates_on_skill_edit()
         t_materialize_runtime_skills_copies_skill_dirs()
         t_runtime_context_survives_provider_filtering()
+        t_dynamic_audit_context_follows_runtime_skills()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
 

@@ -21,6 +21,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import auth_secrets  # noqa: E402
+import keychain_names  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -57,10 +58,10 @@ def test_write_credentials_rejects_empty() -> bool:
 def test_keychain_roundtrip() -> bool:
     """needs_bootstrap → write_credentials → read-back, all under a
     throwaway keychain service (real `better-claude` entries untouched)."""
-    real_service = auth_secrets._SERVICE
-    real_legacy_service = auth_secrets._LEGACY_SERVICE
-    auth_secrets._SERVICE = _TEST_SERVICE
-    auth_secrets._LEGACY_SERVICE = _TEST_LEGACY_SERVICE
+    real_service = keychain_names.PRIMARY_SERVICE
+    real_legacy_service = keychain_names.LEGACY_SERVICE
+    keychain_names.PRIMARY_SERVICE = _TEST_SERVICE
+    keychain_names.LEGACY_SERVICE = _TEST_LEGACY_SERVICE
     try:
         if not auth_secrets.needs_bootstrap():
             print("  a fresh service should report needs_bootstrap=True")
@@ -89,16 +90,16 @@ def test_keychain_roundtrip() -> bool:
                 return False
         return True
     finally:
-        auth_secrets._SERVICE = real_service
-        auth_secrets._LEGACY_SERVICE = real_legacy_service
+        keychain_names.PRIMARY_SERVICE = real_service
+        keychain_names.LEGACY_SERVICE = real_legacy_service
         _delete_test_services()
 
 
 def test_legacy_keychain_fallback() -> bool:
-    real_service = auth_secrets._SERVICE
-    real_legacy_service = auth_secrets._LEGACY_SERVICE
-    auth_secrets._SERVICE = _TEST_SERVICE
-    auth_secrets._LEGACY_SERVICE = _TEST_LEGACY_SERVICE
+    real_service = keychain_names.PRIMARY_SERVICE
+    real_legacy_service = keychain_names.LEGACY_SERVICE
+    keychain_names.PRIMARY_SERVICE = _TEST_SERVICE
+    keychain_names.LEGACY_SERVICE = _TEST_LEGACY_SERVICE
     try:
         _delete_test_services()
         _security_store(_TEST_LEGACY_SERVICE, "username", "legacy-alice")
@@ -112,8 +113,8 @@ def test_legacy_keychain_fallback() -> bool:
             return False
         return True
     finally:
-        auth_secrets._SERVICE = real_service
-        auth_secrets._LEGACY_SERVICE = real_legacy_service
+        keychain_names.PRIMARY_SERVICE = real_service
+        keychain_names.LEGACY_SERVICE = real_legacy_service
         _delete_test_services()
 
 

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_recovery  # noqa: E402
 from provider_gemini import GeminiProvider  # noqa: E402
+from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
@@ -44,6 +45,9 @@ class _FakeSessionManager:
     def get_ref(self, sid: str):
         return self.sess
 
+    def _root_id_for(self, sid: str):
+        return sid
+
     def set_agent_sid(self, *args, **kwargs):
         pass
 
@@ -53,16 +57,28 @@ class _FakeSessionManager:
     def set_stopped_at(self, sid: str, msg_id: str, value):
         pass
 
+    def set_streaming(self, *args, **kwargs):
+        pass
+
     def set_msg_completed(self, sid: str, msg_id: str, value):
         self.completed_msg_ids.append(msg_id)
 
     def set_msg_stopped(self, *args, **kwargs):
         pass
 
+    def update_running_content(self, *args, **kwargs):
+        pass
+
     def get(self, sid: str):
         return self.sess
 
     def set_msg_retrying_until(self, *args, **kwargs):
+        pass
+
+    def flush_pending_persists(self, *args, **kwargs):
+        pass
+
+    def set_completed_at(self, *args, **kwargs):
         pass
 
     def set_msg_transient_attempt(self, sid: str, msg_id: str, value: int):
@@ -95,7 +111,7 @@ def test_recovery_targets_descriptor_message_not_latest() -> None:
     def _fake_replay(**kwargs):
         replayed.append(kwargs["msg_id"])
 
-    def _fake_completion(persist_sid, msg_id):
+    def _fake_completion(persist_sid, msg_id, **_kwargs):
         fake_sm.set_msg_completed(persist_sid, msg_id, True)
 
     try:
@@ -218,8 +234,43 @@ def test_gemini_live_orphan_returns_live_descriptor_without_complete_json() -> N
     check("complete.json not synthesized", not (run_dir / "complete.json").exists())
 
 
-def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
-    print("T5 missing-target live finalizer leaves run unreconciled")
+def test_openai_live_orphan_returns_live_descriptor_without_complete_json() -> None:
+    print("T4b openai live orphan remains live during recovery scan")
+    provider = OpenAIProvider({
+        "id": "openai-test",
+        "kind": "openai",
+        "base_url": "http://127.0.0.1:1/v1",
+        "api_key": "test",
+    })
+    run_id = "openai-live-run"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(run_dir / "backend_state.json", {
+        "run_id": run_id,
+        "app_session_id": "sid",
+        "persist_to": "sid",
+        "mode": "native",
+        "runner_pid": os.getpid(),
+        "started_at": "2026-01-01T00:00:00",
+        "session_id": "openai-session",
+        "jsonl_path": str(run_dir / "session_events.jsonl"),
+        "processed_line": 0,
+        "cancelled": False,
+        "provider_id": "openai-test",
+        "provider_kind": "openai",
+        "target_message_id": "msg",
+    })
+
+    recovered = provider.recover_in_flight(run_id_filter={run_id})
+    desc = recovered[0] if recovered else {}
+    check("openai returned descriptor", len(recovered) == 1)
+    check("openai descriptor is live", desc.get("alive") is True)
+    check("openai descriptor has no complete", desc.get("has_complete_json") is False)
+    check("openai complete.json not synthesized", not (run_dir / "complete.json").exists())
+
+
+def test_missing_target_finalizer_marks_reconciled() -> None:
+    print("T5 missing-target live finalizer tombstones the run")
     run_id = "missing-target-live"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -235,6 +286,9 @@ def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
     class _Provider:
         def __init__(self) -> None:
             self._runs = {run_id: object()}
+
+        def _cleanup_run(self, rid: str) -> None:
+            self._runs.pop(rid, None)
 
     class _TurnManager:
         def __init__(self) -> None:
@@ -274,11 +328,14 @@ def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
 
     check("run state removed after process ended", coordinator.turn_manager.removed == [run_id])
     check("provider run removed", run_id not in provider._runs)
-    check("no reconciled marker written", not (run_dir / "reconciled.marker").exists())
+    # Finalize succeeded; a version-stale desc with no native source can
+    # never be re-digested, so the run is tombstoned instead of being
+    # re-finalized on every startup.
+    check("reconciled marker written", (run_dir / "reconciled.marker").exists())
 
 
-def test_missing_target_completed_startup_does_not_mark_reconciled() -> None:
-    print("T6 missing-target completed startup recovery stays unreconciled")
+def test_missing_target_completed_startup_marks_reconciled() -> None:
+    print("T6 version-stale completed run is tombstoned, not re-ground")
     run_id = "missing-target-complete"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +375,9 @@ def test_missing_target_completed_startup_does_not_mark_reconciled() -> None:
     finally:
         run_recovery.session_manager = original_sm
 
-    check("no reconciled marker written", not (run_dir / "reconciled.marker").exists())
+    # Version-stale + native-source-missing is permanent — tombstoned so
+    # startup recovery stops re-queueing it forever.
+    check("reconciled marker written", (run_dir / "reconciled.marker").exists())
 
 
 def test_retry_recovered_run_uses_passed_coordinator() -> None:
@@ -328,6 +387,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(run_dir / "input.json", {
         "prompt": "retry me",
+        "source": "mssg",
         "cwd": "/tmp",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "token",
@@ -348,9 +408,11 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         def __init__(self) -> None:
             self._runs = {}
             self.started: list[str] = []
+            self.kwargs: dict = {}
 
         def start_run(self, *, run_id: str, **kwargs) -> None:
             self.started.append(run_id)
+            self.kwargs = kwargs
             self._runs[run_id] = _Run()
 
     class _TurnManager:
@@ -411,6 +473,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("active_run_ids updated", coordinator.turn_manager.active_run_ids == {"sid": [new_run_id]})
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
     check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
+    check("retry preserves source", provider.kwargs.get("source") == "mssg")
 
 
 def main() -> int:
@@ -419,8 +482,9 @@ def main() -> int:
         test_recovery_missing_target_does_not_mutate_latest()
         test_same_target_native_run_state_replaces_but_workers_stay_distinct()
         test_gemini_live_orphan_returns_live_descriptor_without_complete_json()
-        test_missing_target_finalizer_does_not_mark_reconciled()
-        test_missing_target_completed_startup_does_not_mark_reconciled()
+        test_openai_live_orphan_returns_live_descriptor_without_complete_json()
+        test_missing_target_finalizer_marks_reconciled()
+        test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
         print()
         if failures:

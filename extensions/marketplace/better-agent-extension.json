@@ -2,12 +2,24 @@
   "kind": "better-agent-extension",
   "id": "ofek-dev.marketplace",
   "name": "Marketplace",
-  "version": "0.1.0",
-  "description": "Search the Better Agent extension catalog and manage installed extensions.",
+  "version": "0.2.0",
+  "description": "Browse the Better Agent extension catalog and manage installed extensions.",
   "surfaces": [
+    "frontend_feature",
+    "backend_feature",
     "runtime_mcp"
   ],
   "entrypoints": {
+    "frontend": "ui/index.html",
+    "frontend_modules": [
+      {
+        "slot": "settings",
+        "id": "marketplace",
+        "label": "Marketplace",
+        "kind": "iframe",
+        "module": "ui/index.html"
+      }
+    ],
     "mcp": [
       {
         "name": "ofek-dev-marketplace",
@@ -18,10 +30,21 @@
         "bare_allowed": false,
         "requires_backend_auth": true
       }
-    ]
+    ],
+    "backend_module": "backend.routes"
   },
   "permissions": {
-    "internal_loopback": true
+    "backend_routes": true,
+    "marketplace_auth": true,
+    "capabilities": [
+      "marketplace.search",
+      "marketplace.installed.list",
+      "marketplace.installed.get",
+      "marketplace.install",
+      "marketplace.enabled.set",
+      "marketplace.uninstall",
+      "marketplace.update"
+    ]
   },
   "marketplace": {
     "product_id": "",
@@ -33,10 +56,13 @@
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",
-        "mcp/server.py"
+        "ui/index.html",
+        "mcp/server.py",
+        "backend/routes.py"
       ],
       "python_modules": [
-        "mcp.server"
+        "mcp.server",
+        "backend.routes"
       ]
     }
   }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useCallback, useEffect } from "react";
+import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type {
@@ -8,13 +8,23 @@ import type {
   RunInfo,
   Session,
 } from "../types";
-import { MessageGroup } from "./MessageBubble";
+import { TurnGroup } from "./MessageBubble";
 import { buildThreadColorMap } from "../threadColors";
 import { useOpProgress } from "../progress/store";
 import { useViewport } from "../hooks/useViewport";
 import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
+import { providerNameForId } from "../utils/providerCache";
+
+function sessionModelMetaTitle(t: (key: string) => string, pane: Session): string {
+  const providerName = providerNameForId(pane.provider_id);
+  return [
+    providerName ? `${t("message.provider")}: ${providerName}` : "",
+    pane.model ? `${t("message.model")}: ${pane.model}` : "",
+    pane.reasoning_effort ? `${t("message.effort")}: ${pane.reasoning_effort}` : "",
+  ].filter(Boolean).join(" / ");
+}
 
 interface Props {
   /** Root tree to render. Its `forks` array drives the split columns. */
@@ -39,6 +49,7 @@ interface Props {
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
+  userDisplayName?: string | null;
   /** Load older messages for a pane. Keyed by session id. */
   onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
   /** Click handler for adversarial-sync agreed-text spans. The
@@ -64,7 +75,7 @@ interface Props {
  *   button. Closing a fork freezes it (no focus, no new prompts) but
  *   keeps the pane visible.
  *
- * Each pane uses `MessageGroup` (the same rich renderer Chat uses)
+ * Each pane uses `TurnGroup` (the same rich renderer Chat uses)
  * so tool calls, thinking blocks, run badges, etc. stay intact in
  * every pane regardless of nesting depth.
  */
@@ -81,10 +92,12 @@ export function ForkSplitView({
   onViewDiff,
   onRetry,
   onRetryStopped,
+  userDisplayName,
   onLoadOlderMessages,
   onAdvSyncClick,
 }: Props) {
   const { t } = useTranslation();
+  const [focusedViewEnabled, setFocusedViewEnabled] = useState(true);
 
   // Flatten the tree depth-first so root → its forks → their forks ...
   // become an ordered list of panes. We render each as a column.
@@ -176,12 +189,29 @@ export function ForkSplitView({
   const viewport = useViewport();
   const isMobile = viewport.mode !== "desktop";
 
+  const paneLabel = useCallback(
+    (pane: Session, index: number) =>
+      pane.id === tree.id ? t("fork.original") : pane.name || `${t("fork.fork")} ${index}`,
+    [t, tree.id],
+  );
+
   // Index of the focused pane; used by both the tab strip (active
   // marker) and the mobile swipe handler (prev/next neighbour).
   const focusedIdx = useMemo(() => {
     const i = panes.findIndex(({ pane }) => pane.id === focusedSessionId);
     return i < 0 ? 0 : i;
   }, [panes, focusedSessionId]);
+
+  const focusedViewPane = useMemo(() => {
+    if (!focusedViewEnabled) return null;
+    return panes.find(({ pane }) => pane.id === focusedSessionId) ?? null;
+  }, [focusedSessionId, focusedViewEnabled, panes]);
+
+  useEffect(() => {
+    if (focusedViewEnabled && !focusedViewPane) {
+      setFocusedViewEnabled(false);
+    }
+  }, [focusedViewEnabled, focusedViewPane]);
 
   // Axis-locked horizontal swipe on the tab strip — switches the
   // focused pane to the previous / next neighbour. The swipe handler
@@ -240,7 +270,11 @@ export function ForkSplitView({
   // when focused id is stale (e.g. focused fork was deleted) — this
   // mirrors App.tsx's existing `setFocusedForkId(null)` fallback to
   // root.
-  const renderedPanes = isMobile ? [panes[focusedIdx]].filter(Boolean) : panes;
+  const focusedViewActive = !isMobile && !!focusedViewPane;
+  const focusedViewPaneId = focusedViewPane?.pane.id ?? null;
+  const renderedPanes = isMobile
+    ? [panes[focusedIdx]].filter(Boolean)
+    : panes;
 
   return (
     <div className="fork-split">
@@ -263,6 +297,7 @@ export function ForkSplitView({
           sessionId={tree.id}
           orchestrationMode={tree.orchestration_mode}
           threadColorMap={threadColorMap}
+          userDisplayName={userDisplayName}
           onFileClick={onFileClick}
           onViewDiff={onViewDiff}
           onRetry={onRetry}
@@ -283,7 +318,7 @@ export function ForkSplitView({
           {panes.map(({ pane }, i) => {
             const active = i === focusedIdx;
             const closed = !!pane.fork_closed;
-            const label = pane.id === tree.id ? "root" : pane.name || `fork ${i}`;
+            const label = paneLabel(pane, i);
             return (
               <button
                 key={pane.id}
@@ -303,11 +338,40 @@ export function ForkSplitView({
           })}
         </div>
       )}
+      {focusedViewActive && focusedViewPane && (
+        <div className="fork-focus-toolbar" data-testid="fork-focus-toolbar">
+          <button
+            type="button"
+            className="fork-focus-back"
+            onClick={() => setFocusedViewEnabled(false)}
+            title={t("fork.backToSplitTitle")}
+            data-testid="fork-back-to-split"
+          >
+            <Icon name="chevron-left" size={14} />
+            {t("fork.backToSplit")}
+          </button>
+          <span className="fork-focus-title">
+            {t("fork.focusedViewLabel", {
+              name: paneLabel(focusedViewPane.pane, focusedIdx),
+            })}
+          </span>
+        </div>
+      )}
       <div
-        className="fork-split-grid"
+        className={"fork-split-grid" + (focusedViewActive ? " fork-split-grid-focused" : "")}
         style={
           isMobile
             ? { gridTemplateColumns: "1fr" }
+            : focusedViewActive
+              ? {
+                  gridTemplateColumns: panes
+                    .map(({ pane }) =>
+                      pane.id === focusedViewPaneId
+                        ? "minmax(220px, 1fr)"
+                        : "minmax(0, 0fr)"
+                    )
+                    .join(" "),
+                }
             : {
                 gridTemplateColumns: `repeat(${panes.length}, minmax(220px, 1fr))`,
               }
@@ -318,6 +382,7 @@ export function ForkSplitView({
       >
         {renderedPanes.map(({ pane, msgs, pending, runs }) => {
           const isFocused = pane.id === focusedSessionId;
+          const isFocusedViewHidden = focusedViewActive && pane.id !== focusedViewPaneId;
           const isClosed = !!pane.fork_closed;
           const isRoot = pane.id === tree.id;
           return (
@@ -328,10 +393,16 @@ export function ForkSplitView({
               pending={pending}
               runs={runs}
               threadColorMap={threadColorMap}
+              userDisplayName={userDisplayName}
               isFocused={isFocused}
+              isFocusedViewHidden={isFocusedViewHidden}
               isClosed={isClosed}
               isRoot={isRoot}
               onSetFocus={() => onSetFocus(pane.id)}
+              onOpenFocusedView={() => {
+                if (!isClosed) onSetFocus(pane.id);
+                setFocusedViewEnabled(true);
+              }}
               onClose={() => onCloseFork(pane.id)}
               onReopen={() => onReopenFork(pane.id)}
               onDelete={onDeleteFork ? () => onDeleteFork(pane.id) : undefined}
@@ -366,10 +437,13 @@ interface PaneProps {
   pending: ChatMessage[];
   runs: RunInfo[];
   threadColorMap: Map<string, string>;
+  userDisplayName?: string | null;
   isFocused: boolean;
+  isFocusedViewHidden: boolean;
   isClosed: boolean;
   isRoot: boolean;
   onSetFocus: () => void;
+  onOpenFocusedView: () => void;
   onClose: () => void;
   onReopen: () => void;
   onDelete?: () => void;
@@ -389,10 +463,13 @@ function ForkPane({
   pending,
   runs,
   threadColorMap,
+  userDisplayName,
   isFocused,
+  isFocusedViewHidden,
   isClosed,
   isRoot,
   onSetFocus,
+  onOpenFocusedView,
   onClose,
   onReopen,
   onDelete,
@@ -430,29 +507,56 @@ function ForkPane({
   const className = [
     "fork-pane",
     isFocused ? "fork-pane-focused" : "",
+    isFocusedViewHidden ? "fork-pane-focus-hidden" : "",
     isClosed ? "fork-pane-closed" : "",
   ]
     .filter(Boolean)
     .join(" ");
+  const metaTitle = sessionModelMetaTitle(t, pane);
+  const providerName = providerNameForId(pane.provider_id);
 
   return (
-    <div className={className} data-testid="fork-pane" data-session-id={pane.id}>
+    <div
+      className={className}
+      data-testid="fork-pane"
+      data-session-id={pane.id}
+      aria-hidden={isFocusedViewHidden}
+      inert={isFocusedViewHidden ? true : undefined}
+    >
       <div className="fork-pane-header">
         <span className="fork-pane-label" title={pane.name}>
           {isRoot ? t("fork.original") : pane.name || t("fork.fork")}
         </span>
+        {(providerName || pane.model || pane.reasoning_effort) && (
+          <span className="fork-pane-run-meta" title={metaTitle}>
+            {providerName && <span>{providerName}</span>}
+            {pane.model && <span>{pane.model}</span>}
+            {pane.reasoning_effort && <span>{pane.reasoning_effort}</span>}
+          </span>
+        )}
         {!isClosed && (
-          <button
-            type="button"
-            className="fork-pane-focus-radio"
-            onClick={onSetFocus}
-            aria-label={isFocused ? t("fork.focusedAria") : t("fork.focusTitle")}
-            title={isFocused ? t("fork.focusedTitle") : t("fork.focusTitle")}
-            role="radio"
-            aria-checked={isFocused}
-          >
-            {isFocused ? "●" : "◯"}
-          </button>
+          <div className="fork-pane-actions">
+            <button
+              type="button"
+              className="fork-pane-view-button"
+              onClick={onOpenFocusedView}
+              aria-label={t("fork.openFocusedAria")}
+              title={t("fork.openFocusedTitle")}
+            >
+              <Icon name="expand" size={14} />
+            </button>
+            <button
+              type="button"
+              className="fork-pane-focus-radio"
+              onClick={onSetFocus}
+              aria-label={isFocused ? t("fork.focusedAria") : t("fork.focusTitle")}
+              title={isFocused ? t("fork.focusedTitle") : t("fork.focusTitle")}
+              role="radio"
+              aria-checked={isFocused}
+            >
+              {isFocused ? "●" : "◯"}
+            </button>
+          </div>
         )}
         {isClosed && !isRoot && (
           <>
@@ -510,6 +614,7 @@ function ForkPane({
             sessionId={pane.id}
             orchestrationMode={pane.orchestration_mode}
             threadColorMap={threadColorMap}
+            userDisplayName={userDisplayName}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
             onRetry={onRetry}
@@ -545,6 +650,7 @@ function MessageList({
   sessionId,
   orchestrationMode,
   threadColorMap,
+  userDisplayName,
   onFileClick,
   onViewDiff,
   onRetry,
@@ -559,6 +665,7 @@ function MessageList({
   sessionId: string;
   orchestrationMode?: Session["orchestration_mode"];
   threadColorMap: Map<string, string>;
+  userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
@@ -569,47 +676,48 @@ function MessageList({
 }) {
   const all = useMemo(() => mergeMessagesSorted(messages, pending), [messages, pending]);
   const groups = useMemo(() => {
-    const out: { user: ChatMessage; assistant?: ChatMessage }[] = [];
+    const out: { initiator: ChatMessage; response?: ChatMessage }[] = [];
     for (let i = 0; i < all.length; i++) {
       const msg = all[i];
       if (msg.role === "user") {
         const next = all[i + 1];
         if (next && next.role === "assistant") {
-          out.push({ user: msg, assistant: next });
+          out.push({ initiator: msg, response: next });
           i++;
         } else {
-          out.push({ user: msg });
+          out.push({ initiator: msg });
         }
       }
     }
     return out;
   }, [all]);
-  const lastGroupIdx = groups.length - 1;
+  const lastTurnGroupIdx = groups.length - 1;
   return (
     <>
       {groups.map((g, idx) => {
-        const groupRuns = runs.filter((r) => {
-          if (r.target_message_id === g.user.id) return true;
-          if (g.assistant && r.target_message_id === g.assistant.id) return true;
-          if (isUnanchoredRun(r) && !g.assistant && idx === lastGroupIdx) {
+        const turnRuns = runs.filter((r) => {
+          if (r.target_message_id === g.initiator.id) return true;
+          if (g.response && r.target_message_id === g.response.id) return true;
+          if (isUnanchoredRun(r) && !g.response && idx === lastTurnGroupIdx) {
             return true;
           }
           return false;
         });
         return (
-          <MessageGroup
-            key={g.user.id}
-            userMessage={g.user}
-            assistantMessage={g.assistant}
+          <TurnGroup
+            key={g.initiator.id}
+            initiatorMessage={g.initiator}
+            responseMessage={g.response}
             sessionId={sessionId}
+            userDisplayName={userDisplayName}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
             onRetry={onRetry}
             onRetryStopped={onRetryStopped}
             threadColorMap={threadColorMap}
-            defaultCollapsed={!!g.assistant && !g.assistant.isStreaming}
+            defaultCollapsed={!!g.response && !g.response.isStreaming}
             orchestrationMode={orchestrationMode}
-            runs={groupRuns}
+            runs={turnRuns}
             scrollEl={scrollEl}
             advSyncOverlays={advSyncOverlays}
             onAdvSyncClick={onAdvSyncClick}

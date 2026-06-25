@@ -22,7 +22,6 @@ interface ProviderInfo {
   jsonl_path: string | null;
   run_dir: string | null;
   cancelled: boolean;
-  lingering: boolean;
   popen_alive: boolean | null;
   popen_pid: number | null;
 }
@@ -183,7 +182,6 @@ function RunDetailsBody({ details }: { details: RunDetails }) {
           <KV k="jsonl_path" v={p.jsonl_path ?? "—"} mono />
           <KV k="run_dir" v={p.run_dir ?? "—"} mono />
           <KV k="cancelled" v={p.cancelled ? t("common.yes") : t("common.no")} />
-          <KV k="lingering" v={p.lingering ? t("common.yes") : t("common.no")} />
           <KV
             k="popen_alive"
             v={

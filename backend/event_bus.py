@@ -168,6 +168,8 @@ class EventBus:
 
     def __init__(self) -> None:
         self._subs: list[_Sub] = []
+        self._exact_subs: dict[str, list[_Sub]] = {}
+        self._glob_subs: list[_Sub] = []
         self._lock = asyncio.Lock()  # Protects _subs sort during concurrent subscribe.
         # A16 monotonic seq stamper. Plain int + `+= 1` is atomic
         # under the GIL (single bytecode op, no await between read
@@ -193,14 +195,40 @@ class EventBus:
         twice creates two subscriptions. Caller's responsibility.
         """
         self._subs.append(_Sub(priority, pattern, handler, name))
-        self._subs.sort(key=lambda s: (s.priority, s.name))
+        self._reindex_subscribers()
 
     def unsubscribe(self, name: str) -> int:
         """Remove every subscription with the given `name`. Returns the
         number removed. Use for test cleanup."""
         before = len(self._subs)
         self._subs = [s for s in self._subs if s.name != name]
+        self._reindex_subscribers()
         return before - len(self._subs)
+
+    def _reindex_subscribers(self) -> None:
+        self._subs.sort(key=lambda s: (s.priority, s.name))
+        exact: dict[str, list[_Sub]] = {}
+        glob_subs: list[_Sub] = []
+        for sub in self._subs:
+            if any(char in sub.pattern for char in "*?["):
+                glob_subs.append(sub)
+            else:
+                exact.setdefault(sub.pattern, []).append(sub)
+        self._exact_subs = exact
+        self._glob_subs = glob_subs
+
+    def _matching_subscribers(self, event_type: str) -> list[_Sub]:
+        exact = self._exact_subs.get(event_type) or []
+        globbed = [
+            sub
+            for sub in self._glob_subs
+            if fnmatch.fnmatchcase(event_type, sub.pattern)
+        ]
+        if not exact:
+            return globbed
+        if not globbed:
+            return exact
+        return sorted([*exact, *globbed], key=lambda s: (s.priority, s.name))
 
     # A17: meta-event emitted when a subscriber raises. Surfaced as a
     # bus event so downstream observability subscribers (metrics, the
@@ -278,9 +306,7 @@ class EventBus:
             )
         token = _publish_depth.set(depth + 1)
         try:
-            for sub in self._subs:
-                if not fnmatch.fnmatchcase(event.type, sub.pattern):
-                    continue
+            for sub in self._matching_subscribers(event.type):
                 try:
                     await sub.handler(event)
                 except Exception as exc:

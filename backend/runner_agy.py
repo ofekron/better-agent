@@ -14,10 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from capability_contexts import prepend_capability_context
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from cli_paths import resolve_cli_binary
 from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
+from runtime_skills import has_runtime_skills, materialize_runtime_skills
+from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
 _CONVERSATION_RE = re.compile(
@@ -37,7 +40,7 @@ def _new_uuid() -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def _assistant_event(text: str, *, model: Optional[str], parent_uuid: str) -> dict[str, Any]:
@@ -84,14 +87,105 @@ def _event_uuid_holder(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     return data if "uuid" in data else None
 
 
+def _db_main_text(agy_home: Path, conversation_id: Optional[str], parent_uuid: str) -> str:
+    """Best-effort main-thread answer from the conversation DB, used only when
+    agy's stdout is empty (rare). Reassembles via the same path as native
+    import; may include thoughts/markers since the DB blobs jumble them — stdout
+    is always preferred."""
+    if not conversation_id:
+        return ""
+    db_path = _conversation_db(agy_home, conversation_id)
+    if not db_path.is_file():
+        return ""
+    for event in _extract_parent_main_events(db_path, parent_uuid):
+        content = event.get("data", {}).get("message", {}).get("content", [{}])
+        block = content[0] if content else {}
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    return ""
+
+
+def _existing_event_uuids(events_path: Path) -> set[str]:
+    """Uuids already written to session_events.jsonl. Seeds the streaming
+    cursor so a resumed conversation (cumulative DB) does not re-emit prior
+    turns as new events."""
+    if not events_path.is_file():
+        return set()
+    seen: set[str] = set()
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return seen
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        holder = _event_uuid_holder(ev)
+        if holder and holder.get("uuid"):
+            seen.add(holder["uuid"])
+    return seen
+
+
+def _prior_turn_uuids(*, agy_home: Path, conversation_id: str) -> set[str]:
+    """Stabilized uuids of a resumed conversation's existing events.
+
+    agy's conversation DB is cumulative (append-only by step idx), so a resumed
+    conversation still holds prior turns' steps. Event uuids are
+    ``uuid5(conversation|index)`` and the index is the position in
+    ``_agy_worker_events``' deterministic rebuild -- so prior turns occupy the
+    same indices across runs and produce the same uuids. Seeding the streaming
+    dedup set with these prevents prior turns re-emitting into a new turn
+    (interrupt-and-resume). Must be snapshotted BEFORE the new turn appends its
+    own steps, so callers do it before spawning agy.
+    """
+    prior = _agy_worker_events(
+        agy_home=agy_home, conversation_id=conversation_id,
+        parent_uuid=conversation_id,
+    )
+    _stabilize_event_uuids(prior, conversation_id)
+    out: set[str] = set()
+    for event in prior:
+        holder = _event_uuid_holder(event)
+        if holder and holder.get("uuid"):
+            out.add(holder["uuid"])
+    return out
+
+
 def _stabilize_event_uuids(events: list[dict[str, Any]], conversation_id: Optional[str]) -> None:
-    """Assign uuid5(... conversation_id|index) so re-emission is idempotent."""
+    """Assign deterministic uuids so re-emission is idempotent.
+
+    agent_message / worker_event holders get uuid5(conversation|index). The
+    index is stable because _agy_worker_events rebuilds the same ordered list
+    each call. worker_start/worker_complete have no message uuid, so they get
+    a synthetic uuid5(conversation|type|delegation_id) — without it the
+    seen-based dedup could never collapse them and they'd re-emit every poll
+    and every resume."""
     if not conversation_id:
         return
     for i, event in enumerate(events):
         holder = _event_uuid_holder(event)
         if holder is not None:
             holder["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, f"{conversation_id}|{i}"))
+            continue
+        data = event.get("data")
+        if isinstance(data, dict) and "uuid" not in data:
+            key = f"{event.get('type')}|{data.get('delegation_id') or data.get('worker_session_id') or i}"
+            data["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, f"{conversation_id}|{key}"))
+
+
+def _is_main_text_agent_message(event: dict[str, Any]) -> bool:
+    """A top-level assistant text bubble (not a tool_use, tool_result, or
+    worker envelope). Used to keep DB prose OUT of the live stream — agy's
+    print-mode stdout is the authoritative main-thread answer."""
+    if event.get("type") != "agent_message":
+        return False
+    content = (event.get("data") or {}).get("message", {}).get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return isinstance(content[0], dict) and content[0].get("type") == "text"
 
 
 def _stream_new_events(
@@ -100,13 +194,19 @@ def _stream_new_events(
     agy_home: Path,
     conversation_id: Optional[str],
     parent_uuid: str,
-    emitted: dict[str, int],
+    emitted: dict[str, set],
+    include_prose: bool = True,
 ) -> None:
-    """Append agy steps not yet written to session_events.jsonl.
+    """Append agy events not yet written to session_events.jsonl.
 
-    Emits each event exactly once by stable output index; safe to call
+    Idempotent by uuid (emitted['seen'], seeded from the existing file so a
+    resumed conversation's prior turns are not re-emitted). Safe to call
     repeatedly during the run and once more as the final post-exit flush.
-    """
+
+    include_prose=False skips main-thread assistant text — the live stream uses
+    agy's clean print-mode stdout as the answer (the DB blobs jumble thoughts,
+    echoed input context, and protobuf markers), so only tool calls and
+    subagent worker panels are streamed from the DB."""
     if not conversation_id:
         return
     events = _agy_worker_events(
@@ -115,36 +215,22 @@ def _stream_new_events(
         parent_uuid=parent_uuid,
     )
     _stabilize_event_uuids(events, conversation_id)
-    new = events[emitted["count"]:]
+    new: list[dict[str, Any]] = []
+    for event in events:
+        if not include_prose and _is_main_text_agent_message(event):
+            continue
+        holder = _event_uuid_holder(event)
+        uid = holder.get("uuid") if holder else None
+        if uid and uid in emitted["seen"]:
+            continue
+        if uid:
+            emitted["seen"].add(uid)
+        new.append(event)
     if not new:
         return
     with events_path.open("a", encoding="utf-8") as fh:
         for event in new:
             fh.write(json.dumps(event) + "\n")
-    emitted["count"] = len(events)
-
-
-def _events_file_has_main_events(events_path: Path) -> bool:
-    """True if session_events.jsonl already holds a top-level agent_message
-    (a parent text turn or tool_use). Worker_start/worker_event/worker_complete
-    envelopes do not count — they route into subagent panels, not the main
-    assistant bubble. Used to decide whether the stdout fallback is needed."""
-    if not events_path.is_file():
-        return False
-    try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if ev.get("type") == "agent_message":
-            return True
-    return False
 
 
 def _load_json_object(path: Path) -> dict:
@@ -156,10 +242,17 @@ def _load_json_object(path: Path) -> dict:
     return data
 
 
-def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optional[dict[str, str]]:
+def _materialize_agy_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    cwd: str,
+    bare_config: bool = False,
+) -> Optional[dict[str, str]]:
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
-    if not mcp_servers and not skills:
+    has_ext_skills = has_runtime_skills(cwd, bare_config=bare_config)
+    if not mcp_servers and not skills and not has_ext_skills:
         return None
 
     real_home = Path.home()
@@ -177,10 +270,17 @@ def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optio
     symlink_home_overlay(real_cli, overlay_cli, skip={"settings.json", "builtin"})
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
+    ext_count = materialize_runtime_skills(
+        overlay_cli / "builtin" / "skills", cwd, bare_config=bare_config
+    )
+    materialize_runtime_skills(
+        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config
+    )
+
     settings = _load_json_object(real_cli / "settings.json")
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
-    if skills:
+    if skills or ext_count:
         settings["skills"] = {"enabled": True}
     if settings:
         overlay_cli.mkdir(parents=True, exist_ok=True)
@@ -195,23 +295,7 @@ def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optio
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 def _materialize_attachments(run_dir: Path, images: list) -> list[Path]:
@@ -365,37 +449,131 @@ def _looks_like_tool_json(text: str) -> bool:
     )
 
 
-def _meaningful_text(strings: list[str]) -> Optional[str]:
-    skip_prefixes = (
-        "sessionID",
-        "agent_message",
-        "toolAction",
-        "toolSummary",
-    )
-    candidates: list[str] = []
-    for text in strings:
-        if _UUID_RE.fullmatch(text.strip('"$')):
-            continue
-        if len(text) < 96 and _CONVERSATION_RE.search(text):
-            continue
-        if any(text.startswith(prefix) for prefix in skip_prefixes):
-            continue
-        if "bot-" in text:
-            continue
-        if text.startswith("{") or text.endswith("}"):
-            continue
-        if _looks_like_tool_json(text):
-            continue
-        if len(text) < 12:
-            continue
-        if not re.search(r"\s", text):
-            continue
-        if not re.search(r"[a-zA-Z]{3}", text):
-            continue
-        candidates.append(text)
-    if not candidates:
+# agy's bot-identifier streaming separator, e.g. "2(bot-<uuid>)" or
+# "2(bot-<uuid>B)" when the uuid runs into a trailing hex byte. Splits the
+# streaming copy (which carries the model's "thought") from the final copy.
+_BOT_ID_RE = re.compile(r"\d*\(bot-[0-9a-fA-F-]{4,}[:)?]?")
+
+# Strings that are CLI-injected system notices, not model output. agy emits
+# these as `[Message] sender=system ... [Notice] ...` (step_type 101) on events
+# like a server restart; they must never render as the assistant's answer.
+_SYSTEM_NOTICE_PREFIXES = ("[Message]", "[Notice]", "System Message")
+
+_SKIP_PREFIXES = (
+    "sessionID",
+    "agent_message",
+    "toolAction",
+    "toolSummary",
+)
+
+
+def _is_prose(text: str) -> bool:
+    """True if a cleaned blob string looks like assistant prose (not a uuid,
+    tool json, system notice, or binary garbage)."""
+    if _UUID_RE.fullmatch(text.strip('"$')):
+        return False
+    if len(text) < 96 and _CONVERSATION_RE.search(text):
+        return False
+    if any(text.startswith(p) for p in _SYSTEM_NOTICE_PREFIXES):
+        return False
+    if any(text.startswith(p) for p in _SKIP_PREFIXES):
+        return False
+    if "bot-" in text:
+        return False
+    if text.startswith("{") or text.endswith("}"):
+        return False
+    if _looks_like_tool_json(text):
+        return False
+    if len(text) < 12:
+        return False
+    if not re.search(r"\s", text):
+        return False
+    if not re.search(r"[a-zA-Z]{3}", text):
+        return False
+    return True
+
+
+def _strip_lead_marker(text: str) -> str:
+    """Strip a short protobuf field-marker prefix glued to the start of prose
+    (e.g. "gLet me know...", a leading field byte). Only strips when the prefix
+    up to the first sentence boundary contains NO space — a real prose prefix
+    like "s why I open" has a space and must be preserved."""
+    text = text.strip()
+    m = re.search(r"(I\s|I'|[A-Z][a-z]+\s)", text[:40])
+    if m and 0 < m.start() <= 20 and not re.search(r"\s", text[:m.start()]):
+        text = text[m.start():]
+    return text
+
+
+def _join_fragments(frags: list[str]) -> str:
+    """Join agy's streaming fragments back into one answer.
+
+    Fragments split at apostrophe boundaries, so the apostrophe byte is dropped
+    by the printable-string extraction and a contraction surfaces as two
+    fragments ("That" + "s why"). Space-join, then restore the common 's
+    contraction/possessive. A lone "s" word is otherwise vanishingly rare in
+    prose, so the restoration is safe."""
+    text = " ".join(frags)
+    return re.sub(r"\b([A-Za-z]+) s\b", r"\1's", text)
+
+
+def _reassemble_answer(strings: list[str]) -> Optional[str]:
+    """Reconstruct the assistant's final answer from agy's protobuf-ish blobs.
+
+    agy fragments one answer across many printable strings AND stores it twice
+    (streaming + final), separated by "2(bot-<uuid>)" identifiers. The model's
+    internal "thought" lives in the streaming segment BEFORE the last bot-id;
+    the clean final answer is the segment AFTER it. Keep prose candidates,
+    split each on the bot-id separator, take the last non-empty segment, strip
+    a leading marker off each fragment, and join in order. Returns None when
+    the step carries no model prose (system notice, pure tool step, garbage)."""
+    segments: list[list[str]] = [[]]
+    for raw in strings:
+        for i, part in enumerate(_BOT_ID_RE.split(raw)):
+            if i > 0:
+                segments.append([])
+            part = _strip_lead_marker(part).strip("\x00`")
+            if _is_prose(part):
+                segments[-1].append(part)
+    answer = segments[-1] if segments[-1] else max(segments, key=len)
+    if not answer:
         return None
-    return max(candidates, key=len)
+    return _join_fragments(answer)
+
+
+def _reassemble_tool_output(
+    strings: list[str], payload: dict[str, Any],
+) -> Optional[str]:
+    """Reassemble a tool's inline output, stripping agy's display header.
+
+    agy prepends a header (a UI label + the input's ``toolAction`` description)
+    before the real output, usually twice (streaming + final copy), so the raw
+    reassembly starts with e.g. ``"Viewing file Reading requirement_context.py
+    Viewing file Reading requirement_context.py from __future__ import..."``.
+    Strip the LEADING header only -- occurrences of ``toolAction`` in the first
+    quarter of the text -- so a legitimate later echo of the same phrase inside
+    the output (common in grep results) is preserved. Falls back to the full
+    reassembly when there is no toolAction or no text after the header.
+    """
+    text = _reassemble_answer(strings)
+    if not text:
+        return None
+    tool_action = payload.get("toolAction") if isinstance(payload, dict) else None
+    if isinstance(tool_action, str) and tool_action:
+        threshold = max(300, int(0.25 * len(text)))
+        cut = -1
+        start = 0
+        while True:
+            found = text.find(tool_action, start)
+            if found == -1 or found >= threshold:
+                break
+            cut = found + len(tool_action)
+            start = found + 1
+        if cut > 0:
+            tail = text[cut:].lstrip(" \n-")
+            if tail:
+                return tail
+    return text
 
 
 def _agent_message(
@@ -551,28 +729,90 @@ def _tool_signature(tool_name: str, payload: dict[str, Any]) -> str:
     return f"{tool_name}|{key}"
 
 
-def _strip_protobuf_artifacts(text: str) -> str:
-    """Clean the protobuf-ish wrappers agy puts around model prose.
+def _classify_simple_tool_step(
+    strings: list[str], payload: dict[str, Any],
+) -> tuple[str, str]:
+    """Classify a plain tool-call step (subagent / native-import paths) into
+    (tool_id, tool_name). Returns ("", "") for non-tool steps. agy stores the
+    tool_id as the first printable string and the tool_name as the second."""
+    if not payload or not strings:
+        return "", ""
+    tokens = _leading_tokens(strings[0])
+    if len(tokens) > 1 and _valid_tool_name(tokens[1]):
+        return tokens[0], tokens[1]
+    if len(strings) > 1 and _valid_tool_name(strings[1]):
+        return strings[0], strings[1]
+    return "", ""
 
-    A type-15 assistant string carries a trailing "2(bot-<uuid>)" bot-identifier
-    suffix that _meaningful_text rejects (its "bot-" guard). The blob is often
-    truncated before the closing ")" and the uuid may be partial, so the suffix
-    match is tolerant. _strings_from_blob's printable-ASCII filter leaves a
-    single leading protobuf field-marker char on prose (e.g. "II am waiting" ->
-    the first "I" is a marker); strip one leading duplicate when the rest reads
-    as a sentence."""
-    text = text.strip()
-    # Strip the bot-identifier wherever it appears (the blob often continues
-    # past the uuid, so anchoring to end-of-string misses it).
-    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]+\)?", "", text)
-    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]*$", "", text)
-    text = re.sub(r"^\d", "", text, count=1)
-    # Drop a single leading field-marker char duplicated onto sentence start
-    # ("II am" -> "I am", "## He" -> "# He" is left alone — only collapse an
-    # immediate repeat of the first char).
-    if len(text) >= 3 and text[0] == text[1] and text[2] == " ":
-        text = text[1:]
-    return text.strip()
+
+# Tools whose inline text is the call's INPUT (the message/prompt being sent),
+# not its output. send_message/invoke_subagent results arrive later as [Message]
+# lines routed through the subagent worker panel — they must never emit an
+# inline tool_result (that would label the sent message as the reply).
+_MESSAGE_TOOL_NAMES = {"send_message", "invoke_subagent"}
+
+
+def _is_message_tool_call(tool_name: str, payload: dict[str, Any]) -> bool:
+    return (
+        tool_name in _MESSAGE_TOOL_NAMES
+        or bool(payload.get("Message") or payload.get("Subagents"))
+    )
+
+
+# agy step types whose tool call and output are bundled in the SAME step — the
+# reassembled text IS the output. Other tool-call types (15/127/132) defer the
+# result to a later step.
+_INLINE_TOOL_STEP_TYPES = frozenset({7, 8, 9, 23})
+
+
+def _emit_tool_call_events(
+    *, tool_id: str, tool_name: str, input_data: dict[str, Any],
+    step_type: int, text: Optional[str], in_prompt: bool,
+    is_message_tool: bool, last_tool_id: str, parent_uuid: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Build the inner agent_message events for a tool-call step and return
+    (events, new_last_tool_id).
+
+    - Message tools: tool_use only; their result arrives later as a [Message]
+      worker event. Clears any pending deferred id.
+    - Inline step types (7/8/9/23): tool_use + tool_result(this tool) from the
+      step's own output; clears the pending deferred id (consumed inline).
+    - Deferred step types (15/127/132): tool_use only; remembers the id so a
+      later non-tool result step can attach to it.
+    """
+    out: list[dict[str, Any]] = [_tool_use_event(
+        tool_id=tool_id, name=tool_name, input_data=input_data,
+        parent_uuid=parent_uuid,
+    )]
+    if is_message_tool:
+        return out, ""
+    if step_type in _INLINE_TOOL_STEP_TYPES:
+        if text and not in_prompt:
+            out.append(_tool_result_event(
+                tool_id=tool_id, content=text, parent_uuid=parent_uuid,
+            ))
+        return out, ""
+    return out, tool_id
+
+
+def _emit_non_tool_text_events(
+    *, text: Optional[str], in_prompt: bool,
+    last_tool_id: str, parent_uuid: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Non-tool step carrying reassembled prose. If a deferred tool is awaiting
+    its result, the prose is that result (attach + clear); otherwise it is an
+    assistant narration turn."""
+    if not text or in_prompt:
+        return [], last_tool_id
+    if last_tool_id:
+        return [_tool_result_event(
+            tool_id=last_tool_id, content=text, parent_uuid=parent_uuid,
+        )], ""
+    return [_agent_message(
+        role="assistant",
+        content=[{"type": "text", "text": text}],
+        parent_uuid=parent_uuid,
+    )], last_tool_id
 
 
 class _ParentMainState:
@@ -592,6 +832,13 @@ class _ParentMainState:
 
     Dedups the type-15 vs type-127/132 duplicate tool pair by signature so
     each logical tool call emits exactly one tool_use.
+
+    agy has two tool models. Inline step types (7/8/9/23) bundle a call and its
+    output in one step -> tool_use + tool_result(this tool). Deferred step types
+    (15/127/132) emit a call now and a result in a later step; _last_tool_id
+    remembers the pending deferred call so the later result step can attach to
+    it. Messaging tools (send_message/invoke_subagent) never take an inline
+    result — their reply arrives as a [Message] worker event.
     """
 
     def __init__(self, parent_uuid: str) -> None:
@@ -606,44 +853,41 @@ class _ParentMainState:
         if _step_is_message_line(step):
             return []
         payload = step.get("json") or {}
-        is_subagent_delegation = bool(payload and "Subagents" in payload)
-        # agy wraps type-15 assistant prose in protobuf field markers and a
-        # "2(bot-<uuid>)" identifier. _meaningful_text rejects strings
-        # containing "bot-", so strip the artifacts first or the turn is lost.
-        cleaned = [_strip_protobuf_artifacts(s) for s in step["strings"]]
-        text = _meaningful_text(cleaned)
-        if text and text in self._prompt_texts:
-            text = None
-        # A step can carry BOTH an assistant text turn and a tool call (like a
-        # Claude text+tool_use turn). Emit text first, then the tool, so the
-        # prose is not lost when the model narrates before acting.
-        out: list[dict[str, Any]] = []
-        if text:
-            if step.get("step_type") in {7, 8, 9, 23, 101} and self._last_tool_id:
-                out.append(_tool_result_event(
-                    tool_id=self._last_tool_id, content=text,
-                    parent_uuid=self.parent_uuid,
-                ))
-            else:
-                out.append(_agent_message(
+        text = _reassemble_answer(step["strings"])
+        in_prompt = bool(text and text in self._prompt_texts)
+        if payload and "Subagents" in payload:
+            # invoke_subagent routes to its worker panel; a subagent delegation
+            # supersedes any pending deferred tool, so clear it and show any
+            # preamble prose as an assistant text turn.
+            self._last_tool_id = ""
+            if text and not in_prompt:
+                return [_agent_message(
                     role="assistant",
                     content=[{"type": "text", "text": text}],
                     parent_uuid=self.parent_uuid,
-                ))
-        # Subagent delegations route to their worker panel; do NOT also emit a
-        # main-thread tool_use (single representation, matches Claude delegate).
-        if not is_subagent_delegation:
-            tool_id, tool_name, input_data = _classify_parent_tool(step)
-            if tool_id and tool_name:
-                sig = _tool_signature(tool_name, payload)
-                if sig not in self._seen_tools:
-                    self._seen_tools.add(sig)
-                    self._last_tool_id = tool_id
-                    out.append(_tool_use_event(
-                        tool_id=tool_id, name=tool_name, input_data=input_data,
-                        parent_uuid=self.parent_uuid,
-                    ))
-        return out
+                )]
+            return []
+        tool_id, tool_name, input_data = _classify_parent_tool(step)
+        if tool_id and tool_name:
+            sig = _tool_signature(tool_name, payload)
+            if sig in self._seen_tools:
+                return []
+            self._seen_tools.add(sig)
+            result_text = _reassemble_tool_output(step["strings"], payload)
+            inner, self._last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=input_data,
+                step_type=step.get("step_type"),
+                text=result_text,
+                in_prompt=bool(result_text and result_text in self._prompt_texts),
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=self._last_tool_id, parent_uuid=self.parent_uuid,
+            )
+            return inner
+        inner, self._last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=in_prompt,
+            last_tool_id=self._last_tool_id, parent_uuid=self.parent_uuid,
+        )
+        return inner
 
     def _user_prompt_events(self, step: dict[str, Any]) -> list[dict[str, Any]]:
         # The parent's user prompt is already persisted as the session's user
@@ -815,48 +1059,34 @@ def _extract_subagent_conversation_events(
             continue
         strings = step["strings"]
         payload = step.get("json") or {}
-        if payload:
-            tool_id = ""
-            tool_name = ""
-            if strings:
-                tokens = _leading_tokens(strings[0])
-                if len(tokens) > 1 and _valid_tool_name(tokens[1]):
-                    tool_id = tokens[0]
-                    tool_name = tokens[1]
-            if not tool_name and len(strings) > 1 and _valid_tool_name(strings[1]):
-                tool_id = strings[0]
-                tool_name = strings[1]
-            if tool_id and tool_name:
-                last_tool_id = tool_id
+        text = _reassemble_answer(strings)
+        in_prompt = bool(text and text in prompt_texts)
+        tool_id, tool_name = _classify_simple_tool_step(strings, payload)
+        if tool_id and tool_name:
+            result_text = _reassemble_tool_output(strings, payload)
+            inner_events, last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=payload,
+                step_type=step.get("step_type"),
+                text=result_text,
+                in_prompt=bool(result_text and result_text in prompt_texts),
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+            )
+            for inner in inner_events:
                 events.append({"type": "worker_event", "data": {
                     "delegation_id": delegation_id,
-                    "event": _tool_use_event(
-                        tool_id=tool_id,
-                        name=tool_name,
-                        input_data=payload,
-                        parent_uuid=parent_uuid,
-                    ),
+                    "event": inner,
                 }})
-                continue
-        text = _meaningful_text(strings)
-        if not text or text in prompt_texts:
             continue
-        if step.get("step_type") in {7, 8, 9, 23, 101, 127, 132} and last_tool_id:
-            inner = _tool_result_event(
-                tool_id=last_tool_id,
-                content=text,
-                parent_uuid=parent_uuid,
-            )
-        else:
-            inner = _agent_message(
-                role="assistant",
-                content=[{"type": "text", "text": text}],
-                parent_uuid=parent_uuid,
-            )
-        events.append({"type": "worker_event", "data": {
-            "delegation_id": delegation_id,
-            "event": inner,
-        }})
+        inner_events, last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=in_prompt,
+            last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+        )
+        for inner in inner_events:
+            events.append({"type": "worker_event", "data": {
+                "delegation_id": delegation_id,
+                "event": inner,
+            }})
     return events
 
 
@@ -887,33 +1117,24 @@ def extract_main_conversation_events(
             continue
         strings = step["strings"]
         payload = step.get("json") or {}
-        tool_id, tool_name = "", ""
-        if payload and strings:
-            tokens = _leading_tokens(strings[0])
-            if len(tokens) > 1 and _valid_tool_name(tokens[1]):
-                tool_id, tool_name = tokens[0], tokens[1]
-            elif len(strings) > 1 and _valid_tool_name(strings[1]):
-                tool_id, tool_name = strings[0], strings[1]
+        text = _reassemble_answer(strings)
+        tool_id, tool_name = _classify_simple_tool_step(strings, payload)
         if tool_id and tool_name:
-            last_tool_id = tool_id
-            events.append(_tool_use_event(
-                tool_id=tool_id, name=tool_name, input_data=payload,
-                parent_uuid=parent_uuid,
-            ))
+            result_text = _reassemble_tool_output(strings, payload)
+            inner_events, last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=payload,
+                step_type=step.get("step_type"),
+                text=result_text, in_prompt=False,
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+            )
+            events.extend(inner_events)
             continue
-        text = _meaningful_text(strings)
-        if not text:
-            continue
-        if step.get("step_type") in {7, 8, 9, 23, 101, 127, 132} and last_tool_id:
-            events.append(_tool_result_event(
-                tool_id=last_tool_id, content=text, parent_uuid=parent_uuid,
-            ))
-        else:
-            events.append(_agent_message(
-                role="assistant",
-                content=[{"type": "text", "text": text}],
-                parent_uuid=parent_uuid,
-            ))
+        inner_events, last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=False,
+            last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+        )
+        events.extend(inner_events)
     return events
 
 
@@ -963,7 +1184,6 @@ def _agy_worker_events(
             "run_mode": "agy_subagent",
         }})
     return events
-    return events
 
 
 def _fail(run_dir: Path, error: str) -> None:
@@ -1010,7 +1230,12 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     run_env = os.environ.copy()
     run_env.update(native_mcp_runtime_env(inputs))
     provider_run_config = with_builtin_mcp_servers(inputs, inputs.get("provider_run_config") or {})
-    scoped_env = _materialize_agy_run_home(run_dir, provider_run_config)
+    scoped_env = _materialize_agy_run_home(
+        run_dir,
+        provider_run_config,
+        cwd=cwd,
+        bare_config=bool(inputs.get("bare_config")),
+    )
     if scoped_env:
         run_env.update(scoped_env)
     agy_home = Path(run_env.get("HOME") or str(Path.home()))
@@ -1040,6 +1265,14 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     log_path = run_dir / "agy_cli.log"
     argv += ["--log-file", str(log_path), "-p", prompt]
 
+    # On resume the conversation DB is cumulative -- snapshot prior turns'
+    # stabilized uuids BEFORE spawning agy so they are not re-emitted into
+    # this turn once the new turn appends its own steps.
+    prior_seen = (
+        _prior_turn_uuids(agy_home=agy_home, conversation_id=resume_session_id)
+        if resume_session_id else set()
+    )
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
@@ -1051,9 +1284,13 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     cancel_path = run_dir / "cancel"
     cancelled = False
     events_path = run_dir / "session_events.jsonl"
-    # Mutable holder so the streaming watcher and the final flush share one
-    # emit cursor — every event is written to disk exactly once.
-    emitted: dict[str, int] = {"count": 0}
+    # Shared dedup set for the streaming watcher and final flush — every event
+    # is written to disk exactly once. Seeded from the existing events file plus
+    # the prior turns' stabilized uuids (snapshotted before spawn) so a resumed
+    # conversation does not re-emit prior turns from the cumulative DB.
+    emitted: dict[str, set] = {
+        "seen": _existing_event_uuids(events_path) | prior_seen,
+    }
 
     async def _watch_cancel() -> None:
         nonlocal cancelled
@@ -1083,8 +1320,13 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     async def _watch_stream() -> None:
         # Stream agy steps into session_events.jsonl as they land so the
         # provider's polling tailer can feed the render tree during the turn.
-        # Without this, nothing is emitted until agy exits, so a long or hung
-        # agy turn renders as an empty bubble stuck "streaming" forever.
+        # Only tool calls and subagent worker panels come from the DB — main
+        # prose is taken from agy's clean print-mode stdout at exit, because
+        # the step blobs jumble thoughts + echoed input context + markers.
+        # The in-flight assistant message is created by the orchestrator's
+        # run_turn, so tool events attach without any placeholder; the final
+        # answer is appended last with its own uuid so it renders AFTER the
+        # tool calls (not replaced into a leading empty bubble).
         while proc.returncode is None:
             sid = state.get("session_id")
             if sid:
@@ -1094,6 +1336,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                     conversation_id=sid,
                     parent_uuid=sid,
                     emitted=emitted,
+                    include_prose=False,
                 )
             await asyncio.sleep(_STREAM_INTERVAL)
 
@@ -1132,36 +1375,29 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         auth_error or stderr or f"agy CLI exited with code {proc.returncode}"
     )
     parent_uuid = state.get("session_id") or _new_uuid()
-    # Final flush: any steps added after the last stream poll. Re-runs
-    # _agy_worker_events in full but only writes events past the shared emit
-    # cursor, so nothing duplicates.
+    # Final flush of tool calls + subagent worker panels from the DB (main prose
+    # is excluded — it comes from stdout below).
     _stream_new_events(
         events_path,
         agy_home=agy_home,
         conversation_id=state.get("session_id"),
         parent_uuid=parent_uuid,
         emitted=emitted,
+        include_prose=False,
     )
-    # If the conversation DB yielded ordered parent text/tool events, those ARE
-    # the assistant response (rendered as separated turns + tool calls). Only
-    # fall back to the single stdout block when extraction produced nothing —
-    # e.g. DB unreadable, auth-failure fast exit, or a pure-stdout run. On
-    # failure we always emit the error text so the user sees what went wrong.
-    has_main_events = _events_file_has_main_events(events_path)
-    if not success or not has_main_events:
-        # No ordered parent events to render (DB unreadable, auth-failure fast
-        # exit, pure-stdout run) OR the run failed — emit the stdout / error
-        # block as the terminal assistant message so output is never lost.
-        final_text = stdout if success else f"Error: {error}"
-        final_event = _assistant_event(
-            final_text,
-            model=model,
-            parent_uuid=parent_uuid,
-        )
-        final_seed = f"{state.get('session_id') or ''}|final"
-        final_event["data"]["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, final_seed))
-        with events_path.open("a", encoding="utf-8") as events:
-            events.write(json.dumps(final_event) + "\n")
+    # agy's print-mode stdout is the authoritative main-thread answer: clean
+    # rendered prose, free of the thoughts / echoed input context / protobuf
+    # markers that the step blobs contain. Emit it LAST with its own uuid so it
+    # appends after the tool calls and renders at the bottom of the turn. On
+    # success prefer stdout, falling back to DB-reassembled text when agy
+    # produced no stdout (rare); on failure emit the error.
+    if success:
+        final_text = stdout or _db_main_text(agy_home, state.get("session_id"), parent_uuid)
+    else:
+        final_text = f"Error: {error}"
+    final_event = _assistant_event(final_text, model=model, parent_uuid=parent_uuid)
+    with events_path.open("a", encoding="utf-8") as events:
+        events.write(json.dumps(final_event) + "\n")
 
     state["complete"] = True
     state["finished_at"] = datetime.now().isoformat()

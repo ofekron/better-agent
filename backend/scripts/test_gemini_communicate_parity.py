@@ -37,18 +37,19 @@ def _instrument():
 
 def test_ask_direct_routes_to_ask_endpoint():
     captured = _instrument()
-    res = communicate_mcp.ask_response("worker-1", "hi")
+    res = communicate_mcp.ask_response("hi", target_session_id="worker-1")
     assert res["success"] is True
     assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["ask_id"].startswith("ask_")
     assert captured[0][1]["sender_session_id"] == "mgr-session"
     assert captured[0][1]["target_session_id"] == "worker-1"
+    assert captured[0][1]["mode"] == "wait_and_grab_last_assistant_mssg_in_turn"
 
 
 def test_ask_fork_routes_to_delegate_engine():
     captured = _instrument()
     res = communicate_mcp.ask_response(
-        "worker-1", "audit auth", run_mode="fork",
+        "audit auth", target_session_id="worker-1", run_mode="fork",
         worker_description="auditor", worker_registry_cwd="/repo",
     )
     assert res["success"] is True
@@ -69,7 +70,7 @@ def test_ask_fork_routes_to_delegate_engine():
 def test_ask_fork_routes_ephemeral():
     captured = _instrument()
     res = communicate_mcp.ask_response(
-        "worker-1", "audit auth", run_mode="fork",
+        "audit auth", target_session_id="worker-1", run_mode="fork",
         worker_description="auditor", ephemeral=True,
     )
     assert res["success"] is True
@@ -80,14 +81,14 @@ def test_ask_fork_routes_ephemeral():
 
 def test_ask_direct_rejects_ephemeral():
     captured = _instrument()
-    res = communicate_mcp.ask_response("worker-1", "hi", ephemeral=True)
+    res = communicate_mcp.ask_response("hi", target_session_id="worker-1", ephemeral=True)
     assert res["success"] is False
     assert captured == []
 
 
 def test_ask_fork_allows_missing_worker_description():
     captured = _instrument()
-    res = communicate_mcp.ask_response("w", "x", run_mode="fork")
+    res = communicate_mcp.ask_response("x", target_session_id="w", run_mode="fork")
     assert res["success"] is True
     assert captured[0][0] == "/api/internal/ask-fork"
     assert captured[0][1]["worker_description"] == ""
@@ -121,9 +122,39 @@ def test_create_worker_rejects_missing_fields():
 
 def test_mssg_still_routes_to_mssg_endpoint():
     captured = _instrument()
-    communicate_mcp.mssg_response("w", "hello")
+    communicate_mcp.mssg_response(
+        "hello",
+        target_session_id="w",
+        provider_id="provider-1",
+        model="model-1",
+        reasoning_effort="high",
+    )
     assert captured[0][0] == "/api/internal/mssg"
+    assert captured[0][1]["provider_id"] == "provider-1"
+    assert captured[0][1]["model"] == "model-1"
+    assert captured[0][1]["reasoning_effort"] == "high"
     assert captured[0][2] == 30.0
+
+
+def test_ask_async_mode_routes_to_ask_endpoint():
+    captured = _instrument()
+    communicate_mcp.ask_response(
+        "run in background",
+        target_worker_pool="testape",
+        pool_affinity_key="thread-1",
+        mode="continue_and_expect_mssg_back_async",
+    )
+    endpoint, payload, timeout = captured[0]
+    assert endpoint == "/api/internal/ask"
+    assert payload["sender_session_id"] == "mgr-session"
+    assert payload["target_worker_pool"] == "testape"
+    assert payload["pool_affinity_key"] == "thread-1"
+    assert payload["message"] == "run in background"
+    assert payload["mode"] == "continue_and_expect_mssg_back_async"
+    assert payload["provider_id"] is None
+    assert payload["model"] == ""
+    assert payload["reasoning_effort"] is None
+    assert timeout == 30.0
 
 
 def test_delegate_task_routes_to_delegate_task_endpoint():
@@ -224,3 +255,74 @@ def test_create_sub_session_routes_to_create_sub_session_endpoint():
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"
     assert payload["reasoning_effort"] == "high"
+
+
+def _instrument_provision():
+    captured: list[tuple] = []
+
+    def fake_post(endpoint, payload, timeout):
+        captured.append((endpoint, payload, timeout))
+        spec = (payload.get("workers") or [{}])[0]
+        return {"workers": [{
+            "agent_session_id": "worker-session-1",
+            "name": f"worker:{spec.get('role_key')}",
+            "created": True,
+            "orchestration_mode": spec.get("orchestration_mode"),
+            "registry_cwd": payload.get("cwd"),
+        }]}
+
+    communicate_mcp._post_json = fake_post  # type: ignore[assignment]
+    return captured
+
+
+def test_ensure_named_worker_routes_to_provision_with_singleton_key():
+    captured = _instrument_provision()
+    res = communicate_mcp.ensure_named_worker_response(
+        name="testape",
+        cwd="/Users/ofekron/testape",
+        orchestration_mode="team",
+        provision_prompt="seed",
+    )
+    assert res["success"] is True
+    assert res["agent_session_id"] == "worker-session-1"
+    assert res["name"] == "worker:testape"
+    assert res["created"] is True
+    endpoint, payload, timeout = captured[0]
+    # The provision endpoint is the idempotent get-or-create path.
+    assert endpoint == "/api/internal/workers/provision"
+    assert timeout == communicate_mcp._LONG_TIMEOUT
+    spec = payload["workers"][0]
+    # role_key=name is the singleton key: provision derives session name
+    # `worker:<role_key>`, which the use-testape delegator recursion guard
+    # compares against BETTER_CLAUDE_APP_SESSION_ID.
+    assert spec["role_key"] == "testape"
+    assert spec["orchestration_mode"] == "team"
+    assert spec["provision_prompt"] == "seed"
+    assert spec["tags"] == ["testape"]
+    assert payload["cwd"] == "/Users/ofekron/testape"
+
+
+def test_ensure_named_worker_drops_empty_optionals():
+    captured = _instrument_provision()
+    communicate_mcp.ensure_named_worker_response(
+        name="testape",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    spec = captured[0][1]["workers"][0]
+    # Empty optionals must NOT be forwarded (provision would treat them as
+    # explicit overrides over the creating session's defaults).
+    assert "provision_prompt" not in spec
+    assert "provider_id" not in spec
+    assert "model" not in spec
+    assert spec["tags"] == ["testape"]
+    assert "reasoning_effort" not in spec
+    # description defaults to worker:<name> so the session is named correctly.
+    assert spec["description"] == "worker:testape"
+
+
+def test_ensure_named_worker_rejects_missing_fields():
+    captured = _instrument_provision()
+    res = communicate_mcp.ensure_named_worker_response("", "/repo", "native")
+    assert res["success"] is False
+    assert captured == []

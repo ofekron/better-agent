@@ -9,6 +9,7 @@ import type {
   Project,
   Provider,
   ReasoningEffort,
+  Permission,
 } from "../types";
 import {
   ProviderCapabilityPicker,
@@ -22,6 +23,9 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
+import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
+import { useQuotaStatus } from "../hooks/useQuotaStatus";
+import { extId } from "../extensionIds";
 import { ProgressButton } from "../progress/ProgressButton";
 import Icon from "./Icon";
 import { SessionFolderPopover } from "./SessionFolderPopover";
@@ -36,16 +40,18 @@ import {
   readProviderCache,
 } from "../utils/providerCache";
 
-interface RoleConfig {
+interface RuntimeProfile {
   providerId: string;
   model: string;
   reasoningEffort: ReasoningEffort | "";
+  /** Per-session permission override. {} = inherit provider default. */
+  permission: Permission;
 }
 
 interface SessionConfig {
   orchestrationMode: OrchestrationMode;
-  main: RoleConfig;
-  worker: RoleConfig;
+  main: RuntimeProfile;
+  worker: RuntimeProfile;
   cwd: string;
   browserHarnessEnabled: boolean;
   browserHarnessHeadless: boolean;
@@ -115,6 +121,7 @@ interface Props {
   teamEnabled?: boolean;
   machineNodesEnabled?: boolean;
   browserHarnessEnabled?: boolean;
+  allowOfflineCreate?: boolean;
   extensionOptions?: NewSessionExtensionOption[];
 }
 
@@ -217,7 +224,7 @@ function capabilityContextFromPickerSource(
 }
 
 function resolveReasoningEffort(
-  saved: RoleConfig | undefined,
+  saved: RuntimeProfile | undefined,
   provider: Provider,
   role: "main" | "worker",
 ): ReasoningEffort | "" {
@@ -235,17 +242,29 @@ function resolveReasoningEffort(
   ) ?? options[0];
 }
 
-export function resolveRoleConfig(
-  saved: RoleConfig | undefined,
+function resolvePermission(
+  saved: RuntimeProfile | undefined,
+  provider: Provider,
+): Permission {
+  // Carry over a previously chosen override when the provider still matches;
+  // otherwise inherit the provider default ({}).
+  const savedPerm = saved?.providerId === provider.id ? saved.permission : {};
+  return savedPerm && Object.keys(savedPerm).length > 0 ? { ...savedPerm } : {};
+}
+
+export function resolveRuntimeProfile(
+  saved: RuntimeProfile | undefined,
   providers: Provider[],
   defaultProviderId: string | null,
   modelsByProvider: Record<string, string[]>,
   role: "main" | "worker",
-): RoleConfig {
+): RuntimeProfile {
+  const availableProviders = providers.filter((item) => !item.suspended);
   const provider =
-    providers.find((item) => item.id === saved?.providerId)
-    ?? providers.find((item) => item.id === defaultProviderId);
-  if (!provider) return { providerId: "", model: "", reasoningEffort: "" };
+    availableProviders.find((item) => item.id === saved?.providerId)
+    ?? availableProviders.find((item) => item.id === defaultProviderId)
+    ?? availableProviders[0];
+  if (!provider) return { providerId: "", model: "", reasoningEffort: "", permission: {} };
 
   const models = modelsByProvider[provider.id] ?? [];
   const savedModel = saved?.providerId === provider.id ? saved.model : "";
@@ -266,10 +285,11 @@ export function resolveRoleConfig(
     providerId: provider.id,
     model,
     reasoningEffort: resolveReasoningEffort(saved, provider, role),
+    permission: resolvePermission(saved, provider),
   };
 }
 
-function ProviderModelPicker({
+function RuntimeProfilePicker({
   label,
   role,
   providers,
@@ -279,13 +299,15 @@ function ProviderModelPicker({
   label: string;
   role: "main" | "worker";
   providers: Provider[];
-  value: RoleConfig;
-  onChange: (v: RoleConfig) => void;
+  value: RuntimeProfile;
+  onChange: (v: RuntimeProfile) => void;
 }) {
   const { t } = useTranslation();
+  const quotaStatus = useQuotaStatus(API, providers);
   const [models, setModels] = useState<string[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
+  const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
 
   useEffect(() => {
     if (!value.providerId) {
@@ -320,19 +342,25 @@ function ProviderModelPicker({
         <select
           value={value.providerId}
           onChange={(e) => {
-            const p = providers.find((pr) => pr.id === e.target.value);
+            const p = providers.find((pr) => pr.id === e.target.value && !pr.suspended);
+            if (!p) return;
             onChange({
               providerId: e.target.value,
               model: p?.last_model || p?.default_model || "",
               reasoningEffort: p ? resolveReasoningEffort(undefined, p, role) : "",
+              permission: p ? resolvePermission(undefined, p) : {},
             });
           }}
         >
-          {providers.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
+          {providers.map((p) => {
+            const q = summarizeProvider(quotaStatus, p);
+            return (
+              <option key={p.id} value={p.id} disabled={p.suspended}>
+                {optionLabelWithQuota(p.name, q, t)}
+                {p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
+              </option>
+            );
+          })}
         </select>
       </div>
       <div className="ns-modal-row">
@@ -343,7 +371,7 @@ function ProviderModelPicker({
         >
           {models.map((m) => (
             <option key={m} value={m}>
-              {m}
+              {optionLabelWithQuota(m, selectedQuota, t)}
             </option>
           ))}
           {!models.length && (
@@ -366,6 +394,40 @@ function ProviderModelPicker({
           </select>
         </div>
       ) : null}
+      {selectedProvider?.permission_options &&
+      Object.keys(selectedProvider.permission_options).length > 0
+        ? Object.entries(selectedProvider.permission_options).map(([axis, allowed]) => {
+            const def = selectedProvider.default_permission?.[axis];
+            const current = value.permission[axis] ?? "";
+            return (
+              <div className="ns-modal-row" key={axis}>
+                <label>
+                  {t("newSession.permission")} ({t(`permission.axis.${axis}`, { defaultValue: axis })})
+                </label>
+                <select
+                  value={current}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    const next: Permission = { ...value.permission };
+                    if (v === "") delete next[axis];
+                    else next[axis] = v;
+                    onChange({ ...value, permission: next });
+                  }}
+                >
+                  <option value="">
+                    {t("permission.inherit", { defaultValue: "Inherit default" })}
+                    {def ? ` (${def})` : ""}
+                  </option>
+                  {allowed.map((v) => (
+                    <option key={v} value={v}>
+                      {t(`permission.value.${v}`, { defaultValue: v })}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })
+        : null}
     </div>
   );
 }
@@ -396,11 +458,15 @@ function MachineNodePicker({
             // Offline state only meaningful for non-local nodes; the
             // local backend (us) is always "connected" by construction.
             const offline = !isLocal && m.state !== "connected";
+            const versionMismatch = !isLocal && m.version_status === "mismatch";
+            const dirty = isLocal ? m.primary_dirty : m.app_dirty;
             return (
-              <option key={m.id} value={m.id}>
+              <option key={m.id} value={m.id} disabled={versionMismatch}>
                 {m.id}
                 {isLocal ? ` (${t("newSession.machinePrimary")})` : ""}
                 {offline ? ` — ${t("newSession.machineOffline")}` : ""}
+                {versionMismatch ? ` — ${t("newSession.machineVersionMismatch")}` : ""}
+                {dirty ? ` — ${t("newSession.machineDirty")}` : ""}
               </option>
             );
           })}
@@ -423,6 +489,7 @@ export function NewSessionModal({
   teamEnabled = true,
   machineNodesEnabled = true,
   browserHarnessEnabled: browserHarnessExtensionEnabled = true,
+  allowOfflineCreate = false,
   extensionOptions = EMPTY_EXTENSION_OPTIONS,
 }: Props) {
   const { t } = useTranslation();
@@ -457,8 +524,8 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
-  const [main, setMain] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "" });
-  const [worker, setWorker] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "" });
+  const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
+  const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [
       ...(
@@ -466,14 +533,14 @@ export function NewSessionModal({
           ? [
               {
                 id: "browser_harness_enabled",
-                extensionId: "ofek-dev.browser-harness",
+                extensionId: extId("browserHarness"),
                 label: t("orchestration.browserHarness"),
                 defaultValue: true,
                 applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessEnabled: value }),
                 children: [
                   {
                     id: "browser_harness_headless",
-                    extensionId: "ofek-dev.browser-harness",
+                    extensionId: extId("browserHarness"),
                     label: t("orchestration.browserHarnessHeadless"),
                     defaultValue: true,
                     applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessHeadless: value }),
@@ -552,8 +619,8 @@ export function NewSessionModal({
     const cached = readProviderCache();
     if (cached) {
       setProviders(cached.providers);
-      setMain(resolveRoleConfig(defaults.main, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "main"));
-      setWorker(resolveRoleConfig(defaults.worker, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "worker"));
+      setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "main"));
+      setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "worker"));
     }
     trackedFetch("providers:list", `${API}/api/providers`)
       .then((r) => r.json())
@@ -563,8 +630,8 @@ export function NewSessionModal({
         cacheProviders(list, activeId);
         setProviders(list);
         const modelsByProvider = readProviderCache()?.modelsByProvider ?? {};
-        setMain(resolveRoleConfig(defaults.main, list, activeId, modelsByProvider, "main"));
-        setWorker(resolveRoleConfig(defaults.worker, list, activeId, modelsByProvider, "worker"));
+        setMain(resolveRuntimeProfile(defaults.main, list, activeId, modelsByProvider, "main"));
+        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, modelsByProvider, "worker"));
       })
       .catch(() => {});
   }, [open, browserHarnessExtensionEnabled, sessionExtensionOptions]);
@@ -628,7 +695,8 @@ export function NewSessionModal({
   // the modal forces "native". The main-role provider picker also
   // filters to capable providers when in manager mode so the user
   // can't pick a Gemini as the manager.
-  const managerCapableProviders = providers.filter(
+  const activeProviders = providers.filter((p) => !p.suspended);
+  const managerCapableProviders = activeProviders.filter(
     (p) => p.supports_manager_mode,
   );
   const managerModeAvailable = teamEnabled && managerCapableProviders.length > 0;
@@ -654,7 +722,7 @@ export function NewSessionModal({
   useEffect(() => {
     if (effectiveOrchestrationMode !== "team") return;
     if (!main.providerId) return;
-    const cur = providers.find((p) => p.id === main.providerId);
+    const cur = activeProviders.find((p) => p.id === main.providerId);
     if (cur && cur.supports_manager_mode) return;
     const fb = managerCapableProviders[0];
     if (fb) {
@@ -662,9 +730,10 @@ export function NewSessionModal({
         providerId: fb.id,
         model: fb.default_model,
         reasoningEffort: resolveReasoningEffort(undefined, fb, "main"),
+        permission: resolvePermission(main, fb),
       });
     }
-  }, [effectiveOrchestrationMode, main.providerId, providers, managerCapableProviders]);
+  }, [effectiveOrchestrationMode, main.providerId, activeProviders, managerCapableProviders]);
 
   const addAttachments = useCallback((files: File[]) => {
     files.forEach((file) => {
@@ -687,6 +756,8 @@ export function NewSessionModal({
   const selectedFolderLabel = folderId
     ? (folderPathMap.get(folderId) ?? t("session.unfiled"))
     : t("session.unfiled");
+  const missingProviderConfig =
+    !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
   const handleCreate = () => {
     const effectiveCwd = cwd || defaultCwd;
@@ -964,10 +1035,10 @@ export function NewSessionModal({
           </div>
 
           {effectiveOrchestrationMode === "native" && (
-            <ProviderModelPicker
-              label={t("newSession.sessionProvider")}
+            <RuntimeProfilePicker
+              label={t("newSession.sessionRuntimeProfile")}
               role="main"
-              providers={providers}
+              providers={activeProviders}
               value={main}
               onChange={setMain}
             />
@@ -975,17 +1046,17 @@ export function NewSessionModal({
 
           {effectiveOrchestrationMode === "team" && (
             <>
-              <ProviderModelPicker
-                label={t("newSession.managerProvider")}
+              <RuntimeProfilePicker
+                label={t("newSession.managerRuntimeProfile")}
                 role="main"
                 providers={managerCapableProviders}
                 value={main}
                 onChange={setMain}
               />
-              <ProviderModelPicker
-                label={t("newSession.workerProvider")}
+              <RuntimeProfilePicker
+                label={t("newSession.workerRuntimeProfile")}
                 role="worker"
-                providers={providers}
+                providers={activeProviders}
                 value={worker}
                 onChange={setWorker}
               />
@@ -1016,7 +1087,7 @@ export function NewSessionModal({
             className="btn-primary"
             opId="session:create"
             onClick={handleCreate}
-            extraDisabled={!(cwd || defaultCwd)}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
@@ -1069,4 +1140,4 @@ export function NewSessionModal({
   );
 }
 
-export type { SessionConfig, RoleConfig };
+export type { SessionConfig, RuntimeProfile };

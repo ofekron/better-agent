@@ -34,6 +34,49 @@ async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
 }
 
 describe("sessions CRUD + subscribe lifecycle", () => {
+  it("changes a newly created empty session model before the first prompt", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+        models: [
+          { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+          { id: "claude-opus-4-7", name: "Opus 4.7" },
+        ],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    await h.click(".input-overflow-trigger");
+    await h.click(".session-selector-picker-button");
+    const selects = h.$$(".session-model-picker-field select") as HTMLSelectElement[];
+    const modelSelect = selects[1];
+    expect(modelSelect).toBeDefined();
+    fireEvent.change(modelSelect, { target: { value: "claude-opus-4-7" } });
+    await h.clickByText("OK");
+
+    expect(h.restCalls).toContainEqual(
+      expect.objectContaining({
+        method: "PATCH",
+        path: "/api/sessions/sess-1/selectors",
+        body: expect.objectContaining({ model: "claude-opus-4-7" }),
+      }),
+    );
+
+    await h.typeAndSend("first prompt after model change");
+    expect(await waitForSend(h, "first prompt after model change")).toEqual(
+      expect.objectContaining({ model: "claude-opus-4-7" }),
+    );
+    h.unmount();
+  });
+
   it("clicking '+ New' creates a session via REST and selects it", async () => {
     const h = await renderApp({
       seed: {
@@ -340,6 +383,86 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("opens a prefilled new-session modal from the composer with attachments", async () => {
+    const session = makeSession({ id: "source", messages: [] });
+    const h = await renderApp({
+      seed: {
+        sessions: [session],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(session.id);
+
+    const prompt = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "send elsewhere");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const attach = h.$('.input-row input[type="file"]') as HTMLInputElement;
+    const file = new File(["payload"], "payload.txt", { type: "text/plain" });
+    Object.defineProperty(attach, "files", { value: [file], configurable: true });
+    attach.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(await waitForSelector(h, ".file-preview-item")).not.toBeNull();
+
+    await h.click(".input-overflow-trigger");
+    await h.click('[data-testid="send-to-new-session-btn"]');
+    await h.flush();
+
+    const modalPrompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    expect(modalPrompt.value).toBe("send elsewhere");
+    expect(h.$(".modal-content .file-preview-item .file-preview-name")?.textContent).toBe("payload.txt");
+
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    expect(await waitForSend(h, "send elsewhere")).toEqual(
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "send elsewhere",
+        app_session_id: "sess-2",
+        files: [expect.objectContaining({
+          name: "payload.txt",
+          data: "cGF5bG9hZA==",
+          media_type: "text/plain",
+        })],
+      }),
+    );
+    expect(h.toJSON().input.text).toBe("");
+    h.unmount();
+  });
+
+  it("opens a prefilled new-session modal from the composer prompt", async () => {
+    const session = makeSession({ id: "source", messages: [] });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    const prompt = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "start this elsewhere");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await h.click(".input-overflow-trigger");
+    const sendToNew = h.$('[data-testid="send-to-new-session-btn"]') as HTMLButtonElement | null;
+    expect(sendToNew).not.toBeNull();
+    expect(sendToNew!.disabled).toBe(false);
+    await h.click('[data-testid="send-to-new-session-btn"]');
+    await h.flush();
+
+    const modalPrompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    expect(modalPrompt.value).toBe("start this elsewhere");
+    expect(h.toJSON().input.text).toBe("");
+    h.unmount();
+  });
+
   it("renders selected file attachment on the optimistic user bubble", async () => {
     const session = makeSession({ id: "s-attach", messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });
@@ -584,6 +707,55 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("does not render backend internal send rows as queued prompts", async () => {
+    const session = makeSession({ id: "s1" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: "s1",
+        patch: {
+          queued_prompts: [{
+            id: "internal-send",
+            lifecycle_msg_id: "life-internal-send",
+            content: "already sent",
+            kind: "send",
+            queue_position: 0,
+          }],
+        },
+        originated_by: "OTHER_TAB",
+      },
+    });
+    await h.flush();
+
+    expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: "s1",
+        patch: {
+          queued_prompts: [{
+            id: "visible-queued",
+            lifecycle_msg_id: "life-visible-queued",
+            content: "actually queued",
+            kind: "queued_behind",
+            queue_position: 1,
+          }],
+        },
+        originated_by: "OTHER_TAB",
+      },
+    });
+    await h.flush();
+
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain(
+      "actually queued",
+    );
+    h.unmount();
+  });
+
   it("clicking the row's × deletes the session and removes it from the sidebar", async () => {
     const a = makeSession({ id: "a" });
     const b = makeSession({ id: "b", name: "session b" });
@@ -611,24 +783,26 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
-  it("Fork button POSTs /fork_and_send with the typed prompt once a claude_sid exists", async () => {
+  it("Fork button POSTs /fork_and_send with the typed prompt once an agent sid exists", async () => {
     const session = makeSession({
       id: "parent",
-      manager_claude_session_id: "claude-sid-1",
+      agent_session_id: "agent-sid-1",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
-    // Type a prompt — Fork is gated on draft.trim() being non-empty.
     const ta = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
-    // Set the value via React's input event so the controlled draft updates.
     Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype,
       "value",
     )!.set!.call(ta, "explore alternative");
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     await h.flush();
-    await h.clickByText(/^Fork$/);
+    await h.click(".input-overflow-trigger");
+    const fork = h.$('[data-testid="fork-btn"]') as HTMLButtonElement | null;
+    expect(fork).not.toBeNull();
+    expect(fork!.disabled).toBe(false);
+    await h.click('[data-testid="fork-btn"]');
 
     expect(
       h.restCalls.find(
@@ -639,14 +813,28 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("Fork button is disabled before any turn (no claude_sid)", async () => {
-    const session = makeSession({ manager_claude_session_id: null });
+    const session = makeSession({ agent_session_id: null });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const fork = Array.from(h.$$("button")).find((b) => b.textContent === "Fork");
-    expect(fork).toBeDefined();
-    // Disabled by canFork=false (claude_sid missing) regardless of draft.
-    expect((fork as HTMLButtonElement).disabled).toBe(true);
+    const ta = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(ta, "cannot fork yet");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.flush();
+    await h.click(".input-overflow-trigger");
+
+    const fork = h.$('[data-testid="fork-btn"]') as HTMLButtonElement | null;
+    expect(fork).not.toBeNull();
+    expect(fork!.disabled).toBe(true);
+    expect(
+      h.restCalls.find(
+        (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/fork_and_send`,
+      ),
+    ).toBeUndefined();
     h.unmount();
   });
 

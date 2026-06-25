@@ -193,31 +193,58 @@ async def main() -> int:
             ln for ln in events_path.read_text(encoding="utf-8").splitlines()
             if ln.strip()
         ]
-        has_final = any(
-            json.loads(ln).get("data", {}).get("type") == "assistant"
-            for ln in final_lines
-        )
-        if has_final:
-            print(f"{PASS}  terminal assistant message written ({len(final_lines)} total events)")
+        # The terminal assistant message is agy's clean print-mode stdout,
+        # appended LAST with its own uuid so it renders after the tool calls.
+        agent_msgs = []
+        for ln in final_lines:
+            ev = json.loads(ln)
+            if ev.get("type") == "agent_message":
+                c = ev["data"]["message"]["content"][0]
+                agent_msgs.append((ev["data"]["uuid"], c.get("text", "") if isinstance(c, dict) else ""))
+        non_empty = [t for _, t in agent_msgs if t]
+        if non_empty and non_empty[-1] == "final agy answer":
+            print(f"{PASS}  clean stdout answer emitted ('final agy answer')")
         else:
-            print(f"{FAIL}  no terminal assistant message in session_events.jsonl")
+            print(f"{FAIL}  terminal text should be clean stdout 'final agy answer', "
+                  f"got {non_empty!r}")
             failures += 1
 
-        # (3) Idempotency: no duplicate render-tree uuids across the streamed
-        # + final-flush emission (deterministic uuid5 means each logical event
-        # appears once; final assistant message has its own seed).
-        uuids = []
+        # (3) Ordering: the final answer must be the LAST agent_message with its
+        # OWN uuid. Pre-fix the runner emitted an empty placeholder first and
+        # reused its uuid for the answer, so apply_event replaced the empty
+        # bubble at position 0 and the answer rendered at the TOP of the turn
+        # (above the tools). Post-fix there is no placeholder and no uuid reuse.
+        empty_text_bubbles = [
+            (u, t) for u, t in agent_msgs
+            if t == "" and agent_msgs[0] == (u, t)
+        ]
+        answer_uuid = agent_msgs[-1][0] if agent_msgs else None
+        answer_is_last = bool(non_empty) and agent_msgs[-1][1] == "final agy answer"
+        answer_uuid_unique = answer_uuid not in [u for u, _ in agent_msgs[:-1]]
+        if not empty_text_bubbles and answer_is_last and answer_uuid_unique:
+            print(f"{PASS}  final answer appended last with a unique uuid "
+                  f"(no leading placeholder)")
+        else:
+            print(f"{FAIL}  answer misordered: empty_leading="
+                  f"{bool(empty_text_bubbles)} answer_is_last={answer_is_last} "
+                  f"answer_uuid_unique={answer_uuid_unique}")
+            failures += 1
+
+        # (4) Idempotency: every event uuid must be unique now that the
+        # placeholder/answer uuid-reuse is gone.
+        from collections import Counter
+        all_uuids = []
         for ln in final_lines:
             ev = json.loads(ln)
             uid = runner_agy._event_uuid_holder(ev)
             if uid and uid.get("uuid"):
-                uuids.append(uid["uuid"])
-        dupes = len(uuids) - len(set(uuids))
-        if dupes == 0:
-            print(f"{PASS}  no duplicate event uuids ({len(uuids)} uuids)")
+                all_uuids.append(uid["uuid"])
+        counts = Counter(all_uuids)
+        dupes = {u: c for u, c in counts.items() if c > 1}
+        if not dupes:
+            print(f"{PASS}  no duplicate event uuids ({len(all_uuids)} uuids)")
         else:
-            print(f"{FAIL}  {dupes} duplicate event uuid(s) — streamed + final "
-                  f"flush are duplicating in the render tree")
+            print(f"{FAIL}  duplicate uuids: {dupes}")
             failures += 1
 
         return 1 if failures else 0

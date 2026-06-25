@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -11,14 +12,29 @@ from typing import Any
 from env_compat import get_env, require_env
 from mcp.server.fastmcp import FastMCP
 
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    DEFAULT_ASK_MODE,
+    normalize_ask_mode,
+)
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION,
+    CHAT_DESCRIPTION,
+    CREATE_CHAT_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION,
+    DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION,
+    LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION,
+    SET_CHAT_SENDER_POLICY_DESCRIPTION,
 )
+
+
+import chat_store
+from provider_catalog_mcp import available_provider_models_response
 
 
 _LONG_TIMEOUT = 24 * 60 * 60  # fork runs / ask waits / approval can be long
@@ -41,10 +57,17 @@ def _env_required(name: str) -> str:
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "chat",
+    "create_chat",
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "delete_chat",
+    "ensure_named_worker",
+    "list_available_provider_models",
     "mssg",
+    "read_chat_history",
+    "set_chat_sender_policy",
 })
 
 
@@ -74,6 +97,38 @@ def _post_json(endpoint: str, payload: dict, timeout: float) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
+def _post_mcp_job(endpoint: str, operation: str, payload: dict, timeout: float) -> dict[str, Any]:
+    job_id = f"mcp_{uuid.uuid4().hex}"
+    fire_payload = {**payload, "_mcp_job_id": job_id, "_mcp_job_wait": 0}
+    deadline = time.monotonic() + max(0.0, timeout)
+    try:
+        response = _post_json(endpoint, fire_payload, timeout=min(30.0, max(1.0, timeout)))
+    except Exception:
+        response = _post_json(
+            "/api/internal/mcp-jobs/results",
+            {"operation": operation, "id": job_id, "_mcp_job_wait": 0},
+            timeout=30.0,
+        )
+    while isinstance(response, dict) and response.get("ready") is False:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return response
+        time.sleep(min(1.0, max(0.05, remaining)))
+        response = _post_json(
+            "/api/internal/mcp-jobs/results",
+            {
+                "operation": operation,
+                "id": job_id,
+                "_mcp_job_wait": min(5.0, max(0.0, remaining)),
+            },
+            timeout=min(30.0, max(1.0, remaining)),
+        )
+    if isinstance(response, dict) and response.get("ready") is True and "result" in response:
+        result = response.get("result")
+        return result if isinstance(result, dict) else {"success": False, "error": "MCP job returned invalid result"}
+    return response
+
+
 def _safe_result(fn):
     """Wrap a tool body so HTTP/infra errors come back as {success: False}
     instead of crashing the stdio MCP server."""
@@ -87,17 +142,75 @@ def _safe_result(fn):
     return wrapper
 
 
-def mssg_response(target_session_id: str, message: str) -> dict[str, Any]:
+def _communication_payload(
+    target_session_id: str,
+    target_worker_id: str,
+    target_worker_pool: str,
+    pool_affinity_key: str,
+    message: str,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    collapse_key: str = "",
+    collapse_policy: str = "",
+) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
+    target_worker_id = (target_worker_id or "").strip()
+    target_worker_pool = (target_worker_pool or "").strip()
+    pool_affinity_key = (pool_affinity_key or "").strip()
     message = (message or "").strip()
-    if not target_session_id or not message:
-        return {"success": False, "error": "target_session_id and message are required"}
+    targets = [target for target in (target_session_id, target_worker_id, target_worker_pool) if target]
+    if len(targets) != 1 or not message:
+        return {"success": False, "error": "exactly one target and message are required"}
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
-    return _post_json("/api/internal/mssg", {
+    return {
         "sender_session_id": sender_session_id,
         "target_session_id": target_session_id,
+        "target_worker_id": target_worker_id,
+        "target_worker_pool": target_worker_pool,
+        "pool_affinity_key": pool_affinity_key,
         "message": message,
-    }, timeout=30.0)
+        "provider_id": (provider_id or "").strip() or None,
+        "model": (model or "").strip(),
+        "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "collapse_key": (collapse_key or "").strip(),
+        "collapse_policy": (collapse_policy or "").strip(),
+    }
+
+
+def mssg_response(
+    message: str,
+    target_session_id: str = "",
+    target_worker_id: str = "",
+    target_worker_pool: str = "",
+    pool_affinity_key: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    collapse_key: str = "",
+    collapse_policy: str = "",
+) -> dict[str, Any]:
+    payload = _communication_payload(
+        target_session_id,
+        target_worker_id,
+        target_worker_pool,
+        pool_affinity_key,
+        message,
+        provider_id,
+        model,
+        reasoning_effort,
+        collapse_key,
+        collapse_policy,
+    )
+    if payload.get("success") is False:
+        return payload
+    return _post_mcp_job("/api/internal/mssg", "mssg", payload, timeout=30.0)
+
+
+def _resolve_cwd(cwd: str) -> str:
+    """cwd override-or-inherit: use the caller-supplied cwd if provided,
+    otherwise inherit the calling session's cwd."""
+    return (cwd or "").strip() or _env("BETTER_CLAUDE_CWD")
 
 
 def delegate_task_response(
@@ -107,6 +220,9 @@ def delegate_task_response(
     model: str = "",
     reasoning_effort: str = "",
     sub_session: bool = True,
+    cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -119,51 +235,73 @@ def delegate_task_response(
         return {"success": False, "error": "task is required"}
     target = (target_session_id or "").strip()
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
-    return _post_json("/api/internal/delegate-task", {
+    return _post_mcp_job("/api/internal/delegate-task", "delegate-task", {
         "sender_session_id": sender_session_id,
         "task": task,
         "target_session_id": target or None,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "sub_session": sub_session is not False,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=_LONG_TIMEOUT)
 
 
 def ask_response(
-    target_session_id: str,
     message: str,
+    target_session_id: str = "",
+    target_worker_id: str = "",
+    target_worker_pool: str = "",
+    pool_affinity_key: str = "",
     run_mode: str = "direct",
     worker_description: str = "",
     worker_registry_cwd: str = "",
     ephemeral: bool = False,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    mode: str = DEFAULT_ASK_MODE,
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
+    target_worker_id = (target_worker_id or "").strip()
+    target_worker_pool = (target_worker_pool or "").strip()
+    pool_affinity_key = (pool_affinity_key or "").strip()
     message = (message or "").strip()
-    if not target_session_id or not message:
-        return {"success": False, "error": "target_session_id and message are required"}
+    if not any((target_session_id, target_worker_id, target_worker_pool)) or not message:
+        return {"success": False, "error": "one target and message are required"}
     run_mode = (run_mode or "direct").strip() or "direct"
     if run_mode not in ("direct", "fork"):
         return {"success": False, "error": "run_mode must be 'direct' or 'fork'"}
+    try:
+        mode = normalize_ask_mode(mode)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+        return {"success": False, "error": "async ask mode requires run_mode='direct'"}
+    if run_mode == "fork" and not target_session_id:
+        return {"success": False, "error": "run_mode='fork' requires target_session_id"}
     if ephemeral and run_mode != "fork":
         return {"success": False, "error": "ephemeral is only valid for run_mode='fork'"}
 
     # The manager session is both the team-message sender and the fork caller.
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
-    model = _env("BETTER_CLAUDE_MODEL")
+    selected_model = (model or "").strip() or _env("BETTER_CLAUDE_MODEL")
     cwd = _env("BETTER_CLAUDE_CWD")
 
     if run_mode == "fork":
         worker_description = (worker_description or "").strip()
         registry_cwd = worker_registry_cwd.strip()
         client_delegation_id = f"del_{uuid.uuid4().hex[:10]}"
-        return _post_json("/api/internal/ask-fork", {
+        return _post_mcp_job("/api/internal/ask-fork", "ask-fork", {
             "app_session_id": sender_session_id,
             "instructions": message,
             "worker_session_id": target_session_id,
             "worker_description": worker_description,
-            "model": model,
+            "model": selected_model,
+            "provider_id": (provider_id or "").strip() or None,
+            "reasoning_effort": (reasoning_effort or "").strip() or None,
             "cwd": cwd,
             "client_delegation_id": client_delegation_id,
             "run_mode": "fork",
@@ -172,11 +310,18 @@ def ask_response(
         }, timeout=_LONG_TIMEOUT)
 
     ask_id = f"ask_{uuid.uuid4().hex[:10]}"
-    return _post_json("/api/internal/ask", {
+    return _post_mcp_job("/api/internal/ask", "ask", {
         "sender_session_id": sender_session_id,
         "target_session_id": target_session_id,
+        "target_worker_id": target_worker_id,
+        "target_worker_pool": target_worker_pool,
+        "pool_affinity_key": pool_affinity_key,
         "message": message,
         "ask_id": ask_id,
+        "mode": mode,
+        "provider_id": (provider_id or "").strip() or None,
+        "model": (model or "").strip(),
+        "reasoning_effort": (reasoning_effort or "").strip() or None,
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -185,6 +330,9 @@ def create_worker_response(
     justification: str,
     orchestration_mode: str,
     node_id: str = "",
+    cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     worker_description = (worker_description or "").strip()
     justification = (justification or "").strip()
@@ -205,10 +353,69 @@ def create_worker_response(
         "worker_description": worker_description,
         "justification": justification,
         "orchestration_mode": orchestration_mode,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "client_request_id": client_request_id,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=_LONG_TIMEOUT)
+
+
+def ensure_named_worker_response(
+    name: str,
+    orchestration_mode: str,
+    cwd: str = "",
+    provision_prompt: str = "",
+    description: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    node_id: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    name = (name or "").strip()
+    cwd = _resolve_cwd(cwd)
+    mode = (orchestration_mode or "").strip()
+    if not name or not mode:
+        return {"success": False, "error": "name and orchestration_mode are required"}
+    if mode == "manager":
+        mode = "team"
+    if mode not in ("team", "native"):
+        return {"success": False, "error": "orchestration_mode must be 'team' or 'native'"}
+    spec: dict[str, Any] = {
+        "role_key": name,
+        "description": (description or "").strip() or f"worker:{name}",
+        "orchestration_mode": mode,
+        "node_id": node_id.strip() or None,
+        "tags": [name],
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
+    }
+    if (provision_prompt or "").strip():
+        spec["provision_prompt"] = provision_prompt.strip()
+    if (provider_id or "").strip():
+        spec["provider_id"] = provider_id.strip()
+    if (model or "").strip():
+        spec["model"] = model.strip()
+    if (reasoning_effort or "").strip():
+        spec["reasoning_effort"] = reasoning_effort.strip()
+    result = _post_json("/api/internal/workers/provision", {
+        "cwd": cwd,
+        "workers": [spec],
+    }, timeout=_LONG_TIMEOUT)
+    workers = (result or {}).get("workers") or []
+    if not workers:
+        return {"success": False, "error": "provision returned no worker"}
+    worker = workers[0]
+    return {
+        "success": True,
+        "agent_session_id": worker.get("agent_session_id"),
+        "name": worker.get("name"),
+        "created": bool(worker.get("created")),
+        "orchestration_mode": worker.get("orchestration_mode"),
+        "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+    }
 
 
 def create_session_response(
@@ -218,6 +425,10 @@ def create_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -230,12 +441,15 @@ def create_session_response(
     return _post_json("/api/internal/create-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
         "name": name,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "orchestration_mode": mode,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
+        "mcp_servers": mcp_servers or [],
     }, timeout=30.0)
 
 
@@ -245,15 +459,22 @@ def create_sub_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
         "description": (description or "").strip(),
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
+        "mcp_servers": mcp_servers or [],
     }, timeout=30.0)
 
 
@@ -263,17 +484,22 @@ def build_server() -> FastMCP:
         "communicate",
         instructions=(
             "Team tools for Better Agent sessions: mssg (queued message, "
-            "joined to your turn), delegate_task (detached handoff — offload "
+            "fire-and-forget), ask (waits by default; mode="
+            "'continue_and_expect_mssg_back_async' continues and expects a "
+            "later mssg reply), delegate_task "
+            "(detached handoff — offload "
             "heavy tangential/off-topic real work so you can remain focused; "
             "not for reviews; auto-routing may run session search and has a "
             "cost; set target_session_id only when you already know the target "
-            "to bypass routing), ask (synchronous; run_mode='fork' runs an "
+            "to bypass routing), run_mode='fork' runs an "
             "isolated branch from existing session context for reviews/checks; "
             "do not use fork for brand-new sessions), create_session (standalone "
             "session; orchestration_mode='team' is for complex tasks that need "
             "their own coordinator), create_sub_session (hidden native "
             "sub-session; send work to it later with mssg or ask), and "
-            "create_worker (team worker, may require approval). Leave provider/"
+            "create_worker (team worker, may require approval), and chat/create_chat/"
+            "delete_chat (a shared team chat room: every session reads the same chat; "
+            "chat returns only messages newer than your last-read position). Leave provider/"
             "model/reasoning selectors unprovided unless a specific different "
             "provider or model is truly required."
         ),
@@ -281,8 +507,109 @@ def build_server() -> FastMCP:
 
     if "mssg" not in disabled_tools:
         @server.tool(description=MSSG_DESCRIPTION)
-        def mssg(target_session_id: str, message: str) -> dict[str, Any]:
-            return _safe_result(mssg_response)(target_session_id, message)
+        def mssg(
+            message: str,
+            target_session_id: str = "",
+            target_worker_id: str = "",
+            target_worker_pool: str = "",
+            pool_affinity_key: str = "",
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+            collapse_key: str = "",
+            collapse_policy: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(mssg_response)(
+                message,
+                target_session_id,
+                target_worker_id,
+                target_worker_pool,
+                pool_affinity_key,
+                provider_id,
+                model,
+                reasoning_effort,
+                collapse_key,
+                collapse_policy,
+            )
+
+    if "list_available_provider_models" not in disabled_tools:
+        @server.tool(description=LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION)
+        def list_available_provider_models(
+            provider: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(available_provider_models_response)(
+                provider,
+                model,
+                reasoning_effort,
+            )
+
+    if "chat" not in disabled_tools:
+        @server.tool(description=CHAT_DESCRIPTION)
+        def chat(
+            chat_id: str,
+            message: str = "",
+            history_mode: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.post_and_read(
+                chat_id=chat_id,
+                reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                message=message,
+                history_mode=history_mode,
+            ))()
+
+    if "read_chat_history" not in disabled_tools:
+        @server.tool(description=(
+            "Read shared chat history without changing your unread cursor."
+        ))
+        def read_chat_history(
+            chat_id: str,
+            limit: int = 50,
+            before_seq: int | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.read_history(
+                chat_id=chat_id,
+                limit=limit,
+                before_seq=before_seq,
+            ))()
+
+    if "create_chat" not in disabled_tools:
+        @server.tool(description=CREATE_CHAT_DESCRIPTION)
+        def create_chat(
+            chat_id: str,
+            name: str = "",
+            new_readers_see_history: bool = True,
+            sender_policy: str = "",
+            sender_ids: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.create_chat(
+                chat_id=chat_id,
+                created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                name=name,
+                new_readers_see_history=new_readers_see_history,
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
+            ))()
+
+    if "set_chat_sender_policy" not in disabled_tools:
+        @server.tool(description=SET_CHAT_SENDER_POLICY_DESCRIPTION)
+        def set_chat_sender_policy(
+            chat_id: str,
+            sender_policy: str,
+            sender_ids: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.set_sender_policy(
+                chat_id=chat_id,
+                owner_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
+            ))()
+
+    if "delete_chat" not in disabled_tools:
+        @server.tool(description=DELETE_CHAT_DESCRIPTION)
+        def delete_chat(chat_id: str) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.delete_chat(chat_id))()
 
     if "delegate_task" not in disabled_tools:
         @server.tool(description=DELEGATE_TASK_DESCRIPTION)
@@ -293,6 +620,9 @@ def build_server() -> FastMCP:
             model: str = "",
             reasoning_effort: str = "",
             sub_session: bool = True,
+            cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(delegate_task_response)(
                 task,
@@ -301,6 +631,9 @@ def build_server() -> FastMCP:
                 model,
                 reasoning_effort,
                 sub_session,
+                cwd,
+                folder_id,
+                tag_ids,
             )
 
     if "create_session" not in disabled_tools:
@@ -312,6 +645,10 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
+            mcp_servers: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_session_response)(
                 name,
@@ -320,6 +657,10 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                cwd,
+                folder_id,
+                tag_ids,
+                mcp_servers,
             )
 
     if "create_sub_session" not in disabled_tools:
@@ -330,6 +671,10 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
+            mcp_servers: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_sub_session_response)(
                 description,
@@ -337,21 +682,43 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                cwd,
+                folder_id,
+                tag_ids,
+                mcp_servers,
             )
 
     if "ask" not in disabled_tools:
         @server.tool(description=ASK_DESCRIPTION)
         def ask(
-            target_session_id: str,
             message: str,
+            target_session_id: str = "",
+            target_worker_id: str = "",
+            target_worker_pool: str = "",
+            pool_affinity_key: str = "",
             run_mode: str = "direct",
             worker_description: str = "",
             worker_registry_cwd: str = "",
             ephemeral: bool = False,
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+            mode: str = DEFAULT_ASK_MODE,
         ) -> dict[str, Any]:
             return _safe_result(ask_response)(
-                target_session_id, message, run_mode, worker_description,
-                worker_registry_cwd, ephemeral,
+                message,
+                target_session_id,
+                target_worker_id,
+                target_worker_pool,
+                pool_affinity_key,
+                run_mode,
+                worker_description,
+                worker_registry_cwd,
+                ephemeral,
+                provider_id,
+                model,
+                reasoning_effort,
+                mode,
             )
 
     @server.tool(description=CREATE_WORKER_DESCRIPTION)
@@ -360,10 +727,34 @@ def build_server() -> FastMCP:
         justification: str,
         orchestration_mode: str,
         node_id: str = "",
+        cwd: str = "",
+        folder_id: str = "",
+        tag_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         return _safe_result(create_worker_response)(
-            worker_description, justification, orchestration_mode, node_id,
+            worker_description, justification, orchestration_mode, node_id, cwd,
+            folder_id, tag_ids,
         )
+
+    if "ensure_named_worker" not in disabled_tools:
+        @server.tool(description=ENSURE_NAMED_WORKER_DESCRIPTION)
+        def ensure_named_worker(
+            name: str,
+            orchestration_mode: str,
+            cwd: str = "",
+            provision_prompt: str = "",
+            description: str = "",
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+            node_id: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(ensure_named_worker_response)(
+                name, orchestration_mode, cwd, provision_prompt, description,
+                provider_id, model, reasoning_effort, node_id, folder_id, tag_ids,
+            )
 
     return server
 

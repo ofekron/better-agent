@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+
+from prompt_templates import render_prompt
 
 MAX_CAPABILITY_CONTEXTS = 20
 MAX_CAPABILITY_OUTPUTS = 20
 MAX_CAPABILITY_CONTENT_CHARS = 200_000
 MAX_CAPABILITY_FIELD_CHARS = 1_000
+_SOURCE_HEADING_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 
 def _clean_text(value: Any, field: str, *, required: bool = True, max_chars: int = MAX_CAPABILITY_FIELD_CHARS) -> str:
@@ -99,3 +103,42 @@ def provider_capability_contexts(
             "content": output["content"],
         })
     return selected
+
+
+def render_capability_context(contexts: Optional[list[dict]]) -> str:
+    blocks: list[str] = []
+    for item in contexts or []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        name = str(item.get("name") or "Capability")
+        category = str(item.get("category") or "capability")
+        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
+    if not blocks:
+        return ""
+    return render_prompt(
+        "runner/capability_context.md",
+        {"blocks": "\n\n".join(blocks)},
+    )
+
+
+def prompt_heading_for_source(source: Any) -> str:
+    if source == "mssg":
+        return "Message"
+    if source == "team_ask":
+        return "Ask"
+    if isinstance(source, str) and source.strip():
+        token = _SOURCE_HEADING_TOKEN_RE.sub("_", source.strip()).strip("_")[:80]
+        return f"Injected prompt ({token})" if token else "Injected prompt"
+    return "User prompt"
+
+
+def prepend_capability_context(prompt: str, inputs: dict) -> str:
+    context = render_capability_context(inputs.get("capability_contexts") or [])
+    if not context:
+        return prompt
+    if not prompt:
+        return context
+    return f"{context}\n\n## {prompt_heading_for_source(inputs.get('source'))}\n\n{prompt}"

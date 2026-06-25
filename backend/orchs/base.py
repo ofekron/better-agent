@@ -34,6 +34,8 @@ import perf
 from session_manager import manager as session_manager
 from user_msg_lifecycle import emit_received
 
+_ALL_TASKS_DONE_MARKER_TAG = "ALL_TASKS__DONE"
+
 
 def _sum_token_usage(usages: list[dict]) -> Optional[dict]:
     """Sum a list of token_usage dicts field-wise. Returns None if the
@@ -71,6 +73,7 @@ class ApplyEventCtx:
     user_msg: Optional[dict] = None
     root_id: Optional[str] = None
     run_id: Optional[str] = None
+    cwd_override: Optional[str] = None
 
 
 def _uid_idx_for(owner: dict, evs: list) -> dict:
@@ -87,10 +90,10 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
     lives on `owner["_uid_idx"]` and is stripped from
     disk snapshots by `session_store._strip_volatile_from_tree`.
 
-    Cheap validity check: a lazy compare of `len(idx)` against the
-    number of uuid-bearing events in `evs`. Catches structural drift
-    (someone replaced the whole list) without walking every event. Does
-    NOT catch the pathological "same length, different uuids" case —
+    Cheap validity check: reject caches whose size is impossible for
+    the current list. Callers still guard the specific cached index
+    before dereferencing. Does NOT catch the pathological
+    "same length, different uuids" case -
     that requires the mutating caller to `owner.pop('_uid_idx', None)`
     explicitly. Today the only callers that bypass `apply_event` and
     its mutator family are `session_manager.set_native_events` and
@@ -99,7 +102,8 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
     """
     idx = owner.get("_uid_idx")
     if idx is not None:
-        return idx
+        if len(idx) <= len(evs):
+            return idx
     idx = {}
     for i, e in enumerate(evs):
         eu = _event_uuid(e)
@@ -112,11 +116,15 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
 def _event_uuid(event: dict) -> Optional[str]:
     """Extract the claude event uuid from an event dict.
 
-    Handles legacy manager_event wrappers (`data.event.data.uuid`)
-    and the canonical agent_message shape (`data.uuid`).
+    Handles top-level event UUIDs, legacy manager_event wrappers
+    (`data.event.data.uuid`), and canonical agent_message shape
+    (`data.uuid`).
     """
     if not isinstance(event, dict):
         return None
+    uid = event.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
     data = event.get("data")
     if not isinstance(data, dict):
         return None
@@ -176,6 +184,25 @@ def _agent_message_text(data: dict) -> str:
     return "\n".join(parts)
 
 
+def _completed_items(current: list) -> list:
+    return [
+        {**item, "status": "completed"}
+        for item in current
+        if isinstance(item, dict)
+    ]
+
+
+def _complete_current_work_items(session_id: str) -> None:
+    current = session_manager.get_current_todos_snapshot(session_id)
+    completed = _completed_items(current)
+    if completed and completed != current:
+        session_manager.set_current_todos(session_id, completed)
+    current_tasks = session_manager.get_current_tasks_snapshot(session_id)
+    completed_tasks = _completed_items(current_tasks)
+    if completed_tasks and completed_tasks != current_tasks:
+        session_manager.set_current_tasks(session_id, completed_tasks)
+
+
 def _unwrap_typed_worker_envelope(event: dict) -> dict:
     if not isinstance(event, dict) or event.get("type") != "agent_message":
         return event
@@ -196,7 +223,7 @@ class OrchestrationStrategy(ABC):
     # Event types that land on msg.events (the narrow render tree).
     # DO NOT extend without auditing `_reconcile_msg_events_from_jsonl`.
     # `manager_event` kept for backward compat with pre-migration events.jsonl rows.
-    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "steer_prompt")
+    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "model_switched", "steer_prompt", "lifecycle_notice")
 
     # Hard caps on lifecycle accumulators so a `done` event that never
     # fires (orphan run, crashed handler, race between cancel and
@@ -408,6 +435,8 @@ class OrchestrationStrategy(ABC):
         model: str,
         cwd: str,
         ws_callback,
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         images: Optional[list] = None,
         files: Optional[list] = None,
         cli_prompt: Optional[str] = None,
@@ -415,6 +444,7 @@ class OrchestrationStrategy(ABC):
         user_initiated: bool = False,
         client_id: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
@@ -450,6 +480,8 @@ class OrchestrationStrategy(ABC):
             model=model,
             cwd=cwd,
             ws_callback=ws_callback,
+            provider_id=provider_id,
+            reasoning_effort=reasoning_effort,
             images=images,
             files=files,
             trace_step_name=self.trace_step_name,
@@ -459,6 +491,7 @@ class OrchestrationStrategy(ABC):
             source=source,
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
+            disabled_builtin_extensions=disabled_builtin_extensions,
             queue_item_id=queue_item_id,
             team_message=team_message,
             capability_contexts=capability_contexts,
@@ -509,15 +542,24 @@ class OrchestrationStrategy(ABC):
         Default no-op; manager pins `manager.session_id` on the msg."""
 
     @staticmethod
-    def _apply_ai_title(app_session_id: str, title: str) -> None:
-        """Rename the session to the Claude-provided AI title.
+    def _apply_agent_rename(
+        app_session_id: str, title: str, *, require_allowed: bool,
+    ) -> None:
+        """Rename the session to an agent-provided title.
 
-        Skips when the session already has the same name (Claude emits
-        ai-title many times per turn with an identical string).
+        `require_allowed=True` gates on the session's `agent_rename_allowed`
+        flag (the ai-title auto-naming path). Explicit `<SESSION_NAME>` tags
+        — emitted only when a mode prompt instructs the agent to name the
+        session — bypass the flag with `require_allowed=False`.
+
+        Skips when the session already has the same name (providers emit
+        the same title many times per turn / across streaming deltas).
         """
         from session_manager import manager as session_manager
         sess = session_manager.get_lite(app_session_id)
         if sess is None:
+            return
+        if require_allowed and not sess.get("agent_rename_allowed"):
             return
         if sess.get("name") == title:
             return
@@ -533,7 +575,9 @@ class OrchestrationStrategy(ABC):
         if metadata_type == "ai-title":
             title = data.get("aiTitle")
             if isinstance(title, str) and title.strip():
-                self._apply_ai_title(app_session_id, title.strip())
+                self._apply_agent_rename(
+                    app_session_id, title.strip(), require_allowed=True,
+                )
             return True
         if metadata_type == "file-history-snapshot":
             return True
@@ -562,6 +606,7 @@ class OrchestrationStrategy(ABC):
                 source="apply_event",
                 run_id=ctx.run_id,
                 message_id=msg_id,
+                cwd_override=ctx.cwd_override,
                 timeout=0,
             )
         except EventJournalWriteError as exc:
@@ -643,15 +688,15 @@ class OrchestrationStrategy(ABC):
             inner_data = inner.get("data") if isinstance(inner, dict) else None
             if isinstance(inner_data, dict):
                 from file_ref_resolver import (
-                    assume_exists_for_session, rewrite_event_data,
+                    assume_exists_for_node, rewrite_event_data,
                 )
                 try:
-                    sess = session_manager.get_lite(app_session_id) or {}
+                    cwd, node_id = session_manager.get_file_ref_context(app_session_id)
                     rewrite_event_data(
                         inner.get("type") or "unknown",
                         inner_data,
-                        sess.get("cwd"),
-                        assume_exists=assume_exists_for_session(sess),
+                        cwd,
+                        assume_exists=assume_exists_for_node(node_id),
                     )
                 except Exception:
                     import logging
@@ -662,15 +707,25 @@ class OrchestrationStrategy(ABC):
             return "worker_event", data
 
         from file_ref_resolver import (
-            assume_exists_for_session, rewrite_event_data,
+            assume_exists_for_node, extract_session_name, rewrite_event_data,
         )
+        # Agent-proposed session name MUST be extracted from RAW text HERE:
+        # on the live path this runs BEFORE apply_event on the same data
+        # dict, and rewrite_event_data below strips the complete
+        # <SESSION_NAME> tag. apply_event re-detects only for paths that
+        # skip this prepare step (crash-recovery replay).
+        session_name_tag = extract_session_name(_agent_message_text(norm_data))
+        if session_name_tag:
+            self._apply_agent_rename(
+                app_session_id, session_name_tag, require_allowed=False,
+            )
         try:
-            sess = session_manager.get_lite(app_session_id) or {}
+            cwd, node_id = session_manager.get_file_ref_context(app_session_id)
             rewrite_event_data(
                 etype,
                 data,
-                sess.get("cwd"),
-                assume_exists=assume_exists_for_session(sess),
+                cwd,
+                assume_exists=assume_exists_for_node(node_id),
             )
         except Exception:
             import logging
@@ -721,13 +776,16 @@ class OrchestrationStrategy(ABC):
                 )
         # Route to the panel; no-op when delegation_id absent or
         # panel missing (mutator handles both).
+        target_msg_id = msg_id
         if delegation_id and inner:
-            session_manager.apply_worker_panel_event(
-                app_session_id, msg_id, delegation_id, inner,
+            target_msg_id = (
+                session_manager.worker_panel_message_id(
+                    app_session_id, msg_id, str(delegation_id),
+                )
+                or msg_id
             )
-        if ctx.workers_list is not None:
-            session_manager.snapshot_workers(
-                app_session_id, msg_id, ctx.workers_list,
+            session_manager.apply_worker_panel_event(
+                app_session_id, target_msg_id, delegation_id, inner,
             )
         # events.jsonl gets the OUTER worker_event wrapper so
         # reconcile can re-apply through this same branch.
@@ -737,7 +795,7 @@ class OrchestrationStrategy(ABC):
             app_session_id=app_session_id,
             etype="worker_event",
             data=data,
-            msg_id=msg_id,
+            msg_id=target_msg_id,
             log_label="apply_event: worker_event ingest failed",
         )
 
@@ -804,6 +862,37 @@ class OrchestrationStrategy(ABC):
             msg_id=None,
             log_label="ingest_orphan failed",
         )
+
+
+    def _refresh_message_content_from_event_projection(self, msg: dict, event: dict) -> None:
+        from event_shape import (
+            extract_output_text,
+            project_content_snapshot,
+            strip_synthetic_events,
+        )
+
+        from event_shape import has_final_answer_event
+
+        # Final-marked events must project from the FULL event list so
+        # multiple finals concatenate with origin labels, and later
+        # non-final text can never clobber a final-marked snapshot.
+        # Finality is derived from the durable event data each time —
+        # no per-message latch, so live/replay/reconcile stay convergent.
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if data.get("final_answer") is not True:
+            content = extract_output_text(strip_synthetic_events([event]))
+            if content and not has_final_answer_event(self._events_list(msg)):
+                msg["content"] = content
+                msg["_content_dirty"] = False
+                return
+        events = self._events_list(msg)
+        if events:
+            projected = project_content_snapshot(events, msg.get("content"))
+            if projected != (msg.get("content") or ""):
+                msg["content"] = projected
+            msg["_content_dirty"] = False
+            return
+        msg["_content_dirty"] = True
 
 
     @perf.timed_fn("apply_event")
@@ -873,6 +962,9 @@ class OrchestrationStrategy(ABC):
         # form.  Use it for both the render tree AND events.jsonl writes.
         norm_etype = normalized.get("type") or etype or "unknown"
         norm_data = normalized.get("data") if isinstance(normalized.get("data"), dict) else data
+        norm_uuid = normalized.get("uuid")
+        if isinstance(norm_uuid, str) and norm_uuid and isinstance(norm_data, dict) and not norm_data.get("uuid"):
+            norm_data = {**norm_data, "uuid": norm_uuid}
 
         # Attention markers MUST be detected on RAW assistant text, BEFORE
         # the file-ref/tag rewrite below strips the `<TAG>` wrapper out of
@@ -880,11 +972,12 @@ class OrchestrationStrategy(ABC):
         # render tree. Live path only — replay re-detection is idempotent
         # via set_marker's change-gate, but markers are a live signal.
         attention_markers: list[tuple[str, dict]] = []
+        session_name_tag: Optional[str] = None
         if source_is_provider_stream and etype in self._RENDER_TREE_ETYPES:
             import file_ref_resolver
-            attention_markers = file_ref_resolver.detect_markers(
-                _agent_message_text(norm_data)
-            )
+            raw_text = _agent_message_text(norm_data)
+            attention_markers = file_ref_resolver.detect_markers(raw_text)
+            session_name_tag = file_ref_resolver.extract_session_name(raw_text)
 
         if self._apply_metadata_side_effects(
             app_session_id=app_session_id,
@@ -904,6 +997,7 @@ class OrchestrationStrategy(ABC):
         if etype == "worker_start":
             delegation_id = data.get("delegation_id")
             if delegation_id:
+                reset_events = data.get("reset_events") is True
                 panel = {
                     "delegation_id": delegation_id,
                     "worker_session_id": data.get("worker_session_id") or "",
@@ -923,12 +1017,20 @@ class OrchestrationStrategy(ABC):
                     "run_mode": data.get("run_mode"),
                     "token_usage": data.get("token_usage"),
                 }
-                if ctx.workers_list is not None and not any(
-                    p.get("delegation_id") == delegation_id
-                    for p in ctx.workers_list
-                ):
-                    ctx.workers_list.append(panel)
-                session_manager.upsert_worker_panel(app_session_id, msg_id, panel)
+                if ctx.workers_list is not None:
+                    ctx_panel = next((
+                        p for p in ctx.workers_list
+                        if p.get("delegation_id") == delegation_id
+                    ), None)
+                    if ctx_panel is None:
+                        ctx.workers_list.append(panel)
+                    elif reset_events:
+                        ctx_panel.update(panel)
+                        ctx_panel["events"] = []
+                        ctx_panel.pop("_uid_idx", None)
+                session_manager.upsert_worker_panel(
+                    app_session_id, msg_id, panel, reset_events=reset_events,
+                )
             self._publish_provider_event(
                 write_journal,
                 ctx,
@@ -1049,9 +1151,15 @@ class OrchestrationStrategy(ABC):
             owner = self._events_owner(msg)
             uid_idx = _uid_idx_for(owner, evs)
             existing_idx = uid_idx.get(ev_uuid)
+            if existing_idx is not None and existing_idx >= len(evs):
+                owner.pop("_uid_idx", None)
+                uid_idx = _uid_idx_for(owner, evs)
+                existing_idx = uid_idx.get(ev_uuid)
             if existing_idx is not None:
                 existing = evs[existing_idx]
                 if existing == normalized:
+                    if bool(msg.get("_content_dirty")) or not msg.get("content"):
+                        self._refresh_message_content_from_event_projection(msg, normalized)
                     # Identical re-apply: full no-op for both render
                     # tree and events.jsonl. Early-return is safe here
                     # because `event_ingester.ingest`'s `uid:sha256(data)`
@@ -1083,6 +1191,7 @@ class OrchestrationStrategy(ABC):
                 # for every streaming snapshot.
                 self._replace_event(app_session_id, msg_id, normalized, ev_uuid)
                 evs[existing_idx] = normalized
+                self._refresh_message_content_from_event_projection(msg, normalized)
                 # uid_idx[ev_uuid] unchanged — same uuid, same index.
                 # Fall through to side-effect blocks + ingest tail.
             else:
@@ -1114,6 +1223,7 @@ class OrchestrationStrategy(ABC):
                 if ev_uuid not in uid_idx:
                     uid_idx[ev_uuid] = len(evs)
                     evs.append(normalized)
+                self._refresh_message_content_from_event_projection(msg, normalized)
                 if source_is_provider_stream:
                     session_manager.bump_unread(app_session_id, msg_id)
 
@@ -1123,6 +1233,16 @@ class OrchestrationStrategy(ABC):
             for ext_id, marker in attention_markers:
                 if ext_id:
                     session_manager.set_marker(app_session_id, ext_id, marker)
+                if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
+                    _complete_current_work_items(app_session_id)
+
+            # Explicit agent-proposed session name (raw-text tag captured
+            # pre-strip above). Change-gated inside `_apply_agent_rename`,
+            # so streaming deltas repeating the tag rename at most once.
+            if session_name_tag:
+                self._apply_agent_rename(
+                    app_session_id, session_name_tag, require_allowed=False,
+                )
 
             import session_event_extensions
             session_event_extensions.apply_event(
@@ -1142,7 +1262,9 @@ class OrchestrationStrategy(ABC):
             # so worker tool calls don't land here.
             if source_is_provider_stream:
                 session_manager.apply_provenance_from_event(
-                    app_session_id, normalized,
+                    app_session_id,
+                    normalized,
+                    backend_msg_id=msg_id,
                 )
 
         if etype == "turn_start":

@@ -11,6 +11,7 @@ _TMP_HOME = _test_home.isolate("bc-test-team-store-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import extension_store  # noqa: E402
 import team_store  # noqa: E402
 from orchs.manager import bootstrap  # noqa: E402
 
@@ -23,7 +24,7 @@ def test_team_store_tracks_members_by_session() -> None:
     team = team_store.create(
         team_id="team-test",
         root_session_id="manager-session",
-        definition_ref="extension:ofek.testape:testape-ui-expert",
+        definition_ref=f"extension:{extension_store.extension_id_for_role('testape')}:testape-ui-expert",
         profile="web-ui",
     )
 

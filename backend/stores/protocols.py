@@ -80,7 +80,12 @@ class SessionsStorage(Protocol):
     def get_root_tree(self, session_id: str) -> Optional[dict]: ...
 
     def write_session_full(
-        self, root: dict, *, bump_updated_at: bool = True,
+        self,
+        root: dict,
+        *,
+        bump_updated_at: bool = True,
+        preserve_projection_fields: bool = False,
+        already_persistable: bool = False,
     ) -> None: ...
 
     def list_sessions(self) -> list[dict]: ...
@@ -120,6 +125,8 @@ class WorkersStorage(Protocol):
         orchestration_mode: str,
         agent_sid: str,
         node_id: str = "primary",
+        name: Optional[str] = None,
+        role_key: Optional[str] = None,
     ) -> dict: ...
 
     def touch_worker(
@@ -299,32 +306,11 @@ class ConfigStorage(Protocol):
 # Traces — backend/trace_collector.py
 # ============================================================================
 class TracesStorage(Protocol):
-    """Per-turn structured traces under `ba_home()/traces/<session_id>/`
-    + an `index.jsonl` for fast listing. Producer is the `TraceCollector`
-    class (one instance per turn) wrapped around the manager run by
-    the orchestrator. The module-level read functions below feed the
-    extension-authenticated `/api/internal/traces/*` substrate and `trace_cli.py`."""
+    """Per-turn trace index under `ba_home()/traces/`. The `TraceCollector`
+    class (one instance per turn) appends a compact entry to `index.jsonl`
+    on every turn; `iter_trace_index` streams that index to the analytics
+    page. `trace_step` events stream live to the render tree via the WS
+    callback set on the collector."""
 
-    def list_traces(
-        self, session_id: Optional[str] = None, limit: int = 100,
-    ) -> list[dict]: ...
+    def iter_trace_index(self) -> "Iterator[dict]": ...
 
-    def get_trace(self, trace_id: str) -> Optional[dict]: ...
-    def search_traces(self, query: str, limit: int = 50) -> list[dict]: ...
-
-    def grep_traces(
-        self,
-        pattern: str,
-        field: str = "all",
-        session_id: Optional[str] = None,
-        step_type: Optional[str] = None,
-        limit: int = 50,
-    ) -> list[dict]: ...
-
-    def get_latest_trace(
-        self, session_id: Optional[str] = None,
-    ) -> Optional[dict]: ...
-
-    def get_trace_stats(
-        self, session_id: Optional[str] = None,
-    ) -> dict: ...

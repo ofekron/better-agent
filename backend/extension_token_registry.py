@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from pathlib import Path
 
 from paths import ba_home
@@ -27,26 +28,37 @@ _LOCK = threading.Lock()
 # process that switches BETTER_AGENT_HOME (tests) never serves a stale map, AND
 # an out-of-process write (reinstall rotation, another node/process minting)
 # invalidates the cache instead of being silently invisible until restart.
-_cache_key: tuple[str, int, int] | None = None
+_cache_key: tuple[str, str] | None = None
 _cache: dict[str, str] | None = None
+_last_fingerprint_check = 0.0
+_FINGERPRINT_TTL_SECONDS = 0.25
 
 
 def _path() -> Path:
     return ba_home() / "extension_tokens.json"
 
 
-def _fingerprint(path: Path) -> tuple[str, int, int]:
+def _fingerprint(path: Path) -> tuple[str, str]:
     try:
-        st = path.stat()
-        return (str(path), st.st_mtime_ns, st.st_size)
+        digest = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+        return (str(path), digest)
     except OSError:
-        return (str(path), -1, -1)
+        return (str(path), "")
 
 
 def _load_locked() -> dict[str, str]:
-    global _cache_key, _cache
+    global _cache_key, _cache, _last_fingerprint_check
     path = _path()
+    now = time.monotonic()
+    if (
+        _cache is not None
+        and _cache_key is not None
+        and _cache_key[0] == str(path)
+        and now - _last_fingerprint_check < _FINGERPRINT_TTL_SECONDS
+    ):
+        return _cache
     key = _fingerprint(path)
+    _last_fingerprint_check = now
     if _cache is not None and _cache_key == key:
         return _cache
     try:
@@ -86,8 +98,9 @@ def mint(extension_id: str) -> str:
             token = secrets.token_urlsafe(32)
             data[extension_id] = token
             _persist_locked(data)
-            global _cache, _cache_key
+            global _cache, _cache_key, _last_fingerprint_check
             _cache, _cache_key = data, _fingerprint(_path())
+            _last_fingerprint_check = time.monotonic()
         return token
 
 
@@ -103,6 +116,13 @@ def resolve(token: str | None) -> str | None:
     return None
 
 
+def resolve_fresh(token: str | None) -> str | None:
+    global _last_fingerprint_check
+    with _LOCK:
+        _last_fingerprint_check = 0.0
+    return resolve(token)
+
+
 def revoke(extension_id: str) -> None:
     """Drop an extension's token (e.g. on uninstall) so it stops authenticating."""
     extension_id = (extension_id or "").strip()
@@ -112,5 +132,6 @@ def revoke(extension_id: str) -> None:
         data = dict(_load_locked())
         if data.pop(extension_id, None) is not None:
             _persist_locked(data)
-            global _cache, _cache_key
+            global _cache, _cache_key, _last_fingerprint_check
             _cache, _cache_key = data, _fingerprint(_path())
+            _last_fingerprint_check = time.monotonic()

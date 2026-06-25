@@ -72,6 +72,7 @@ class UserPromptManager:
         # distinguish "cancelled after delivery" (done) from "aborted
         # before ever reaching the CLI" (failed). Cleared on terminal.
         self._sent_lifecycle_ids: set[str] = set()
+        self._done_payloads: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # In-flight lifecycle id API (replaces direct dict mutation).
@@ -100,6 +101,9 @@ class UserPromptManager:
 
     def _clear_sent(self, lifecycle_msg_id: str) -> None:
         self._sent_lifecycle_ids.discard(lifecycle_msg_id)
+
+    def pop_done_payload(self, lifecycle_msg_id: str) -> Optional[dict]:
+        return self._done_payloads.pop(lifecycle_msg_id, None)
 
     async def emit_user_msg_cancel_terminal(
         self,
@@ -219,6 +223,7 @@ class UserPromptManager:
                 cancelled=cancelled,
                 interrupted_by_msg_id=interrupted_by_msg_id,
             )
+            self._done_payloads[lifecycle_msg_id] = dict(payload)
             await emit_done(
                 app_session_id=app_session_id,
                 lifecycle_msg_id=lifecycle_msg_id,
@@ -226,6 +231,30 @@ class UserPromptManager:
             )
         except Exception:
             logger.exception("lifecycle: emit_done failed")
+        finally:
+            self._clear_sent(lifecycle_msg_id)
+
+    async def emit_user_msg_done_from_payload(
+        self,
+        app_session_id: str,
+        lifecycle_msg_id: str,
+        payload: dict,
+    ) -> None:
+        try:
+            from user_msg_lifecycle import emit_done
+            await emit_done(
+                app_session_id=app_session_id,
+                lifecycle_msg_id=lifecycle_msg_id,
+                success=bool(payload.get("success")),
+                cancelled=bool(payload.get("cancelled")),
+                error=payload.get("error"),
+                duration_ms=payload.get("duration_ms"),
+                token_usage_total=payload.get("token_usage_total"),
+                sub_turns=payload.get("sub_turns") or [],
+                interrupted_by_msg_id=payload.get("interrupted_by_msg_id"),
+            )
+        except Exception:
+            logger.exception("lifecycle: emit cloned done failed")
         finally:
             self._clear_sent(lifecycle_msg_id)
 

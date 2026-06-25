@@ -77,7 +77,7 @@ def _configure_internal_llm_defaults(*tasks: str) -> None:
 
 def main_test() -> int:
     _configure_internal_llm_defaults("default_session")
-    _install_gate_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
+    _install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     provider = config_store.get_default_provider()
     provider_id = provider["id"]
@@ -135,6 +135,20 @@ def main_test() -> int:
     assert explicit_session["model"] == provider_model
     assert explicit_session["reasoning_effort"] == provider_reasoning_effort
 
+    explicit_by_name = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "explicit by name",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": provider["name"],
+        "model": provider_model,
+        "reasoning_effort": provider_reasoning_effort,
+    })
+    assert explicit_by_name.status_code == 200, explicit_by_name.text
+    explicit_by_name_session = session_manager.get(explicit_by_name.json()["session_id"]) or {}
+    assert explicit_by_name_session["provider_id"] == provider_id
+    assert explicit_by_name_session["model"] == provider_model
+
     invalid_session_model = _post(client, {
         "sender_session_id": sender["id"],
         "name": "bad model",
@@ -157,6 +171,31 @@ def main_test() -> int:
     session_provider_default_record = session_manager.get(session_provider_default.json()["session_id"]) or {}
     assert session_provider_default_record["provider_id"] == other_provider_id
     assert session_provider_default_record["model"] == "other-provider-model"
+
+    codex_provider = config_store.add_provider({
+        "name": "Codex Stale Default",
+        "kind": "codex",
+        "mode": "subscription",
+        "default_model": "gpt-5.6",
+        "custom_models": [],
+    })
+    models_mod._update_cache(
+        codex_provider["id"],
+        models=["gpt-5.5", "gpt-5.4"],
+        retired=[],
+        last_fetch_state="ok",
+    )
+    stale_codex_default = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "stale codex default",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": codex_provider["id"],
+    })
+    assert stale_codex_default.status_code == 200, stale_codex_default.text
+    stale_codex_default_record = session_manager.get(stale_codex_default.json()["session_id"]) or {}
+    assert stale_codex_default_record["provider_id"] == codex_provider["id"]
+    assert stale_codex_default_record["model"] == "gpt-5.5"
 
     session_provider_no_default = _post(client, {
         "sender_session_id": sender["id"],
@@ -241,6 +280,25 @@ def main_test() -> int:
     finally:
         main.coordinator.run_delegate_task = original_run_delegate_task
     assert delegate_provider_default.status_code == 200, delegate_provider_default.text
+    assert delegate_call["provider_id"] == other_provider_id
+    assert delegate_call["model"] == "other-provider-model"
+
+    main.coordinator.run_delegate_task = fake_run_delegate_task
+    delegate_call.clear()
+    try:
+        delegate_provider_by_name = client.post(
+            "/api/internal/delegate-task",
+            json={
+                "sender_session_id": sender["id"],
+                "task": "delegate provider by name",
+                "provider_id": "other test provider",
+                "cwd": "/repo",
+            },
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+        )
+    finally:
+        main.coordinator.run_delegate_task = original_run_delegate_task
+    assert delegate_provider_by_name.status_code == 200, delegate_provider_by_name.text
     assert delegate_call["provider_id"] == other_provider_id
     assert delegate_call["model"] == "other-provider-model"
 
@@ -377,6 +435,21 @@ def main_test() -> int:
     assert sub_provider_default_from_sender_session["provider_id"] == other_provider_id
     assert sub_provider_default_from_sender_session["model"] == "other-provider-model"
 
+    sub_provider_by_name = client.post(
+        "/api/internal/create-sub-session",
+        json={
+            "sender_session_id": sender["id"],
+            "description": "sub provider by name",
+            "cwd": "/repo",
+            "provider_id": "Other Test Provider",
+        },
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert sub_provider_by_name.status_code == 200, sub_provider_by_name.text
+    sub_provider_by_name_session = session_manager.get(sub_provider_by_name.json()["target_session_id"]) or {}
+    assert sub_provider_by_name_session["provider_id"] == other_provider_id
+    assert sub_provider_by_name_session["model"] == "other-provider-model"
+
     sub_provider_no_default = client.post(
         "/api/internal/create-sub-session",
         json={
@@ -403,6 +476,23 @@ def main_test() -> int:
     )
     assert invalid_model.status_code == 400
     assert "does not support model" in invalid_model.text
+
+    config_store.add_provider({
+        "name": "Other Test Provider",
+        "kind": provider.get("kind") or "claude",
+        "mode": provider.get("mode") or "subscription",
+        "default_model": "duplicate-provider-model",
+        "custom_models": ["duplicate-provider-model"],
+    })
+    ambiguous_provider = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "ambiguous provider",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": "Other Test Provider",
+    })
+    assert ambiguous_provider.status_code == 400
+    assert "ambiguous" in ambiguous_provider.text
 
     session_manager.set_agent_sid(target_session_id, "native", "provider-sub-sid")
     fork = session_manager.create_delegate_fork(

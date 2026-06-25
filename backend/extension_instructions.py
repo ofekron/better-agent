@@ -16,10 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pcs_paths
-
-pcs_paths.ensure_on_path()
-from provider_config_sync_backend import api as _pcs  # noqa: E402
+from provider_config_sync_backend import api as _pcs
 
 
 def _owner(extension_id: str) -> str:
@@ -66,18 +63,62 @@ def _instruction_items(manifest: dict) -> list[dict]:
     return instruction_items_from_entrypoints(manifest.get("entrypoints") or {}) or []
 
 
-def _sections_for_level(manifest: dict, install_path: Path, level: str) -> list[tuple[str, str]]:
-    """Read ``(section_name, content)`` for the manifest's instruction sections at ``level``."""
+def _sections_for_level(
+    manifest: dict,
+    install_path: Path,
+    level: str,
+    *,
+    extension_id: str,
+    provider_kind: str,
+) -> list[tuple[str, str]]:
+    """Read ``(section_name, content)`` for sections at ``level`` that apply to ``provider_kind``.
+
+    An item with no ``providers`` field applies to every provider; an item that
+    declares ``providers`` only materializes into that subset's instruction files.
+    """
     sections: list[tuple[str, str]] = []
     root = install_path.resolve()
+    import extension_store
+
     for item in _instruction_items(manifest):
         if item.get("level") != level:
+            continue
+        allowed = item.get("providers")
+        if allowed is not None and provider_kind not in allowed:
+            continue
+        if not extension_store.native_harness_exposed(
+            extension_id, "instructions", item["name"]
+        ):
             continue
         content_path = (root / item["path"]).resolve()
         if not content_path.is_relative_to(root) or not content_path.is_file():
             continue
         sections.append((item["name"], content_path.read_text(encoding="utf-8")))
     return sections
+
+
+def runtime_instruction_blocks(record: dict) -> list[str]:
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
+    if not extension_id:
+        return []
+    import extension_store
+
+    install_path = extension_store.runtime_package_root_for_record(record)
+    if install_path is None:
+        return []
+    root = install_path.resolve()
+    blocks: list[str] = []
+    for item in _instruction_items(manifest):
+        content_path = (root / item["path"]).resolve()
+        if not content_path.is_relative_to(root) or not content_path.is_file():
+            continue
+        providers = item.get("providers")
+        scope = f" Providers: {', '.join(providers)} only." if providers else ""
+        content = content_path.read_text(encoding="utf-8").strip()
+        if content:
+            blocks.append(f"### {item['name']} ({extension_id}).{scope}\n{content}")
+    return blocks
 
 
 def normalize_state(record: dict) -> dict:
@@ -100,6 +141,11 @@ def reconcile_blocks(record: dict) -> None:
 
     Better Agent owns the desired extension state; Provider Config Sync owns
     making the corresponding instruction blocks exist or not exist on disk.
+
+    Sections carrying a ``providers`` filter (see ``_sections_for_level``) only
+    reach that subset's instruction files. Each configured provider is reconciled
+    with its own call so filtering one provider's block set never touches another
+    provider's files.
     """
     manifest = record.get("manifest") or {}
     extension_id = manifest.get("id", "")
@@ -109,28 +155,49 @@ def reconcile_blocks(record: dict) -> None:
     owner = _owner(extension_id)
     providers = _configured_providers()
     project_roots = _local_project_paths()
-    desired: list[dict[str, Any]] = []
+    enabled = bool(record.get("enabled"))
 
-    if bool(record.get("enabled")):
-        install_path = Path(str((record.get("source") or {}).get("install_path") or ""))
+    install_path = None
+    state = None
+    if enabled:
+        import extension_store
+
+        install_path = extension_store.runtime_package_root_for_record(record)
         state = normalize_state(record)
-        if state["global"]:
-            sections = _sections_for_level(manifest, install_path, "global")
-            if sections:
-                desired.append({"scope": "global", "project_root": None, "sections": sections})
-        for project_root in project_roots:
-            if not state["projects"].get(str(project_root), False):
-                continue
-            sections = _sections_for_level(manifest, install_path, "project")
-            if sections:
-                desired.append({"scope": "project", "project_root": project_root, "sections": sections})
 
-    _pcs.reconcile_managed_instruction_blocks(
-        owner=owner,
-        desired=desired,
-        providers=providers,
-        project_roots=project_roots,
-    )
+    for provider in providers:
+        desired: list[dict[str, Any]] = []
+        if install_path is not None and state is not None:
+            kind = provider.get("kind", "")
+            if state["global"]:
+                sections = _sections_for_level(
+                    manifest,
+                    install_path,
+                    "global",
+                    extension_id=extension_id,
+                    provider_kind=kind,
+                )
+                if sections:
+                    desired.append({"scope": "global", "project_root": None, "sections": sections})
+            for project_root in project_roots:
+                if not state["projects"].get(str(project_root), False):
+                    continue
+                sections = _sections_for_level(
+                    manifest,
+                    install_path,
+                    "project",
+                    extension_id=extension_id,
+                    provider_kind=kind,
+                )
+                if sections:
+                    desired.append({"scope": "project", "project_root": project_root, "sections": sections})
+
+        _pcs.reconcile_managed_instruction_blocks(
+            owner=owner,
+            desired=desired,
+            providers=[provider],
+            project_roots=project_roots,
+        )
 
 
 def clear_all_blocks(record: dict) -> None:

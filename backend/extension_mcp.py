@@ -5,10 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pcs_paths
-
-pcs_paths.ensure_on_path()
-from provider_config_sync_backend import api as _pcs  # noqa: E402
+from provider_config_sync_backend import api as _pcs
 
 
 _MCP_CAPABILITY_ID = "mcp"
@@ -18,25 +15,10 @@ _MARKER_SERVER_NAME = "BETTER_CLAUDE_EXTENSION_MCP_SERVER"
 
 def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
     _configure_pcs()
-    active: dict[str, tuple[str, dict[str, Any]]] = {}
-    for record in records:
-        manifest = record.get("manifest") or {}
-        extension_id = str(manifest.get("id") or "").strip()
-        if not extension_id:
-            continue
-        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
-            if not isinstance(item, dict):
-                continue
-            server_name = str(item.get("replaces_builtin") or item.get("name") or "").strip()
-            item_name = str(item.get("name") or "").strip()
-            if not server_name or not item_name:
-                continue
-            active[server_name] = (extension_id, _launcher_server_item(extension_id, item_name))
+    active = _active_server_items(records)
+    capability, current, exists = _pcs._current_unified_for_tool("", _MCP_CAPABILITY_ID, "global")
+    _assert_entries_available(capability, current, exists, active)
 
-    try:
-        capability, current, exists = _pcs._current_unified_for_tool("", _MCP_CAPABILITY_ID, "global")
-    except Exception:
-        return 0
     content = _pcs._mcp_tool_content(current, exists)
     servers = dict(content.get("mcpServers") or {})
 
@@ -54,8 +36,6 @@ def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
         marker = _marker(servers.get(name))
         if marker == extension_id:
             continue
-        if name in servers and marker != extension_id:
-            continue
         servers[name] = item
         changed += 1
 
@@ -68,6 +48,59 @@ def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
     _pcs._write_entry_if_unchanged(unified, _pcs._expected_content(current, exists), next_content)
     _sync_specific_entries(capability, active)
     return changed
+
+
+def _active_server_items(
+    records: list[dict[str, Any]],
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    active: dict[str, tuple[str, dict[str, Any]]] = {}
+    for record in records:
+        manifest = record.get("manifest") or {}
+        extension_id = str(manifest.get("id") or "").strip()
+        if not extension_id:
+            continue
+        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
+            if not isinstance(item, dict):
+                continue
+            server_name = str(item.get("replaces_builtin") or item.get("name") or "").strip()
+            item_name = str(item.get("name") or "").strip()
+            if not server_name or not item_name:
+                continue
+            existing = active.get(server_name)
+            if existing and existing[0] != extension_id:
+                raise ValueError(
+                    f"Native MCP server name {server_name!r} is already exposed by {existing[0]}"
+                )
+            active[server_name] = (extension_id, _launcher_server_item(extension_id, item_name))
+    return active
+
+
+def _assert_entries_available(
+    capability: dict[str, Any],
+    unified_current: Any,
+    unified_exists: bool,
+    active: dict[str, tuple[str, dict[str, Any]]],
+) -> None:
+    entries = [(capability["unified"], unified_current, unified_exists)]
+    for entry in capability.get("specifics") or []:
+        if entry.get("writable"):
+            current, exists = _pcs._read_entry_current(entry)
+            entries.append((entry, current, exists))
+    for _entry, current, exists in entries:
+        servers = dict(_pcs._mcp_tool_content(current, exists).get("mcpServers") or {})
+        for name, (extension_id, _item) in active.items():
+            raw = servers.get(name)
+            if raw is None:
+                continue
+            marker = _marker(raw)
+            if marker == extension_id:
+                continue
+            if marker:
+                continue
+            raise ValueError(
+                f"Native MCP server name {name!r} is already owned by "
+                "the user's native provider configuration"
+            )
 
 
 def _configure_pcs() -> None:

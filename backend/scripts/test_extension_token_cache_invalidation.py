@@ -17,6 +17,7 @@ import os
 import shutil
 import tempfile
 import sys
+import time
 from pathlib import Path
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-token-cache-"))
@@ -45,14 +46,36 @@ def test_external_write_invalidates_cache() -> None:
     data["ext.b"] = "externally-minted-token-value-1234567890"
     path.write_text(json.dumps(data), encoding="utf-8")
 
+    time.sleep(reg._FINGERPRINT_TTL_SECONDS + 0.05)
     check(reg.resolve("externally-minted-token-value-1234567890") == "ext.b",
           "externally-written token resolves (cache invalidated on file change)")
     check(reg.resolve(token_a) == "ext.a", "original token still resolves after reload")
 
 
+def test_hot_resolve_does_not_stat_every_call() -> None:
+    token = reg.mint("ext.hot")
+    check(reg.resolve(token) == "ext.hot", "hot token resolves before stat probe")
+    calls = 0
+    original = reg._fingerprint
+
+    def counted(path):
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    reg._fingerprint = counted
+    try:
+        for _ in range(10):
+            check(reg.resolve(token) == "ext.hot", "hot token resolves from cached registry")
+    finally:
+        reg._fingerprint = original
+    check(calls == 0, "hot token resolve skips repeated fingerprint stats inside TTL")
+
+
 if __name__ == "__main__":
     try:
         test_external_write_invalidates_cache()
+        test_hot_resolve_does_not_stat_every_call()
         print("ALL PASS")
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)

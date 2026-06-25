@@ -47,6 +47,7 @@ import main  # noqa: E402
 import extension_store  # noqa: E402
 import config_store  # noqa: E402
 import provisioning  # noqa: E402
+import provider  # noqa: E402
 import extension_token_registry  # noqa: E402
 from better_agent_sdk import BetterAgentError, Client  # noqa: E402
 
@@ -64,6 +65,7 @@ TOKEN = main.coordinator.internal_token
 
 SPAWN_EXT = "test.spawn-ext"
 NOSPAWN_EXT = "test.nospawn-ext"
+INLINE_TASK = "test_inline_task"
 
 
 def _seed_extension(extension_id: str, *, spawn_runs: bool) -> None:
@@ -81,7 +83,7 @@ def _seed_extension(extension_id: str, *, spawn_runs: bool) -> None:
 
 
 def _install_team_orchestration_extension() -> None:
-    extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    extension_id = extension_store.extension_id_for_role('team-orchestration')
     package = Path(_TMP_HOME) / "team-orchestration-fixture"
     if package.exists():
         shutil.rmtree(package)
@@ -144,6 +146,34 @@ def _post(body=None, *, token=_SENTINEL, extension_id=SPAWN_EXT, raw=None):
     return CLIENT.post("/api/internal/provisioned-sessions", json=body, headers=headers)
 
 
+def _resolve_post(body=None, *, token=_SENTINEL, extension_id=SPAWN_EXT):
+    if token is _SENTINEL:
+        token = TOKEN if extension_id is None else extension_token_registry.mint(extension_id)
+    headers = {}
+    if token is not None:
+        headers["X-Internal-Token"] = token
+    return CLIENT.post("/api/internal/extension-internal-llm/resolve", json=body or {}, headers=headers)
+
+
+def _inline_spec(**overrides) -> dict:
+    spec = {
+        "key": "inline-worker",
+        "version": 2,
+        "name": "Inline worker",
+        "task_key": INLINE_TASK,
+        "provision_prompt": "Prime inline worker",
+        "instructions": "Answer inline request",
+        "dirty_policy": {
+            "max_base_bytes": 128_000,
+            "max_user_turns": 1,
+            "max_assistant_turns": 1,
+            "leak_markers": ["Prime inline worker"],
+        },
+    }
+    spec.update(overrides)
+    return spec
+
+
 class _FakeSpec(provisioning.ProvisionedSessionSpec):
     key = "test-fake-spec"
 
@@ -151,6 +181,7 @@ class _FakeSpec(provisioning.ProvisionedSessionSpec):
 def main_test() -> int:
     _seed_extension(SPAWN_EXT, spawn_runs=True)
     _seed_extension(NOSPAWN_EXT, spawn_runs=False)
+    extension_store._BUILTIN_INTERNAL_LLM_TASKS[SPAWN_EXT] = (INLINE_TASK,)
     provisioning.register(_FakeSpec())
 
     run_calls = []
@@ -176,6 +207,14 @@ def main_test() -> int:
         r = _post({"spec_key": "test-fake-spec", "query": "q"}, extension_id="test.not-installed")
         check(r.status_code == 403, f"unknown extension -> 403 (got {r.status_code})")
 
+        print("T2b extension internal-LLM resolver is extension-owned")
+        r = _resolve_post({"task_key": INLINE_TASK})
+        check(r.status_code == 200, f"owned internal-LLM task resolves (got {r.status_code})")
+        r = _resolve_post({"task_key": "default_session"})
+        check(r.status_code == 403, f"unowned internal-LLM task rejected (got {r.status_code})")
+        r = _resolve_post({"task_key": INLINE_TASK}, extension_id=NOSPAWN_EXT)
+        check(r.status_code == 403, f"other extension cannot resolve task (got {r.status_code})")
+
         print("T3 unknown spec + bad body -> 4xx, never 500")
         r = _post({"spec_key": "no-such-spec", "query": "q"})
         check(r.status_code == 404, f"unknown spec -> 404 (got {r.status_code})")
@@ -183,6 +222,17 @@ def main_test() -> int:
         check(r.status_code == 400, f"missing spec_key -> 400 (got {r.status_code})")
         r = _post({"spec_key": "test-fake-spec", "query": "q", "ctx": [1, 2]})
         check(r.status_code == 400, f"ctx not object -> 400 (got {r.status_code})")
+        r = _post({"spec_key": "test-fake-spec", "inline_spec": _inline_spec(), "query": "q"})
+        check(r.status_code == 400, f"spec_key + inline_spec rejected (got {r.status_code})")
+        r = _post({"inline_spec": _inline_spec(task_key="unknown_task"), "query": "q"})
+        check(r.status_code == 400, f"undeclared inline task_key rejected (got {r.status_code})")
+        r = _post({"inline_spec": _inline_spec(default_cwd="/tmp"), "query": "q"})
+        check(r.status_code == 400, f"unsupported inline field rejected (got {r.status_code})")
+        r = _post({"inline_spec": _inline_spec(node_id="remote-node"), "query": "q"})
+        check(r.status_code == 400, f"non-primary inline node rejected (got {r.status_code})")
+        nan_spec = json.dumps(_inline_spec())[:-1] + ',"provision_timeout":NaN}'
+        r = _post(raw=f'{{"inline_spec":{nan_spec},"query":"q"}}')
+        check(r.status_code == 400, f"non-finite inline timeout rejected (got {r.status_code})")
         r = _post(raw='{"spec_key":"test-fake-spec","query":"q","ctx":{"a":1}}')
         check(r.status_code == 200, f"valid raw-json body accepted (got {r.status_code})")
 
@@ -198,6 +248,108 @@ def main_test() -> int:
               f"provisioning.run called once with forwarded args (got {run_calls})")
     finally:
         provisioning.run = original_run
+
+    print("T4b inline spec dispatches namespaced runtime spec")
+    inline_calls = []
+
+    async def _fake_inline_run(spec, query, ctx):
+        inline_calls.append({
+            "key": spec.key,
+            "version": spec.version,
+            "name": spec.name,
+            "task_key": spec.task_key,
+            "query": query,
+            "ctx": ctx,
+            "provision_prompt": spec.build_provision_prompt(ctx),
+            "instructions": spec.build_instructions(query, ctx),
+            "value": spec.parse_result("inline reply", ctx),
+            "run_mode": spec.run_mode,
+            "dispatch": spec.dispatch,
+            "worker_creation_policy": spec.worker_creation_policy,
+            "machine_completion": spec.machine_completion,
+            "bare_config": spec.bare_config,
+        })
+        return SimpleNamespace(text="inline reply", value="inline reply", base_session_id="base-inline")
+
+    provisioning.run = _fake_inline_run
+    try:
+        r = _post({"inline_spec": _inline_spec(), "query": "inline query", "ctx": {"k": "v"}})
+        body = r.json()
+        check(r.status_code == 200 and body.get("success") is True, f"inline success (got {r.status_code} {body})")
+        check(body.get("text") == "inline reply", "inline returns fork text")
+        check(body.get("value") == "inline reply", "inline value is raw text")
+        check(body.get("base_session_id") == "base-inline", "inline returns base session id")
+        expected = [{
+            "key": f"extension:{SPAWN_EXT}:inline-worker",
+            "version": 2,
+            "name": "Inline worker",
+            "task_key": INLINE_TASK,
+            "query": "inline query",
+            "ctx": {"k": "v"},
+            "provision_prompt": "Prime inline worker",
+            "instructions": "Answer inline request",
+            "value": "inline reply",
+            "run_mode": "fork",
+            "dispatch": "in_process",
+            "worker_creation_policy": "deny",
+            "machine_completion": True,
+            "bare_config": True,
+        }]
+        check(inline_calls == expected, f"inline spec constrained + forwarded (got {inline_calls})")
+    finally:
+        provisioning.run = original_run
+
+    print("T4c inline spec resolves config only through declared task")
+    spec = provisioning.inline_spec_from_payload(
+        _inline_spec(),
+        extension_id=SPAWN_EXT,
+        allowed_task_keys={INLINE_TASK},
+    )
+    resolved_task_keys = []
+    original_resolve_internal_llm = config_store.resolve_internal_llm
+    original_get_provider = provider.get_provider
+
+    class _ForkProvider:
+        supports_fork = True
+
+    class _NoForkProvider:
+        supports_fork = False
+
+    def _resolve_internal_llm(task_key: str) -> dict:
+        resolved_task_keys.append(task_key)
+        return {
+            "provider_id": "provider-inline",
+            "model": "model-inline",
+            "reasoning_effort": "high",
+        }
+
+    config_store.resolve_internal_llm = _resolve_internal_llm
+    provider.get_provider = lambda _provider_id: _ForkProvider()
+    try:
+        cfg = spec.build_config()
+        check(resolved_task_keys == [INLINE_TASK], f"inline config uses declared task only (got {resolved_task_keys})")
+        check(cfg.provider_id == "provider-inline" and cfg.model == "model-inline",
+              "inline config uses task provider/model")
+        check(cfg.reasoning_effort == "high", "inline config forwards task reasoning effort")
+        check(cfg.cwd == str(Path(os.getcwd()).expanduser().resolve()), "inline config pins cwd to backend process cwd")
+        check(cfg.node_id == "primary" and cfg.run_mode == "fork" and cfg.dispatch == "in_process",
+              "inline config pins node/run/dispatch")
+        override_rejected = False
+        try:
+            spec.build_config(model="caller-model")
+        except RuntimeError:
+            override_rejected = True
+        check(override_rejected, "inline config rejects per-call model override")
+        provider.get_provider = lambda _provider_id: _NoForkProvider()
+        no_fork_rejected = False
+        try:
+            spec.build_config()
+        except RuntimeError:
+            no_fork_rejected = True
+        check(no_fork_rejected, "inline config rejects non-fork provider")
+    finally:
+        config_store.resolve_internal_llm = original_resolve_internal_llm
+        provider.get_provider = original_get_provider
 
     print("T5 provisioning.run failure -> success:false, not 5xx")
     async def _boom(spec, query, ctx):
@@ -316,17 +468,28 @@ def main_test() -> int:
     original_urlopen = urllib.request.urlopen
     urllib.request.urlopen = _fake_urlopen
     try:
-        out = Client(internal_token="tok", extension_id="ext-1", backend_url="http://core").create_provisioned_session(
+        client = Client(internal_token="tok", extension_id="ext-1", backend_url="http://core")
+        out = client.create_provisioned_session(
             "spec", "query", {"a": 1}
         )
+        registered_captured = dict(captured)
+        inline_payload = _inline_spec()
+        inline_out = client.create_inline_provisioned_session(inline_payload, query="inline", ctx={"b": 2})
+        inline_captured = dict(captured)
     finally:
         urllib.request.urlopen = original_urlopen
     check(out == {"success": True}, "returns parsed body")
-    check(captured["url"].endswith("/api/internal/provisioned-sessions"), f"posts to right path (got {captured['url']})")
-    check(captured["headers"].get("x-internal-token") == "tok", "sends X-Internal-Token")
-    check("x-extension-id" not in captured["headers"], "does not send X-Extension-Id (identity is token-derived)")
-    check(json.loads(captured["data"]) == {"spec_key": "spec", "query": "query", "ctx": {"a": 1}},
+    check(
+        registered_captured["url"].endswith("/api/internal/provisioned-sessions"),
+        f"posts to right path (got {registered_captured['url']})",
+    )
+    check(registered_captured["headers"].get("x-internal-token") == "tok", "sends X-Internal-Token")
+    check("x-extension-id" not in registered_captured["headers"], "does not send X-Extension-Id (identity is token-derived)")
+    check(json.loads(registered_captured["data"]) == {"spec_key": "spec", "query": "query", "ctx": {"a": 1}},
           "sends correct payload")
+    check(inline_out == {"success": True}, "inline SDK returns parsed body")
+    check(json.loads(inline_captured["data"]) == {"inline_spec": inline_payload, "query": "inline", "ctx": {"b": 2}},
+          "inline SDK sends correct payload")
 
     print("S2b SDK team methods use core integration endpoints")
     captured_calls = []

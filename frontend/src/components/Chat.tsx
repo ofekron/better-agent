@@ -12,7 +12,10 @@ import type {
   FileFocus,
   PendingApproval,
   CredentialConsent,
+  UserApprovalRequest,
   UserInputRequest,
+  UserInteractionRequest,
+  ToolApproval,
   Provider,
   RunInfo,
   Session,
@@ -20,7 +23,7 @@ import type {
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
 import type { StreamingLoadPhase } from "../hooks/useWebSocket";
-import { MessageGroup, MessageBubble } from "./MessageBubble";
+import { TurnGroup, MessageBubble } from "./MessageBubble";
 import { InputArea } from "./InputArea";
 import type { ScheduleSendPayload } from "./ScheduleSendPopover";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
@@ -36,6 +39,7 @@ import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
+import { notifyUserRequest } from "../utils/userInputNotifications";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
 import {
   extractAssistantOutputTextFromEvents,
@@ -43,11 +47,12 @@ import {
 } from "../utils/agentMessages";
 
 /** Stable empty-runs singleton so groups with no targeted runs hand a
- *  referentially identical array to MessageGroup across renders — a
- *  fresh `[]` per render would defeat the downstream `memo(MessageGroup)`.
+ *  referentially identical array to TurnGroup across renders — a
+ *  fresh `[]` per render would defeat the downstream `memo(TurnGroup)`.
  *  Frozen so an accidental `.push` on the shared instance throws loudly
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
+const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
@@ -77,8 +82,9 @@ import {
 } from "../progress/store";
 
 import { API, createSessionSchedule } from "../api";
+import { extBackendBase } from "../extensionIds";
 
-const TEAM_ORCHESTRATION_API = `${API}/api/extensions/ofek-dev.team-orchestration/backend`;
+const teamOrchestrationApi = () => extBackendBase("team");
 
 function UserInputCard({
   request,
@@ -87,6 +93,7 @@ function UserInputCard({
   request: UserInputRequest;
   onDone: (requestId: string) => void;
 }) {
+  const { t } = useTranslation();
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const q of request.questions) {
@@ -95,7 +102,14 @@ function UserInputCard({
     return initial;
   });
   const [submitting, setSubmitting] = useState(false);
+  const textRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const canSubmit = request.questions.every((q) => (answers[q.id] || "").trim());
+
+  const pickOption = (questionId: string, label: string) => {
+    setAnswers((prev) => ({ ...prev, [questionId]: label }));
+    const el = textRefs.current[questionId];
+    if (el) requestAnimationFrame(() => { el.focus(); el.select(); });
+  };
 
   const submit = async () => {
     if (!canSubmit || submitting) return;
@@ -130,8 +144,8 @@ function UserInputCard({
   };
 
   return (
-    <div className="user-input-card">
-      <div className="user-input-card__title">Input needed</div>
+    <div className="user-input-card" data-testid="user-input-card">
+      <div className="user-input-card__title">{t("userInput.title")}</div>
       {request.questions.map((q) => (
         <div className="user-input-card__question" key={q.id}>
           <div className="user-input-card__header">{q.header}</div>
@@ -144,7 +158,7 @@ function UserInputCard({
                     type="radio"
                     name={`${request.request_id}:${q.id}`}
                     checked={answers[q.id] === option.label}
-                    onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: option.label }))}
+                    onChange={() => pickOption(q.id, option.label)}
                     disabled={submitting}
                   />
                   <span>
@@ -154,15 +168,13 @@ function UserInputCard({
                 </label>
               ))}
               <input
+                ref={(el) => { textRefs.current[q.id] = el; }}
                 className="user-input-card__text"
-                value={
-                  q.options.some((option) => option.label === answers[q.id])
-                    ? ""
-                    : answers[q.id] ?? ""
-                }
+                value={answers[q.id] ?? ""}
                 onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                onFocus={(e) => e.target.select()}
                 disabled={submitting}
-                placeholder="Other answer"
+                placeholder={t("userInput.otherAnswer")}
               />
             </div>
           ) : (
@@ -177,23 +189,225 @@ function UserInputCard({
         </div>
       ))}
       <div className="user-input-card__actions">
-        <button type="button" onClick={cancel} disabled={submitting}>Cancel</button>
+        <button type="button" onClick={cancel} disabled={submitting}>{t("userInput.cancel")}</button>
         <button type="button" className="primary" onClick={submit} disabled={!canSubmit || submitting}>
-          Send
+          {submitting ? t("userInput.submitting") : t("userInput.send")}
         </button>
       </div>
     </div>
   );
 }
 
-/** One rendered turn: a user message paired with its assistant reply (if
- * any), the runs targeting it, and whether it's the latest group. Exposed
- * so callers can inject a per-turn footer via `renderGroupFooter`. */
-export interface ChatGroup {
-  userMessage: ChatMessage;
-  assistantMessage?: ChatMessage;
-  groupRuns: RunInfo[];
-  isLast: boolean;
+function UserApprovalCard({
+  request,
+  onDone,
+}: {
+  request: UserApprovalRequest;
+  onDone: (requestId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [alternative, setAlternative] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const resolve = async (approved: boolean) => {
+    const text = alternative.trim();
+    if (submitting || (!approved && !text)) return;
+    setSubmitting(true);
+    setFailed(false);
+    try {
+      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          app_session_id: request.app_session_id,
+          approved,
+          ...(approved ? {} : { alternative: text }),
+        }),
+      });
+      if (res.ok) {
+        onDone(request.request_id);
+        return;
+      }
+      setFailed(true);
+    } catch {
+      setFailed(true);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="user-input-card user-approval-card" data-testid="user-approval-card">
+      <div className="user-input-card__title">{t("userApproval.title")}</div>
+      <div className="user-input-card__body">{request.prompt}</div>
+      <textarea
+        className="user-input-card__textarea"
+        data-action="alternative"
+        value={alternative}
+        onChange={(event) => setAlternative(event.target.value)}
+        placeholder={t("userApproval.alternativePlaceholder")}
+        disabled={submitting}
+        rows={3}
+      />
+      {failed ? <div className="user-approval-card__error" role="alert">{t("userApproval.failed")}</div> : null}
+      <div className="user-input-card__actions">
+        <button
+          type="button"
+          data-action="submit-alternative"
+          onClick={() => resolve(false)}
+          disabled={submitting || !alternative.trim()}
+        >
+          {submitting ? t("userApproval.submitting") : t("userApproval.useAlternative")}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          data-action="approve"
+          onClick={() => resolve(true)}
+          disabled={submitting}
+        >
+          {submitting ? t("userApproval.submitting") : t("userApproval.approve")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Max chars rendered per argument value in the approval card. The backend
+ *  already caps each value, but a runner that bypasses the shared helper (or a
+ *  future provider) might not — defend the UI so one huge field can't blow up
+ *  the card. Generous enough to show a full command / path / short patch. */
+const TOOL_APPROVAL_VALUE_LIMIT = 2000;
+
+/** Normalize a tool-call summary into ordered [label, value] rows covering
+ *  EVERY argument, so the user sees exactly what they're approving. Tolerant
+ *  of the unified `summary.input` shape and the legacy `summary.args` shape
+ *  (older runners / replayed records), and of non-string values. */
+export function toolApprovalArgRows(
+  summary: Record<string, unknown> | undefined,
+): Array<{ key: string; value: string }> {
+  const bag =
+    (summary?.input as Record<string, unknown> | undefined) ??
+    (summary?.args as Record<string, unknown> | undefined) ??
+    undefined;
+  if (!bag || typeof bag !== "object") return [];
+  const rows: Array<{ key: string; value: string }> = [];
+  for (const [key, raw] of Object.entries(bag)) {
+    let value: string;
+    if (typeof raw === "string") {
+      value = raw;
+    } else if (raw === null || raw === undefined) {
+      value = String(raw);
+    } else {
+      try {
+        value = JSON.stringify(raw);
+      } catch {
+        value = String(raw);
+      }
+    }
+    if (value.length > TOOL_APPROVAL_VALUE_LIMIT) {
+      value = value.slice(0, TOOL_APPROVAL_VALUE_LIMIT) + "…";
+    }
+    rows.push({ key, value });
+  }
+  return rows;
+}
+
+function ToolApprovalCard({
+  approval,
+  sessionId,
+  onResolved,
+}: {
+  approval: ToolApproval;
+  sessionId: string;
+  onResolved: (approvalId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const toolName =
+    approval.tool_name ||
+    (typeof approval.summary?.tool === "string" ? (approval.summary.tool as string) : "") ||
+    t("toolApproval.unknownTool");
+  const rows = toolApprovalArgRows(approval.summary);
+  const decide = async (approved: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await fetch(
+        `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ approved }),
+        },
+      );
+      onResolved(approval.approval_id);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="user-input-card" data-testid="tool-approval-card" data-approval-id={approval.approval_id}>
+      <div className="user-input-card__title">{t("toolApproval.title")}</div>
+      <div className="user-input-card__question">
+        <div className="user-input-card__header">
+          {t("toolApproval.tool", { tool: toolName })}
+        </div>
+        {approval.provider_kind ? (
+          <div className="tool-approval-card__provider">
+            {t("toolApproval.provider", { provider: approval.provider_kind })}
+          </div>
+        ) : null}
+        {rows.length > 0 ? (
+          <dl className="tool-approval-card__args">
+            {rows.map((row) => (
+              <div key={row.key} className="tool-approval-card__arg">
+                <dt className="tool-approval-card__arg-key">{row.key}</dt>
+                <dd className="tool-approval-card__arg-value">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <div className="user-input-card__body tool-approval-card__no-args">
+            {t("toolApproval.noArgs")}
+          </div>
+        )}
+      </div>
+      <div className="user-input-card__actions">
+        <button type="button" onClick={() => decide(false)} disabled={busy}>
+          {t("toolApproval.deny")}
+        </button>
+        <button type="button" className="primary" onClick={() => decide(true)} disabled={busy}>
+          {t("toolApproval.approve")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** One rendered turn group: an initiating turn message (User/Ask/Message/
+ * Provisioning/etc.) paired with its assistant response (if any), the runs
+ * targeting that turn, and whether it is the latest turn group. Exposed so
+ * callers can inject a per-turn footer via `renderTurnFooter`. */
+export interface TurnGroupData {
+  initiatorMessage: ChatMessage;
+  responseMessage?: ChatMessage;
+  turnRuns: RunInfo[];
+  isLatest: boolean;
+  precedingModelSwitchEvents: WSEvent[];
+  trailingModelSwitchEvents: WSEvent[];
+}
+
+function turnGroupRenderKey(group: TurnGroupData): string {
+  return group.initiatorMessage.client_id || group.initiatorMessage.id;
+}
+
+function modelSwitchEvents(message?: ChatMessage): WSEvent[] {
+  const events = message?.events?.filter((event) => event.type === "model_switched") ?? [];
+  return events.length > 0 ? events : EMPTY_MODEL_SWITCH_EVENTS;
 }
 
 interface Props {
@@ -203,7 +417,6 @@ interface Props {
    * badges that replaced the synthetic-streaming-bubble cursor. */
   runs: RunInfo[];
   streamingEvents: WSEvent[];
-  traceSteps: WSEvent[];
   isStreaming: boolean;
   isStopping: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. Null once content flows. */
@@ -216,12 +429,14 @@ interface Props {
   onStop?: () => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
+  onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
+  rateLimitFallbackLabel?: string | null;
+  onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   disabled: boolean;
   session?: Session | null;
-  /** Experimental: toggle the per-session rearranger side session. */
-  onToggleRearranger?: (enabled: boolean) => void;
+  onRename?: (id: string, name: string) => void;
   tags?: InlineTag[];
   onAddTag?: (text: string, comment: string, messageId: string) => void;
   onAdvSync?: (text: string, messageId: string) => void;
@@ -240,6 +455,11 @@ interface Props {
    * button. Click forwards the trimmed draft up to App.tsx, which opens
    * the fork/new picker and starts the prompt-eng overlay. */
   onEngineer?: (draft: string) => void;
+  onSendToNewSession?: (
+    prompt: string,
+    images: import("./InputArea").PastedImage[],
+    files: import("./InputArea").FileAttachment[],
+  ) => boolean | Promise<boolean>;
   /** Optional: full root tree for split-pane fork view. When this has
    * a non-empty `forks` array, the linear chat list is replaced by a
    * `ForkSplitView` (shared messages above the fork point, N+1 columns
@@ -265,16 +485,25 @@ interface Props {
     prompt: string,
     images: import("./InputArea").PastedImage[]
   ) => boolean | Promise<boolean>;
+  canForkSession?: boolean;
   /** Currently queued prompt (shown in banner). */
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
-  onPromoteQueued: () => void;
-  onSteerQueued?: () => void;
-  onCancelQueued?: () => void;
-  onQueuedTextEdit?: (text: string) => void;
+  queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
+  onPromoteQueued: (queuedId?: string) => void;
+  /** Interrupt with a selected/all set of queued items in one atomic reorder. */
+  onPromoteQueuedMulti?: (queuedIds: string[]) => void;
+  onSteerQueued?: (queuedId?: string) => void;
+  onCancelQueued?: (queuedId?: string) => void;
+  onQueuedTextEdit?: (text: string, queuedId?: string) => void;
+  onQueuedEditStart?: (queuedId?: string) => void;
+  onQueuedEditFinish?: (queuedId?: string) => void;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
   onToggleSupervisor?: (enabled: boolean) => void;
+  /** Reopen the supervisor prompt modal to edit the custom prompt
+   *  while supervisor is already enabled. */
+  onEditSupervisorPrompt?: () => void;
   /** Graduate the supervisor's claude session into a new native BC root
    *  and re-back the supervisor on this session as a fork of it. */
   onSeparateSupervisor?: () => void;
@@ -289,34 +518,41 @@ interface Props {
   hasOlderMessages?: boolean;
   /** True while REST fetch for the session is in flight. */
   sessionLoading?: boolean;
+  /** Set when the session REST fetch failed — renders an error state with retry. */
+  sessionLoadError?: { sessionId: string; message: string } | null;
+  /** Retry loading the session after a failed fetch. */
+  onRetrySessionLoad?: (sessionId: string) => void;
   /** Save the current draft as a note. */
   onAddNote?: (text: string) => void;
   onAddCapabilityToNextTurn?: () => void;
   nextTurnCapabilities?: CapabilityContext[];
   onRemoveNextTurnCapability?: (sourceId: string) => void;
-  /** Move queued prompt to notes. */
-  onQueuedToNote?: (text: string) => void;
+  /** Move a single queued prompt to notes (and cancel just that item). */
+  onQueuedToNote?: (text: string, queuedId: string) => void;
   /** Cross-project session tabs. */
   openSessions?: Session[];
-  /** Whether the open-session tabs bar is shown (user pref). */
+  /** Whether the open-session tabs bar is shown. */
   sessionTabsVisible?: boolean;
   /** Active tabs sort field — its timestamp shows on each tab. */
   sessionTabsSort?: string;
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
+  onCloseOtherTabs?: (id: string) => void;
   onSelectTab?: (id: string) => void;
+  onToggleTopbarPin?: (id: string, pinned: boolean) => void;
   /** Optional node rendered at the TOP of the message scroll area,
    * above the first group. Used by the Ask view for its greeting box. */
   headerNode?: import("react").ReactNode;
   composerHeaderNode?: import("react").ReactNode;
-  /** Optional node rendered BELOW each message group (per turn). Used by
+  composerOverflowNode?: import("react").ReactNode;
+  /** Optional node rendered BELOW each turn group. Used by
    * the Ask view to inject the inline session picker for any turn whose
    * assistant message carries an `ask_result` — rendered outside the
    * group so it stays visible even when the group is collapsed. */
-  renderGroupFooter?: (group: ChatGroup) => import("react").ReactNode;
+  renderTurnFooter?: (group: TurnGroupData) => import("react").ReactNode;
   /** Optional per-group CSS class. When provided, each group is wrapped
    * in a div (instead of a Fragment) with the returned class. */
-  getGroupClassName?: (group: ChatGroup) => string | undefined;
+  getTurnGroupClassName?: (group: TurnGroupData) => string | undefined;
   /** Hide the per-session toolbar (name + Trace/Raw/Tree toggles).
    * The Ask view has no use for it. */
   hideToolbar?: boolean;
@@ -341,6 +577,7 @@ interface Props {
   currentNodeId?: string;
   /** Machine snapshots for resolving node_id → display name. */
   machines?: import("../types").NodeSnapshot[];
+  userDisplayName?: string | null;
 }
 
 export function Chat({
@@ -358,10 +595,14 @@ export function Chat({
   onStop,
   onRetry,
   onRetryStopped,
+  onContinueRateLimitOnAnotherProvider,
+  rateLimitFallbackLabel,
+  onChooseAnotherProviderForRateLimit,
   onFileClick,
   onViewDiff,
   disabled,
   session,
+  onRename,
   onAddTag,
   onAdvSync,
   tags,
@@ -372,6 +613,7 @@ export function Chat({
   draftImages,
   onImagesChange,
   onEngineer,
+  onSendToNewSession,
   tree,
   pendingBySession,
   focusedSessionId,
@@ -381,19 +623,27 @@ export function Chat({
   onDeleteFork,
   runStateBySession,
   onForkAndSend,
+  canForkSession = false,
   queuedPrompt,
+  queuedPrompts,
   onPromoteQueued,
+  onPromoteQueuedMulti,
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
+  onQueuedEditStart,
+  onQueuedEditFinish,
   onReviewLastWork,
   onToggleSupervisor,
+  onEditSupervisorPrompt,
   onSeparateSupervisor,
   sendTarget,
   onSendTargetChange,
   onLoadOlderMessages,
   hasOlderMessages,
   sessionLoading = false,
+  sessionLoadError = null,
+  onRetrySessionLoad,
   onAddNote,
   onAddCapabilityToNextTurn,
   nextTurnCapabilities,
@@ -404,11 +654,14 @@ export function Chat({
   sessionTabsSort = "last_opened_at",
   providers = [],
   onCloseTab,
+  onCloseOtherTabs,
   onSelectTab,
+  onToggleTopbarPin,
   headerNode,
   composerHeaderNode,
-  renderGroupFooter,
-  getGroupClassName,
+  composerOverflowNode,
+  renderTurnFooter,
+  getTurnGroupClassName,
   hideToolbar,
   onShowNotes,
   onShowComments,
@@ -420,14 +673,43 @@ export function Chat({
   sessions = [],
   currentNodeId = "primary",
   machines = [],
+  userDisplayName = null,
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
-  const chatDiagnosticModules = useExtensionFrontendModules("chat-diagnostic-panel");
   const { is_running: sessionRunning } = useSessionMeta(session?.id);
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(session?.name ?? "");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setEditing(false);
+    setEditName(session?.name ?? "");
+  }, [session?.id, session?.name]);
+
+  const startEdit = () => {
+    if (session && onRename) {
+      setEditName(session.name);
+      setEditing(true);
+    }
+  };
+
+  const commitEdit = () => {
+    setEditing(false);
+    const trimmed = editName.trim();
+    if (session && onRename && trimmed && trimmed !== session.name) {
+      onRename(session.id, trimmed);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setEditName(session?.name ?? "");
+  };
+
   const loadOlderOpId = `chat:loadOlder:${session?.id ?? "none"}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
 
@@ -450,8 +732,7 @@ export function Chat({
     onLoadOlderMessages ? loadOlderFn : undefined,
   );
   const [showRaw, setShowRaw] = useState(false);
-  const [showTrace, setShowTrace] = useState(false);
-  const [showTree, setShowTree] = useState(false);
+  const [rawJsonCollapseSignal, setRawJsonCollapseSignal] = useState(0);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [voicePlaybackEnabled, setVoicePlaybackEnabled] = useState(false);
   // Close toolbar overflow menu on outside clicks + Escape
@@ -505,7 +786,7 @@ export function Chat({
     const fetchApprovals = async () => {
       try {
         const res = await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals?cwd=${encodeURIComponent(cwd)}`,
+          `${teamOrchestrationApi()}/pending_approvals?cwd=${encodeURIComponent(cwd)}`,
         );
         if (!res.ok) return;
         const data = await res.json();
@@ -549,7 +830,7 @@ export function Chat({
     }
     try {
       const res = await fetch(
-        `${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
+        `${extBackendBase("credentialBroker")}/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -567,12 +848,22 @@ export function Chat({
     if (last.type !== "credential_consent_changed") return;
     refetchCredentials();
   }, [streamingEvents, refetchCredentials]);
-  const [pendingUserInputs, setPendingUserInputs] = useState<UserInputRequest[]>([]);
+  const [pendingUserInputs, setPendingUserInputs] = useState<UserInteractionRequest[]>([]);
+  const pendingUserInputsSessionRef = useRef<string | null>(null);
+  const pendingUserInputsFetchSeqRef = useRef(0);
+  pendingUserInputsSessionRef.current = session?.id ?? null;
+  useEffect(() => {
+    // <Chat> is a long-lived singleton across session switches. Clear
+    // immediately so a pending card from the previously viewed session never
+    // paints in the newly selected session while its REST snapshot loads.
+    setPendingUserInputs([]);
+  }, [session?.id]);
   const removePendingUserInput = useCallback((requestId: string) => {
     setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
   }, []);
   const refetchUserInputs = useCallback(async () => {
     const sid = session?.id;
+    const fetchSeq = ++pendingUserInputsFetchSeqRef.current;
     if (!sid) {
       setPendingUserInputs([]);
       return;
@@ -584,7 +875,9 @@ export function Chat({
       );
       if (!res.ok) return;
       const data = await res.json();
-      setPendingUserInputs(Array.isArray(data.requests) ? data.requests : []);
+      if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
+      const fetched = Array.isArray(data.requests) ? (data.requests as UserInteractionRequest[]) : [];
+      setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
     } catch {
       // ignore
     }
@@ -594,8 +887,11 @@ export function Chat({
   }, [refetchUserInputs]);
   useEffect(() => {
     const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent<UserInputRequest>).detail;
-      if (detail?.app_session_id !== session?.id) return;
+      const detail = (e as CustomEvent<UserInteractionRequest>).detail;
+      if (!detail) return;
+      void notifyUserRequest(detail, t("userApproval.title"), t("userInput.title"));
+      const sid = pendingUserInputsSessionRef.current;
+      if (!sid || detail?.app_session_id !== sid) return;
       setPendingUserInputs((prev) => {
         const rest = prev.filter((req) => req.request_id !== detail.request_id);
         return [...rest, detail];
@@ -603,7 +899,8 @@ export function Chat({
     };
     const onResolved = (e: Event) => {
       const detail = (e as CustomEvent<{ request_id?: string; app_session_id?: string }>).detail;
-      if (detail?.app_session_id !== session?.id || !detail.request_id) return;
+      const sid = pendingUserInputsSessionRef.current;
+      if (!sid || detail?.app_session_id !== sid || !detail.request_id) return;
       removePendingUserInput(detail.request_id);
     };
     window.addEventListener("user_input_requested", onRequested);
@@ -612,13 +909,72 @@ export function Chat({
       window.removeEventListener("user_input_requested", onRequested);
       window.removeEventListener("user_input_resolved", onResolved);
     };
-  }, [session?.id, removePendingUserInput]);
+  }, [removePendingUserInput, t]);
+  const visiblePendingUserInputs = useMemo(() => {
+    const sid = session?.id;
+    return sid ? pendingUserInputs.filter((req) => req.app_session_id === sid) : [];
+  }, [pendingUserInputs, session?.id]);
+  // Interactive tool/command approvals (Claude can_use_tool / Codex app-server).
+  // Backend holds them in-memory with a fail-closed timeout; rehydrate on
+  // mount/reconnect so a missed WS event doesn't silently become a denial.
+  const [pendingToolApprovals, setPendingToolApprovals] = useState<ToolApproval[]>([]);
+  const removeToolApproval = useCallback((approvalId: string) => {
+    setPendingToolApprovals((prev) => prev.filter((a) => a.approval_id !== approvalId));
+  }, []);
+  const refetchToolApprovals = useCallback(async () => {
+    const sid = session?.id;
+    if (!sid) {
+      setPendingToolApprovals([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/tool-approvals/pending`, {
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const fetched = Array.isArray(data.approvals) ? (data.approvals as ToolApproval[]) : [];
+      // Merge, don't replace: a late REST snapshot (taken before a WS-added
+      // approval existed) must not clobber a card the live WS event already
+      // added — otherwise the user can't approve and the backend denies.
+      setPendingToolApprovals((prev) => {
+        const byId = new Map(prev.map((a) => [a.approval_id, a]));
+        for (const f of fetched) byId.set(f.approval_id, f);
+        return [...byId.values()];
+      });
+    } catch {
+      // ignore
+    }
+  }, [session?.id]);
+  useEffect(() => {
+    refetchToolApprovals();
+  }, [refetchToolApprovals]);
+  useEffect(() => {
+    const onRequested = (e: Event) => {
+      const detail = (e as CustomEvent<ToolApproval>).detail;
+      if (!detail || detail.app_session_id !== session?.id) return;
+      setPendingToolApprovals((prev) => [
+        ...prev.filter((a) => a.approval_id !== detail.approval_id),
+        detail,
+      ]);
+    };
+    const onResolved = (e: Event) => {
+      const detail = (e as CustomEvent<{ approval_id?: string }>).detail;
+      if (detail?.approval_id) removeToolApproval(detail.approval_id);
+    };
+    window.addEventListener("tool_approval_requested", onRequested);
+    window.addEventListener("tool_approval_resolved", onResolved);
+    return () => {
+      window.removeEventListener("tool_approval_requested", onRequested);
+      window.removeEventListener("tool_approval_resolved", onResolved);
+    };
+  }, [session?.id, removeToolApproval]);
   const chatInlineActionContext = useMemo(
     () => ({
       workerApprovals: pendingApprovals,
       approveWorker: async (delegationId: string, description: string, orchestrationMode: string) => {
         await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals/${delegationId}/approve`,
+          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -631,7 +987,7 @@ export function Chat({
       },
       denyWorker: async (delegationId: string) => {
         await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals/${delegationId}/deny`,
+          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
           { method: "POST" },
         );
         setPendingApprovals((prev) =>
@@ -641,7 +997,7 @@ export function Chat({
       credentialConsents: pendingCredentials,
       approveCredential: async (consentId: string, secrets: Record<string, string>) => {
         const body = Object.keys(secrets).length ? { secrets } : {};
-        const res = await fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/${consentId}/approve`, {
+        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/approve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -653,7 +1009,7 @@ export function Chat({
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
       denyCredential: async (consentId: string) => {
-        const res = await fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/${consentId}/deny`, {
+        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/deny`, {
           method: "POST",
         });
         if (!res.ok) {
@@ -737,42 +1093,32 @@ export function Chat({
   // token mutates the last message's content, not its id, so `threadIdKey`
   // holds and the Map keeps the same reference. Without this the Map was
   // rebuilt on every token and its new identity broke memo() on every
-  // MessageGroup, re-rendering the whole chat instead of the streaming group.
+  // TurnGroup, re-rendering the whole chat instead of the streaming turn group.
   const threadIdKey = allMessages.map((m) => m.id).join("\n");
   const threadColorMap = useMemo(
     () => buildThreadColorMap(allMessages.map((m) => m.id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [threadIdKey],
   );
-  const chatDiagnosticContext = useMemo(
-    () => ({
-      activePanel: showTree ? "rearranger-tree" : showTrace ? "trace-viewer" : null,
-      tree: session?.rearranger_tree ?? null,
-      liveSteps: streamingEvents,
-      threadColorMap: Array.from(threadColorMap.entries()),
-    }),
-    [showTree, showTrace, session?.rearranger_tree, streamingEvents, threadColorMap],
-  );
-
-  const groups = useMemo(() => {
-    // Pair consecutive user+assistant messages into groups.
-    const pairs: { userMessage: ChatMessage; assistantMessage?: ChatMessage }[] = [];
+  const turnGroups = useMemo(() => {
+    // Pair consecutive turn initiators + assistant messages into turn groups.
+    const pairs: { initiatorMessage: ChatMessage; responseMessage?: ChatMessage }[] = [];
     let pendingUser: ChatMessage | null = null;
 
     for (const m of allMessages) {
       if (m.role === "user") {
-        if (pendingUser) pairs.push({ userMessage: pendingUser });
+        if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
         pendingUser = m;
       } else if (m.role === "assistant") {
         if (pendingUser) {
-          pairs.push({ userMessage: pendingUser, assistantMessage: m });
+          pairs.push({ initiatorMessage: pendingUser, responseMessage: m });
           pendingUser = null;
         } else {
           // Orphan assistant (user msg was cancelled / never persisted).
           // Synthesize an empty user stub so the assistant renders in
           // its proper slot instead of being mislabeled as "User".
           pairs.push({
-            userMessage: {
+            initiatorMessage: {
               id: `__synth-${m.id}`,
               role: "user" as const,
               content: "",
@@ -780,18 +1126,18 @@ export function Chat({
               timestamp: m.timestamp,
               isStreaming: false,
             },
-            assistantMessage: m,
+            responseMessage: m,
           });
         }
       }
     }
-    if (pendingUser) pairs.push({ userMessage: pendingUser });
+    if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
 
     const lastGroupIdx = pairs.length - 1;
     return pairs.map((pair, idx) => {
       const mids = new Set<string>();
-      mids.add(pair.userMessage.id);
-      if (pair.assistantMessage) mids.add(pair.assistantMessage.id);
+      mids.add(pair.initiatorMessage.id);
+      if (pair.responseMessage) mids.add(pair.responseMessage.id);
 
       const collected = visibleRuns.filter((r) => r.target_message_id && mids.has(r.target_message_id));
 
@@ -801,8 +1147,12 @@ export function Chat({
       }
       return {
         ...pair,
-        groupRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
-        isLast: idx === lastGroupIdx,
+        turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
+        isLatest: idx === lastGroupIdx,
+        precedingModelSwitchEvents:
+          idx > 0 ? modelSwitchEvents(pairs[idx - 1].responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
+        trailingModelSwitchEvents:
+          idx === lastGroupIdx ? modelSwitchEvents(pair.responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
       };
     });
   }, [allMessages, visibleRuns]);
@@ -810,10 +1160,10 @@ export function Chat({
   // Coalesce streaming-driven re-renders so the chat's layout animations
   // animate in chunks instead of re-triggering on every token. Idle sessions
   // pass through immediately so user interactions stay snappy.
-  const displayGroups = useThrottledValue(groups, sessionRunning ? 140 : 0);
+  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning ? 140 : 0);
 
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
-  // Keyed on displayGroups (the throttled render data), not raw messages, so
+  // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
   // the snap runs in the same commit that grows the DOM — otherwise throttling
   // would scroll to the stale pre-update height. Skip the snap on a prepend
   // render (older messages loaded); the hook's layout effect already restored
@@ -827,49 +1177,49 @@ export function Chat({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [displayGroups, stickToBottom, pendingMessages, streamingEvents, pendingUserInputs, justPrepended]);
+  }, [displayTurnGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
 
-  const latestGroup = groups[groups.length - 1];
-  const latestGroupRunning =
-    !!latestGroup &&
+  const latestTurnGroup = turnGroups[turnGroups.length - 1];
+  const latestTurnGroupRunning =
+    !!latestTurnGroup &&
     (sessionRunning ||
-      (latestGroup.assistantMessage
-        ? isGroupRunning(latestGroup.assistantMessage, latestGroup.groupRuns)
-        : latestGroup.groupRuns.length > 0));
-  const latestAssistantSpeech = assistantSpeechText(latestGroup?.assistantMessage);
+      (latestTurnGroup.responseMessage
+        ? isGroupRunning(latestTurnGroup.responseMessage, latestTurnGroup.turnRuns)
+        : latestTurnGroup.turnRuns.length > 0));
+  const latestResponseSpeech = assistantSpeechText(latestTurnGroup?.responseMessage);
   const previousLatestTurnRef = useRef<{
     sessionId?: string;
-    userMessageId?: string;
-    assistantMessageId?: string;
+    initiatorMessageId?: string;
+    responseMessageId?: string;
     running: boolean;
   } | null>(null);
   useEffect(() => {
     const current = {
       sessionId: session?.id,
-      userMessageId: latestGroup?.userMessage.id,
-      assistantMessageId: latestGroup?.assistantMessage?.id,
-      running: latestGroupRunning,
+      initiatorMessageId: latestTurnGroup?.initiatorMessage.id,
+      responseMessageId: latestTurnGroup?.responseMessage?.id,
+      running: latestTurnGroupRunning,
     };
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = current;
     if (
       !previous ||
       previous.sessionId !== current.sessionId ||
-      previous.userMessageId !== current.userMessageId ||
-      previous.assistantMessageId !== current.assistantMessageId ||
+      previous.initiatorMessageId !== current.initiatorMessageId ||
+      previous.responseMessageId !== current.responseMessageId ||
       !previous.running ||
       current.running ||
       !voicePlaybackEnabled ||
-      !latestAssistantSpeech
+      !latestResponseSpeech
     ) {
       return;
     }
-    speakAssistantText(latestAssistantSpeech);
+    speakAssistantText(latestResponseSpeech);
   }, [
-    latestAssistantSpeech,
-    latestGroup?.assistantMessage?.id,
-    latestGroup?.userMessage.id,
-    latestGroupRunning,
+    latestResponseSpeech,
+    latestTurnGroup?.responseMessage?.id,
+    latestTurnGroup?.initiatorMessage.id,
+    latestTurnGroupRunning,
     session?.id,
     voicePlaybackEnabled,
   ]);
@@ -891,13 +1241,13 @@ export function Chat({
     if (reduceMotion) return NO_ENTERING;
     const prevFirst = prevFirstGroupIdRef.current;
     if (!prevFirst) return NO_ENTERING;
-    const anchorIdx = displayGroups.findIndex((g) => g.userMessage.id === prevFirst);
+    const anchorIdx = displayTurnGroups.findIndex((g) => turnGroupRenderKey(g) === prevFirst);
     if (anchorIdx <= 0) return NO_ENTERING;
-    return new Set(displayGroups.slice(0, anchorIdx).map((g) => g.userMessage.id));
-  }, [displayGroups, reduceMotion]);
+    return new Set(displayTurnGroups.slice(0, anchorIdx).map(turnGroupRenderKey));
+  }, [displayTurnGroups, reduceMotion]);
   useLayoutEffect(() => {
-    prevFirstGroupIdRef.current = displayGroups[0]?.userMessage.id;
-  }, [displayGroups]);
+    prevFirstGroupIdRef.current = displayTurnGroups[0] ? turnGroupRenderKey(displayTurnGroups[0]) : undefined;
+  }, [displayTurnGroups]);
 
   return (
     <MotionConfig reducedMotion="user" transition={{ duration: 0.55, ease: "easeInOut" }}>
@@ -906,7 +1256,7 @@ export function Chat({
       data-testid="chat-container"
       data-session-running={sessionRunning ? "true" : "false"}
     >
-      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && (
+      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && onCloseOtherTabs && onToggleTopbarPin && (
         <SessionTabs
           sessions={openSessions}
           providers={providers ?? []}
@@ -914,13 +1264,36 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onCloseOthers={onCloseOtherTabs}
+          onToggleTopbarPin={onToggleTopbarPin}
         />
       )}
       {session && !hideToolbar && (
         <div className="chat-toolbar">
-          <div className="chat-toolbar-title" title={session.name}>
-            {session.name}
-          </div>
+          {editing && onRename ? (
+            <input
+              ref={(el) => { inputRef.current = el; }}
+              className="chat-rename-input"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") commitEdit();
+                if (e.key === "Escape") cancelEdit();
+              }}
+              onBlur={commitEdit}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+            />
+          ) : (
+            <div
+              className="chat-toolbar-title"
+              title={session.name}
+              onDoubleClick={startEdit}
+            >
+              {session.name}
+            </div>
+          )}
           {onShowNotes && (session.notes?.length ?? 0) > 0 && (
             <button
               className="chat-toolbar-badge-btn"
@@ -965,37 +1338,14 @@ export function Chat({
             {toolbarMenuOpen && (
               <div className="chat-toolbar-overflow-menu">
                 <button
-                  className={`raw-toggle ${showTrace ? "active" : ""}`}
-                  onClick={() => {
-                    setShowTrace((v) => !v);
-                    if (showTrace) { setShowRaw(false); setShowTree(false); }
-                    setToolbarMenuOpen(false);
-                  }}
-                >
-                  {showTrace ? t("chat.chatButton") : t("chat.traceButton")}
-                </button>
-                <button
                   className={`raw-toggle ${showRaw ? "active" : ""}`}
                   onClick={() => {
                     setShowRaw((v) => !v);
-                    if (showRaw) { setShowTrace(false); setShowTree(false); }
                     setToolbarMenuOpen(false);
                   }}
                 >
                   {showRaw ? t("chat.chatButton") : t("chat.rawJsonButton")}
                 </button>
-                {userFacingForks(session).length > 0 && (
-                  <button
-                    className={`raw-toggle ${showTree ? "active" : ""}`}
-                    onClick={() => {
-                      setShowTree((v) => !v);
-                      if (showTree) { setShowRaw(false); setShowTrace(false); }
-                      setToolbarMenuOpen(false);
-                    }}
-                  >
-                    {showTree ? t("chat.hideTreeButton") : t("chat.treeButton")}
-                  </button>
-                )}
               </div>
             )}
           </div>
@@ -1029,27 +1379,40 @@ export function Chat({
           </div>
         )}
 
-        {(showTree || showTrace) && (
-          chatDiagnosticModules.map((module) => (
-            <ExtensionModuleSlot
-              key={`${module.extension_id}:${module.id}`}
-              module={module}
-              context={chatDiagnosticContext}
-            />
-          ))
-        )}
-
         {showRaw && (
           <div className="raw-events-viewer">
+            <div className="raw-events-toolbar">
+              <button
+                className="raw-toggle json-tree-collapse"
+                onClick={() => setRawJsonCollapseSignal((v) => v + 1)}
+              >
+                {t("chat.collapseJsonTreeButton", { defaultValue: "Collapse tree" })}
+              </button>
+            </div>
             {streamingEvents.map((e, i) => (
-              <JsonNode key={i} value={e} />
+              <JsonNode key={i} value={e} collapseSignal={rawJsonCollapseSignal} />
             ))}
           </div>
         )}
 
-        {!showTrace && !showRaw && !showTree && (
+        {!showRaw && (
           <>
-            {sessionLoading && displayGroups.length === 0 ? (
+            {sessionLoadError && sessionLoadError.sessionId === (focusedSessionId ?? tree?.id) ? (
+              <div className="chat-load-error" role="alert">
+                <span className="chat-load-error-text">
+                  {t("chat.sessionLoadFailed", { detail: sessionLoadError.message })}
+                </span>
+                {onRetrySessionLoad && (
+                  <button
+                    type="button"
+                    className="chat-load-error-retry"
+                    onClick={() => onRetrySessionLoad(sessionLoadError.sessionId)}
+                  >
+                    {t("chat.sessionLoadRetry")}
+                  </button>
+                )}
+              </div>
+            ) : sessionLoading && displayTurnGroups.length === 0 ? (
               <div className="chat-loading-skeleton">
                 <div className="chat-loading-pulse" />
               </div>
@@ -1059,6 +1422,7 @@ export function Chat({
                 focusedSessionId={focusedSessionId ?? tree.id}
                 pendingBySession={pendingBySession ?? {}}
                 runStateBySession={runStateBySession ?? {}}
+                userDisplayName={userDisplayName}
                 onSetFocus={onSetForkFocus ?? (() => {})}
                 onCloseFork={onCloseFork ?? (() => {})}
                 onReopenFork={onReopenFork ?? (() => {})}
@@ -1067,31 +1431,45 @@ export function Chat({
               />
             ) : (
               <LayoutGroup>
-              {displayGroups.map((g) => {
-                const groupCls = getGroupClassName?.(g);
+              {displayTurnGroups.map((g) => {
+                const groupCls = getTurnGroupClassName?.(g);
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
+                const groupKey = turnGroupRenderKey(g);
                 return (
-                  <Wrapper key={g.userMessage.id} {...wrapperProps}>
-                    <MessageGroup
-                      enterAnimation={enteringGroupIds.has(g.userMessage.id)}
-                      userMessage={g.userMessage}
-                      assistantMessage={g.assistantMessage}
-                      runs={g.groupRuns}
-                      sessionRunning={g.isLast ? sessionRunning : false}
-                      isLastGroup={g.isLast}
+                  <Wrapper key={groupKey} {...wrapperProps}>
+                    <TurnGroup
+                      enterAnimation={enteringGroupIds.has(groupKey)}
+                      initiatorMessage={g.initiatorMessage}
+                      responseMessage={g.responseMessage}
+                      precedingModelSwitchEvents={g.precedingModelSwitchEvents}
+                      trailingModelSwitchEvents={g.trailingModelSwitchEvents}
+                      runs={g.turnRuns}
+                      sessionRunning={g.isLatest ? sessionRunning : false}
+                      fallbackRunMeta={
+                        g.isLatest && session
+                          ? {
+                              providerId: session.provider_id ?? null,
+                              model: session.model ?? null,
+                              reasoningEffort: session.reasoning_effort ?? null,
+                            }
+                          : undefined
+                      }
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
-                        !!g.assistantMessage &&
-                        !isGroupRunning(g.assistantMessage, g.groupRuns)
+                        !!g.responseMessage &&
+                        !isGroupRunning(g.responseMessage, g.turnRuns)
                       }
                       threadColorMap={threadColorMap}
                       onRetry={onRetry}
                       onRetryStopped={onRetryStopped}
-                      onAlterUserMessage={
+                      onContinueRateLimitOnAnotherProvider={onContinueRateLimitOnAnotherProvider}
+                      rateLimitFallbackLabel={rateLimitFallbackLabel}
+                      onChooseAnotherProviderForRateLimit={onChooseAnotherProviderForRateLimit}
+                      onAlterTurnMessage={
                         onAlterUserMessage &&
-                        g.isLast &&
-                        !g.userMessage.id.startsWith("pending-")
+                        g.isLatest &&
+                        !g.initiatorMessage.id.startsWith("pending-")
                           ? onAlterUserMessage
                           : undefined
                       }
@@ -1102,8 +1480,9 @@ export function Chat({
                       onAdvSyncClick={onAdvSyncClick}
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
+                      userDisplayName={userDisplayName}
                     />
-                    {renderGroupFooter?.(g)}
+                    {renderTurnFooter?.(g)}
                   </Wrapper>
                 );
               })}
@@ -1127,6 +1506,7 @@ export function Chat({
                   threadColorMap={threadColorMap}
                   onFileClick={onFileClick}
                   onViewDiff={onViewDiff}
+                  userDisplayName={userDisplayName}
                 />
               </div>
             )}
@@ -1141,11 +1521,28 @@ export function Chat({
               context={chatInlineActionContext}
             />
           ))}
-        {pendingUserInputs.map((request) => (
-          <UserInputCard
+        {visiblePendingUserInputs.map((request) => (
+          <motion.div
             key={request.request_id}
-            request={request}
-            onDone={removePendingUserInput}
+            layout
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.24, ease: "easeOut" }}
+          >
+            {request.kind === "approval" ? (
+              <UserApprovalCard request={request} onDone={removePendingUserInput} />
+            ) : (
+              <UserInputCard request={request} onDone={removePendingUserInput} />
+            )}
+          </motion.div>
+        ))}
+        {pendingToolApprovals.map((approval) => (
+          <ToolApprovalCard
+            key={approval.approval_id}
+            approval={approval}
+            sessionId={session?.id ?? ""}
+            onResolved={removeToolApproval}
           />
         ))}
       </motion.div>
@@ -1170,8 +1567,9 @@ export function Chat({
               onInterrupt={onInterrupt}
               canSteer={!!canSteer}
               onFork={onForkAndSend}
-              canFork={!!onForkAndSend}
+              canFork={!!onForkAndSend && canForkSession}
               onEngineer={onEngineer}
+              onSendToNewSession={onSendToNewSession}
               disabled={disabled}
               isStreaming={effectiveIsStreaming}
               isStopping={isStopping}
@@ -1183,16 +1581,21 @@ export function Chat({
               draftImages={draftImages}
               onImagesChange={onImagesChange}
               queuedPrompt={queuedPrompt}
+              queuedPrompts={queuedPrompts}
               onPromoteQueued={onPromoteQueued}
+              onPromoteQueuedMulti={onPromoteQueuedMulti}
               onSteerQueued={onSteerQueued}
               onCancelQueued={onCancelQueued}
               onQueuedTextEdit={onQueuedTextEdit}
+              onQueuedEditStart={onQueuedEditStart}
+              onQueuedEditFinish={onQueuedEditFinish}
               onReviewLastWork={onReviewLastWork}
               tagCount={tags?.length ?? 0}
               sendTarget={sendTarget}
               onSendTargetChange={onSendTargetChange}
               supervisorEnabled={!!session?.supervisor_enabled}
               onToggleSupervisor={onToggleSupervisor}
+              onEditSupervisorPrompt={onEditSupervisorPrompt}
               onSeparateSupervisor={onSeparateSupervisor}
               onAddNote={onAddNote}
               onAddCapabilityToNextTurn={onAddCapabilityToNextTurn}
@@ -1205,6 +1608,7 @@ export function Chat({
               currentNodeId={currentNodeId}
               machines={machines}
               headerNode={composerHeaderNode}
+              overflowPanelNode={composerOverflowNode}
             />
           </>
         );

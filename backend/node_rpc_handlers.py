@@ -27,8 +27,17 @@ from typing import Optional
 from orchs.jsonl_helpers import compute_jsonl_path
 from env_compat import get_env
 from provider import StreamEvent, default_provider
+from session_manager import manager as session_manager
+import perf
 
 logger = logging.getLogger(__name__)
+
+
+def _node_provisioned_tool_profile(value: object) -> str:
+    profile = str(value or "").strip()
+    if not profile:
+        return ""
+    raise ValueError("unsupported provisioned_tool_profile")
 
 
 @dataclass
@@ -72,8 +81,16 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     provider = default_provider()
     try:
         import startup_recovery_gate
-        await startup_recovery_gate.wait_for_recovery_ready()
-        provider.start_run(
+        with perf.timed("node_rpc.provider_start_run.recovery_gate"):
+            await startup_recovery_gate.wait_for_recovery_ready()
+        # Offload the synchronous spawn body off the event loop — parity
+        # with turn_manager's spawn path. Without this, blocking
+        # session-manager reads in _build_input_payload freeze the loop.
+        with perf.timed("node_rpc.provider_start_run.flush_pending_persists"):
+            await asyncio.to_thread(session_manager.flush_pending_persists)
+        with perf.timed("node_rpc.provider_start_run.provider_call"):
+            await asyncio.to_thread(
+                provider.start_run,
             run_id=run_id,
             prompt=msg["prompt"],
             cwd=cwd,
@@ -84,6 +101,7 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             session_id=msg.get("session_id"),
             mode=msg.get("mode") or "native",
             app_session_id=worker_agent_session_id,
+            source=msg.get("source"),
             disallowed_tools=msg.get("disallowed_tools"),
             setting_sources=msg.get("setting_sources"),
             backend_url=msg.get("backend_url"),
@@ -101,9 +119,12 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             capability_contexts=msg.get("capability_contexts"),
             target_message_id=msg.get("target_message_id"),
             turn_run_id=msg.get("turn_run_id"),
+            provisioned_tool_profile=_node_provisioned_tool_profile(
+                msg.get("provisioned_tool_profile")
+            ),
             disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
-            files=msg.get("files"),
-        )
+                files=msg.get("files"),
+            )
     except Exception as e:
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
         await node_client.send_run_control(
@@ -450,7 +471,15 @@ async def dispatch_rpc(method: str, params: dict) -> dict:
     return await asyncio.to_thread(handler, params)
 
 
-async def call_local_or_remote(node_id: str, method: str, params: dict):
+async def call_local_or_remote(
+    node_id: str,
+    method: str,
+    params: dict,
+    *,
+    timeout: float = 30.0,
+    secure_transport_required: bool = False,
+    version_ready_required: bool = False,
+):
     """Route an RPC to the local `dispatch_rpc` (in-process) when
     `node_id` is the local sentinel `"primary"` or matches the local
     topology id; otherwise ship over `node_link.rpc_call` to the
@@ -459,18 +488,29 @@ async def call_local_or_remote(node_id: str, method: str, params: dict):
     translation wrap this themselves (see `main._file_op`)."""
     if node_id == "primary":
         return await dispatch_rpc(method, params)
+    # `topology.local_node_id()` raises when topology.yaml is absent
+    # (dynamic-only deploy). That only means we can't CONFIRM the node
+    # IS the local host — not that it's unreachable. Dynamic worker
+    # nodes register without topology and are served by
+    # `node_link.rpc_call`, which raises `NodeOffline` when the node
+    # isn't connected. So on a topology resolve failure we fall through
+    # to the remote path instead of aborting; we never dispatch locally
+    # on a mismatch, preserving the no-silent-local-fallback guard.
     try:
         from topology import local_node_id as _lid
-        local_id = _lid()
+        if node_id == _lid():
+            return await dispatch_rpc(method, params)
     except Exception:
-        raise RuntimeError(
-            f"node_id={node_id!r} requires topology.yaml; "
-            f"BETTER_CLAUDE_TOPOLOGY_PATH not configured"
-        )
-    if node_id == local_id:
-        return await dispatch_rpc(method, params)
+        pass
     import node_link
-    return await node_link.rpc_call(node_id, method, params)
+    return await node_link.rpc_call(
+        node_id,
+        method,
+        params,
+        timeout=timeout,
+        secure_transport_required=secure_transport_required,
+        version_ready_required=version_ready_required,
+    )
 
 
 # INVARIANT: matches any absolute path (POSIX or Windows) excluding NUL
@@ -516,14 +556,20 @@ def _assert_within_cwd_roots(path_str: str) -> None:
         return
     if not spec.cwd_roots:
         return
-    if not any(
-        path_str == root or path_str.startswith(root.rstrip("/") + "/")
-        for root in spec.cwd_roots
-    ):
-        raise ValueError(
-            f"path {path_str!r} is outside this node's cwd_roots "
-            f"{list(spec.cwd_roots)}"
-        )
+    # Resolve BEFORE containment so `..` segments and symlink escapes cannot
+    # slip a path out of an allowlisted root: a lexical prefix check on the
+    # raw string accepts "/root/../../etc" (starts with "/root/") and the
+    # handler's own resolve() then reads/writes the escaped target. Compare
+    # fully-resolved paths on both sides instead.
+    resolved = Path(path_str).resolve()
+    for root in spec.cwd_roots:
+        root_resolved = Path(root).resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return
+    raise ValueError(
+        f"path {path_str!r} is outside this node's cwd_roots "
+        f"{list(spec.cwd_roots)}"
+    )
 
 
 # ---- handlers --------------------------------------------------------
@@ -561,7 +607,9 @@ def _rpc_get_file_tree(params: dict) -> dict:
     root = params.get("root") or ""
     _validate_path(root)
     _assert_within_cwd_roots(root)
-    max_depth = int(params.get("max_depth") or 3)
+    max_depth = int(params.get("max_depth", 1))
+    if max_depth < 0 or max_depth > 5:
+        raise ValueError("max_depth must be between 0 and 5")
     from file_browser import get_file_tree
     return get_file_tree(root, max_depth=max_depth)
 
@@ -730,13 +778,11 @@ def _rpc_list_sessions(params: dict) -> dict:
     metadata and the primary already owns them.
     """
     import json as _json
-    from paths import ba_home
-    sessions_dir = ba_home() / "sessions"
-    if not sessions_dir.is_dir():
-        return {"sessions": []}
+    import session_store
     result = []
-    for f in sessions_dir.iterdir():
-        if not f.is_file() or not f.name.endswith(".summary.json"):
+    for session_file in session_store._session_json_files():
+        f = session_file.with_name(f"{session_file.stem}.summary.json")
+        if not f.is_file():
             continue
         try:
             data = _json.loads(f.read_text(encoding="utf-8"))
@@ -756,6 +802,28 @@ def _rpc_list_sessions(params: dict) -> dict:
             "kind": data.get("kind"),
         })
     return {"sessions": result}
+
+
+def _rpc_sync_provider_config(params: dict) -> dict:
+    provider_state = params.get("provider_state")
+    if not isinstance(provider_state, dict):
+        raise ValueError("provider_state must be an object")
+    import config_store
+    synced = config_store.import_provider_sync_state(provider_state)
+    return {
+        "ok": True,
+        "default_provider_id": synced.get("default_provider_id"),
+        "provider_count": len(synced.get("providers", [])),
+        "provider_api_key_count": synced.get("provider_api_key_count", 0),
+    }
+
+
+def _rpc_sync_extension_config(params: dict) -> dict:
+    extension_state = params.get("extension_state")
+    if not isinstance(extension_state, dict):
+        raise ValueError("extension_state must be an object")
+    import extension_store
+    return extension_store.import_extension_sync_state(extension_state)
 
 
 # Prompt-engineer temp files live under this node's own state home —
@@ -813,7 +881,9 @@ def _rpc_get_raw_file_info(params: dict) -> dict:
     _validate_path(path_str)
     _assert_within_cwd_roots(path_str)
     from file_browser import get_raw_file_info
-    return get_raw_file_info(path_str)
+    return get_raw_file_info(
+        path_str, allow_preview_types=params.get("allow_preview_types") is True,
+    )
 
 
 def _rpc_read_file_raw_range(params: dict) -> dict:
@@ -832,7 +902,9 @@ def _rpc_read_file_raw_range(params: dict) -> dict:
     # Re-resolve through get_raw_file_info on EVERY read so the media
     # extension allowlist is enforced per-chunk, not just at info time.
     from file_browser import get_raw_file_info
-    info = get_raw_file_info(path_str)
+    info = get_raw_file_info(
+        path_str, allow_preview_types=params.get("allow_preview_types") is True,
+    )
     with open(info["path"], "rb") as f:
         f.seek(start)
         data = f.read(length)
@@ -910,6 +982,7 @@ async def _rpc_run_headless(params: dict) -> dict:
         fork=bool(params.get("fork")),
         cwd=params.get("cwd"),
         timeout=timeout if isinstance(timeout, (int, float)) else None,
+        no_tools=bool(params.get("no_tools")),
     )
     return {"result": result}
 
@@ -962,6 +1035,8 @@ def _rpc_read_run_jsonl(params: dict) -> dict:
 _HANDLERS = {
     "list_dir": _rpc_list_dir,
     "list_sessions": _rpc_list_sessions,
+    "sync_provider_config": _rpc_sync_provider_config,
+    "sync_extension_config": _rpc_sync_extension_config,
     "list_directories": _rpc_list_directories,
     "get_file_tree": _rpc_get_file_tree,
     "search_tree": _rpc_search_tree,

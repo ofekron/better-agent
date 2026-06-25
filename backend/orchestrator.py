@@ -28,26 +28,32 @@ and pick up where it left off.
 
 import asyncio
 import base64
+import concurrent.futures
 import copy
+import hmac
 import json
 import logging
 import os
 import re
 import secrets
 import traceback
+import threading
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Optional
+from typing import NamedTuple
 
 from i18n import t
-from provider import StreamEvent, default_provider, get_provider, known_providers
+from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
 from runs_dir import pid_alive as _pid_alive
 from trace_collector import (
     TraceCollector,
     extract_provider_result_token_usage,
     extract_token_usage,
+    merge_token_usages,
 )
 from session_manager import manager as session_manager
 # user_msg_lifecycle emits routed through UserPromptManager — no
@@ -55,10 +61,80 @@ from session_manager import manager as session_manager
 # `self.user_prompt_manager.emit_user_msg_done/_failed`.
 
 import perf
+from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
 import time as _time
 import virtual_session_prompt_handlers
+from ws_serialization import dumps_ws_json
+from global_events import GLOBAL_EVENT_TYPES, validate_global_event
 
 logger = logging.getLogger(__name__)
+_TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
+    name="auth.internal_token",
+    max_workers=2,
+    capacity=16,
+    timeout_seconds=0.1,
+)
+_BOUND_PRINCIPAL: ContextVar[Optional["_RequestAuthorityBinding"]] = ContextVar(
+    "bound_internal_principal",
+    default=None,
+)
+
+
+class PrincipalAuthority(NamedTuple):
+    kind: str
+    extension_id: Optional[str]
+
+
+class _RequestAuthorityBinding:
+    def __init__(
+        self,
+        token: str,
+        principal: PrincipalAuthority,
+        owner: object,
+        allow_downstream: bool,
+    ) -> None:
+        self.token = token
+        self.principal = principal
+        self.owner = owner
+        self.allow_downstream = allow_downstream
+        self.downstream_owner: object | None = None
+
+
+def _bound_principal_for(token: str) -> PrincipalAuthority | None:
+    bound = _BOUND_PRINCIPAL.get()
+    if bound is None or not hmac.compare_digest(token, bound.token):
+        return None
+    try:
+        current_owner: object = asyncio.current_task()
+    except RuntimeError:
+        current_owner = threading.current_thread()
+    if current_owner is bound.owner or current_owner is bound.downstream_owner:
+        return bound.principal
+    if bound.allow_downstream and bound.downstream_owner is None:
+        bound.downstream_owner = current_owner
+        return bound.principal
+    return None
+
+
+async def shutdown_auth_executor() -> None:
+    await _TOKEN_AUTH_EXECUTOR.shutdown()
+
+_PROMPT_PROCESSOR_TRANSPORT_KEYS = (
+    "collapse_key",
+    "collapse_policy",
+    "_delivery_attempt",
+)
+
+
+def _prompt_processor_handle_params(params: dict) -> dict:
+    out = dict(params)
+    for key in _PROMPT_PROCESSOR_TRANSPORT_KEYS:
+        out.pop(key, None)
+    return out
+
+
+class SerializedGlobalEvent(dict):
+    pass
 
 _IMAGE_EXT_BY_MEDIA_TYPE = {
     "image/png": "png",
@@ -181,6 +257,7 @@ from event_shape import (
     extract_output_text as _extract_output_text,
     extract_subagent_types as _extract_subagent_types,
     is_synthetic_event as _is_synthetic_event,
+    project_content_snapshot as _project_content_snapshot,
     strip_synthetic_events as _strip_synthetic_events,
 )
 from event_bus import BusEvent, bus
@@ -333,6 +410,10 @@ class Coordinator:
             pass
         self.ws_callbacks: dict[str, list[Callable[[dict], Awaitable[None]]]] = {}
         self.global_ws_callbacks: list[Callable[[dict], Awaitable[None]]] = []
+        self._global_broadcast_tasks: set[asyncio.Task] = set()
+        self._global_broadcast_futures: set[concurrent.futures.Future] = set()
+        self._global_broadcast_lock = threading.RLock()
+        self._global_broadcast_accepting = True
         # Per-root BetterAgentJsonlTailer — sole producer of live WS
         # frames. Started on first WS subscriber for any session in the
         # root, stopped when last subscriber leaves. The tailer reads
@@ -362,6 +443,7 @@ class Coordinator:
         # still going" work.
         self._prompt_queues: dict[str, asyncio.Queue] = {}
         self._processor_tasks: dict[str, asyncio.Task] = {}
+        self._prompt_admission_open = True
         # A10 TOCTOU closure: counter of prompts that have been
         # dequeued by `_run_session_processor` but not yet fully
         # processed (i.e. `handle_prompt` is still running). Stamped
@@ -380,8 +462,14 @@ class Coordinator:
         # Per-session list of queued prompt IDs (in order). Used to
         # track queued prompts for promote_queued and WS events.
         self._queued_ids: dict[str, list[str]] = {}
+        self._queued_edit_events: dict[tuple[str, str], asyncio.Event] = {}
         self._active_prompt_client_ids: dict[tuple[str, str], str] = {}
         self._prompt_client_id_by_item: dict[str, tuple[str, str]] = {}
+        # Serializes `ask_team_message`'s reattach-redispatch recovery
+        # (see `_reattach_dispatch_missing`) per lifecycle_msg_id, so two
+        # concurrent reattach attempts for the same ask never both
+        # redispatch. Popped after use — see ask_team_message.
+        self._ask_reattach_locks: dict[str, asyncio.Lock] = {}
         # Per-session set of prompt IDs cancelled while still queued.
         # The processor checks this before starting a dequeued prompt.
         self._cancelled_ids: dict[str, set[str]] = {}
@@ -450,13 +538,13 @@ class Coordinator:
         # regardless of what the supervisor says — prevents an
         # infinitely-looping supervisor from trapping the worker.
 
-        # A4: the orchestrator no longer holds a rearranger reference.
+        # A4: the orchestrator owns no turn-lifecycle subscriber state.
         # It publishes `lifecycle.turn_complete` / `lifecycle.turn_stopped`
-        # bus events at the natural points; the rearranger subscribes
-        # via `event_bus_subscribers.bind_rearranger(...)` from main.py.
-        # Decouples the orchestrator from the rearranger subsystem and
-        # makes the lifecycle observable to any future subscriber
-        # (metrics, trace exports, …) without another late-bind hook.
+        # bus events at the natural points; subscribers bind to the bus
+        # from main.py. This decouples the orchestrator from any
+        # lifecycle consumer and makes the lifecycle observable to any
+        # future subscriber (metrics, trace exports, …) without another
+        # late-bind hook.
 
         # Reactive tailer acquisition for mid-session sid discoveries is
         # owned by `native_files_manager` (it subscribes to
@@ -690,7 +778,7 @@ class Coordinator:
         Single-machine path (default): unchanged — pick the session's
         configured provider, fall back to the active provider when
         the record's provider_id is missing or defunct."""
-        sess = session_manager.get(app_session_id)
+        sess = session_manager.get_fields(app_session_id, ("node_id", "provider_id"))
         node_id = (sess or {}).get("node_id") or "primary"
         try:
             from topology import local_node_id
@@ -701,7 +789,7 @@ class Coordinator:
         if node_id != here:
             import extension_store
             not_ready = extension_store.runtime_not_ready_message(
-                extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+                extension_store.extension_id_for_role('machine-nodes')
             )
             if not_ready is not None:
                 raise RuntimeError(not_ready)
@@ -712,6 +800,10 @@ class Coordinator:
         if pid:
             try:
                 prov = get_provider(pid)
+                if getattr(prov, "suspended", False):
+                    raise ProviderSuspendedError(
+                        f"provider {pid} is suspended; cannot start runs"
+                    )
                 if not prov.defunct:
                     return prov
                 logger.warning(
@@ -719,6 +811,8 @@ class Coordinator:
                     "falling back to active",
                     app_session_id, pid,
                 )
+            except ProviderSuspendedError:
+                raise
             except KeyError:
                 logger.warning(
                     "session %s references unknown provider_id %s — "
@@ -726,6 +820,33 @@ class Coordinator:
                     app_session_id, pid,
                 )
         return default_provider()
+
+    def provider_for_run(self, app_session_id: str, provider_id: Optional[str] = None):
+        pid = str(provider_id or "").strip()
+        if not pid:
+            return self.provider_for_session(app_session_id)
+        try:
+            prov = get_provider(pid)
+            if getattr(prov, "suspended", False):
+                raise ProviderSuspendedError(
+                    f"provider {pid} is suspended; cannot start runs"
+                )
+            if not prov.defunct:
+                return prov
+            logger.warning(
+                "per-turn provider_id %s is defunct for session %s — falling back to session provider",
+                pid,
+                app_session_id,
+            )
+        except ProviderSuspendedError:
+            raise
+        except KeyError:
+            logger.warning(
+                "per-turn provider_id %s is unknown for session %s — falling back to session provider",
+                pid,
+                app_session_id,
+            )
+        return self.provider_for_session(app_session_id)
 
     async def rewind_session(self, app_session_id: str, agent_sid: str, anchor_uuid: str) -> None:
         """Public rewind API for submodules that need to rewind a claude
@@ -776,6 +897,9 @@ class Coordinator:
         secret — never from a self-asserted X-Extension-Id header."""
         if not token:
             return None
+        bound = _bound_principal_for(token)
+        if bound is not None:
+            return bound
         if self.verify_internal_token(token):
             return ("core", None)
         import extension_token_registry
@@ -783,6 +907,112 @@ class Coordinator:
         if ext_id:
             return ("extension", ext_id)
         return None
+
+    async def resolve_principal_async(
+        self,
+        token: Optional[str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        if not token:
+            return None
+        import hmac as _hmac
+        bound = _bound_principal_for(token)
+        if bound is not None:
+            return bound
+
+        def _resolve_disk_aware() -> Optional[tuple[str, Optional[str]]]:
+            import extension_token_registry
+            extension_id = extension_token_registry.resolve_fresh(token)
+            try:
+                disk = _internal_token_path().read_text(encoding="utf-8").strip()
+            except OSError:
+                disk = ""
+            extension_match = bool(extension_id)
+            core_match = bool(disk and _hmac.compare_digest(token, disk))
+            if extension_match and core_match:
+                return None
+            if extension_match:
+                return PrincipalAuthority("extension", extension_id)
+            if core_match:
+                return PrincipalAuthority("core", None)
+            if self._prev_token and _hmac.compare_digest(token, self._prev_token):
+                if _time.monotonic() < self._prev_token_grace_expires_at:
+                    return PrincipalAuthority("core", None)
+            return None
+        return await _TOKEN_AUTH_EXECUTOR.run(_resolve_disk_aware)
+
+    async def extension_internal_loopback_allowed_async(self, extension_id: str) -> bool:
+        def check() -> bool:
+            import extension_store
+            record = extension_store.get_extension(extension_id)
+            return bool(
+                record
+                and extension_store.has_permission(record, "internal_loopback")
+            )
+
+        return bool(await _TOKEN_AUTH_EXECUTOR.run(check))
+
+    def request_principal(
+        self,
+        request,
+        token: Optional[str],
+    ) -> Optional[PrincipalAuthority]:
+        if not token:
+            return None
+        bound_token = getattr(request.state, "internal_token", None)
+        principal = getattr(request.state, "internal_principal", None)
+        if not bound_token or principal is None:
+            return None
+        if not hmac.compare_digest(token, bound_token):
+            return None
+        bound_principal = self.bound_request_principal()
+        if bound_principal is None or bound_principal != principal:
+            return None
+        try:
+            current: object = asyncio.current_task()
+        except RuntimeError:
+            current = threading.current_thread()
+        owner = getattr(request.state, "internal_principal_owner", None)
+        if owner is None:
+            request.state.internal_principal_owner = current
+        elif owner is not current:
+            return None
+        return PrincipalAuthority(principal[0], principal[1])
+
+    async def request_principal_async(
+        self,
+        request,
+        token: Optional[str],
+    ) -> Optional[PrincipalAuthority]:
+        principal = self.request_principal(request, token)
+        if principal is not None:
+            return principal
+        return await self.resolve_principal_async(token)
+
+    @contextmanager
+    def bind_principal(
+        self,
+        token: str,
+        principal: PrincipalAuthority,
+        *,
+        allow_downstream: bool = False,
+    ):
+        try:
+            owner: object = asyncio.current_task()
+        except RuntimeError:
+            owner = threading.current_thread()
+        binding = _BOUND_PRINCIPAL.set(
+            _RequestAuthorityBinding(token, principal, owner, allow_downstream),
+        )
+        try:
+            yield principal
+        finally:
+            _BOUND_PRINCIPAL.reset(binding)
+
+    def bound_request_principal(self) -> PrincipalAuthority | None:
+        bound = _BOUND_PRINCIPAL.get()
+        if bound is None:
+            return None
+        return _bound_principal_for(bound.token)
 
     def principal_extension_id(self, token: Optional[str]) -> Optional[str]:
         """Token-derived extension id, or None if the token is core/invalid."""
@@ -926,19 +1156,40 @@ class Coordinator:
         client_id: Optional[str],
         lifecycle_msg_id: str,
     ) -> bool:
-        provider = self.provider_for_session(app_session_id)
-        if not provider.supports_steering:
-            return False
-        candidates = [
-            run_id
-            for run_id in self.turn_manager.active_run_ids.get(app_session_id, [])
-            if run_id in provider._runs
-        ]
+        # Resolve which provider owns the in-flight run. The common case
+        # (and the path the steer tests exercise) is the session's current
+        # provider — try it FIRST. Only when it doesn't own the run do we
+        # scan the provider registry: the user may have switched
+        # provider/model metadata mid-turn (that change applies lazily to
+        # the next prompt), so the live run is still owned by the
+        # previously-active provider instance.
+        run_ids = list(self.turn_manager.active_run_ids.get(app_session_id, []))
+        candidates: list[tuple[object, str]] = []
+        seen_runs: set[str] = set()
+
+        def _collect(prov: object) -> None:
+            if not getattr(prov, "supports_steering", False):
+                return
+            runs = getattr(prov, "_runs", {})
+            for rid in run_ids:
+                if rid in runs and rid not in seen_runs:
+                    seen_runs.add(rid)
+                    candidates.append((prov, rid))
+
+        try:
+            _collect(self.provider_for_session(app_session_id))
+        except Exception:
+            pass
+        if not candidates:
+            for prov in known_providers():
+                _collect(prov)
+
         save_callback = self.turn_manager._turn_save_callbacks.get(app_session_id)
         if save_callback is None:
             return False
         if len(candidates) != 1:
             return False
+        provider, run_id = candidates[0]
         current_assistant_msgs = getattr(
             self.turn_manager, "current_assistant_msgs", {},
         )
@@ -958,7 +1209,7 @@ class Coordinator:
             return True
         deadline = _time.monotonic() + _STEER_READY_RETRY_SECONDS
         while True:
-            if provider.steer_run(candidates[0], prompt, images):
+            if provider.steer_run(run_id, prompt, images):
                 break
             if _time.monotonic() >= deadline:
                 return False
@@ -1039,6 +1290,56 @@ class Coordinator:
         if key and self._active_prompt_client_ids.get(key) == item_id:
             self._active_prompt_client_ids.pop(key, None)
 
+    def try_claim_prompt_client_id(
+        self,
+        app_session_id: str,
+        item_id: str,
+        client_id: object,
+    ) -> Optional[str]:
+        """Atomically claim `(app_session_id, client_id)` for `item_id`.
+
+        Returns the item_id already holding the claim (⇒ this is a
+        duplicate send — caller should echo the in-flight turn and skip)
+        or None after claiming it for `item_id`. No await: atomic on the
+        single-threaded loop, so two concurrent same-client_id sends
+        (offline re-dispatch / reconnect) can't both claim. Closes the
+        TOCTOU between the WS handler's read-only dedup checks and
+        `submit_prompt`, which would otherwise let the second send persist
+        and broadcast a phantom queued bubble before being deduped."""
+        if not self._prompt_admission_open:
+            raise RuntimeError("prompt admission is closed")
+        return self._remember_active_prompt_client_id(
+            app_session_id, item_id, client_id,
+        )
+
+    def reopen_prompt_admission(self) -> None:
+        if any(not task.done() for task in self._processor_tasks.values()):
+            raise RuntimeError("cannot reopen prompt admission before processor drain")
+        self._prompt_admission_open = True
+
+    async def quiesce_prompt_processors(self) -> None:
+        """Fence prompt admission, then finish every cancellation finalizer."""
+        self._prompt_admission_open = False
+        current = asyncio.current_task()
+        tasks = tuple(
+            task for task in self._processor_tasks.values()
+            if not task.done()
+        )
+        if current in tasks:
+            raise RuntimeError("prompt processor cannot quiesce itself")
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = [
+            result for result in results
+            if isinstance(result, BaseException)
+            and not isinstance(result, asyncio.CancelledError)
+        ]
+        if failures:
+            raise ExceptionGroup("prompt processor shutdown failed", failures)
+
     def active_prompt_for_client_id(
         self,
         app_session_id: str,
@@ -1077,6 +1378,10 @@ class Coordinator:
         Returns the queue item ID (for promote_queued / tracking).
         """
         import uuid
+        if not self._prompt_admission_open:
+            if params.get("_client_id_claimed"):
+                self._forget_active_prompt_item(params.get("_queued_id"))
+            raise RuntimeError("prompt admission is closed")
         if not _adv_sync_checked:
             self._reject_if_adv_sync_fork_locked(app_session_id)
         q = self._prompt_queues.get(app_session_id)
@@ -1085,15 +1390,20 @@ class Coordinator:
             self._prompt_queues[app_session_id] = q
         item_id = params.get("_queued_id") or str(uuid.uuid4())
         params["_queued_id"] = item_id
-        existing_item_id = self._remember_active_prompt_client_id(
-            app_session_id,
-            item_id,
-            params.get("client_id"),
-        )
-        if existing_item_id:
-            if item_id != existing_item_id:
-                session_manager.remove_queued_prompt(app_session_id, item_id)
-            return existing_item_id
+        # The WS handler may have already claimed the client_id for this
+        # item_id via try_claim_prompt_client_id (atomic admission gate).
+        # Re-claiming here would see its own claim and wrongly self-dedup,
+        # so skip it in that case.
+        if not params.pop("_client_id_claimed", False):
+            existing_item_id = self._remember_active_prompt_client_id(
+                app_session_id,
+                item_id,
+                params.get("client_id"),
+            )
+            if existing_item_id:
+                if item_id != existing_item_id:
+                    session_manager.remove_queued_prompt(app_session_id, item_id)
+                return existing_item_id
         q.put_nowait(params)
         # Track queued IDs
         ids = self._queued_ids.setdefault(app_session_id, [])
@@ -1114,20 +1424,127 @@ class Coordinator:
         target_session_id: str,
         message: str,
         detach: bool = False,
+        expect_mssg_response: bool = False,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        model_task_key: str = "delegation_message",
+        collapse_key: str = "",
+        collapse_policy: str = "",
+        source: str = "",
+        target_selector: Optional[dict] = None,
     ) -> dict:
         import uuid
         import team_messaging
 
-        sender, target = team_messaging.validate_message_route(
+        sender, target = await asyncio.to_thread(
+            team_messaging.validate_message_route,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
-        metadata = team_messaging.build_message_metadata(
+        run_config = self._resolve_delegation_run_config(
+            model_task_key,
+            sender=sender,
+            target=target,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        metadata = await asyncio.to_thread(
+            team_messaging.build_message_metadata,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if isinstance(target_selector, dict):
+            metadata["target_selector"] = {
+                key: str(target_selector.get(key) or "").strip()
+                for key in ("kind", "value", "pool_affinity_key")
+                if str(target_selector.get(key) or "").strip()
+            }
+        target_disallowed_tools = (
+            target.get("disallowed_tools")
+            if isinstance(target.get("disallowed_tools"), list)
+            else None
+        )
+        if expect_mssg_response:
+            if collapse_key:
+                raise ValueError("collapse_key is not supported for response-waiting messages")
+            metadata["expects_response"] = True
+            metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
+        message_source = source or team_messaging.source_for_message_route(sender, target)
+        if message_source not in team_messaging.MESSAGE_SOURCES:
+            raise ValueError("source must be a team message source")
+        collapse_key = str(collapse_key or "").strip()
+        collapse_policy = str(collapse_policy or "").strip()
+        if collapse_key:
+            if not collapse_policy:
+                collapse_policy = team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+            if collapse_policy not in team_messaging.COLLAPSE_POLICIES:
+                raise ValueError("collapse_policy must be 'take_latest'")
+        elif collapse_policy:
+            raise ValueError("collapse_key is required when collapse_policy is set")
         queue_item_id = str(uuid.uuid4())
         lifecycle_msg_id = str(uuid.uuid4())
+        queue_item = await asyncio.to_thread(
+            team_messaging.queue_payload,
+            queue_item_id=queue_item_id,
+            sender_session_id=sender_session_id,
+            message=message,
+            metadata=metadata,
+            lifecycle_msg_id=lifecycle_msg_id,
+            target_session_id=target_session_id,
+            source=message_source,
+            collapse_key=collapse_key,
+            collapse_policy=collapse_policy,
+        )
+        cli_prompt = await asyncio.to_thread(
+            team_messaging.format_team_message_prompt,
+            message,
+            metadata,
+            target_session_id=target_session_id,
+            wrapper_tag="delegated-task"
+            if message_source == team_messaging.DELEGATE_TASK_SOURCE
+            else "mssg",
+        )
+        prompt_params = {
+            "_queued_id": queue_item_id,
+            "app_session_id": target_session_id,
+            "prompt": message,
+            "cli_prompt": cli_prompt,
+            "provider_id": run_config.get("provider_id") or "",
+            "model": run_config.get("model") or "",
+            "reasoning_effort": run_config.get("reasoning_effort") or "",
+            "allow_model_override": True,
+            "cwd": target.get("cwd") or sender.get("cwd") or "",
+            "orchestration_mode": target.get("orchestration_mode") or "team",
+            "source": message_source,
+            "user_initiated": False,
+            "lifecycle_msg_id": lifecycle_msg_id,
+            "team_message": {
+                "message": message,
+                "metadata": metadata,
+            },
+            "disallowed_tools": target_disallowed_tools,
+            "collapse_key": collapse_key,
+            "collapse_policy": collapse_policy,
+        }
+        if target_disallowed_tools:
+            queue_item["disallowed_tools"] = target_disallowed_tools
+        if collapse_key and collapse_policy == team_messaging.COLLAPSE_POLICY_TAKE_LATEST:
+            collapsed_id = await self.collapse_queued_prompt_take_latest(
+                target_session_id,
+                collapse_key,
+                queue_item,
+                prompt_params,
+            )
+            if collapsed_id:
+                return {
+                    "success": True,
+                    "queued_id": collapsed_id,
+                    "target_session_id": target_session_id,
+                    "expects_response": expect_mssg_response,
+                    "collapsed": True,
+                }
         panel = await self._start_team_message_panel(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -1156,40 +1573,18 @@ class Coordinator:
                 target_session_id=target_session_id,
             )
         try:
-            session_manager.add_queued_prompt(
+            await asyncio.to_thread(
+                session_manager.add_queued_prompt,
                 target_session_id,
-                team_messaging.queue_payload(
-                    queue_item_id=queue_item_id,
-                    sender_session_id=sender_session_id,
-                    message=message,
-                    metadata=metadata,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    target_session_id=target_session_id,
-                ),
+                queue_item,
             )
-            cli_prompt = team_messaging.format_team_message_prompt(
-                message,
-                metadata,
-                target_session_id=target_session_id,
-            )
-            self.submit_prompt(target_session_id, {
-                "_queued_id": queue_item_id,
-                "app_session_id": target_session_id,
-                "prompt": message,
-                "cli_prompt": cli_prompt,
-                "model": target.get("model") or sender.get("model") or "",
-                "cwd": target.get("cwd") or sender.get("cwd") or "",
-                "orchestration_mode": target.get("orchestration_mode") or "team",
-                "source": team_messaging.SOURCE,
-                "user_initiated": False,
-                "lifecycle_msg_id": lifecycle_msg_id,
-                "team_message": {
-                    "message": message,
-                    "metadata": metadata,
-                },
-            })
+            await self.submit_prompt_async(target_session_id, prompt_params)
         except Exception:
-            session_manager.remove_queued_prompt(target_session_id, queue_item_id)
+            await asyncio.to_thread(
+                session_manager.remove_queued_prompt,
+                target_session_id,
+                queue_item_id,
+            )
             if cancel_panel_watch is not None:
                 cancel_panel_watch()
             raise
@@ -1197,6 +1592,126 @@ class Coordinator:
             "success": True,
             "queued_id": queue_item_id,
             "target_session_id": target_session_id,
+            "expects_response": expect_mssg_response,
+        }
+
+    async def collapse_queued_prompt_take_latest(
+        self,
+        app_session_id: str,
+        collapse_key: str,
+        queue_item: Optional[dict],
+        prompt_params: dict,
+    ) -> Optional[str]:
+        """Replace an already-queued item matching `collapse_key` with the
+        newest payload instead of appending a second one. `queue_item` is the
+        session_manager-persisted queued-prompt record to update (team/mssg
+        traffic); pass None for callers with no persisted record (e.g.
+        routine/task launches), which skips that persistence step."""
+        q = self._prompt_queues.get(app_session_id)
+        if not q or q.empty():
+            return None
+        items: list[object] = []
+        latest_idx: Optional[int] = None
+        expected_source = prompt_params.get("source")
+        expected_sender = (
+            (prompt_params.get("team_message") or {})
+            .get("metadata", {})
+            .get("sender_session_id")
+        )
+        while not q.empty():
+            item = await q.get()
+            item_sender = (
+                (item.get("team_message") or {})
+                .get("metadata", {})
+                .get("sender_session_id")
+                if isinstance(item, dict)
+                else None
+            )
+            if (
+                isinstance(item, dict)
+                and item.get("collapse_key") == collapse_key
+                and item.get("collapse_policy") == "take_latest"
+                and item.get("source") == expected_source
+                and item_sender == expected_sender
+            ):
+                latest_idx = len(items)
+            items.append(item)
+        queued_id = ""
+        updated_item: Optional[dict] = None
+        persisted_update: Optional[dict] = None
+        if latest_idx is not None:
+            existing = items[latest_idx]
+            if isinstance(existing, dict):
+                queued_id = str(existing.get("_queued_id") or "")
+                lifecycle_msg_id = str(existing.get("lifecycle_msg_id") or "")
+                updated_item = dict(existing)
+                updated_item.update(prompt_params)
+                updated_item["_queued_id"] = queued_id
+                if lifecycle_msg_id:
+                    updated_item["lifecycle_msg_id"] = lifecycle_msg_id
+                if queue_item is not None:
+                    persisted_update = dict(queue_item)
+                    persisted_update["id"] = queued_id
+                    if lifecycle_msg_id:
+                        persisted_update["lifecycle_msg_id"] = lifecycle_msg_id
+        if not queued_id or updated_item is None:
+            for item in items:
+                await q.put(item)
+            return None
+        if persisted_update is not None:
+            try:
+                await asyncio.to_thread(
+                    session_manager.update_queued_prompt,
+                    app_session_id,
+                    queued_id,
+                    persisted_update,
+                )
+            except Exception:
+                for item in items:
+                    await q.put(item)
+                raise
+        items[latest_idx] = updated_item
+        for item in items:
+            await q.put(item)
+        return queued_id
+
+    def _resolve_delegation_run_config(
+        self,
+        task_key: str,
+        *,
+        sender: dict,
+        target: Optional[dict] = None,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+    ) -> dict[str, str]:
+        import config_store
+
+        provider_id = str(provider_id or "").strip()
+        if provider_id.upper() == "ANY":
+            provider_id = ""
+        model = str(model or "").strip()
+        reasoning_effort = str(reasoning_effort or "").strip()
+        assignment = config_store.get_internal_llm_task(task_key)
+        if assignment:
+            resolved = config_store.resolve_internal_llm(task_key)
+            provider_id = provider_id or str(resolved.get("provider_id") or "").strip()
+            model = model or str(resolved.get("model") or "").strip()
+            reasoning_effort = (
+                reasoning_effort
+                or str(resolved.get("reasoning_effort") or "").strip()
+            )
+        if provider_id and not model:
+            provider = config_store.get_provider(provider_id) or {}
+            model = str(provider.get("default_model") or "").strip()
+            if not model:
+                name = provider.get("name") or provider_id
+                raise ValueError(f"{name} has no default model configured")
+        target = target or {}
+        return {
+            "provider_id": provider_id or str(target.get("provider_id") or sender.get("provider_id") or "").strip(),
+            "model": model or str(target.get("model") or sender.get("model") or "").strip(),
+            "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or sender.get("reasoning_effort") or "").strip(),
         }
 
     def register_mssg_turn_waiter(
@@ -1297,6 +1812,9 @@ class Coordinator:
         provider_id: str = "",
         reasoning_effort: str = "",
         sub_session: bool = True,
+        run_mode: str = "direct",
+        folder_id: Optional[str] = None,
+        tag_ids: Optional[list[str]] = None,
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -1304,27 +1822,38 @@ class Coordinator:
         detached (does NOT join the sender's turn)."""
         import config_store
         import session_search
+        import team_messaging
         from stores import pending_approvals
 
         policy = config_store.get_delegate_task_policy()
         caller = sender_session_id
         caller_session = session_manager.get(caller) or {}
-        delegate_provider_id = provider_id or caller_session.get("provider_id")
-        if not model and provider_id:
-            provider = config_store.get_provider(provider_id) or {}
-            model = str(provider.get("default_model") or "").strip()
-            if not model:
-                name = provider.get("name") or provider_id
-                raise ValueError(f"{name} has no default model configured")
-        if not model:
-            model = caller_session.get("model") or ""
-        delegate_reasoning_effort = (
-            reasoning_effort
-            if reasoning_effort != ""
-            else caller_session.get("reasoning_effort")
+        create_config = self._resolve_delegation_run_config(
+            "delegation_task",
+            sender=caller_session,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
+        requested_provider_id = str(provider_id or "").strip()
+        delegate_search_provider_id = (
+            requested_provider_id
+            if requested_provider_id and requested_provider_id.upper() != "ANY"
+            else None
+        )
+        delegate_provider_id = create_config.get("provider_id") or None
+        delegate_reasoning_effort = create_config.get("reasoning_effort") or None
+        if run_mode not in ("direct", "fork"):
+            raise ValueError("run_mode must be direct or fork")
+        if run_mode == "fork" and not target_session_id:
+            raise ValueError("run_mode=fork requires target_session_id")
         target: Optional[str] = target_session_id or None
+        if target == caller:
+            raise ValueError(
+                "delegate_task target_session_id must not be the sender_session_id"
+            )
         created = False
+        forked_from: Optional[str] = None
 
         # Resolve the target session.
         if not target:
@@ -1332,32 +1861,58 @@ class Coordinator:
                 target = self._delegate_task_create_session(
                     caller,
                     task,
-                    model,
+                    create_config.get("model") or "",
                     cwd,
                     provider_id=delegate_provider_id,
                     reasoning_effort=delegate_reasoning_effort,
                     sub_session=sub_session,
                 )
                 created = True
-            else:  # auto / manual → search_sessions, take the first suggestion
+            else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
-                    suggestion = await session_search.search(task)
+                    suggestion = await session_search.run_search_sessions_session(
+                        task,
+                        provider_id=delegate_search_provider_id,
+                    )
                 except Exception:
                     logger.exception("delegate_task: session_search failed")
                     suggestion = {"session_ids": []}
                 ids = (suggestion or {}).get("session_ids") or []
-                target = ids[0] if ids else None
+                target = next(
+                    (
+                        sid for sid in ids
+                        if isinstance(sid, str)
+                        and sid
+                        and sid != caller
+                        and session_manager.get(sid)
+                    ),
+                    None,
+                )
                 if not target:
                     target = self._delegate_task_create_session(
                         caller,
                         task,
-                        model,
+                        create_config.get("model") or "",
                         cwd,
                         provider_id=delegate_provider_id,
                         reasoning_effort=delegate_reasoning_effort,
                         sub_session=sub_session,
                     )
                     created = True
+
+        if run_mode == "fork":
+            try:
+                fork = await asyncio.to_thread(
+                    session_manager.fork,
+                    target,
+                    user_initiated=False,
+                    kind="delegate_task_fork",
+                )
+            except KeyError as exc:
+                raise ValueError("target_session_id does not exist") from exc
+            target = fork["id"]
+            forked_from = target_session_id
+            created = True
 
         # Approval gate (manual / always_new_approve) — reuses pending_approvals
         # + approval_waiters + the existing /api/pending_approvals/{id}/approve|deny.
@@ -1378,7 +1933,7 @@ class Coordinator:
                     proposed_description=(task or "")[:200] or "delegate_task",
                     proposed_orchestration_mode="native",
                     instructions_preview=task,
-                    model=model or "",
+                    model=create_config.get("model") or "",
                 )
             except Exception:
                 self.approval_waiters.pop(dt_id, None)
@@ -1397,24 +1952,57 @@ class Coordinator:
             try:
                 await asyncio.wait_for(fut, timeout=_DELEGATE_TASK_APPROVAL_TIMEOUT)
             except asyncio.TimeoutError:
+                if created:
+                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task approval timed out",
                         "target_session_id": target}
             finally:
                 self.approval_waiters.pop(dt_id, None)
             rec = pending_approvals.get(dt_id)
             if not rec or rec.get("status") != "approved":
+                if created:
+                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task denied by user",
                         "target_session_id": target}
 
+        if created and (folder_id or tag_ids):
+            import session_organization_store
+            try:
+                await asyncio.to_thread(
+                    session_organization_store.set_session_organization,
+                    target,
+                    folder_id,
+                    tag_ids or [],
+                )
+            except ValueError:
+                await asyncio.to_thread(session_manager.delete, target)
+                raise
+
         # Dispatch detached (does not join the sender's turn).
+        target_session = session_manager.get(target) or {}
+        run_config = self._resolve_delegation_run_config(
+            "delegation_task",
+            sender=caller_session,
+            target=target_session,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
         await self.submit_team_message(
             sender_session_id=caller, target_session_id=target,
             message=task, detach=True,
+            source=team_messaging.DELEGATE_TASK_SOURCE,
+            provider_id=run_config.get("provider_id") or "",
+            model=run_config.get("model") or "",
+            reasoning_effort=run_config.get("reasoning_effort") or "",
+            model_task_key="delegation_task",
         )
         created_target = session_manager.get(target) if created else None
         return {
             "success": True,
             "target_session_id": target,
+            "forked_from_session_id": forked_from,
+            "run_mode": run_mode,
             "created_session": created,
             "created_sub_session": bool(
                 created_target and created_target.get("kind") == "sub_session"
@@ -1534,6 +2122,9 @@ class Coordinator:
             "started_at": started_at,
             "insert_at": insert_at,
             "orchestration_mode": target.get("orchestration_mode"),
+            "provider_id": target.get("provider_id"),
+            "model": target.get("model"),
+            "reasoning_effort": target.get("reasoning_effort"),
             "is_new": False,
             "instructions_preview": message[:2000],
             "events": [],
@@ -1552,6 +2143,9 @@ class Coordinator:
             "started_at": started_at,
             "insert_at": insert_at,
             "orchestration_mode": target.get("orchestration_mode"),
+            "provider_id": target.get("provider_id"),
+            "model": target.get("model"),
+            "reasoning_effort": target.get("reasoning_effort"),
             "run_mode": run_mode,
             "is_new": False,
             "instructions_preview": message[:2000],
@@ -1587,6 +2181,9 @@ class Coordinator:
             "started_at": started_at,
             "insert_at": insert_at,
             "orchestration_mode": target_session.get("orchestration_mode"),
+            "provider_id": target_session.get("provider_id"),
+            "model": target_session.get("model"),
+            "reasoning_effort": target_session.get("reasoning_effort"),
             "is_new": True,
             "instructions_preview": "",
             "events": [],
@@ -1605,6 +2202,9 @@ class Coordinator:
             "started_at": started_at,
             "insert_at": insert_at,
             "orchestration_mode": target_session.get("orchestration_mode"),
+            "provider_id": target_session.get("provider_id"),
+            "model": target_session.get("model"),
+            "reasoning_effort": target_session.get("reasoning_effort"),
             "run_mode": "created",
             "is_new": True,
             "instructions_preview": "",
@@ -1676,6 +2276,11 @@ class Coordinator:
         message: str,
         ask_id: str = "",
         timeout_s: float = 24 * 60 * 60,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        model_task_key: str = "delegation_ask",
+        target_selector: Optional[dict] = None,
     ) -> dict:
         import uuid
         import ask_status_store
@@ -1689,19 +2294,45 @@ class Coordinator:
         existing = ask_status_store.read_status(ask_id) if ask_id else None
         if existing and existing.get("result") is not None:
             return existing["result"]
-        reattach = existing is not None
+        reattach = bool(
+            existing
+            and existing.get("lifecycle_msg_id")
+            and existing.get("queue_item_id")
+            and existing.get("target_session_id")
+        )
         lifecycle_msg_id = (existing or {}).get("lifecycle_msg_id") or str(uuid.uuid4())
         queue_item_id = (existing or {}).get("queue_item_id") or str(uuid.uuid4())
 
-        sender, target = team_messaging.validate_message_route(
+        sender, target = await asyncio.to_thread(
+            team_messaging.validate_message_route,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
-        metadata = team_messaging.build_message_metadata(
+        run_config = self._resolve_delegation_run_config(
+            model_task_key,
+            sender=sender,
+            target=target,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        metadata = await asyncio.to_thread(
+            team_messaging.build_message_metadata,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if isinstance(target_selector, dict):
+            metadata["target_selector"] = {
+                key: str(target_selector.get(key) or "").strip()
+                for key in ("kind", "value", "pool_affinity_key")
+                if str(target_selector.get(key) or "").strip()
+            }
         metadata["expects_response"] = True
+        target_disallowed_tools = (
+            target.get("disallowed_tools")
+            if isinstance(target.get("disallowed_tools"), list)
+            else None
+        )
         panel = None
         if not reattach:
             panel = await self._start_team_message_panel(
@@ -1716,7 +2347,9 @@ class Coordinator:
             f"{message}\n\n"
             "<response_contract>\n"
             "The sender is waiting for this turn to finish. Put the answer in "
-            "your assistant response for this turn.\n"
+            "your assistant response for this turn. The ask tool automatically "
+            "captures your last assistant text batch and returns it to the "
+            "sender as the tool result — do NOT mssg the sender back\n"
             "</response_contract>"
         )
         done: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -1746,56 +2379,79 @@ class Coordinator:
                     "error": data.get("error") or data.get("reason") or "target turn failed",
                 })
 
+        async def _dispatch_prompt() -> None:
+            """Durably persist the queue item and submit the target turn.
+            Reused by the fresh (`not reattach`) path and by the reattach
+            recovery path when `_reattach_dispatch_missing` finds the
+            original dispatch never durably landed. `add_queued_prompt`
+            replaces (not duplicates) any existing entry with the same
+            `id`, so calling this twice for the same `queue_item_id` is
+            safe."""
+            if ask_id:
+                await ask_status_store.write_status_async(
+                    ask_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    queue_item_id=queue_item_id,
+                    sender_session_id=sender_session_id,
+                    target_session_id=target_session_id,
+                )
+            queue_item = await asyncio.to_thread(
+                team_messaging.queue_payload,
+                queue_item_id=queue_item_id,
+                sender_session_id=sender_session_id,
+                message=message,
+                metadata=metadata,
+                lifecycle_msg_id=lifecycle_msg_id,
+                target_session_id=target_session_id,
+                source=team_messaging.ASK_SOURCE,
+            )
+            if target_disallowed_tools:
+                queue_item["disallowed_tools"] = target_disallowed_tools
+            await asyncio.to_thread(
+                session_manager.add_queued_prompt,
+                target_session_id,
+                queue_item,
+            )
+            cli_prompt = await asyncio.to_thread(
+                team_messaging.format_team_message_prompt,
+                ask_prompt,
+                metadata,
+                target_session_id=target_session_id,
+            )
+            await self.submit_prompt_async(target_session_id, {
+                "_queued_id": queue_item_id,
+                "app_session_id": target_session_id,
+                "prompt": message,
+                "cli_prompt": cli_prompt,
+                "provider_id": run_config.get("provider_id") or "",
+                "model": run_config.get("model") or "",
+                "reasoning_effort": run_config.get("reasoning_effort") or "",
+                "allow_model_override": True,
+                "cwd": target.get("cwd") or sender.get("cwd") or "",
+                "orchestration_mode": target.get("orchestration_mode") or "team",
+                "source": team_messaging.ASK_SOURCE,
+                "user_initiated": False,
+                "lifecycle_msg_id": lifecycle_msg_id,
+                "team_message": {
+                    "message": message,
+                    "metadata": metadata,
+                },
+                "disallowed_tools": target_disallowed_tools,
+            })
+
         self.register_ws(target_session_id, wait_callback)
         result: dict
         try:
             if not reattach:
-                if ask_id:
-                    ask_status_store.write_status(
-                        ask_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        queue_item_id=queue_item_id,
-                        sender_session_id=sender_session_id,
-                        target_session_id=target_session_id,
-                    )
-                session_manager.add_queued_prompt(
-                    target_session_id,
-                    team_messaging.queue_payload(
-                        queue_item_id=queue_item_id,
-                        sender_session_id=sender_session_id,
-                        message=message,
-                        metadata=metadata,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        target_session_id=target_session_id,
-                        source=team_messaging.ASK_SOURCE,
-                    ),
-                )
-                cli_prompt = team_messaging.format_team_message_prompt(
-                    ask_prompt,
-                    metadata,
-                    target_session_id=target_session_id,
-                )
-                self.submit_prompt(target_session_id, {
-                    "_queued_id": queue_item_id,
-                    "app_session_id": target_session_id,
-                    "prompt": message,
-                    "cli_prompt": cli_prompt,
-                    "model": target.get("model") or sender.get("model") or "",
-                    "cwd": target.get("cwd") or sender.get("cwd") or "",
-                    "orchestration_mode": target.get("orchestration_mode") or "team",
-                    "source": team_messaging.ASK_SOURCE,
-                    "user_initiated": False,
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "team_message": {
-                        "message": message,
-                        "metadata": metadata,
-                    },
-                })
+                await _dispatch_prompt()
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
-            # does not reliably re-emit user_message_done/failed, so the durable
-            # events.jsonl is the authoritative completion signal.
-            terminal = user_msg_lifecycle.terminal_event_for_lifecycle(
+            # normally writes a durable user_message_done/failed terminal; older
+            # already-reconciled runs may predate that terminal, so a reattached
+            # ask also consults the target assistant message + its run
+            # complete.json before it blocks again. That repairs existing
+            # stuck ask callers without re-queueing a duplicate prompt.
+            terminal = await user_msg_lifecycle.terminal_event_for_lifecycle_async(
                 target_session_id, lifecycle_msg_id
             )
             if terminal is not None:
@@ -1807,6 +2463,40 @@ class Coordinator:
                         "success": False,
                         "error": tdata.get("error") or tdata.get("reason") or "target turn failed",
                     }
+            elif reattach:
+                recovered = await self._team_message_completed_result_from_store(
+                    target_session_id=target_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                )
+                if recovered is not None:
+                    result = recovered
+                else:
+                    # Close the write-ahead-but-never-persisted window: the
+                    # ask_status_store correlation write (in _dispatch_prompt)
+                    # happens BEFORE the queue item is durably persisted, so a
+                    # crash in between leaves `reattach=True` true forever
+                    # with nothing ever actually queued. Detect that and
+                    # redispatch instead of blocking for timeout_s. Locked
+                    # per lifecycle_msg_id so two concurrent reattach
+                    # attempts for the same ask can't both redispatch.
+                    lock = self._ask_reattach_locks.setdefault(
+                        lifecycle_msg_id, asyncio.Lock(),
+                    )
+                    try:
+                        async with lock:
+                            if await asyncio.to_thread(
+                                self._reattach_dispatch_missing,
+                                target_session_id, queue_item_id, lifecycle_msg_id,
+                            ):
+                                logger.warning(
+                                    "ask_team_message reattach %s: original "
+                                    "dispatch never durably landed; redispatching",
+                                    ask_id or lifecycle_msg_id,
+                                )
+                                await _dispatch_prompt()
+                    finally:
+                        self._ask_reattach_locks.pop(lifecycle_msg_id, None)
+                    result = await asyncio.wait_for(done, timeout=timeout_s)
             else:
                 result = await asyncio.wait_for(done, timeout=timeout_s)
         except Exception as exc:
@@ -1840,7 +2530,7 @@ class Coordinator:
             **response,
         }
         if ask_id:
-            ask_status_store.write_status(ask_id, result=full)
+            await ask_status_store.write_status_async(ask_id, result=full)
         return full
 
     def _team_message_turn_response(
@@ -1849,6 +2539,57 @@ class Coordinator:
         target_session_id: str,
         lifecycle_msg_id: str,
     ) -> dict:
+        found = self._team_message_user_and_assistant(
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if found is None:
+            return {"response_message_id": None, "assistant_content": ""}
+        _user_msg, assistant_msg = found
+        if assistant_msg is None:
+            return {"response_message_id": None, "assistant_content": ""}
+        return {
+            "response_message_id": assistant_msg.get("id"),
+            "assistant_content": self._team_message_assistant_content(
+                target_session_id,
+                assistant_msg,
+            ),
+        }
+
+    def _team_message_assistant_content(
+        self,
+        target_session_id: str,
+        assistant_msg: dict,
+    ) -> str:
+        content = assistant_msg.get("content")
+        content = content if isinstance(content, str) else ""
+        events = assistant_msg.get("events") or []
+        if not events:
+            return content
+        # `content` is a cache of the events projection — re-derive from
+        # the source on every grab so a stale snapshot (e.g. a lead-in
+        # captured before the turn's final text event) is never returned.
+        # `_project_content_snapshot` keeps a non-empty current content
+        # when the projection comes back empty (unhydrated/tool-only
+        # tails), so this can only move the snapshot forward.
+        projected = _project_content_snapshot(events, content)
+        if projected and projected != content:
+            msg_id = assistant_msg.get("id")
+            if msg_id:
+                session_manager.update_running_content(
+                    target_session_id,
+                    str(msg_id),
+                    projected,
+                )
+                assistant_msg["content"] = projected
+        return projected or content
+
+    def _team_message_user_and_assistant(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> Optional[tuple[dict, Optional[dict]]]:
         session = session_manager.get(target_session_id) or {}
         messages = session.get("messages") or []
         user_idx = None
@@ -1860,15 +2601,152 @@ class Coordinator:
                 user_idx = idx
                 break
         if user_idx is None:
-            return {"response_message_id": None, "assistant_content": ""}
+            return None
         for msg in messages[user_idx + 1:]:
-            if msg.get("role") != "assistant":
+            if msg.get("role") == "assistant":
+                return messages[user_idx], msg
+        return messages[user_idx], None
+
+    def _team_message_complete_for_assistant(
+        self,
+        *,
+        target_session_id: str,
+        assistant_msg_id: str,
+    ) -> Optional[dict]:
+        try:
+            from runs_dir import (
+                cached_run_dirs_for_app_session,
+                read_best_complete,
+                runs_root,
+            )
+            root = runs_root()
+        except Exception:
+            logger.debug("ask reattach: runs_root unavailable", exc_info=True)
+            return None
+        candidates = []
+        for child in cached_run_dirs_for_app_session(root, target_session_id):
+            bs_path = child / "backend_state.json"
+            try:
+                state = json.loads(bs_path.read_text(encoding="utf-8"))
+            except Exception:
                 continue
+            persist_to = state.get("persist_to") or state.get("app_session_id")
+            if persist_to != target_session_id:
+                continue
+            if state.get("target_message_id") != assistant_msg_id:
+                continue
+            try:
+                candidates.append((child.stat().st_mtime, child))
+            except OSError:
+                continue
+        for _mtime, child in sorted(candidates, reverse=True):
+            try:
+                complete = read_best_complete(child)
+            except Exception:
+                logger.debug(
+                    "ask reattach: failed reading complete for %s", child.name,
+                    exc_info=True,
+                )
+                continue
+            if isinstance(complete, dict):
+                return complete
+        return None
+
+    async def _team_message_completed_result_from_store(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> Optional[dict]:
+        found = self._team_message_user_and_assistant(
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if found is None:
+            return None
+        user_msg, assistant_msg = found
+        if user_msg.get("status") == "error":
             return {
-                "response_message_id": msg.get("id"),
-                "assistant_content": msg.get("content") or "",
+                "success": False,
+                "error": user_msg.get("errorText") or "target turn failed",
             }
-        return {"response_message_id": None, "assistant_content": ""}
+        if assistant_msg is None:
+            return None
+
+        response = {
+            "response_message_id": assistant_msg.get("id"),
+            "assistant_content": self._team_message_assistant_content(
+                target_session_id,
+                assistant_msg,
+            ),
+        }
+        if assistant_msg.get("completed_at"):
+            return {"success": True, **response}
+        if assistant_msg.get("error") or assistant_msg.get("errorText"):
+            return {
+                "success": False,
+                "error": assistant_msg.get("errorText") or "target turn failed",
+            }
+
+        complete = await asyncio.to_thread(
+            self._team_message_complete_for_assistant,
+            target_session_id=target_session_id,
+            assistant_msg_id=str(assistant_msg.get("id") or ""),
+        )
+        if complete is not None:
+            success = bool(complete.get("success"))
+            if success:
+                return {"success": True, **response}
+            return {
+                "success": False,
+                "error": complete.get("error") or "target turn failed",
+            }
+
+        return None
+
+    def _reattach_dispatch_missing(
+        self, target_session_id: str, queue_item_id: str, lifecycle_msg_id: str,
+    ) -> bool:
+        """True when a reattached `ask`'s original dispatch never durably
+        landed: the queue item was never persisted to `queued_prompts` AND
+        the target turn never started. In that state nothing will ever
+        complete this `lifecycle_msg_id` — the caller must redispatch
+        rather than wait. Mirrors the dedup check `_re_enqueue_queued_prompts`
+        (backend/main.py) uses at startup, applied inline instead of waiting
+        for a full backend restart. Reads `session_manager.get` directly
+        (not `session_queue_projection`, which is only eventually
+        consistent via a background writer) so this sees the queue write
+        the instant it lands.
+
+        `_run_session_processor` dequeues a queued prompt (removing it from
+        `queued_prompts`) BEFORE the turn's user message is durably
+        appended to `messages` — a real gap between the two durable checks
+        below. `user_prompt_manager`'s in-flight marker is set the instant
+        a queue item is claimed for processing and cleared only once that
+        attempt fully concludes (success, failure, or cancellation — see
+        the `finally` in `_run_session_processor`), so it exactly spans
+        that gap for a turn genuinely running in THIS process. It is
+        intentionally in-memory/per-process only: after a real backend
+        restart it is empty, which is correct — nothing is actually still
+        running post-restart, so the durable checks alone decide."""
+        if self.user_prompt_manager.get_in_flight_lifecycle_msg_id(
+            target_session_id,
+        ) == lifecycle_msg_id:
+            return False
+        session = session_manager.get(target_session_id) or {}
+        still_queued = any(
+            isinstance(qp, dict) and qp.get("id") == queue_item_id
+            for qp in session.get("queued_prompts") or []
+        )
+        if still_queued:
+            return False
+        already_started = any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and msg.get("lifecycle_msg_id") == lifecycle_msg_id
+            for msg in session.get("messages") or []
+        )
+        return not already_started
 
     async def create_worker_for_session(
         self,
@@ -1981,6 +2859,30 @@ class Coordinator:
         """Return True if there are queued (not yet dequeued) prompts for this session."""
         return bool(self._queued_ids.get(app_session_id))
 
+    def is_prompt_item_in_flight(self, app_session_id: str, item_id: str) -> bool:
+        """Return True if `item_id` is known to the in-memory coordinator —
+        either waiting in the per-session queue (`_queued_ids`) or currently
+        being processed (`_claimed_queued_ids`). The runtime re-enqueue
+        watchdog uses this to skip items that are merely pending vs. truly
+        lost (admitted to disk but never submitted), which is what prevents
+        a re-enqueue from double-running a prompt regardless of client_id.
+
+        A claimed id is treated as in-flight ONLY while its processor task
+        is alive: if the task died abnormally after claiming (before its
+        finally cleared the claim), the claim is stale and must not block
+        re-enqueue — otherwise the prompt would still drop forever, the
+        exact bug the watchdog exists to close. On normal completion the
+        finally clears the claim before the task ends, so this never
+        suppresses a legitimately-pending item."""
+        if item_id in self._queued_ids.get(app_session_id, []):
+            return True
+        if item_id not in getattr(self, "_claimed_queued_ids", {}).get(
+            app_session_id, set()
+        ):
+            return False
+        task = self._processor_tasks.get(app_session_id)
+        return task is not None and not task.done()
+
     def _queue_persisted_prompts_for_promotion(self, app_session_id: str) -> None:
         queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
         if not queued:
@@ -1994,18 +2896,11 @@ class Coordinator:
             qp_id = qp.get("id") or str(uuid.uuid4())
             if qp_id in ids:
                 continue
-            team_message = None
-            if qp.get("source") in ("team_message", "team_ask"):
-                import team_messaging
-                sender_session_id = str(qp.get("sender_session_id") or "")
-                metadata = team_messaging.build_message_metadata(
-                    sender_session_id=sender_session_id,
-                    target_session_id=app_session_id,
-                )
-                team_message = {
-                    "message": qp.get("content", ""),
-                    "metadata": metadata,
-                }
+            import team_messaging
+            team_message = team_messaging.team_message_from_queue_payload(
+                qp,
+                target_session_id=app_session_id,
+            )
             q.put_nowait({
                 "_queued_id": qp_id,
                 "prompt": qp.get("content", ""),
@@ -2016,8 +2911,12 @@ class Coordinator:
                 "lifecycle_msg_id": qp.get("lifecycle_msg_id"),
                 "source": qp.get("source"),
                 "team_message": team_message,
+                "disallowed_tools": qp.get("disallowed_tools"),
+                "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                 "capability_contexts": qp.get("capability_contexts") or [],
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
+                "collapse_key": qp.get("collapse_key") or "",
+                "collapse_policy": qp.get("collapse_policy") or "",
             })
             ids.append(qp_id)
 
@@ -2025,6 +2924,8 @@ class Coordinator:
         self,
         app_session_id: str,
         action: Literal["interrupt", "steer"] = "interrupt",
+        queued_id: Optional[str] = None,
+        queued_ids: Optional[list[str]] = None,
     ) -> bool:
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
@@ -2038,7 +2939,44 @@ class Coordinator:
         if not items:
             return False
 
-        first = items[0]
+        # Multi-select interrupt: pull every matching item to the front (in
+        # their original relative queue order), the rest stay queued behind.
+        # Steer only ever replaces the active turn with a single prompt, so
+        # a multi-id list falls back to the single-item path below.
+        if queued_ids and action == "interrupt":
+            id_set = {qid for qid in queued_ids if qid}
+            selected = [
+                item for item in items
+                if isinstance(item, dict) and item.get("_queued_id") in id_set
+            ]
+            if not selected:
+                for item in items:
+                    await q.put(item)
+                return False
+            remaining = [item for item in items if item not in selected]
+            first, rest_selected = selected[0], selected[1:]
+            first["_interrupt"] = True
+            await q.put(first)
+            for item in [*rest_selected, *remaining]:
+                await q.put(item)
+            interrupting_id = first.get("lifecycle_msg_id")
+            cancelled = await self.cancel_turn(
+                app_session_id, interrupted_by_msg_id=interrupting_id,
+            )
+            return cancelled or True
+
+        selected_idx: Optional[int] = 0
+        if queued_id:
+            selected_idx = None
+            for idx, item in enumerate(items):
+                if isinstance(item, dict) and item.get("_queued_id") == queued_id:
+                    selected_idx = idx
+                    break
+            if selected_idx is None:
+                for item in items:
+                    await q.put(item)
+                return False
+        first = items.pop(selected_idx)
         if action == "steer":
             if await self.steer_active_turn(
                 app_session_id=app_session_id,
@@ -2060,14 +2998,16 @@ class Coordinator:
                     item_id,
                 )
                 self._forget_active_prompt_item(item_id)
-                for item in items[1:]:
+                for item in items:
                     await q.put(item)
                 return True
+            items.insert(selected_idx, first)
             for item in items:
                 await q.put(item)
             return False
 
         first["_interrupt"] = True
+        await q.put(first)
         for item in items:
             await q.put(item)
         # Cancel the current turn so the processor picks up the queued one.
@@ -2079,7 +3019,7 @@ class Coordinator:
         )
         return cancelled or True  # Even if no active turn, the promote is valid
 
-    def cancel_queued(self, app_session_id: str) -> bool:
+    def cancel_queued(self, app_session_id: str, queued_id: Optional[str] = None) -> bool:
         """Remove all queued items for a session (e.g. because the frontend
         is merging them into a single combined prompt). Items already
         dequeued by the processor but not yet started are caught by
@@ -2087,11 +3027,39 @@ class Coordinator:
         this set before executing and skips cancelled items."""
         q = self._prompt_queues.get(app_session_id)
         cancelled_any = False
+        if queued_id:
+            kept = []
+            while q and not q.empty():
+                try:
+                    item = q.get_nowait()
+                except Exception:
+                    break
+                if isinstance(item, dict) and item.get("_queued_id") == queued_id:
+                    self.finish_queued_edit(app_session_id, queued_id)
+                    self._forget_active_prompt_item(item.get("_queued_id"))
+                    cancelled_any = True
+                else:
+                    kept.append(item)
+            for item in kept:
+                q.put_nowait(item)
+            ids = self._queued_ids.get(app_session_id, [])
+            if queued_id in ids:
+                ids.remove(queued_id)
+                self.finish_queued_edit(app_session_id, queued_id)
+                cancelled_set = self._cancelled_ids.setdefault(app_session_id, set())
+                cancelled_set.add(queued_id)
+                cancelled_any = True
+            if not ids:
+                self._queued_ids.pop(app_session_id, None)
+            return cancelled_any
         # Drain the queue and discard
         while q and not q.empty():
             try:
                 item = q.get_nowait()
                 if isinstance(item, dict):
+                    item_id = item.get("_queued_id")
+                    if isinstance(item_id, str):
+                        self.finish_queued_edit(app_session_id, item_id)
                     self._forget_active_prompt_item(item.get("_queued_id"))
                 cancelled_any = True
             except Exception:
@@ -2101,7 +3069,10 @@ class Coordinator:
         if ids:
             cancelled_set = self._cancelled_ids.setdefault(app_session_id, set())
             cancelled_set.update(ids)
+            for queued_id in ids:
+                self.finish_queued_edit(app_session_id, queued_id)
             ids.clear()
+            self._queued_ids.pop(app_session_id, None)
         return cancelled_any
 
     async def update_queued(
@@ -2123,6 +3094,44 @@ class Coordinator:
         for item in items:
             await q.put(item)
         return updated
+
+    def begin_queued_edit(self, app_session_id: str, queued_id: str) -> bool:
+        if queued_id not in self._queued_ids.get(app_session_id, []):
+            return False
+        self._queued_edit_events.setdefault(
+            (app_session_id, queued_id),
+            asyncio.Event(),
+        )
+        return True
+
+    def finish_queued_edit(self, app_session_id: str, queued_id: str) -> None:
+        event = self._queued_edit_events.pop((app_session_id, queued_id), None)
+        if event is not None:
+            event.set()
+
+    async def _restore_queue_front(self, q: asyncio.Queue, item: object) -> None:
+        rest = []
+        while not q.empty():
+            rest.append(q.get_nowait())
+        q.put_nowait(item)
+        for queued in rest:
+            q.put_nowait(queued)
+
+    async def _defer_if_queued_editing(
+        self,
+        app_session_id: str,
+        q: asyncio.Queue,
+        item: object,
+    ) -> bool:
+        queued_id = item.get("_queued_id") if isinstance(item, dict) else None
+        if not isinstance(queued_id, str):
+            return False
+        event = self._queued_edit_events.get((app_session_id, queued_id))
+        if event is None:
+            return False
+        await self._restore_queue_front(q, item)
+        await event.wait()
+        return True
 
     async def update_latest_queued(
         self,
@@ -2173,6 +3182,9 @@ class Coordinator:
             if params is None:
                 # Sentinel: cancel_session fed this to unblock us.
                 break
+            if await self._defer_if_queued_editing(app_session_id, q, params):
+                continue
+            original_params = copy.deepcopy(params)
             # A10 TOCTOU closure: stamp the session as "claimed for
             # processing" the INSTANT we dequeue, BEFORE any other
             # await. `has_active_runs` reads this counter, so a PATCH
@@ -2185,25 +3197,27 @@ class Coordinator:
             )
             # Pop this item from the queued IDs tracker
             item_id = params.pop("_queued_id", None)
+            queue_consumed = False
             if item_id:
                 params["queue_item_id"] = item_id
-                ids = self._queued_ids.get(app_session_id, [])
-                if item_id in ids:
-                    ids.remove(item_id)
                 # If cancel_queued marked this item as cancelled (race:
                 # cancel arrived after dequeue but before execution),
                 # skip it — the frontend already sent a merged replacement.
-                cancelled_set = self._cancelled_ids.get(app_session_id, set())
-                if item_id in cancelled_set:
+                async def cleanup_cancelled_queue_item() -> bool:
+                    cancelled_set = self._cancelled_ids.get(app_session_id, set())
+                    if item_id not in cancelled_set:
+                        return False
                     cancelled_set.discard(item_id)
+                    self._forget_active_prompt_item(item_id)
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
                         item_id,
                     )
-                    # A gap-window cancel aimed at this (already
-                    # cancelled) item must not abort the next prompt.
                     self.turn_manager._pending_cancel.pop(app_session_id, None)
+                    return True
+
+                if await cleanup_cancelled_queue_item():
                     # Decrement the in-flight counter we just incremented
                     remaining = self._in_flight_prompts.get(app_session_id, 1) - 1
                     if remaining > 0:
@@ -2211,14 +3225,25 @@ class Coordinator:
                     else:
                         self._in_flight_prompts.pop(app_session_id, None)
                     continue
+
+            async def consume_queue_item() -> None:
+                nonlocal queue_consumed
+                if not item_id or queue_consumed:
+                    return
+                ids = self._queued_ids.get(app_session_id, [])
+                if item_id in ids:
+                    ids.remove(item_id)
+                    if not ids:
+                        self._queued_ids.pop(app_session_id, None)
+                await asyncio.to_thread(
+                    session_manager.remove_queued_prompt,
+                    app_session_id,
+                    item_id,
+                )
                 # Notify all subscribers that this queue item was consumed.
                 # Critical for frontends that are subscribed to this session
                 # but NOT currently viewing it — they won't get turn_start
                 # unless they clear the stale queuedBySession entry now.
-                # MUST be after the cancel check: a cancelled item's frontend
-                # state was already cleared optimistically, and a new prompt
-                # may have been queued in the race window — emitting here
-                # would wipe the new legitimate banner.
                 try:
                     await self.dispatch_raw(app_session_id, {
                         "type": "queue_consumed",
@@ -2229,76 +3254,7 @@ class Coordinator:
                     })
                 except Exception:
                     logger.debug("queue_consumed emit failed", exc_info=True)
-                await asyncio.to_thread(
-                    session_manager.remove_queued_prompt,
-                    app_session_id,
-                    item_id,
-                )
-            if params.get("source") == "team_message":
-                import team_messaging
-
-                batched = [params]
-                rest = []
-                stopped = False
-                while not q.empty():
-                    try:
-                        next_params = q.get_nowait()
-                    except Exception:
-                        break
-                    if next_params is None:
-                        rest.append(next_params)
-                        stopped = True
-                        continue
-                    if not stopped and next_params.get("source") == "team_message":
-                        batched.append(next_params)
-                        next_item_id = next_params.pop("_queued_id", None)
-                        if next_item_id:
-                            next_params["queue_item_id"] = next_item_id
-                            ids = self._queued_ids.get(app_session_id, [])
-                            if next_item_id in ids:
-                                ids.remove(next_item_id)
-                            try:
-                                await self.dispatch_raw(app_session_id, {
-                                    "type": "queue_consumed",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        "queued_id": next_item_id,
-                                    },
-                                })
-                            except Exception:
-                                logger.debug(
-                                    "queue_consumed emit failed",
-                                    exc_info=True,
-                                )
-                            await asyncio.to_thread(
-                                session_manager.remove_queued_prompt,
-                                app_session_id,
-                                next_item_id,
-                            )
-                            self._forget_active_prompt_item(next_item_id)
-                        continue
-                    stopped = True
-                    rest.append(next_params)
-                for item in rest:
-                    q.put_nowait(item)
-                if len(batched) > 1:
-                    items = [
-                        item.get("team_message") or {
-                            "message": item.get("prompt") or "",
-                            "metadata": {},
-                        }
-                        for item in batched
-                    ]
-                    params["prompt"] = "\n\n".join(
-                        str(item.get("message") or "") for item in items
-                    )
-                    params["cli_prompt"] = team_messaging.format_team_message_batch(
-                        items,
-                        target_session_id=app_session_id,
-                    )
-                    params["team_message"] = {
-                        "messages": items,
-                    }
+                queue_consumed = True
             # If marked as interrupt, prepend the interruption prefix to
             # BOTH the displayed prompt AND the model-facing cli_prompt
             # (when the caller split them — e.g. the Ask singleton). Only
@@ -2336,11 +3292,23 @@ class Coordinator:
             is_review = params.pop("_review", False)
             try:
                 import startup_recovery_gate
-                await startup_recovery_gate.wait_for_recovery_ready()
+                if (
+                    self._startup_recovery_can_overlap_session(app_session_id)
+                    and await asyncio.to_thread(
+                        self._startup_recovery_session_has_run_dir,
+                        app_session_id,
+                    )
+                ):
+                    await startup_recovery_gate.wait_for_session_recovery_ready(
+                        app_session_id,
+                    )
                 # Barrier: never start a turn while externally-registered
                 # runs (recovered subprocesses) are still alive for this
                 # session — two CLI subprocesses on one session interleave.
                 await self.turn_manager.wait_for_clear_runs(app_session_id)
+                if item_id and await cleanup_cancelled_queue_item():
+                    continue
+                await consume_queue_item()
                 if is_review:
                     from orchs.supervisor import request_review
                     await request_review(
@@ -2348,14 +3316,15 @@ class Coordinator:
                         app_session_id=app_session_id,
                         ws_callback=dispatch_ws,
                     )
-                elif await self._handle_special_session_prompt(
-                    app_session_id,
-                    params,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    dispatch_ws=dispatch_ws,
-                ):
-                    pass
                 else:
+                    handled_special = await self._handle_special_session_prompt(
+                        app_session_id,
+                        params,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        dispatch_ws=dispatch_ws,
+                    )
+                    if handled_special:
+                        continue
                     if params.pop("_alter_rewind_latest", False):
                         session = session_manager.get(app_session_id)
                         messages = (session or {}).get("messages") or []
@@ -2384,7 +3353,7 @@ class Coordinator:
                                 str(previous_prompt),
                                 str(replacement_prompt),
                             )
-                    await self.handle_prompt(**params)
+                    await self.handle_prompt(**_prompt_processor_handle_params(params))
             except asyncio.CancelledError:
                 # Backend shutdown propagating into us; bail.
                 if lifecycle_msg_id:
@@ -2398,9 +3367,43 @@ class Coordinator:
                     await dispatch_ws({"type": "error", "data": {"error": str(e)}})
                 except Exception:
                     pass
+                queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
+                if (
+                    item_id
+                    and not queue_consumed
+                    and any(item.get("id") == item_id for item in queued)
+                ):
+                    retry_params = original_params
+                    retry_params["_delivery_attempt"] = int(
+                        retry_params.get("_delivery_attempt") or 0
+                    ) + 1
+                    pending = []
+                    while not q.empty():
+                        pending.append(q.get_nowait())
+                    q.put_nowait(retry_params)
+                    for pending_item in pending:
+                        q.put_nowait(pending_item)
+                    ids = self._queued_ids.setdefault(app_session_id, [])
+                    if item_id not in ids:
+                        ids.append(item_id)
+                    try:
+                        await self.dispatch_raw(app_session_id, {
+                            "type": "prompt_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                "queued_id": item_id,
+                                "prompt_preview": retry_params.get("prompt", ""),
+                                "queue_position": 0,
+                                "client_id": retry_params.get("client_id"),
+                            },
+                        })
+                    except Exception:
+                        logger.debug("prompt retry queue emit failed", exc_info=True)
+                    await asyncio.sleep(min(2 ** retry_params["_delivery_attempt"], 30))
             finally:
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:
+                    self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)
                     self.user_prompt_manager.clear_in_flight_lifecycle_msg_id(
                         app_session_id,
                     )
@@ -2425,6 +3428,23 @@ class Coordinator:
         # been swapped by a re-spawn race.)
         self.turn_manager._pending_cancel.pop(app_session_id, None)
         self._processor_tasks.pop(app_session_id, None)
+
+    def _startup_recovery_can_overlap_session(self, app_session_id: str) -> bool:
+        import startup_recovery_gate
+
+        if not startup_recovery_gate.is_pending():
+            return False
+        session = session_manager.get(app_session_id)
+        if not session:
+            return True
+        if session.get("agent_session_id") or session.get("supervisor_agent_session_id"):
+            return True
+        return bool(session.get("messages"))
+
+    def _startup_recovery_session_has_run_dir(self, app_session_id: str) -> bool:
+        from runs_dir import run_dirs_by_app_session, runs_root
+
+        return app_session_id in run_dirs_by_app_session(runs_root())
 
     async def _handle_special_session_prompt(
         self,
@@ -2578,8 +3598,12 @@ class Coordinator:
         if tailer is None:
             try:
                 from jsonl_tailer import BetterAgentJsonlTailer
-                from paths import ba_home
-                events_path = ba_home() / "sessions" / root_id / "events.jsonl"
+                import session_store
+                events_path = (
+                    Path(session_store.session_file_path(root_id)).parent
+                    / root_id
+                    / "events.jsonl"
+                )
                 tailer = BetterAgentJsonlTailer(
                     events_jsonl_path=events_path,
                     root_id=root_id,
@@ -2743,27 +3767,8 @@ class Coordinator:
     ) -> dict:
         if not omit_render_events:
             return msg
-        payload = dict(msg)
-        if "events" in payload:
-            payload.pop("events", None)
-            payload["event_payload_omitted"] = True
-        workers = payload.get("workers")
-        if isinstance(workers, list):
-            next_workers = []
-            omitted = False
-            for worker in workers:
-                if not isinstance(worker, dict):
-                    next_workers.append(worker)
-                    continue
-                next_worker = dict(worker)
-                if "events" in next_worker:
-                    next_worker.pop("events", None)
-                    omitted = True
-                next_workers.append(next_worker)
-            payload["workers"] = next_workers
-            if omitted:
-                payload["event_payload_omitted"] = True
-        return payload
+        from messages_delta_compaction import compact_message_delta_payload
+        return compact_message_delta_payload(msg)
 
     async def _dispatch_messages_delta(
         self,
@@ -2914,173 +3919,10 @@ class Coordinator:
     #       `ws_callbacks`; NOT persisted. Use only for cache-bust
     #       signals whose authoritative state already lives on disk in
     #       a store (the frontend re-reads via REST snapshot on receipt).
-    #       An allowlist enforces the intent — any other event_type
-    #       raises `ValueError`. Adding a new global type is a conscious
-    #       allowlist edit.
+    #       The canonical global_events registry enforces the intent — any
+    #       other event_type raises `ValueError` before work is scheduled.
     # ------------------------------------------------------------------
-    GLOBAL_EVENT_ALLOWLIST: set[str] = {
-        "provider_changed",
-        "projects_changed",
-        "project_mappings_changed",
-        "workers_changed",
-        "extensions_changed",
-        "session_organization_changed",
-        # Global user-preferences mutation ping (folder-view toggle,
-        # session sort, tabs visibility, fonts, language…). Authoritative
-        # state lives in the user_prefs.json store; payload carries the
-        # full `get_all()` snapshot so other tabs converge without a
-        # refetch. PATCH /api/user-prefs raised an uncaught ValueError
-        # here (500 on every pref write) until this was allowlisted.
-        "user_prefs_changed",
-        "session_metadata_updated",
-        "todos_snapshot",
-        "session_created",
-        "session_forked",
-        # Sidebar lifecycle pings — authoritative state lives in
-        # session_store; frontend dedup-by-id makes them idempotent.
-        # Were silently failing (ValueError → unretrieved task) so
-        # multi-tab convergence on delete/rename didn't work.
-        "session_deleted",
-        "session_renamed",
-        # Async-reconcile progress (>0.3s threshold). Authoritative
-        # state is `session_manager._in_flight_reconcile`; clients
-        # render a per-root "reconciling…" badge that flips on
-        # `started` and clears on `finished`.
-        "session_processing_started",
-        "session_processing_finished",
-        # Post-reconcile invalidation ping. Frontend silently refetches
-        # the session if the user is viewing it, replacing stale cache
-        # served by the initial GET. Authoritative state is the
-        # reconciled render tree in session_manager._roots.
-        "session_reconciled",
-        # Tier-1 lazy-fetch: a non-latest (collapsed) historical msg
-        # gained events during reconcile, so its `stub` went stale.
-        # Carries `{app_session_id, msg_id, stub}`; clients with that
-        # turn collapsed swap in the fresh stub, expanded turns re-fetch.
-        # Not persisted — authoritative events live in the render tree.
-        "stub_invalidated",
-        # Per-message recovering pill toggled by run_recovery while it
-        # reconciles an in-flight run after a backend restart.
-        # Authoritative state is `session_manager._recovering_msg_ids`
-        # (stamped onto REST snapshots via `_stamp_recovering_tree`);
-        # the WS ping carries `{session_id, msg_id, value}` for live
-        # convergence. Must NOT be persisted to events.jsonl — the
-        # flag is transient and rebuilt at startup.
-        "message_recovering_changed",
-        # Per-message "Retrying in Ns…" pill stamped by the orchestrator
-        # while it sleeps between a 429 rate-limit response and the next
-        # retry. `retrying_until` lives on the assistant message (part of
-        # the persisted session); the WS ping carries
-        # `{session_id, msg_id, retry_at}` for live convergence.
-        # Transient — must NOT be persisted to events.jsonl.
-        "message_retrying_changed",
-        # Per-message auto-retry toggle (orchestrator arms/disarms the
-        # background auto-retry on a transiently-failed message).
-        # Authoritative state lives on the assistant message; payload
-        # `{session_id, msg_id, value}` for live cross-tab convergence.
-        # Was missing → broadcast_global raised ValueError on every toggle.
-        "message_auto_retry_changed",
-        # Backend startup-task lifecycle. Authoritative state lives in
-        # `startup_task_registry` (in-memory); REST snapshot via
-        # `GET /api/startup_tasks` for first paint, WS push for live
-        # deltas. Payload is `{task: {id,label,state,...}}` for an
-        # upsert, or `{cleared: true}` on registry reset (uvicorn
-        # --reload). Frontend banner is non-blocking — UI stays usable
-        # while migrations/recovery run.
-        "startup_task_changed",
-        # Message ownership resolution: orphan events bracketed onto a
-        # finalized assistant msg during reconcile. Carries
-        # `{session_id, messages}` delta. Authoritative state is the
-        # render tree; WS push lets other tabs see the delta without
-        # a full refetch.
-        "messages_delta",
-        # Ask-result / ask-choice live convergence. Originating tab
-        # resolves an ask prompt; other tabs need to see the result
-        # or choice update. Authoritative state lives on the message.
-        "message_ask_result_changed",
-        "message_ask_choice_changed",
-        "user_input_requested",
-        "user_input_resolved",
-        # Per-session running-flag transition. Authoritative state is
-        # computed live by `coordinator.is_running(sid)` (walks
-        # `_run_state[sid]` + checks pid liveness). Frontend
-        # sessionRegistry mirrors; SessionStatusBadge/ProjectStatusBadge
-        # subscribe via eventBus. Payload: `{session_id, value: bool}`.
-        "session_running_changed",
-        # Per-session monitoring-state transition (active / idle /
-        # blocked_on_user / waiting_on_background / stopped). Authoritative
-        # state is computed live by `coordinator.monitoring_state(sid)`;
-        # payload `{session_id, monitoring_state}`. Mirrors
-        # session_running_changed but fires on finer changes that don't flip
-        # the running boolean (e.g. turn ends but bg work keeps running).
-        "session_monitoring_changed",
-        # Per-session provenance append. Authoritative log is
-        # `provenance.jsonl` (read via GET /api/sessions/{id}/details); this
-        # ping tells an open Details panel to refetch. Payload `{session_id}`.
-        "session_provenance_changed",
-        # Per-session unread-cursor transition. Authoritative state is
-        # `session_manager._unread_counts` (transient — hydrated lazily
-        # from the persisted `last_seen_event_uid` on each Session
-        # record). Fires on every event-append in apply_event AND on
-        # ack via POST /api/sessions/{id}/seen. Payload:
-        # `{session_id, unread_count, last_seen_event_uid?}`.
-        "session_unread_changed",
-        # Per-session extension attention marker (set/cleared by an
-        # extension via session_manager.set_marker / clear_marker).
-        # Authoritative state lives in session_store's marker projection;
-        # payload `{session_id, extension_id, marker|None, cwd, node_id}`
-        # so the tabs bar / sidebar render the marker dot across tabs
-        # without a refetch. Was missing → broadcast_global raised
-        # ValueError on every marker_set/marker_cleared.
-        "session_marker_changed",
-        # Multi-machine: worker-node connect/disconnect transitions.
-        # Authoritative state lives in `node_store` (in-memory registry);
-        # REST snapshot via GET /api/nodes for first paint, this WS push
-        # for live deltas so the frontend Machines page + per-session
-        # picker render online/offline badges without polling. Payload
-        # is `{node_id, state}` where state ∈ {connected, disconnected}.
-        "node_state_changed",
-        # Multi-machine: a brand-new worker-node is awaiting operator
-        # approval. Authoritative state lives in the
-        # `pending_node_registrations` store; REST snapshot via
-        # GET /api/pending_nodes for first paint, this WS push so the
-        # approval popup appears live in any open browser. Payload is the
-        # public record (node_id, address, cwd_roots, fingerprint, ...);
-        # the node's secret never crosses the wire.
-        "node_registration_requested",
-        # Companion resolution ping for the above — fires on approve/deny.
-        # Payload is `{node_id, status}` where status ∈ {approved, denied}.
-        # Lets every open browser dismiss the popup without polling.
-        "node_registration_resolved",
-        # Per-provider model catalog delta. Authoritative state lives in
-        # `~/.better-claude/models_cache.<provider_id>.json` (written by
-        # `models_mod.refresh_one`). Frontend `useModelsCatalogChanged`
-        # refetches `/api/models` on receipt. Payload:
-        # `{provider_id, newly_added, became_active, went_retired,
-        # truly_removed}`. Fires on startup catalog refresh and on
-        # POST /api/providers/{id}/models/refresh.
-        "models_catalog_changed",
-        # Per-project updates badge delta. Authoritative state lives in
-        # `project_update_store` (in-memory + ~/.better-claude/project_
-        # updates/). Frontend refetches through the Project Structure extension.
-        # Payload: `{project_id, unseen_count}`. Fires on capture /
-        # mark-seen.
-        "project_updates_changed",
-        # Provider-native config or memory file changed. The frontend
-        # refetches Provider Config Sync through its extension backend for the active scope.
-        # Payload: `{scope, category, path, cwd}`. Not persisted.
-        "provider_config_sync_changed",
-        # Credential-broker consent list changed (created/approved/denied/
-        # revoked). Authoritative state lives in the consent_store; frontend
-        # refetches `GET /api/credentials/pending`. Payload:
-        # `{app_session_id}`.
-        "credential_consent_changed",
-        # Internal-LLM task assignments changed (which provider/model/effort
-        # runs each backend-internal LLM task). Authoritative state lives in
-        # config_store config.json; frontend refetches
-        # GET /api/settings/internal-llm. Payload: `{}`.
-        "internal_llm_changed",
-    }
+    GLOBAL_EVENT_ALLOWLIST = GLOBAL_EVENT_TYPES
 
     @perf.timed_fn("ws.broadcast_session")
     async def broadcast_session(
@@ -3096,6 +3938,7 @@ class Coordinator:
         callers never touch `ws_callbacks` directly for per-session
         frames."""
         from event_journal import publish_event
+
         root_id = session_manager._root_id_for(app_session_id) or app_session_id
         try:
             await publish_event(
@@ -3111,41 +3954,156 @@ class Coordinator:
                 app_session_id, event_type,
             )
 
+    def prepare_global_event(self, event_type: str, data: dict) -> SerializedGlobalEvent:
+        snapshot = validate_global_event(event_type, data)
+        return SerializedGlobalEvent({"type": event_type, "data": snapshot})
+
+    def reopen_global_broadcasts(self) -> None:
+        with self._global_broadcast_lock:
+            if self._global_broadcast_tasks or self._global_broadcast_futures:
+                raise RuntimeError("cannot reopen global broadcasts before drain")
+            self._global_broadcast_accepting = True
+
+    def _own_global_task(self, task: asyncio.Task) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_tasks.add(task)
+
+        def _finished(done: asyncio.Task) -> None:
+            with self._global_broadcast_lock:
+                self._global_broadcast_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except Exception:
+                logger.exception("global broadcast task result retrieval failed")
+                return
+            if exc is not None:
+                logger.error(
+                    "global broadcast task failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
+
+    def _schedule_prepared_global(
+        self,
+        event: SerializedGlobalEvent,
+        event_type: str,
+    ) -> None:
+        snapshot = list(dict.fromkeys(self.global_ws_callbacks))
+        if snapshot:
+            serialization_task = asyncio.create_task(dumps_ws_json(event))
+            event._bc_serialized_json_task = serialization_task  # type: ignore[attr-defined]
+            self._own_global_task(serialization_task)
+        outer_t = _time.perf_counter()
+        for cb in snapshot:
+            task = asyncio.create_task(self._broadcast_global_one(cb, event, event_type))
+            self._own_global_task(task)
+        perf.record(
+            "ws.broadcast_global.enqueue",
+            (_time.perf_counter() - outer_t) * 1000.0,
+        )
+
+    async def _schedule_prepared_global_async(
+        self,
+        event: SerializedGlobalEvent,
+        event_type: str,
+    ) -> None:
+        self._schedule_prepared_global(event, event_type)
+
+    def _own_global_future(self, future: concurrent.futures.Future) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_futures.add(future)
+
+        def _finished(done: concurrent.futures.Future) -> None:
+            with self._global_broadcast_lock:
+                self._global_broadcast_futures.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except Exception:
+                logger.exception("global broadcast scheduling result retrieval failed")
+                return
+            if exc is not None:
+                logger.error(
+                    "global broadcast scheduling failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        future.add_done_callback(_finished)
+
+    def schedule_global(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        event = self.prepare_global_event(event_type, data)
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        with self._global_broadcast_lock:
+            if not self._global_broadcast_accepting:
+                perf.record_count("ws.broadcast_global.rejected_shutdown")
+                raise RuntimeError("global broadcast scheduling is closed")
+            if loop is running_loop:
+                self._schedule_prepared_global(event, event_type)
+                return
+            coroutine = self._schedule_prepared_global_async(event, event_type)
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except Exception:
+                coroutine.close()
+                raise
+            self._own_global_future(future)
+
+    async def drain_global_broadcasts(self) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_accepting = False
+        while True:
+            with self._global_broadcast_lock:
+                tasks = tuple(self._global_broadcast_tasks)
+                futures = tuple(self._global_broadcast_futures)
+            if not tasks and not futures:
+                return
+            await asyncio.gather(
+                *tasks,
+                *(asyncio.wrap_future(future) for future in futures),
+                return_exceptions=True,
+            )
+
     async def broadcast_global(self, event_type: str, data: dict) -> None:
         """Cross-session UI invalidation ping. Fire-and-forget; failures
         per-callback are swallowed. NOT persisted to events.jsonl —
-        authoritative state must already live in a store. Allowlist is
-        enforced: adding a new global type requires editing
-        `GLOBAL_EVENT_ALLOWLIST` consciously."""
-        if event_type not in self.GLOBAL_EVENT_ALLOWLIST:
-            raise ValueError(
-                f"broadcast_global called with non-allowlisted type "
-                f"{event_type!r}; per-session events must use "
-                f"broadcast_session, or add the type to "
-                f"GLOBAL_EVENT_ALLOWLIST if it really is a cross-session "
-                f"invalidation ping with authoritative state in a store"
+        authoritative state must already live in a store. Event types are
+        validated by the canonical global_events registry."""
+        self.schedule_global(event_type, data)
+
+    async def _broadcast_global_one(
+        self,
+        cb: Callable[[dict], Awaitable[None]],
+        event: dict,
+        event_type: str,
+    ) -> None:
+        cb_t = _time.perf_counter()
+        try:
+            await cb(event)
+        except Exception:
+            logger.exception(
+                "broadcast_global failed type=%s",
+                event_type,
             )
-        event = {"type": event_type, "data": data}
-        snapshot = list(dict.fromkeys(self.global_ws_callbacks))
-        outer_t = _time.perf_counter()
-        for cb in snapshot:
-            cb_t = _time.perf_counter()
-            try:
-                await cb(event)
-            except Exception:
-                logger.exception(
-                    "broadcast_global failed type=%s",
-                    event_type,
-                )
-            finally:
-                perf.record(
-                    "ws.broadcast_global.cb",
-                    (_time.perf_counter() - cb_t) * 1000.0,
-                )
-        perf.record(
-            "ws.broadcast_global.total",
-            (_time.perf_counter() - outer_t) * 1000.0,
-        )
+        finally:
+            perf.record(
+                "ws.broadcast_global.cb",
+                (_time.perf_counter() - cb_t) * 1000.0,
+            )
 
     async def broadcast_credential_consent_changed(
         self, app_session_id: Optional[str]
@@ -3182,11 +4140,18 @@ class Coordinator:
         message_id: str,
         *,
         semantic_alter: bool = False,
+        provider_rewind: bool = True,
     ) -> dict:
         """Invoke `claude --resume <sid> --rewind-files <uuid>` and truncate
         session messages at/after the rewound user message. Also rewinds
         every worker that participated in the discarded turn (see
         `_rewind_workers_for_turn`).
+
+        `provider_rewind=False` truncates the render tree (and worker forks)
+        and broadcasts the rewind WITHOUT calling the provider CLI rewind —
+        used to discard a failed turn whose prompt never committed a provider
+        rewind anchor (no `agent_message_uuid`), so a retry replaces it
+        instead of duplicating the prompt.
         """
         session = session_manager.get(app_session_id)
         if not session:
@@ -3204,11 +4169,12 @@ class Coordinator:
         target = messages[target_idx]
         provider = self.provider_for_session(app_session_id)
         use_semantic_alter = semantic_alter and provider.supports_semantic_alter
-        if not provider.supports_rewind and not use_semantic_alter:
+        do_provider_rewind = provider_rewind and not use_semantic_alter
+        if do_provider_rewind and not provider.supports_rewind:
             raise ValueError(t("orchestrator.rewind_not_supported"))
         message_uuid = target.get("agent_message_uuid")
         rewind_session_id = app_session_id
-        if provider.rewind_requires_agent_identity and not use_semantic_alter:
+        if do_provider_rewind and provider.rewind_requires_agent_identity:
             if not message_uuid:
                 raise ValueError(t("orchestrator.message_no_claude_uuid"))
 
@@ -3218,7 +4184,7 @@ class Coordinator:
                 raise ValueError(t("orchestrator.session_no_sid_field", sid_field=sid_field))
             rewind_session_id = agent_sid
 
-        if not use_semantic_alter:
+        if do_provider_rewind:
             await provider.rewind(
                 rewind_session_id,
                 message_uuid or message_id,
@@ -3400,6 +4366,8 @@ class Coordinator:
         model: str,
         cwd: str,
         ws_callback: Callable[[dict], Awaitable[None]],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         images: Optional[list] = None,
         files: Optional[list] = None,
         orchestration_mode: Optional[str] = None,
@@ -3409,11 +4377,13 @@ class Coordinator:
         source: Optional[str] = None,
         user_initiated: bool = True,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         known_worker_registry_cwds: Optional[dict[str, str]] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         file_discussion_id: Optional[str] = None,
+        allow_model_override: bool = False,
     ) -> None:
         # `source`/`user_initiated` flow through to run_turn; the
         # scheduler submits source="schedule", user_initiated=False so
@@ -3430,10 +4400,27 @@ class Coordinator:
         # team turn, so the coordinator never received delegation instructions.
         # The supervisor-direct branch (the one run_turn caller that bypasses
         # run_primary) defaults None→prompt itself.
-        session = session_manager.get(app_session_id)
+        # get_lite, not get: this reads only top-level fields
+        # (disallowed_tools / orchestration_mode / cwd / model /
+        # supervisor_enabled) plus a messages truthiness check — never
+        # msg.events. `get()` deep-copies the whole tree (incl. all event
+        # lists) under the per-root lock, which blocked the main event
+        # loop up to 19s on large sessions (lag-watchdog dump pinned at
+        # session_manager.py:2052 deepcopy). get_lite strips the event
+        # lists and is the documented reader for this caller shape.
+        session = session_manager.get_lite(app_session_id)
         if not session:
             await ws_callback({"type": "error", "data": {"error": t("error.ws_session_not_found")}})
             return
+        session_disallowed_tools = (
+            session.get("disallowed_tools")
+            if isinstance(session.get("disallowed_tools"), list)
+            else []
+        )
+        disallowed_tools = list(dict.fromkeys([
+            *[str(tool).strip() for tool in session_disallowed_tools if str(tool).strip()],
+            *[str(tool).strip() for tool in (disallowed_tools or []) if str(tool).strip()],
+        ])) or None
 
         # The session record is the source of truth for orchestration_mode
         # (CLAUDE.md state-ownership rule). The per-turn payload is treated
@@ -3476,7 +4463,7 @@ class Coordinator:
             cwd = stored_cwd
 
         stored_model = session.get("model")
-        if stored_model:
+        if stored_model and not allow_model_override:
             if model and model != stored_model:
                 logger.warning(
                     "Discarding per-turn model=%r for session %s; "
@@ -3484,6 +4471,12 @@ class Coordinator:
                     model, app_session_id, stored_model,
                 )
             model = stored_model
+        elif allow_model_override:
+            if not model:
+                model = stored_model or ""
+        else:
+            provider_id = None
+            reasoning_effort = None
 
         # Note: WS registration is owned by the /ws/chat handler in main.py,
         # which registers before putting the prompt on the queue. No need to
@@ -3525,7 +4518,7 @@ class Coordinator:
         if send_target == "supervisor" and session.get("supervisor_enabled"):
             import extension_store
             not_ready = extension_store.runtime_not_ready_message(
-                extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+                extension_store.extension_id_for_role('supervisor')
             )
             if not_ready is not None:
                 raise RuntimeError(not_ready)
@@ -3542,6 +4535,8 @@ class Coordinator:
                     model=model,
                     cwd=cwd,
                     ws_callback=ws_callback,
+                    provider_id=provider_id,
+                    reasoning_effort=reasoning_effort,
                     images=images,
                     files=files,
                     trace_step_name="supervisor_direct",
@@ -3552,6 +4547,8 @@ class Coordinator:
                     queue_item_id=queue_item_id,
                     capability_contexts=capability_contexts,
                     file_discussion_id=file_discussion_id,
+                    disallowed_tools=disallowed_tools,
+                    disabled_builtin_extensions=disabled_builtin_extensions,
                     # Genuine user-facing turn — the user explicitly
                     # typed and sent to the supervisor. Same semantics
                     # as the native/manager `handle_turn` user_initiated
@@ -3617,6 +4614,8 @@ class Coordinator:
                 model=model,
                 cwd=cwd,
                 ws_callback=ws_callback,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
                 images=images,
                 files=files,
                 client_id=client_id,
@@ -3624,6 +4623,7 @@ class Coordinator:
                 source=source,
                 user_initiated=user_initiated,
                 disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
                 queue_item_id=queue_item_id,
                 team_message=team_message,
                 capability_contexts=capability_contexts,
@@ -3681,6 +4681,8 @@ class Coordinator:
         worker_description: str,
         model: str,
         cwd: str,
+        provider_id: str = "",
+        reasoning_effort: str = "",
         justification: Optional[str] = None,
         proposed_orchestration_mode: Optional[str] = None,
         client_delegation_id: Optional[str] = None,
@@ -3690,6 +4692,7 @@ class Coordinator:
         ephemeral: bool = False,
         machine_completion: bool = False,
         provision_prompt: Optional[str] = None,
+        provisioned_tool_profile: str = "",
         include_events: bool = False,
     ) -> dict:
         from orchs.manager._delegation import run_delegation as _impl
@@ -3699,7 +4702,9 @@ class Coordinator:
             instructions=instructions,
             worker_session_id=worker_session_id,
             worker_description=worker_description,
+            provider_id=provider_id,
             model=model,
+            reasoning_effort=reasoning_effort,
             cwd=cwd,
             justification=justification,
             proposed_orchestration_mode=proposed_orchestration_mode,
@@ -3710,6 +4715,7 @@ class Coordinator:
             ephemeral=ephemeral,
             machine_completion=machine_completion,
             provision_prompt=provision_prompt,
+            provisioned_tool_profile=provisioned_tool_profile,
             include_events=include_events,
         )
 
@@ -3723,6 +4729,7 @@ class Coordinator:
         cancel_event: asyncio.Event,
         ws_callback=None,
         provision_prompt: Optional[str] = None,
+        provisioned_tool_profile: str = "",
     ) -> Optional[str]:
         from orchs.manager._approval import init_target_agent_session as _impl
         return await _impl(
@@ -3734,6 +4741,7 @@ class Coordinator:
             cancel_event=cancel_event,
             ws_callback=ws_callback,
             provision_prompt=provision_prompt,
+            provisioned_tool_profile=provisioned_tool_profile,
         )
 
 
@@ -3751,6 +4759,7 @@ class Coordinator:
         client_id: Optional[str] = None,
         source: Optional[str] = None,
         lifecycle_msg_id: Optional[str] = None,
+        cli_prompt: Optional[str] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
@@ -3786,6 +4795,8 @@ class Coordinator:
             # lifecycle WS events back to this message for status display.
             "lifecycle_msg_id": lifecycle_msg_id,
         }
+        if cli_prompt is not None and cli_prompt != prompt:
+            user_msg["cli_prompt"] = cli_prompt
         if file_discussion_id:
             user_msg["file_discussion_id"] = file_discussion_id
         if source:
@@ -3808,18 +4819,27 @@ class Coordinator:
         if files:
             user_msg["files"] = _message_file_metadata(files)
 
-        persisted_user_msg = session_manager.append_user_msg(app_session_id, user_msg)
+        # strict: a prompt whose persist silently no-ops becomes an
+        # unrecoverable turn loss with a false persisted-ack to the UI.
+        # Raising here (KeyError) propagates out of run_turn BEFORE any
+        # turn registration and terminates the lifecycle as `failed`.
+        persisted_user_msg = session_manager.append_user_msg(
+            app_session_id, user_msg, strict=True,
+        )
         if queue_item_id:
             session_manager.remove_queued_prompt(app_session_id, queue_item_id)
         if client_id:
             session_manager.remove_queued_prompt_by_client_id(app_session_id, client_id)
-        return persisted_user_msg or user_msg
+        return persisted_user_msg
 
     def _build_assistant_msg(
         self,
         *,
         session: dict,
         app_session_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> dict:
         """Build (but DO NOT persist) a fresh assistant message scaffold.
 
@@ -3831,12 +4851,27 @@ class Coordinator:
         # `app_session_id` is the supervisor's id.  Look up the real
         # orchestration mode from the app session so the strategy
         # builds the correct scaffold.
-        app_session = (
-            session_manager.get(app_session_id) if app_session_id else None
-        )
+        app_session = None
+        if app_session_id and app_session_id != session.get("id"):
+            app_session = session_manager.get(app_session_id)
         effective_mode = (app_session or session).get("orchestration_mode")
         from orchs import get_strategy
-        return get_strategy(effective_mode or "manager").build_assistant_scaffold()
+        scaffold = get_strategy(effective_mode or "manager").build_assistant_scaffold()
+        # Stamp the resolved provider/model/effort used for THIS turn so
+        # the UI can badge each assistant turn. Per-turn overrides win,
+        # falling back to the session record (the model picker writes the
+        # session before the turn runs). Matches `_drive_cli_run` resolution.
+        resolved = {
+            "provider_id": provider_id or session.get("provider_id"),
+            "model": (model or session.get("model") or "").strip() or None,
+            "reasoning_effort": (
+                str(reasoning_effort or "").strip()
+                or session.get("reasoning_effort")
+            ) or None,
+        }
+        if any(v for v in resolved.values()):
+            scaffold["run_meta"] = {k: v for k, v in resolved.items() if v}
+        return scaffold
 
 
     def _finalize_turn_messages(
@@ -3875,6 +4910,10 @@ class Coordinator:
                     session_manager.remove_assistant_msg(
                         app_session_id, assistant_msg["id"],
                     )
+                # Exception-path failure: surface the sidebar error dot
+                # here too so the single chokepoint covers every failure
+                # shape (raises vs. returns success=False).
+                session_manager.set_unseen_error(app_session_id, error_text)
                 return
 
             if assistant_msg is None:
@@ -3914,7 +4953,9 @@ class Coordinator:
 
             session_manager.set_streaming(app_session_id, msg_id, False)
 
-            extracted = _extract_output_text(primary_events)
+            extracted = _project_content_snapshot(
+                primary_events, assistant_msg.get("content"),
+            )
             if not extracted:
                 # Fallback: use sdk_output captured by runner from SDK
                 # messages (needed when CLI doesn't write a session jsonl,
@@ -3933,6 +4974,7 @@ class Coordinator:
                 primary_result.get("success") is False and not stopped_at
             )
             assistant_failed = False
+            dot_error_text = ""
             content_looks_erroring = bool(
                 re.search(
                     r"API Error:"
@@ -3972,6 +5014,7 @@ class Coordinator:
                     app_session_id, msg_id, err_text,
                 )
                 assistant_failed = True
+                dot_error_text = err_text
             elif content_looks_erroring and not stopped_at:
                 # Gemini CLI reported success but the content IS an API
                 # error (e.g. quota exhaustion with no 4xx code).
@@ -3979,6 +5022,7 @@ class Coordinator:
                     app_session_id, msg_id, extracted or "",
                 )
                 assistant_failed = True
+                dot_error_text = extracted or ""
             elif run_failed and not run_error:
                 session_manager.set_assistant_error(
                     app_session_id,
@@ -3986,6 +5030,18 @@ class Coordinator:
                     "Run failed without producing an error message.",
                 )
                 assistant_failed = True
+                dot_error_text = "Run failed without producing an error message."
+
+            if assistant_failed:
+                # Mirror the surfaced failure onto the sidebar error dot.
+                # This is the chokepoint for the COMMON non-exception
+                # failure path (provider API errors, quota, silent exits)
+                # which return success=False instead of raising and so
+                # never reach turn_manager's except block. The dot retires
+                # on the next turn-start; it is NOT tied to view/seen.
+                session_manager.set_unseen_error(
+                    app_session_id, dot_error_text or "Turn failed",
+                )
 
             # Delegate mode-specific finalization (pin session ids,
             # promote recovered placeholders, etc.)
@@ -4020,16 +5076,10 @@ class Coordinator:
             # Call once with the combined total so token_usage_last
             # represents the full turn, not just the last worker.
             primary_tu = extract_provider_result_token_usage(primary_result) or {}
-            combined = dict(primary_tu)
-            for w in workers:
-                wtu = w.get("token_usage") or {}
-                for k in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                ):
-                    combined[k] = int(combined.get(k, 0)) + int(wtu.get(k, 0))
+            combined = merge_token_usages([
+                primary_tu,
+                *[w.get("token_usage") or {} for w in workers],
+            ]) or {}
             session_manager.add_session_token_usage(
                 app_session_id, combined,
             )

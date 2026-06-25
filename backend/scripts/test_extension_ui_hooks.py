@@ -95,13 +95,19 @@ def _seed_store_with_marketplace() -> None:
         ),
         encoding="utf-8",
     )
+    # Raw write_text bypasses the store's _write_store_unlocked, which always
+    # refreshes the fingerprint cache and drops the projection cache. Mirror it
+    # here so the sub-0.5s store_fingerprint() TTL can't serve a stale ui_hooks
+    # projection (or stale ui-settings) from a prior test into the next one.
+    extension_store._refresh_store_fingerprint_cache()  # type: ignore[attr-defined]
+    extension_store._clear_projection_cache()  # type: ignore[attr-defined]
     _configure_project_structure_runtime()
     _configure_ask_runtime()
 
 
 def _enable_builtin_ui_extensions() -> None:
     _install_ui_hook_extension(
-        extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+        extension_store.extension_id_for_role('project-structure'),
         {
             "name": "Project structure",
             "surfaces": ["backend_feature", "frontend_feature"],
@@ -112,13 +118,13 @@ def _enable_builtin_ui_extensions() -> None:
                     "icon": "clipboard",
                     "open": {
                         "type": "ensure",
-                        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure",
                         "path_template": "/s/{session_id}",
                         "id_field": "session_id",
                         "include_cwd": True,
                     },
                     "badge": {
-                        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
                     },
                 },
             },
@@ -135,11 +141,51 @@ def _enable_builtin_ui_extensions() -> None:
                     "label": "Ask",
                     "icon": "sparkles",
                     "action": {
+                        "type": "navigate",
+                        "path": "/s/virtual:ofek-dev.ask:ask",
+                    },
+                },
+            },
+            "permissions": {"session_state": True},
+        },
+    )
+
+
+_ASK_QUICK_BUTTON_ACTION = {
+    "type": "navigate",
+    "path": "/s/virtual:ofek-dev.ask:ask",
+}
+
+
+def _install_active_assistant() -> None:
+    """Install + enable the Assistant superseder so its quick button replaces
+    Ask's. Active (installed+enabled+entitled) is all the supersede gate needs;
+    a configured internal-LLM task additionally makes Assistant's own button
+    runtime-ready so it surfaces in ui_hooks()."""
+    if extension_store.extension_id_for_role('assistant') is None:
+        raise AssertionError("private registry missing Assistant id")
+    provider = config_store.list_providers()["providers"][0]
+    assignments = config_store.get_internal_llm_assignments()
+    assignments["assistant"] = {
+        "provider_id": provider["id"],
+        "model": provider["default_model"],
+        "reasoning_effort": provider.get("default_reasoning_effort") or "",
+    }
+    config_store.set_internal_llm_assignments(assignments)
+    _install_ui_hook_extension(
+        extension_store.extension_id_for_role('assistant'),
+        {
+            "name": "Assistant",
+            "surfaces": ["backend_feature", "frontend_feature"],
+            "entrypoints": {
+                "quick_button": {
+                    "label": "Assistant",
+                    "icon": "assistant-start",
+                    "action": {
                         "type": "ensure",
-                        "endpoint": "/api/extensions/ofek-dev.ask/backend/ask/ensure",
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/backend/assistant/ensure",
                         "path_template": "/s/{id}",
                         "id_field": "id",
-                        "include_cwd": False,
                     },
                 },
             },
@@ -165,6 +211,21 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         "permissions": manifest["permissions"],
         "marketplace": {},
     }
+    entrypoints = full_manifest["entrypoints"]
+    frontend_path = entrypoints.get("frontend")
+    if frontend_path:
+        frontend_file = package / frontend_path
+        frontend_file.parent.mkdir(parents=True, exist_ok=True)
+        frontend_file.write_text("<div></div>", encoding="utf-8")
+    quick_button_action = (entrypoints.get("quick_button") or {}).get("action") or {}
+    if quick_button_action.get("type") == "module":
+        module_path = str(quick_button_action.get("module_url") or "")
+        legacy_prefix = f"/api/extensions/{extension_id}/assets/"
+        if module_path.startswith(legacy_prefix):
+            module_path = module_path[len(legacy_prefix):]
+        module_file = package / module_path
+        module_file.parent.mkdir(parents=True, exist_ok=True)
+        module_file.write_text("export function mount() {}", encoding="utf-8")
     (package / "better-agent-extension.json").write_text(json.dumps(full_manifest), encoding="utf-8")
     extension_store._install_from_package_dir(  # type: ignore[attr-defined]
         package_dir=package,
@@ -177,6 +238,14 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         },
         persist=True,
     )
+
+
+def _set_stored_quick_button_module_url(extension_id: str, module_url: str) -> None:
+    with extension_store._store_lock():  # type: ignore[attr-defined]
+        data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
+        record = data["extensions"][extension_id]
+        record["manifest"]["entrypoints"]["quick_button"]["action"]["module_url"] = module_url
+        extension_store._write_store_unlocked(data)  # type: ignore[attr-defined]
 
 
 def _base_manifest() -> dict:
@@ -221,16 +290,191 @@ def test_quick_button_and_page_validation_accepts() -> None:
 def test_quick_button_module_action_accepted() -> None:
     manifest = _base_manifest()
     manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
         "quick_button": {
             "label": "Custom",
-            "action": {"type": "module", "module_url": "/api/extensions/ofek.demo/frontend/btn.js"},
+            "action": {"type": "module", "module_url": "ui/btn.js"},
         }
     }
     v = extension_store.validate_manifest(manifest)
     assert v["entrypoints"]["quick_button"]["action"] == {
         "type": "module",
-        "module_url": "/api/extensions/ofek.demo/frontend/btn.js",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
     }
+
+
+def test_ui_hooks_surfaces_normalized_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["action"] == {
+        "type": "module",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
+    }
+
+
+def test_ui_hooks_normalizes_legacy_assets_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    _set_stored_quick_button_module_url(
+        "ofek.demo",
+        "/api/extensions/ofek.demo/assets/ui/btn.js",
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["action"] == {
+        "type": "module",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
+    }
+
+
+def test_ui_hooks_skips_invalid_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    _set_stored_quick_button_module_url("ofek.demo", "/api/sessions/x.js")
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert quick_buttons == []
+
+
+def test_quick_button_placements_normalized() -> None:
+    manifest = _base_manifest()
+    manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
+        "quick_button": {
+            "label": "Custom",
+            "placements": ["settings", "settings"],
+            "action": {"type": "module", "module_url": "ui/btn.js"},
+        },
+    }
+    v = extension_store.validate_manifest(manifest)
+    assert v["entrypoints"]["quick_button"]["placements"] == ["settings"]
+
+
+def test_quick_button_placements_default_is_all_surfaces() -> None:
+    manifest = _base_manifest()
+    manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
+        "quick_button": {
+            "label": "Custom",
+            "action": {"type": "module", "module_url": "ui/btn.js"},
+        },
+    }
+    v = extension_store.validate_manifest(manifest)
+    assert v["entrypoints"]["quick_button"]["placements"] == ["session", "settings"]
+
+
+def test_quick_button_placements_rejects_unknown_and_empty() -> None:
+    for bad in (["sidebar"], [], "settings"):
+        manifest = _base_manifest()
+        manifest["entrypoints"] = {
+            "frontend": "ui/index.html",
+            "quick_button": {
+                "label": "Custom",
+                "placements": bad,
+                "action": {"type": "module", "module_url": "ui/btn.js"},
+            },
+        }
+        try:
+            extension_store.validate_manifest(manifest)
+            raise AssertionError(f"expected rejection for placements={bad!r}")
+        except extension_store.ExtensionError:
+            pass
+
+
+def test_ui_hooks_projects_quick_button_placements() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "placements": ["settings"],
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["placements"] == ["settings"]
+
+
+def test_ui_hooks_defaults_placements_for_pre_placements_records() -> None:
+    # Installed records validated before placements existed have no
+    # placements key; the projection must still surface both surfaces.
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    store_path = Path(_TMP_HOME) / "extensions" / "extensions.json"
+    data = json.loads(store_path.read_text())
+    record = data["extensions"]["ofek.demo"]
+    record["manifest"]["entrypoints"]["quick_button"].pop("placements", None)
+    store_path.write_text(json.dumps(data))
+    extension_store._clear_projection_cache()
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["placements"] == ["session", "settings"]
 
 
 def test_invalid_actions_rejected() -> None:
@@ -247,6 +491,17 @@ def test_invalid_actions_rejected() -> None:
     expect_err(
         {"quick_button": {"label": "A", "action": {"type": "module", "module_url": "//evil.com/x"}}},
         "module //host",
+    )
+    expect_err(
+        {"quick_button": {"label": "A", "action": {"type": "module", "module_url": "/api/sessions/x.js"}}},
+        "module app route",
+    )
+    expect_err(
+        {
+            "frontend": "ui/index.html",
+            "quick_button": {"label": "A", "action": {"type": "module", "module_url": "../x.js"}},
+        },
+        "module traversal",
     )
     # unknown action type
     expect_err({"quick_button": {"label": "A", "action": {"type": "teleport"}}}, "bad action type")
@@ -281,28 +536,85 @@ def test_ui_hooks_surfaces_project_structure_page() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
     hooks = extension_store.ui_hooks()
-    pages = [p for p in hooks["pages"] if p["extension_id"] == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID]
+    pages = [p for p in hooks["pages"] if p["extension_id"] == extension_store.extension_id_for_role('project-structure')]
     assert len(pages) == 1
     page = pages[0]
     assert page["open"]["type"] == "ensure"
-    assert page["open"]["endpoint"] == "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure"
+    assert page["open"]["endpoint"] == f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure"
     assert page["open"]["path_template"] == "/s/{session_id}"
     assert page["open"]["include_cwd"] is True
     assert page["badge"] == {
-        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
     }
+    # Assistant is not installed by _enable_builtin_ui_extensions, so Ask's quick
+    # button is NOT superseded and surfaces normally.
     quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID]
     assert len(quick_buttons) == 1
-    assert quick_buttons[0]["action"] == {
-        "type": "ensure",
-        "endpoint": "/api/extensions/ofek-dev.ask/backend/ask/ensure",
-        "path_template": "/s/{id}",
-        "id_field": "id",
-        "include_cwd": False,
-    }
+    assert quick_buttons[0]["action"] == _ASK_QUICK_BUTTON_ACTION
 
 
-def test_builtin_ask_has_single_toolbar_entrypoint() -> None:
+def test_ask_quick_button_superseded_by_active_assistant() -> None:
+    # Ask ships a quick button again; it is hidden only while the Assistant
+    # superseder is installed+enabled, and returns when Assistant is disabled or
+    # uninstalled (as long as Ask itself stays installed+enabled).
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+
+    def ask_buttons() -> list:
+        return [
+            q for q in extension_store.ui_hooks()["quick_buttons"]
+            if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
+        ]
+
+    def assistant_buttons() -> list:
+        return [
+            q for q in extension_store.ui_hooks()["quick_buttons"]
+            if q["extension_id"] == extension_store.extension_id_for_role('assistant')
+        ]
+
+    # Assistant absent -> Ask button shows.
+    assert len(ask_buttons()) == 1
+
+    # Assistant installed + enabled -> Ask suppressed, Assistant shows.
+    _install_active_assistant()
+    assert ask_buttons() == []
+    assert len(assistant_buttons()) == 1
+
+    # Assistant disabled -> Ask returns, Assistant gone.
+    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), False)
+    assert len(ask_buttons()) == 1
+    assert assistant_buttons() == []
+
+    # Assistant re-enabled -> Ask suppressed again.
+    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), True)
+    assert ask_buttons() == []
+
+    # Assistant uninstalled -> Ask returns.
+    import sys as _sys
+    import types as _types
+    if "assistant_ui" not in _sys.modules:
+        _stub = _types.ModuleType("assistant_ui")
+        _stub.cleanup_singleton = lambda: None  # type: ignore[attr-defined]
+        _sys.modules["assistant_ui"] = _stub
+    extension_store.uninstall(extension_store.extension_id_for_role('assistant'))
+    assert len(ask_buttons()) == 1
+
+
+def test_ask_quick_button_hidden_when_ask_ui_toggle_off() -> None:
+    # The supersede gate is independent of Ask's own ui-settings toggle: with
+    # Assistant absent, disabling Ask's quick_button surface still hides it.
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store.set_ui_settings(
+        extension_store.BUILTIN_ASK_EXTENSION_ID, quick_button_enabled=False
+    )
+    assert [
+        q for q in extension_store.ui_hooks()["quick_buttons"]
+        if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
+    ] == []
+
+
+def test_builtin_ask_ships_quick_button() -> None:
     manifest_path = (
         Path(__file__).resolve().parents[2]
         / "extensions"
@@ -352,20 +664,23 @@ def test_builtin_ask_backend_entrypoint_is_mounted() -> None:
 
 
 def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
-    # First-party builtins surface their UI hooks once seeded + runtime-ready,
-    # regardless of whether they ship as public bundled (ask) or private local
-    # (project-structure) packages. The builtin→private migration dissolved the
-    # old public/private visibility distinction — both are first-party and trusted.
+    # First-party builtins surface their UI hooks once seeded + runtime-ready.
+    # On a fresh reconcile the Assistant superseder is not active, so Ask's
+    # quick button surfaces; it is hidden only while Assistant is installed +
+    # enabled (covered by test_ask_quick_button_superseded_by_active_assistant).
     _seed_store_with_marketplace()
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     hooks = extension_store.ui_hooks()
+    assert not extension_store.is_extension_active(
+        extension_store.extension_id_for_role('assistant')
+    ), "Assistant must be inactive on a fresh reconcile for this assertion to hold"
     assert [
         q for q in hooks["quick_buttons"]
         if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
     ]
     assert [
         p for p in hooks["pages"]
-        if p["extension_id"] == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+        if p["extension_id"] == extension_store.extension_id_for_role('project-structure')
     ]
 
 
@@ -389,7 +704,7 @@ def test_installed_manifest_is_authoritative_without_public_sync() -> None:
 def test_ui_settings_toggle_filters_page() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
-    ext_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ext_id = extension_store.extension_id_for_role('project-structure')
     assert extension_store.get_ui_settings(ext_id) == {
         "quick_button_enabled": True,
         "page_enabled": True,
@@ -408,6 +723,40 @@ def test_ui_settings_toggle_filters_page() -> None:
         if p["extension_id"] == ext_id
     ]
     assert len(pages) == 1
+
+
+def test_frontend_entrypoints_reuse_projection_cache() -> None:
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store._PROJECTION_CACHE.clear()  # type: ignore[attr-defined]
+    first = extension_store.frontend_entrypoints()
+    original_load = extension_store._load  # type: ignore[attr-defined]
+
+    def fail_load():
+        raise AssertionError("unchanged frontend_entrypoints should not reread extension store")
+
+    extension_store._load = fail_load  # type: ignore[attr-defined]
+    try:
+        second = extension_store.frontend_entrypoints()
+    finally:
+        extension_store._load = original_load  # type: ignore[attr-defined]
+    assert second == first
+
+
+def test_ui_hooks_cache_invalidates_on_ui_settings_write() -> None:
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store._PROJECTION_CACHE.clear()  # type: ignore[attr-defined]
+    ext_id = extension_store.extension_id_for_role('project-structure')
+    assert any(
+        p["extension_id"] == ext_id
+        for p in extension_store.ui_hooks()["pages"]
+    )
+    extension_store.set_ui_settings(ext_id, page_enabled=False)
+    assert not any(
+        p["extension_id"] == ext_id
+        for p in extension_store.ui_hooks()["pages"]
+    )
 
 
 def test_ui_settings_unknown_extension_rejected() -> None:
@@ -432,24 +781,26 @@ def test_sdk_builders_round_trip_through_validation() -> None:
         label="Ask",
         icon="search",
         action=sdk.HookAction.ensure("/api/extensions/ofek-dev.ask/backend/ask/ensure", "/s/{session_id}"),
+        placements=("settings",),
     )
     page = sdk.Page(
         label="Project structure",
         icon="clipboard",
         open=sdk.HookAction.ensure(
-            "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+            f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure",
             "/s/{session_id}",
             include_cwd=True,
         ),
-        badge=sdk.Badge("/api/extensions/ofek-dev.project-structure/backend/project-updates/total"),
+        badge=sdk.Badge(f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"),
     )
     manifest = _base_manifest()
     manifest["entrypoints"] = {"quick_button": quick_button.to_dict(), "page": page.to_dict()}
     v = extension_store.validate_manifest(manifest)
     assert v["entrypoints"]["quick_button"]["label"] == "Ask"
+    assert v["entrypoints"]["quick_button"]["placements"] == ["settings"]
     assert v["entrypoints"]["page"]["open"]["include_cwd"] is True
     assert v["entrypoints"]["page"]["badge"] == {
-        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
     }
 
 

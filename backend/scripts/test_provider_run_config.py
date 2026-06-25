@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import asyncio
 import json
 import os
 import shutil
@@ -17,14 +19,19 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provider_run_config  # noqa: E402
+import provider  # noqa: E402
 import runner  # noqa: E402
+import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_gemini  # noqa: E402
+import runtime_skills  # noqa: E402
 import open_file_panel_mcp  # noqa: E402
 import builtin_mcp_config  # noqa: E402
 import extension_registry  # noqa: E402
 import extension_store  # noqa: E402
+import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
+from paths import ba_home  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -48,9 +55,14 @@ def _configure_internal_llm_defaults(*tasks: str) -> None:
     config_store.set_internal_llm_assignments(assignments)
 
 
+def _simulate_backend_restart() -> None:
+    importlib.reload(extension_store)
+    importlib.reload(extension_mcp_launcher)
+    importlib.reload(builtin_mcp_config)
+
+
 def _save_runtime_extension_record(data: dict, extension_id: str) -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_id, "runtime")
 
 
 def _module_from_python_path(rel_path: str) -> str:
@@ -93,7 +105,6 @@ def _write_installed_manifest(package: Path, manifest: dict) -> dict:
 
 def _install_requirements_extension_record(
     *,
-    delivery: str = "runtime",
     replaces_builtin: bool = False,
 ) -> None:
     package = Path(_TMP_HOME) / "requirements-extension"
@@ -107,16 +118,16 @@ def _install_requirements_extension_record(
         "python": "mcp/server.py",
         "args": [],
         "env": {},
-        "user_facing": True,
-        "bare_allowed": False,
+        "user_facing": False,
+        "bare_allowed": True,
         "requires_backend_auth": True,
     }
     if replaces_builtin:
         mcp_entry["replaces_builtin"] = "get-requirements"
-    data["extensions"][extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('requirements')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('requirements'),
             "name": "Requirements",
             "version": "1.0.0",
             "description": "Requirement analysis extension",
@@ -160,11 +171,12 @@ def _install_requirements_extension_record(
             "expires_at": "2099-01-01T00:00:00+00:00",
         },
     }
+    record = data["extensions"][extension_store.extension_id_for_role('requirements')]
+    record["consent"] = {
+        "fingerprint": extension_store.permission_consent_fingerprint(record),
+        "granted_at": "2026-01-01T00:00:00+00:00",
+    }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        delivery,
-    )
 
 
 def _install_feature_extension_record(extension_id: str, permissions: dict | None = None) -> None:
@@ -216,10 +228,10 @@ def _install_scheduler_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('scheduler')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"]["ofek-dev.scheduler"] = {
+    data["extensions"][extension_store.extension_id_for_role('scheduler')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": "ofek-dev.scheduler",
+            "id": extension_store.extension_id_for_role('scheduler'),
             "name": "Scheduler",
             "version": "1.0.0",
             "description": "Scheduler",
@@ -259,12 +271,12 @@ def _install_scheduler_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, "ofek-dev.scheduler")
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('scheduler'))
 
 
 def _install_core_mcp_gate_extensions() -> None:
     _install_feature_extension_record(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+        extension_store.extension_id_for_role('team-orchestration'),
         {"session_state": True, "internal_loopback": True},
     )
     _install_coordination_extension_record()
@@ -333,10 +345,10 @@ def _install_browser_harness_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('browser harness')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('browser-harness')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('browser-harness'),
             "name": "Browser Harness",
             "version": "1.0.0",
             "description": "Browser Harness",
@@ -377,7 +389,7 @@ def _install_browser_harness_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('browser-harness'))
 
 
 def _install_credential_broker_extension_record() -> None:
@@ -385,10 +397,10 @@ def _install_credential_broker_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('credential broker')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('credential-broker')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('credential-broker'),
             "name": "Credential Broker",
             "version": "1.0.0",
             "description": "Credential Broker",
@@ -429,59 +441,7 @@ def _install_credential_broker_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID)
-
-
-def _install_continuation_recall_extension_record() -> None:
-    package = Path(_TMP_HOME) / "continuation-recall-extension"
-    (package / "mcp").mkdir(parents=True, exist_ok=True)
-    (package / "mcp" / "server.py").write_text("print('continuation recall')\n", encoding="utf-8")
-    data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"]["ofek-dev.continuation-recall"] = {
-        "manifest": _write_installed_manifest(package, {
-            "kind": extension_store.MANIFEST_KIND,
-            "id": "ofek-dev.continuation-recall",
-            "name": "Continuation Recall",
-            "version": "1.0.0",
-            "description": "Continuation Recall",
-            "surfaces": ["runtime_mcp"],
-            "entrypoints": {
-                "mcp": [
-                    {
-                        "name": "better-agent-continuation-recall",
-                        "python": "mcp/server.py",
-                        "args": [],
-                        "env": {},
-                        "user_facing": True,
-                        "bare_allowed": False,
-                        "requires_backend_auth": True,
-                        "predicate": {"nonempty": ["continuation_chain"]},
-                    }
-                ]
-            },
-            "permissions": {"internal_loopback": True},
-            "marketplace": {},
-        }),
-        "enabled": True,
-        "installed_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "source": {
-            "type": "git",
-            "repo_url": "https://example.test/private.git",
-            "extension_path": "extensions/continuation-recall",
-            "ref": "",
-            "commit_sha": "continuation-recall-private",
-            "install_path": str(package),
-        },
-        "entitlement": {
-            "status": "not_required",
-            "product_id": "",
-            "token_present": False,
-            "last_checked_at": "",
-            "expires_at": "",
-        },
-    }
-    _save_runtime_extension_record(data, "ofek-dev.continuation-recall")
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('credential-broker'))
 
 
 def _install_session_bridge_extension_record() -> None:
@@ -599,10 +559,10 @@ def _install_canvas_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('canvas')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_CANVAS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('canvas')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_CANVAS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('canvas'),
             "name": "Canvas",
             "version": "1.0.0",
             "description": "Canvas",
@@ -642,7 +602,132 @@ def _install_canvas_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_CANVAS_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('canvas'))
+
+
+def _install_testape_extension_record() -> None:
+    package = Path(_TMP_HOME) / "testape-extension"
+    (package / "mcp").mkdir(parents=True, exist_ok=True)
+    (package / "mcp" / "server.py").write_text("print('testape')\n", encoding="utf-8")
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_store.extension_id_for_role('testape')] = {
+        "manifest": _write_installed_manifest(package, {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_store.extension_id_for_role('testape'),
+            "name": "Testape",
+            "version": "1.0.0",
+            "description": "Testape",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "testape",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                    }
+                ]
+            },
+            "permissions": {"filesystem": True, "session_state": True},
+            "marketplace": {},
+        }),
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/testape",
+            "ref": "",
+            "commit_sha": "testape-private",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+
+
+def _install_bare_matrix_extension_record() -> None:
+    package = Path(_TMP_HOME) / "bare-matrix-extension"
+    (package / "mcp").mkdir(parents=True, exist_ok=True)
+    (package / "mcp" / "server.py").write_text("print('bare matrix')\n", encoding="utf-8")
+    extension_id = "ofek.bare-matrix"
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_id] = {
+        "manifest": _write_installed_manifest(package, {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_id,
+            "name": "Bare Matrix",
+            "version": "1.0.0",
+            "description": "Bare Matrix",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "headless-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": False,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                        "ambient_native": True,
+                    },
+                    {
+                        "name": "visible-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                    },
+                    {
+                        "name": "visible-not-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": False,
+                        "requires_backend_auth": False,
+                    },
+                ]
+            },
+            "permissions": {},
+            "marketplace": {},
+        }),
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/bare-matrix",
+            "ref": "",
+            "commit_sha": "bare-matrix-private",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    extension_store.set_native_harness_exposed(
+        extension_id, "mcp", "headless-bare", True
+    )
 
 
 def t_normalizes_unified_mcp_key() -> None:
@@ -655,17 +740,61 @@ def t_normalizes_unified_mcp_key() -> None:
 
 
 def t_codex_materializes_mcp_and_skills() -> None:
-    run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-    overrides = runner_codex._codex_config_overrides(run_dir, {
-        "mcp_servers": {"demo": {"command": "echo", "args": ["hello"]}},
-        "skills": {"reviewer": {"description": "Review code", "instructions": "Review carefully.\n"}},
-    })
+    old_home = os.environ.get("HOME")
+    home = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+    os.environ["HOME"] = str(home)
+    runtime_skills._DISCOVERY_CACHE.clear()
+    try:
+        runtime_skill = home / ".agents" / "skills" / "runtime-reviewer" / "SKILL.md"
+        runtime_skill.parent.mkdir(parents=True)
+        runtime_skill.write_text(
+            "---\nname: runtime-reviewer\ndescription: Runtime review.\n---\nRuntime review.\n",
+            encoding="utf-8",
+        )
+        (home / ".codex").mkdir()
+        run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        env = runner_codex._materialize_codex_run_home(
+            run_dir,
+            {
+                "skills": {"reviewer": {"description": "Review code", "instructions": "Review carefully.\n"}},
+            },
+            cwd=str(home),
+        )
+        overrides = runner_codex._codex_config_overrides(run_dir, {
+            "mcp_servers": {"demo": {"command": "echo", "args": ["hello"]}},
+        })
+        bare_run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        bare_env = runner_codex._materialize_codex_run_home(
+            bare_run_dir,
+            {},
+            cwd=str(home),
+            bare_config=True,
+        )
+    finally:
+        runtime_skills._DISCOVERY_CACHE.clear()
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+
     check(len(overrides) == 1 and overrides[0].startswith("mcp_servers="), "Codex MCP becomes config override")
     parsed = tomllib.loads(overrides[0])
     check(parsed["mcp_servers"]["demo"]["args"] == ["hello"], "Codex MCP override is valid TOML")
-    skill = run_dir / "codex-skills" / ".agents" / "skills" / "reviewer" / "SKILL.md"
+    overlay_home = Path(env["HOME"])
+    skill_root = overlay_home / ".agents" / "skills"
+    check(overlay_home == run_dir / "codex-home", "Codex HOME points at run-local overlay")
+    check(Path(env["CODEX_HOME"]).is_symlink(), "Codex config home is linked into overlay")
+    skill = skill_root / "reviewer" / "SKILL.md"
     check(skill.is_file(), "Codex per-run skill file is materialized")
     check("Review carefully." in skill.read_text(encoding="utf-8"), "Codex skill body is written")
+    check(
+        (skill_root / "runtime-reviewer" / "SKILL.md").is_file(),
+        "Codex runtime skill file is materialized",
+    )
+    check(
+        not (Path(bare_env["HOME"]) / ".agents" / "skills" / "runtime-reviewer" / "SKILL.md").exists(),
+        "Codex bare config skips runtime skills",
+    )
 
 
 def t_codex_runner_inputs_self_identify_provider_kind() -> None:
@@ -745,7 +874,9 @@ def t_codex_open_file_panel_dynamic_tool() -> None:
 def t_codex_builtin_tool_schemas_do_not_invite_null_defaults() -> None:
     tools = [
         runner_codex._build_create_worker_dynamic_tool(),
+        runner_codex._build_ensure_named_worker_dynamic_tool(),
         runner_codex._build_open_file_panel_dynamic_tool(),
+        runner_codex._build_request_user_input_dynamic_tool(),
         runner_codex._build_delegate_task_dynamic_tool(),
         runner_codex._build_create_session_dynamic_tool(),
         runner_codex._build_create_sub_session_dynamic_tool(),
@@ -768,17 +899,17 @@ def t_codex_builtin_tool_schemas_do_not_invite_null_defaults() -> None:
 def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
     owned = runner_codex._codex_existing_tool_names({
         "mcp_servers": {
-            "open-file-panel": {},
+            "ui": {},
             "custom": {"tool_names": ["custom_owned_tool"]},
         },
     })
-    check("request_user_input" in owned, "Codex native request_user_input is owned before dynamic injection")
+    check("request_user_input" in owned, "Codex ui MCP request_user_input is owned before dynamic injection")
     check("open_file_panel" in owned, "Codex open-file-panel MCP owns open_file_panel")
     check("custom_owned_tool" in owned, "Codex MCP tool_names metadata contributes owned tools")
 
     tools: list[dict] = []
     handlers: dict[str, object] = {}
-    added_native = runner_codex._add_dynamic_tool(
+    added_request_user_input = runner_codex._add_dynamic_tool(
         tools,
         handlers,
         {"name": "request_user_input", "inputSchema": {"type": "object"}},
@@ -799,7 +930,7 @@ def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
         object(),
         existing_tool_names=owned,
     )
-    check(added_native is False, "Codex skips dynamic native-owned tool")
+    check(added_request_user_input is False, "Codex skips dynamic request_user_input when ui MCP owns it")
     check(added_mcp is False, "Codex skips dynamic MCP-owned tool")
     check(added_missing is True, "Codex adds dynamic tool when no owner exists")
     check([tool["name"] for tool in tools] == ["delegate_task"], "Codex dynamic tools contain only missing tools")
@@ -819,6 +950,112 @@ def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
     check(duplicate_failed, "Codex duplicate dynamic tool registration fails closed")
 
 
+def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
+    owned = runner_codex._codex_existing_tool_names({
+        "mcp_servers": {
+            "custom": {"tool_names": ["custom_owned_tool"]},
+        },
+    })
+    check(
+        "request_user_input" not in owned,
+        "Codex does not reserve request_user_input as a native-owned Default-mode tool",
+    )
+
+    owned_with_ui_mcp = runner_codex._codex_existing_tool_names({
+        "mcp_servers": {
+            "ui": {},
+        },
+    })
+    check(
+        "request_user_input" in owned_with_ui_mcp,
+        "Codex preserves request_user_input ownership when an actual ui MCP is configured",
+    )
+
+    dynamic_tools, handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=True,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "request_user_input" in {tool["name"] for tool in dynamic_tools},
+        "Codex injects Better Agent request_user_input when UI loopback tools are enabled",
+    )
+    check(
+        "request_user_input" in handlers,
+        "Codex request_user_input dynamic tool has a loopback handler",
+    )
+
+    open_file_only_tools, open_file_only_handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=False,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "open_file_panel" in {tool["name"] for tool in open_file_only_tools},
+        "Codex still injects open_file_panel when only open-file-panel is enabled",
+    )
+    check(
+        "request_user_input" not in open_file_only_handlers,
+        "Codex open-file-panel enablement does not imply request_user_input",
+    )
+
+    calls: list[tuple[dict, dict]] = []
+    original_post = runner_codex._post_loopback_sync
+
+    def fake_post(payload: dict, **kwargs: dict) -> dict:
+        calls.append((payload, kwargs))
+        return {"success": True, "answers": {"q": "answer"}}
+
+    runner_codex._post_loopback_sync = fake_post
+    try:
+        result = asyncio.run(handlers["request_user_input"]({
+            "arguments": {
+                "questions": [{"id": "q", "header": "H", "question": "Q"}],
+                "timeout_seconds": 5,
+            },
+        }))
+    finally:
+        runner_codex._post_loopback_sync = original_post
+
+    check(result.get("success") is True, "Codex request_user_input handler returns success")
+    check(len(calls) == 1, "Codex request_user_input handler makes one loopback call")
+    if calls:
+        payload, kwargs = calls[0]
+        check(
+            payload == {
+                "app_session_id": "session-1",
+                "kind": "input",
+                "questions": [{"id": "q", "header": "H", "question": "Q"}],
+                "timeout_seconds": 5,
+            },
+            "Codex request_user_input handler sends the expected payload",
+        )
+        check(
+            kwargs.get("url_path") == "/api/internal/user-input/request",
+            "Codex request_user_input handler routes to the user-input endpoint",
+        )
+
+
 def t_gemini_materializes_isolated_home() -> None:
     real_home = Path(tempfile.mkdtemp(dir=_TMP_HOME))
     (real_home / ".gemini").mkdir()
@@ -834,7 +1071,7 @@ def t_gemini_materializes_isolated_home() -> None:
         env = runner_gemini._materialize_gemini_run_home(run_dir, {
             "mcp_servers": {"demo": {"command": "echo"}},
             "skills": {"reviewer": "Review.\n"},
-        })
+        }, cwd=str(real_home))
     finally:
         if old is None:
             os.environ.pop("GEMINI_CLI_HOME", None)
@@ -850,28 +1087,6 @@ def t_gemini_materializes_isolated_home() -> None:
     check((overlay / ".gemini" / "google_accounts.json").is_symlink(), "Gemini auth file is linked, not copied")
     skill = overlay / ".gemini" / "skills" / "reviewer" / "SKILL.md"
     check(skill.read_text(encoding="utf-8") == "Review.\n", "Gemini skill is written")
-
-
-def t_gemini_continuation_recall_mcp_injected() -> None:
-    _configure_internal_llm_defaults("default_session")
-    _install_continuation_recall_extension_record()
-    config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
-        "continuation_chain": ["provider-sid"],
-        "app_session_id": "bc-sid",
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "secret",
-    }, {
-        "mcp_servers": {"demo": {"command": "echo"}},
-    })
-    servers = config["mcp_servers"]
-    check("demo" in servers, "Gemini continuation keeps existing MCP servers")
-    recall = servers["better-agent-continuation-recall"]
-    check(recall["command"] == sys.executable, "Gemini recall MCP uses current executable")
-    check(recall["args"][-1].endswith("server.py"), "Gemini recall MCP points at private package script")
-    env = recall["env"]
-    check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "Gemini recall MCP carries Better Agent session id")
-    check(env["BETTER_CLAUDE_INTERNAL_TOKEN"] == "secret", "Gemini recall MCP carries internal token")
 
 
 def t_gemini_max_tokens_result_is_context_overflow() -> None:
@@ -920,7 +1135,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "better-agent-coordination",
         "better-agent-session-bridge",
         "credential-broker",
-        "open-file-panel",
+        "ui",
         "scheduler",
         "provider-config-sync",
         "better-agent-requirements",
@@ -933,12 +1148,12 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     check("canvas" not in servers, "public canvas MCP is not injected")
     check("project-updates" not in servers, "project-updates is no longer injected as a built-in MCP")
     env = servers["scheduler"]["env"]
-    check(env["BETTER_CLAUDE_EXTENSION_ID"] == "ofek-dev.scheduler", "extension MCP env selects scheduler owner")
+    check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('scheduler'), "extension MCP env selects scheduler owner")
     check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "built-in MCP carries Better Agent session id")
     check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "built-in MCP carries provider id")
     check(
-        servers["open-file-panel"]["args"][-1].endswith("open_file_panel_mcp.py"),
-        "built-in MCP config points open-file-panel at its MCP server",
+        servers["ui"]["args"][-1].endswith("open_file_panel_mcp.py"),
+        "built-in MCP config points ui server at its MCP server",
     )
 
 
@@ -956,7 +1171,7 @@ def t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp() -> None:
         "model": "m",
     }, {})
     servers = config["mcp_servers"]
-    check("open-file-panel" not in servers, "Codex omits open-file-panel MCP to avoid request_user_input collision")
+    check("ui" not in servers, "Codex omits ui MCP to avoid request_user_input collision")
     check("open-config-panel" in servers, "Codex keeps open-config-panel MCP")
     check("better-agent-coordination" in servers, "Codex keeps extension MCP servers")
 
@@ -975,7 +1190,7 @@ def t_builtin_manager_mcp_servers_exclude_session_bridge() -> None:
     servers = config["mcp_servers"]
     check("better-agent-session-bridge" not in servers, "manager runs do not get session-bridge")
     check("better-agent-coordination" in servers, "manager runs get coordination")
-    check("open-file-panel" in servers, "manager user-facing runs get open-file-panel")
+    check("ui" in servers, "manager user-facing runs get ui server")
     check("scheduler" in servers, "manager user-facing runs still get scheduler")
     check("better-agent-requirements" in servers, "manager runs get requirements from private extension")
 
@@ -993,7 +1208,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     # requirements is a dissolved private extension: it is disabled via its
     # enabled flag, not the disabled_builtin_extensions builtin override (which
     # only covers path-map builtins).
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, False)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1004,7 +1219,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     servers = config["mcp_servers"]
     check("better-agent-requirements" not in servers, "disabled requirements extension removes its private MCP server")
     check("better-agent-canvas" in servers, "other private extension MCP servers remain active")
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
 
 
 def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
@@ -1014,10 +1229,10 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
     script = package / "mcp" / "server.py"
     script.write_text("print('project updates')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('project-structure')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('project-structure'),
             "name": "Project Structure",
             "version": "1.0.0",
             "description": "",
@@ -1058,7 +1273,7 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('project-structure'))
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1143,6 +1358,65 @@ def t_installed_extension_mcp_servers_are_injected() -> None:
     check(runtime["env"]["OF_RUNTIME"] == "1", "installed extension MCP carries manifest env")
 
 
+def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
+    _install_requirements_extension_record()
+    _install_core_mcp_gate_extensions()
+    _configure_internal_llm_defaults(
+        "default_session",
+        "requirement_analysis",
+        "project_structure_edit",
+        "provider_config_sync_review",
+    )
+    inputs = {
+        "open_file_panel_enabled": True,
+        "browser_harness_enabled": True,
+        "app_session_id": "restart-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-restart",
+    }
+    before = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"]
+    _simulate_backend_restart()
+    after = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"]
+    for name in (
+        "capabilities",
+        "open-config-panel",
+        "ui",
+        "better-agent-requirements",
+        "better-agent-coordination",
+        "better-agent-session-bridge",
+        "provider-config-sync",
+    ):
+        check(name in before, f"restart simulation baseline includes {name}")
+        check(name in after, f"restart simulation keeps {name}")
+    check(
+        after["better-agent-requirements"]["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "restart-sid",
+        "restart simulation keeps runtime extension MCP session env",
+    )
+
+
+def t_session_bound_mcp_is_not_available_to_ambient_native_tools() -> None:
+    _install_requirements_extension_record(replaces_builtin=True)
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
+        "open_file_panel_enabled": True,
+        "app_session_id": "native-restart-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-native-restart",
+    }
+    configs = extension_store.native_mcp_launcher_server_configs(
+        inputs, user_facing=True, bare=False
+    )
+    check("get-requirements" not in configs, "session-bound requirements MCP is excluded ambiently")
+
+
 def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("default_session", "requirement_analysis")
@@ -1177,12 +1451,12 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     main_src = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
     check(
         "is_extension_runtime_ready(" in supervisor_src
-        and "BUILTIN_SUPERVISOR_EXTENSION_ID" in supervisor_src,
+        and "extension_id_for_role('supervisor')" in supervisor_src,
         "supervisor loop checks extension runtime readiness",
     )
     check(
-        "is_extension_runtime_ready(" in orchestrator_src
-        and "BUILTIN_SUPERVISOR_EXTENSION_ID" in orchestrator_src,
+        "runtime_not_ready_message(" in orchestrator_src
+        and "extension_id_for_role('supervisor')" in orchestrator_src,
         "direct supervisor target checks extension runtime readiness",
     )
     main_enabled_only_uses = [
@@ -1227,34 +1501,68 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
         check("better-agent-coordination" in servers, f"{provider_name} gets coordination through public extension")
 
 
-def t_get_requirements_internal_tool_is_processor_scoped() -> None:
+def t_requirements_mcp_uses_private_extension() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("requirement_analysis")
-    normal = builtin_mcp_config.with_builtin_mcp_servers({
+    config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "normal-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
         "mode": "native",
     }, {})
-    processor = builtin_mcp_config.with_builtin_mcp_servers({
+    servers = config["mcp_servers"]
+    check("get-requirements" not in servers, "normal runs do not use the public requirements MCP")
+    check("better-agent-requirements" in servers, "normal runs use private requirements MCP")
+
+
+def t_better_agent_runner_uses_extension_mcp_configs() -> None:
+    _install_requirements_extension_record()
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
         "open_file_panel_enabled": True,
-        "app_session_id": "processor-caller",
+        "app_session_id": "ba-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
         "mode": "native",
-        "worker_working_mode": "get_requirements_processor",
-    }, {})
-    normal_servers = normal["mcp_servers"]
-    processor_servers = processor["mcp_servers"]
-    check("get-requirements" not in normal_servers, "normal runs do not use the public requirements MCP")
-    check("better-agent-requirements" in normal_servers, "normal runs use private requirements MCP")
-    check("get-requirements" not in processor_servers, "processor runs do not use the public requirements MCP")
-    check("better-agent-requirements" in processor_servers, "processor runs use private requirements MCP")
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-ba",
+    }
+    configs = runner_better_agent._extension_mcp_server_configs_for_run(
+        inputs, user_facing=True, bare=False,
+    )
+    check(
+        "better-agent-requirements" in configs,
+        "Better Agent runner gets requirements through private extension",
+    )
+    headless = dict(inputs)
+    headless["open_file_panel_enabled"] = False
+    check(
+        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
+            headless, user_facing=False, bare=False,
+        ),
+        "Better Agent runner keeps requirements MCP for authenticated headless sessions",
+    )
+
+    missing_token = dict(inputs)
+    missing_token["internal_token"] = ""
+    check(
+        "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
+            missing_token, user_facing=True, bare=False,
+        ),
+        "Better Agent runner omits requirements MCP without backend auth",
+    )
+    check(
+        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
+            inputs, user_facing=True, bare=True,
+        ),
+        "Better Agent runner keeps requirements MCP for bare runs",
+    )
 
 
-def t_native_requirements_mcp_injected_with_run_auth() -> None:
-    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
+    _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
         "open_file_panel_enabled": True,
@@ -1269,56 +1577,128 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
     servers = config["mcp_servers"]
     req = servers.get("get-requirements")
-    check(req is not None, "native requirements MCP is injected per managed run")
+    check(req is not None, "requirements MCP is injected per managed Better Agent run")
     if req:
         env = req["env"]
-        check(env["BETTER_CLAUDE_EXTENSION_ID"] == "ofek-dev.requirements", "native requirements MCP env selects requirements extension")
-        check(env["BETTER_CLAUDE_EXTENSION_MCP_SERVER"] == "better-agent-requirements", "native requirements MCP env selects extension server")
-        check(env["BETTER_CLAUDE_BACKEND_URL"] == "http://127.0.0.1:8000", "native requirements MCP launcher env carries backend URL")
-        check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "native requirements MCP launcher env carries app session id")
-        check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "native requirements MCP launcher env carries cwd")
-        check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "native requirements MCP launcher env carries provider id")
-        check(env["BETTER_CLAUDE_MODE"] == "native", "native requirements MCP launcher env carries mode")
-        check(env["BETTER_CLAUDE_USER_FACING"] == "1", "native requirements MCP launcher env carries user-facing flag")
-        check("BETTER_CLAUDE_INTERNAL_TOKEN" not in env, "native requirements MCP config does not carry per-run internal token")
-        check(req["args"][0].endswith("extension_mcp_launcher.py"), "native requirements MCP points at extension launcher")
-        codex_overrides = runner_codex._codex_config_overrides(Path(tempfile.mkdtemp(dir=_TMP_HOME)), {
-            "mcp_servers": {"get-requirements": req},
-        })
-        check("secret" not in "\n".join(codex_overrides), "Codex native requirements MCP override does not expose token")
-        serialized = json.dumps(req, sort_keys=True)
-        check("secret" not in serialized, "native requirements MCP provider config does not expose token")
-    runtime_env = builtin_mcp_config.native_mcp_runtime_env(inputs)
-    check(runtime_env["BETTER_CLAUDE_INTERNAL_TOKEN"] == "secret", "native requirements MCP runtime env carries per-run internal token")
-    check(runtime_env["BETTER_CLAUDE_CWD"] == "/tmp/project", "native requirements MCP runtime env carries per-run cwd")
-    check(runtime_env["BETTER_CLAUDE_USER_FACING"] == "1", "native requirements MCP runtime env marks user-facing runs")
-
+        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('requirements'), "runtime requirements MCP env selects requirements extension")
+        check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
+        check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
+        check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(missing_token, {})["mcp_servers"],
-        "native requirements MCP is omitted without backend auth",
+        "runtime requirements MCP is omitted without backend auth",
     )
     headless = dict(inputs)
     headless["open_file_panel_enabled"] = False
     check(
-        "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
-        "native requirements MCP is omitted for non-user-facing runs",
+        "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
+        "runtime requirements MCP is kept for authenticated headless runs",
     )
     bare = dict(inputs)
     bare["bare_config"] = True
     check(
-        "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(bare, {})["mcp_servers"],
-        "native requirements MCP is omitted for bare runs",
+        "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(bare, {})["mcp_servers"],
+        "runtime requirements MCP is kept for bare runs",
     )
     # requirements is a dissolved private extension: disabling it via its enabled
     # flag (not the disabled_builtin_extensions builtin override) omits its MCP.
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, False)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"],
-        "native requirements MCP is omitted when the extension is disabled",
+        "runtime requirements MCP is omitted when the extension is disabled",
     )
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
+
+
+def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
+    _install_requirements_extension_record(replaces_builtin=True)
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "processor-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-1",
+        "provisioned_tool_profile": "requirements_processor",
+    }
+    direct = extension_store.runtime_mcp_server_configs(
+        inputs,
+        user_facing=False,
+        bare=False,
+    ).get("get-requirements")
+    check(direct is not None, "processor profile runtime requirements MCP resolves")
+    if direct:
+        check(
+            direct["env"].get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") == "1",
+            "processor profile runtime requirements MCP enables restricted server mode",
+        )
+
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    managed = config["mcp_servers"].get("get-requirements")
+    check(managed is not None, "processor profile managed requirements MCP resolves")
+    if managed:
+        check(
+            managed["env"].get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") == "1",
+            "processor profile managed MCP enables restricted server mode",
+        )
+    runtime_env = builtin_mcp_config.native_mcp_runtime_env(inputs)
+    check(
+        runtime_env["BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE"] == "requirements_processor",
+        "processor profile native runtime env carries provisioned tool profile",
+    )
+
+
+def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
+    _install_testape_extension_record()
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "testape-bare-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-testape",
+        "bare_config": True,
+    }
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    server = config["mcp_servers"].get("testape")
+    check(server is not None, "bare TestApe MCP is injected")
+    if not server:
+        return
+    check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
+    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('testape'), "bare TestApe runtime env carries extension id")
+    check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
+    raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
+    check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")
+
+
+def t_bare_mcp_availability_matrix() -> None:
+    _install_bare_matrix_extension_record()
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "bare-matrix-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-bare-matrix",
+        "bare_config": True,
+    }
+    servers = extension_store.native_mcp_launcher_server_configs(
+        inputs,
+        user_facing=False,
+        bare=True,
+    )
+    check("headless-bare" in servers, "bare non-user-facing MCP is available when bare_allowed")
+    check("visible-bare" not in servers, "user-facing MCP is excluded from ambient native tools")
+    check("visible-not-bare" not in servers, "bare user-facing MCP is excluded without bare_allowed")
 
 
 def t_open_file_panel_mcp_validates_required_fields() -> None:
@@ -1331,12 +1711,76 @@ def t_request_user_input_mcp_validates_required_fields() -> None:
     check(result["success"] is False, "request-user-input MCP rejects missing questions before HTTP")
 
 
+def t_request_user_approval_contract_has_provider_parity() -> None:
+    result = open_file_panel_mcp.request_user_approval_response("")
+    check(result["success"] is False, "request-user-approval MCP rejects missing prompt before HTTP")
+    for module, label in (
+        (runner, "Claude"),
+        (runner_codex, "Codex"),
+        (runner_better_agent, "Gemini/Better Agent"),
+    ):
+        schema = module._REQUEST_USER_APPROVAL_SCHEMA
+        check(schema["required"] == ["prompt"], f"{label} uses the approval-only prompt contract")
+        check(
+            module._REQUEST_USER_APPROVAL_DESCRIPTION == runner._REQUEST_USER_APPROVAL_DESCRIPTION,
+            f"{label} shares the approval tool description",
+        )
+    mcp_tool_names = {
+        tool.name for tool in asyncio.run(open_file_panel_mcp.build_server().list_tools())
+    }
+    check("request_user_approval" in mcp_tool_names, "Gemini/native UI MCP registers request_user_approval")
+    claude_tool = runner._build_request_user_approval_tool(
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+    )
+    check(claude_tool.name == "request_user_approval", "Claude SDK MCP registers request_user_approval")
+    codex_tools, codex_handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=True,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "request_user_approval" in {tool["name"] for tool in codex_tools},
+        "Codex dynamic tools register request_user_approval",
+    )
+    check("request_user_approval" in codex_handlers, "Codex registers the approval loopback handler")
+    better_agent_schemas = runner_better_agent._tool_schemas_for_run(
+        inputs={},
+        capabilities_enabled=False,
+        loopback_enabled=True,
+        team_manager_enabled=False,
+        team_orchestration_enabled=False,
+        open_file_panel_enabled=True,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    better_agent_names = {
+        schema.get("function", {}).get("name") for schema in better_agent_schemas
+    }
+    check("request_user_approval" in better_agent_names, "Better Agent runner registers request_user_approval")
+
+
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     gemini_src = (Path(_BACKEND) / "provider_gemini.py").read_text(encoding="utf-8")
     check(
         '"open_file_panel_enabled": bool(open_file_panel_enabled)' in codex_src,
         "Codex provider persists open_file_panel_enabled into runner input",
+    )
+    check(
+        '"request_user_input_enabled": request_user_input_enabled' in codex_src,
+        "Codex provider persists request_user_input_enabled into runner input separately",
     )
     check(
         '"provider_kind": self.KIND' in codex_src,
@@ -1364,7 +1808,7 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
     check(
         '"disabled_builtin_extensions": (' in codex_src
-        and "config_store.get_disabled_builtin_extensions()" in codex_src,
+        and "disabled_builtin_extensions_for_run(" in codex_src,
         "Codex provider persists disabled built-in extensions into runner input",
     )
     check(
@@ -1372,13 +1816,21 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists worker working mode into runner input",
     )
     check(
+        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in codex_src,
+        "Codex provider persists provisioned tool profile into runner input",
+    )
+    check(
         '"disabled_builtin_extensions": (' in gemini_src
-        and "config_store.get_disabled_builtin_extensions()" in gemini_src,
+        and "disabled_builtin_extensions_for_run(" in gemini_src,
         "Gemini provider persists disabled built-in extensions into runner input",
     )
     check(
         '"worker_working_mode": (_worker_sess_rec or {}).get("working_mode")' in gemini_src,
         "Gemini provider persists worker working mode into runner input",
+    )
+    check(
+        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in gemini_src,
+        "Gemini provider persists provisioned tool profile into runner input",
     )
     claude_src = (Path(_BACKEND) / "provider_claude.py").read_text(encoding="utf-8")
     check(
@@ -1387,12 +1839,16 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
     check(
         '"disabled_builtin_extensions": (' in claude_src
-        and "config_store.get_disabled_builtin_extensions()" in claude_src,
+        and "disabled_builtin_extensions_for_run(" in claude_src,
         "Claude provider persists disabled built-in extensions into runner input",
     )
     check(
         '"worker_working_mode": (_worker_sess_rec or {}).get("working_mode")' in claude_src,
         "Claude provider persists worker working mode into runner input",
+    )
+    check(
+        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in claude_src,
+        "Claude provider persists provisioned tool profile into runner input",
     )
     remote_src = (Path(_BACKEND) / "provider_remote.py").read_text(encoding="utf-8")
     node_handler_src = (Path(_BACKEND) / "node_rpc_handlers.py").read_text(encoding="utf-8")
@@ -1402,13 +1858,47 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Remote provider ships disabled built-in extensions in spawn_run payload",
     )
     check(
+        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in remote_src,
+        "Remote provider ships provisioned tool profile in spawn_run payload",
+    )
+    check(
         "disabled_builtin_extensions=msg.get(\"disabled_builtin_extensions\")" in node_handler_src,
         "Worker node forwards disabled built-in extensions into local provider",
+    )
+    check(
+        "_node_provisioned_tool_profile(" in node_handler_src,
+        "Worker node validates provisioned tool profile before forwarding",
     )
     check(
         "disabled_builtin_extensions: Optional[list[str]]" in node_protocol_src,
         "Node protocol types disabled built-in extensions",
     )
+    check(
+        "provisioned_tool_profile: str" in node_protocol_src,
+        "Node protocol types provisioned tool profile",
+    )
+
+
+def t_provider_runner_env_pins_better_agent_home() -> None:
+    env = provider.build_better_agent_run_env(
+        backend_url="http://127.0.0.1:8000",
+        internal_token="secret",
+        app_session_id="session-1",
+        cwd="/tmp/project",
+        model="model",
+        provider_id="provider-1",
+        bare_config=True,
+        user_facing=False,
+        disabled_builtin_extensions=["ofek.testape-internal"],
+    )
+    home = str(ba_home())
+    check(env["BETTER_AGENT_HOME"] == home, "runner env pins primary Better Agent home")
+    check(env["BETTER_CLAUDE_HOME"] == home, "runner env pins legacy Better Agent home")
+    check(
+        env["BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS"] == "ofek.testape-internal",
+        "runner env keeps disabled built-in extensions",
+    )
+    check("CLAUDE_CONFIG_DIR" not in env, "runner env does not override provider Claude config")
 
 
 def main() -> int:
@@ -1421,21 +1911,29 @@ def main() -> int:
         ("codex open-file-panel dynamic tool", t_codex_open_file_panel_dynamic_tool),
         ("codex built-in tool schemas do not invite null defaults", t_codex_builtin_tool_schemas_do_not_invite_null_defaults),
         ("codex dynamic tools respect existing tool owners", t_codex_dynamic_tools_respect_existing_tool_owners),
+        ("codex request_user_input uses Better Agent dynamic tool", t_codex_request_user_input_uses_better_agent_dynamic_tool),
         ("gemini materializes isolated home", t_gemini_materializes_isolated_home),
-        ("gemini continuation recall mcp injected", t_gemini_continuation_recall_mcp_injected),
         ("gemini max_tokens result is context overflow", t_gemini_max_tokens_result_is_context_overflow),
         ("built-in user-facing mcp servers injected", t_builtin_user_facing_mcp_servers_injected),
         ("built-in manager mcp servers exclude session bridge", t_builtin_manager_mcp_servers_exclude_session_bridge),
         ("built-in mcp servers are extension owned", t_builtin_mcp_servers_are_extension_owned),
         ("installed extension can replace reserved builtin mcp name", t_installed_extension_can_replace_reserved_builtin_mcp_name),
         ("installed extension mcp servers are injected", t_installed_extension_mcp_servers_are_injected),
+        ("runtime mcp servers reload after backend restart simulation", t_runtime_mcp_servers_reload_after_backend_restart_simulation),
+        ("session-bound mcp is not available to ambient native tools", t_session_bound_mcp_is_not_available_to_ambient_native_tools),
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
-        ("get-requirements internal tool is processor scoped", t_get_requirements_internal_tool_is_processor_scoped),
-        ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
+        ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
+        ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
+        ("requirements mcp stays on Better Agent runtime", t_requirements_mcp_stays_on_better_agent_runtime),
+        ("requirements processor profile marks requirements mcp env", t_requirements_processor_profile_marks_requirements_mcp_env),
+        ("bare TestApe mcp stays on Better Agent runtime", t_bare_testape_mcp_stays_on_better_agent_runtime),
+        ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
+        ("request-user-approval contract has provider parity", t_request_user_approval_contract_has_provider_parity),
         ("providers persist open-file-panel flag", t_provider_sources_persist_open_file_panel_flag),
+        ("provider runner env pins Better Agent home", t_provider_runner_env_pins_better_agent_home),
     ]:
         print(f"\n--- {name} ---")
         try:

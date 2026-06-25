@@ -7,15 +7,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-marketplace-extension-"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT.parent / "sdk"))
+
 import _test_home
 _test_home.isolate("ba-test-")
 os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT.parent / "sdk"))
 
 dist_dir = ROOT.parent / "frontend" / "dist"
 created_dist = not dist_dir.exists()
@@ -39,8 +38,8 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     extensions = extension_store.list_extensions()
     check(
-        extension_store.MARKETPLACE_EXTENSION_ID not in {item["manifest"]["id"] for item in extensions},
-        "marketplace stays hidden from public extension list",
+        extension_store.MARKETPLACE_EXTENSION_ID in {item["manifest"]["id"] for item in extensions},
+        "marketplace is listed in the public extension list",
     )
     hidden_extensions = extension_store.list_extensions(include_hidden=True)
     check(
@@ -51,6 +50,14 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
     check(record is not None, "marketplace extension record is installed")
     check(record["enabled"] is True, "marketplace extension is enabled")
     check(record["source"]["type"] == "better_agent_local", "marketplace extension seeds from local package")
+    check(
+        record["source"]["repo_url"] == str(ROOT.parent),
+        "marketplace local source points at public repo root",
+    )
+    check(
+        Path(record["source"]["repo_url"], record["source"]["extension_path"], "mcp", "server.py").is_file(),
+        "marketplace source root contains declared MCP server",
+    )
 
     configs = builtin_mcp_config.with_builtin_mcp_servers(
         {
@@ -94,14 +101,50 @@ def test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint() -> None:
     calls: list[tuple[str, dict, float]] = []
 
     class FakeClient:
-        def call_internal(self, path, body=None, *, timeout=60.0):
-            calls.append((path, body or {}, timeout))
-            return {"success": True, "body": body}
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append((capability, action, payload or {}, timeout))
+            return {"success": True, "body": payload}
 
     module.Client = FakeClient
     result = module.marketplace_action("search", query="todos", limit=5)
     check(result["success"] is True, "marketplace MCP wrapper returns internal result")
-    check(calls == [("/api/internal/marketplace", {"action": "search", "query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses internal endpoint")
+    check(calls == [("marketplace", "search", {"query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses exact capability action")
+
+
+def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() -> None:
+    old_base = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
+    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = "https://marketplace.test/api/marketplace"
+    calls: list[str] = []
+    original_fetch = extension_store._fetch_json
+
+    def fake_fetch(url: str):
+        calls.append(url)
+        return {
+            "extensions": [
+                {"id": "ofek.alpha", "name": "Alpha", "description": "Notes"},
+                {"id": "ofek.todos", "name": "Todos", "description": "Task tracking"},
+                {"id": "ofek.todos-pro", "name": "Todos Pro", "description": "Advanced tasks"},
+            ]
+        }
+
+    extension_store._fetch_json = fake_fetch
+    try:
+        result = extension_store.search_marketplace_catalog(query="todos", limit=1)
+    finally:
+        extension_store._fetch_json = original_fetch
+        if old_base is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_BASE_URL", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = old_base
+
+    check(
+        calls == ["https://marketplace.test/api/marketplace/extensions.json"],
+        "marketplace catalog fetch uses static extensions.json",
+    )
+    check(
+        [item["id"] for item in result["extensions"]] == ["ofek.todos"],
+        "marketplace catalog search filters and limits locally",
+    )
 
 
 def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions() -> None:
@@ -148,6 +191,7 @@ def main() -> int:
     try:
         test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp()
         test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint()
+        test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()
         test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions()
     finally:
         if created_dist:

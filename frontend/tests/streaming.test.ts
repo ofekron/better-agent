@@ -29,6 +29,35 @@ describe("streaming + multi-session behavior", () => {
     h.unmount();
   });
 
+  it("Stop button falls back to REST with progress when websocket is closed", async () => {
+    const session = makeSession({ is_running: true, monitoring_state: "active" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    h.dropConnection();
+    const releaseStop = h.backend.holdNext("POST", `/api/sessions/${session.id}/stop`);
+
+    expect(h.toJSON().chat.stopButtonVisible).toBe(true);
+    await h.clickStop();
+
+    expect(h.outbound).not.toContainEqual(
+      expect.objectContaining({ type: "stop_message", app_session_id: session.id }),
+    );
+    expect(h.restCalls).toContainEqual(
+      expect.objectContaining({
+        method: "POST",
+        path: `/api/sessions/${session.id}/stop`,
+      }),
+    );
+    expect(h.toJSON().chat.stopButtonDisabled).toBe(true);
+    expect(h.toJSON().chat.stopButtonStopping).toBe(true);
+
+    releaseStop();
+    await h.flush();
+    expect(h.toJSON().chat.stopButtonDisabled).toBe(false);
+    expect(h.toJSON().chat.stopButtonStopping).toBe(false);
+    h.unmount();
+  });
+
   it("empty run_state event clears the run badges and the Stop button", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });

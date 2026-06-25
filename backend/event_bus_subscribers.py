@@ -8,9 +8,6 @@ Today:
     broadcast are the same single side-effect.
   - Session content projection subscriber: turns written journal rows
     back into SessionManager-owned render-tree state.
-  - Rearranger lifecycle subscriber (priority 200). Subscribes to
-    `lifecycle.turn_complete` / `lifecycle.turn_stopped` and
-    fire-and-forgets `rearranger.trigger_final(sid)`.
   - Session worker-fanout projection subscriber: owns worker/fork cleanup
     for `session.worker_fanout_required` facts.
 
@@ -22,9 +19,13 @@ they never run before persistence.
 from __future__ import annotations
 
 import asyncio
-import functools
+import json
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Callable
 
 from event_bus import BusEvent, bus, register_event_schema
 from event_journal import (
@@ -35,22 +36,310 @@ from event_journal import (
     event_journal_writer,
 )
 from session_manager import manager as session_manager
+import perf
 
 logger = logging.getLogger(__name__)
 
 
 _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
-_REARRANGER_SUBSCRIBER_PRIORITY = 200  # well after persistence + WS
-_OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="ownership-projection",
-)
+_SESSION_PROJECTION_SHARDS = 8
+_SESSION_PROJECTION_MAX_PENDING = 256
+_SESSION_PROJECTION_DRAIN_CHUNK = 128
+
+
+@dataclass(frozen=True)
+class SessionProjectionCommand:
+    root_id: str
+    sid: str
+    msg_id: str
+    event_type: str
+    source: str
+    seq: int
+
+
+@dataclass
+class _ProjectionRootState:
+    cursor: int
+    target: int
+    queued_at: float
+    active: bool = False
+    expected_applicability: dict[int, bool] | None = None
+
+
+def _projection_command_is_applicable(command: SessionProjectionCommand) -> bool:
+    return (
+        command.event_type == "event_ownership_resolved"
+        or (
+            command.source != "provider_stream"
+            and command.event_type in RENDER_EVENT_TYPES
+        )
+    )
+
+
+class SessionProjectionDrainer:
+    """Coalesces journal acknowledgements into ordered per-root drains."""
+
+    def __init__(
+        self,
+        apply_row: Callable[[str, dict], None],
+        read_rows: Callable[[str, int, int], list[dict]],
+        mark_dirty: Callable[[str, BaseException], None],
+        *,
+        shards: int,
+        max_active_roots: int,
+        chunk_size: int,
+    ) -> None:
+        self._apply_row = apply_row
+        self._read_rows = read_rows
+        self._mark_dirty = mark_dirty
+        self._max_active_roots = max_active_roots
+        self._chunk_size = chunk_size
+        self._lock = threading.Condition(threading.RLock())
+        self._states: dict[str, _ProjectionRootState] = {}
+        self._active_roots = 0
+        self._accepting = True
+        self._executors = tuple(
+            ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"session-projection-{i}",
+            )
+            for i in range(shards)
+        )
+        perf.register_queue("session_projection.active_roots", self.active_root_count)
+        perf.register_queue("session_projection.pending_rows", self.pending_row_count)
+
+    def submit(self, command: SessionProjectionCommand) -> bool:
+        with self._lock:
+            if not self._accepting:
+                self._mark_dirty(
+                    command.root_id,
+                    RuntimeError("session projection is closed"),
+                )
+                perf.record_count("session_projection.errors")
+                return False
+            state = self._states.get(command.root_id)
+            if state is None:
+                state = _ProjectionRootState(
+                    cursor=command.seq - 1,
+                    target=command.seq,
+                    queued_at=time.perf_counter(),
+                    expected_applicability={},
+                )
+                self._states[command.root_id] = state
+            else:
+                assert state.expected_applicability is not None
+                expected = _projection_command_is_applicable(command)
+                prior_expected = state.expected_applicability.get(command.seq)
+                if prior_expected is not None and prior_expected != expected:
+                    perf.record_count(
+                        "session_projection.command_expectation_conflict",
+                    )
+                    self._report_dirty(
+                        command.root_id,
+                        RuntimeError(
+                            "session projection conflicting command "
+                            f"applicability root={command.root_id} "
+                            f"seq={command.seq}",
+                        ),
+                    )
+                else:
+                    state.expected_applicability[command.seq] = expected
+                if command.seq <= state.target:
+                    perf.record_count("session_projection.coalesced")
+                    if state.active:
+                        return True
+                else:
+                    perf.record_count(
+                        "session_projection.coalesced",
+                        command.seq - state.target,
+                    )
+                    state.target = command.seq
+            assert state.expected_applicability is not None
+            state.expected_applicability.setdefault(
+                command.seq,
+                _projection_command_is_applicable(command),
+            )
+            perf.record_count("session_projection.highwater", state.target)
+            if state.active:
+                return True
+            if self._active_roots >= self._max_active_roots:
+                self._mark_dirty(
+                    command.root_id,
+                    RuntimeError(
+                        "session projection active-root capacity is full",
+                    ),
+                )
+                perf.record_count("session_projection.errors")
+                return False
+            state.active = True
+            state.queued_at = time.perf_counter()
+            self._active_roots += 1
+            self._executor(command.root_id).submit(self._drain_chunk, command.root_id)
+            return True
+
+    def _executor(self, root_id: str) -> ThreadPoolExecutor:
+        return self._executors[self._shard(root_id)]
+
+    def _shard(self, root_id: str) -> int:
+        return hash(root_id) % len(self._executors)
+
+    def _drain_chunk(self, root_id: str) -> None:
+        with self._lock:
+            state = self._states[root_id]
+            after_seq = state.cursor
+            target = state.target
+            queued_at = state.queued_at
+        perf.record(
+            "session_projection.age",
+            (time.perf_counter() - queued_at) * 1000.0,
+        )
+        perf.record_lag(f"session_projection.shard{self._shard(root_id)}", queued_at)
+        try:
+            rows = self._read_rows(root_id, after_seq, self._chunk_size)
+            if not rows and after_seq < target:
+                raise RuntimeError(f"durable journal row after {root_id}:{after_seq} is unavailable")
+            advanced = after_seq
+            for row in rows:
+                seq = int(row.get("seq") or 0)
+                if seq <= advanced:
+                    continue
+                if seq > target:
+                    break
+                if seq != advanced + 1:
+                    raise RuntimeError(
+                        f"durable journal gap for {root_id}: "
+                        f"expected {advanced + 1}, got {seq}",
+                    )
+                row_applicable = _projection_row_is_applicable(row)
+                with self._lock:
+                    state = self._states[root_id]
+                    assert state.expected_applicability is not None
+                    command_applicable = state.expected_applicability.pop(seq, None)
+                if (
+                    command_applicable is not None
+                    and command_applicable != row_applicable
+                ):
+                    direction = (
+                        "command_applicable_row_skipped"
+                        if command_applicable
+                        else "command_skipped_row_applicable"
+                    )
+                    perf.record_count(
+                        f"session_projection.command_row_mismatch.{direction}",
+                    )
+                    self._report_dirty(
+                        root_id,
+                        RuntimeError(
+                            f"session projection command/journal mismatch "
+                            f"root={root_id} seq={seq} direction={direction}",
+                        ),
+                    )
+                if row_applicable:
+                    self._apply_row(root_id, row)
+                    perf.record_count("session_projection.applied")
+                else:
+                    perf.record_count("session_projection.skipped")
+                advanced = seq
+                with self._lock:
+                    self._states[root_id].cursor = advanced
+            with self._lock:
+                state = self._states[root_id]
+                if state.cursor < state.target:
+                    if state.cursor == after_seq:
+                        raise RuntimeError(
+                            f"session projection made no progress for "
+                            f"{root_id}:{state.cursor}->{state.target}",
+                        )
+                    state.queued_at = time.perf_counter()
+                    self._executor(root_id).submit(self._drain_chunk, root_id)
+                    return
+                state.active = False
+                self._active_roots -= 1
+                self._lock.notify_all()
+        except Exception as exc:
+            with self._lock:
+                state = self._states[root_id]
+                state.active = False
+                self._active_roots -= 1
+                self._lock.notify_all()
+            self._report_dirty(root_id, exc)
+
+    def barrier(self, root_id: str) -> None:
+        with self._lock:
+            self._lock.wait_for(
+                lambda: not (self._states.get(root_id) and self._states[root_id].active),
+            )
+
+    def shutdown(self, *, wait: bool = True, timeout_s: float = 5.0) -> None:
+        drained = True
+        with self._lock:
+            self._accepting = False
+            if wait:
+                drained = self._lock.wait_for(
+                    lambda: self._active_roots == 0,
+                    timeout=max(0.0, timeout_s),
+                )
+                if not drained:
+                    perf.record_count("session_projection.shutdown_timeout")
+                    active = [
+                        root_id
+                        for root_id, state in self._states.items()
+                        if state.active
+                    ]
+                else:
+                    active = []
+            else:
+                active = []
+        for root_id in active:
+            self._report_dirty(
+                root_id,
+                RuntimeError("session projection shutdown timed out"),
+            )
+        for executor in self._executors:
+            executor.shutdown(wait=wait and drained, cancel_futures=not drained)
+        perf.unregister_queue("session_projection.active_roots")
+        perf.unregister_queue("session_projection.pending_rows")
+
+    def active_root_count(self) -> int:
+        with self._lock:
+            return self._active_roots
+
+    def is_accepting(self) -> bool:
+        with self._lock:
+            return self._accepting
+
+    def pending_row_count(self) -> int:
+        with self._lock:
+            return sum(
+                max(0, state.target - state.cursor)
+                for state in self._states.values()
+            )
+
+    def _report_dirty(self, root_id: str, exc: BaseException) -> None:
+        perf.record_count("session_projection.errors")
+        try:
+            self._mark_dirty(root_id, exc)
+        except Exception:
+            logger.exception(
+                "session projection dirty marker failed root=%s",
+                root_id,
+            )
+
+
+def _projection_row_is_applicable(row: dict) -> bool:
+    return (
+        row.get("type") == "event_ownership_resolved"
+        or (
+            row.get("source") != "provider_stream"
+            and row.get("type") in RENDER_EVENT_TYPES
+        )
+    )
 
 
 # Declare event schemas at MODULE LOAD time (not inside
 # `register_default_subscribers`). `register_default_subscribers` runs
-# only in `on_startup`, but `bind_rearranger` is called during
+# only in `on_startup`, but other `bind_*` calls happen during
 # `main.py` module load — earlier. Without module-load registration,
 # producers that publish between module-load and on_startup would
 # stamp `schema_version=1` (the unregistered default) instead of the
@@ -100,40 +389,93 @@ async def _persist_to_event_journal(event: BusEvent) -> None:
     ))
 
 
+def _apply_session_projection_row(root_id: str, row: dict) -> None:
+    event_type = str(row.get("type") or "unknown")
+    sid = str(row.get("sid") or root_id)
+    msg_id = str(row.get("msg_id") or "")
+    seq = int(row.get("seq") or 0)
+    if event_type == "event_ownership_resolved":
+        session_manager.apply_journal_ownership_resolution(
+            root_id,
+            sid,
+            msg_id,
+            seq,
+        )
+        return
+    data = row.get("data")
+    session_manager.apply_written_journal_event(
+        root_id,
+        sid,
+        msg_id,
+        event_type,
+        data if isinstance(data, dict) else {},
+        seq,
+    )
+
+
+def _read_session_projection_rows(
+    root_id: str,
+    after_seq: int,
+    limit: int,
+) -> list[dict]:
+    from event_journal import event_journal_reader
+    rows, _, _ = event_journal_reader.read_events(
+        root_id,
+        after_seq=after_seq,
+        limit=limit,
+    )
+    return rows
+
+
+def _mark_session_projection_dirty(root_id: str, _exc: BaseException) -> None:
+    session_manager.mark_reconcile_dirty(root_id)
+
+
+def _new_session_projection_dispatcher() -> SessionProjectionDrainer:
+    return SessionProjectionDrainer(
+        _apply_session_projection_row,
+        _read_session_projection_rows,
+        _mark_session_projection_dirty,
+        shards=_SESSION_PROJECTION_SHARDS,
+        max_active_roots=_SESSION_PROJECTION_MAX_PENDING,
+        chunk_size=_SESSION_PROJECTION_DRAIN_CHUNK,
+    )
+
+
+_SESSION_PROJECTION_DISPATCHER = _new_session_projection_dispatcher()
+
+
 async def _refresh_session_content_projection(event: BusEvent) -> None:
-    """SessionManager-owned projection from written journal events."""
+    """Enqueue an ordered projection after its journal row is durable."""
     if not event.msg_id:
         return
     payload = event.payload
-    if payload.get("event_type") == "event_ownership_resolved":
-        await asyncio.get_running_loop().run_in_executor(
-            _OWNERSHIP_PROJECTION_EXECUTOR,
-            functools.partial(
-                session_manager.apply_journal_ownership_resolution,
-                event.root_id,
-                event.sid,
-                event.msg_id,
-                int(payload.get("seq") or 0),
-            ),
-        )
+    if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
         return
-    if payload.get("source") == "provider_stream":
-        return
-    if payload.get("event_type") not in RENDER_EVENT_TYPES:
-        return
-    await asyncio.to_thread(
-        session_manager.apply_written_journal_event,
-        event.root_id,
-        event.sid,
-        event.msg_id,
-        str(payload.get("event_type") or "unknown"),
-        payload.get("data") if isinstance(payload.get("data"), dict) else {},
-        int(payload.get("seq") or 0),
+    command = SessionProjectionCommand(
+        root_id=str(event.root_id),
+        sid=str(event.sid),
+        msg_id=str(event.msg_id),
+        event_type=str(payload.get("event_type") or "unknown"),
+        source=str(payload.get("source") or ""),
+        seq=int(payload.get("seq") or 0),
     )
+    _SESSION_PROJECTION_DISPATCHER.submit(command)
+
+
+def shutdown_session_content_projection() -> None:
+    bus.unsubscribe("session_content_projection")
+    _SESSION_PROJECTION_DISPATCHER.shutdown(wait=True)
+
+
+async def await_session_content_projection(root_id: str) -> None:
+    await asyncio.to_thread(_SESSION_PROJECTION_DISPATCHER.barrier, root_id)
 
 
 async def _refresh_session_search_projection(event: BusEvent) -> None:
     payload = event.payload
+    if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
+        return
     data = payload.get("data")
     if not isinstance(data, dict):
         return
@@ -145,11 +487,7 @@ async def _refresh_session_search_projection(event: BusEvent) -> None:
     }
     if event.msg_id:
         entry["msg_id"] = event.msg_id
-    await asyncio.to_thread(
-        _enqueue_session_search_projection,
-        event.root_id,
-        entry,
-    )
+    _enqueue_session_search_projection(event.root_id, entry)
 
 
 def _enqueue_session_search_projection(root_id: str, entry: dict) -> None:
@@ -165,12 +503,15 @@ def _refresh_requirement_tags_sync() -> None:
     import extension_package_loader
     import extension_store
     try:
-        extension_package_loader.ensure_package_importable(
-            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-            "requirement_analysis",
-        )
+        try:
+            extension_package_loader.ensure_package_importable(
+                extension_store.extension_id_for_role('requirements'),
+                "requirement_analysis",
+            )
+        except extension_package_loader.ExtensionPackageUnavailable:
+            pass  # Extension not registered; try direct import (tests, standalone).
         from requirement_analysis.session_tags import tags_by_session
-    except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
+    except ModuleNotFoundError:
         return
     tags_by_session(blocking=False)
 
@@ -195,6 +536,9 @@ def bind_event_journal_writer(
 
 
 def bind_session_content_projection() -> None:
+    global _SESSION_PROJECTION_DISPATCHER
+    if not _SESSION_PROJECTION_DISPATCHER.is_accepting():
+        _SESSION_PROJECTION_DISPATCHER = _new_session_projection_dispatcher()
     bus.unsubscribe("session_content_projection")
     bus.unsubscribe("session_search_projection")
     bus.subscribe(
@@ -202,12 +546,6 @@ def bind_session_content_projection() -> None:
         _refresh_session_content_projection,
         priority=_SESSION_PROJECTION_PRIORITY,
         name="session_content_projection",
-    )
-    bus.subscribe(
-        EVENT_JOURNAL_WRITTEN,
-        _refresh_session_search_projection,
-        priority=_SESSION_PROJECTION_PRIORITY + 1,
-        name="session_search_projection",
     )
     logger.info("event_bus: registered session content projection")
 
@@ -253,6 +591,7 @@ def register_default_subscribers() -> None:
         bind_configured_hooks()
     except Exception:
         logger.exception("event_bus: hook runner registration failed")
+    bind_task_turn_end_triggers()
 
 
 def bind_session_ws_broadcaster(broadcaster) -> None:
@@ -269,7 +608,7 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
         # `session_manager._fire` published. Same shape the legacy
         # `add_listener` callers received.
         try:
-            broadcaster.on_change(event.sid, event.payload)
+            broadcaster.on_change(event.sid, _session_change_from_event(event))
         except Exception:
             logger.exception(
                 "bind_session_ws_broadcaster: on_change raised "
@@ -289,68 +628,24 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
     )
 
 
-def bind_rearranger(rearranger_instance) -> None:
-    """Wire the rearranger as a turn-lifecycle bus subscriber.
+def unbind_session_ws_broadcaster() -> None:
+    """Detach the WS projection before its scheduling owner shuts down."""
+    bus.unsubscribe("session_ws_broadcaster_on_change")
 
-    The rearranger's CLI round-trip can take seconds, so the subscriber
-    spawns `trigger_final` as a background task and returns
-    immediately — the publisher (orchestrator) is never blocked.
 
-    Idempotent: re-binding (e.g. on uvicorn --reload) unsubscribes
-    the previous registration first. Takes the instance as an
-    argument so this module doesn't import rearranger at top-level
-    — rearranger imports session_manager which already pulls
-    event_bus, and a top-level cycle here would be needless."""
-    def _log_task_exception(task: asyncio.Task) -> None:
-        # `asyncio.create_task` exceptions are silently dropped unless
-        # someone awaits the task or attaches a done-callback. The
-        # subscriber's per-handler try/except in `bus.publish` only
-        # protects against EXCEPTIONS RAISED WITHIN THE HANDLER — the
-        # task we spawn runs AFTER the handler returns, so its
-        # failures bypass A17's `subscriber_failed` contract. This
-        # done-callback closes the gap by logging any escaped
-        # exception. (Cannot republish as `subscriber_failed` here
-        # because we're outside the publish loop; logging is the
-        # observable fallback.)
-        #
-        # MUST guard `task.cancelled()` before `task.exception()` —
-        # calling `.exception()` on a cancelled task re-raises
-        # `CancelledError` from inside the callback, which the
-        # asyncio loop then surfaces as "Exception in callback" log
-        # noise on every shutdown. Cancellation isn't a failure
-        # worth reporting: the rearranger was deliberately torn down.
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error(
-                "bind_rearranger: trigger_final task raised: %r",
-                exc, exc_info=exc,
-            )
-
-    async def _rearrange_on_turn_end(event: BusEvent) -> None:
-        try:
-            t = asyncio.create_task(
-                rearranger_instance.trigger_final(event.sid),
-                name=f"rearranger-final-{event.sid[:8]}",
-            )
-            t.add_done_callback(_log_task_exception)
-        except Exception:
-            logger.exception(
-                "bind_rearranger: failed to schedule trigger_final "
-                "for %s on %s", event.sid, event.type,
-            )
-
-    bus.unsubscribe("rearranger_turn_lifecycle")
-    bus.subscribe(
-        "lifecycle.turn_*",
-        _rearrange_on_turn_end,
-        priority=_REARRANGER_SUBSCRIBER_PRIORITY,
-        name="rearranger_turn_lifecycle",
-    )
-    logger.info(
-        "event_bus: registered rearranger subscriber on lifecycle.turn_*",
-    )
+def _session_change_from_event(event: BusEvent) -> dict:
+    event_kind = event.type.removeprefix("session.")
+    change = dict(event.payload)
+    payload_kind = change.get("kind")
+    if payload_kind is not None and payload_kind != event_kind:
+        logger.error(
+            "session event kind mismatch type=%s payload_kind=%r sid=%s",
+            event.type,
+            payload_kind,
+            event.sid,
+        )
+    change["kind"] = event_kind
+    return change
 
 
 def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
@@ -430,6 +725,19 @@ def _last_assistant_text(sess: dict) -> str:
     return "\n".join(parts)
 
 
+def _log_hook_task_exception(task: asyncio.Task, label: str) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "%s hook task raised: %r",
+            label,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 def bind_post_turn_hooks() -> None:
     """Dispatch ``lifecycle.turn_complete`` to every installed extension that
     declares an ``entrypoints.hooks.post_turn`` backend path. Fire-and-forget,
@@ -440,12 +748,6 @@ def bind_post_turn_hooks() -> None:
     (no convergence-invariant risk). Each hook is a sandboxed backend-host
     invocation via ``invoke_extension_backend``."""
     import extension_backend_loader
-
-    def _log_task_exception(task: asyncio.Task) -> None:
-        try:
-            task.result()
-        except Exception:
-            logger.exception("post-turn hook task raised")
 
     async def _on_turn_complete(event: BusEvent) -> None:
         try:
@@ -471,7 +773,9 @@ def bind_post_turn_hooks() -> None:
                     except Exception:
                         logger.exception("post-turn hook %s failed", eid)
                 t = asyncio.create_task(_invoke(), name=f"post-turn-{ext_id}-{event.sid[:8]}")
-                t.add_done_callback(_log_task_exception)
+                t.add_done_callback(
+                    lambda task: _log_hook_task_exception(task, "post-turn")
+                )
         except Exception:
             logger.exception("post-turn hook dispatch failed for %s", event.sid)
 
@@ -483,3 +787,109 @@ def bind_post_turn_hooks() -> None:
         name="extension_post_turn_hooks",
     )
     logger.info("event_bus: registered extension post-turn hooks subscriber")
+
+
+async def persist_task_turn_end(event: BusEvent) -> int:
+    from stores import task_trigger_store
+
+    fields = session_manager.get_fields(
+        event.sid,
+        ("cwd", "node_id", "storage_scope"),
+    )
+    if not fields:
+        return 0
+    storage_scope = fields.get("storage_scope")
+    if isinstance(storage_scope, dict) and storage_scope.get("kind") == "routine":
+        return 0
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw_provider_kind = payload.get("provider_kind")
+    provider_kind = (
+        raw_provider_kind.lower()
+        if isinstance(raw_provider_kind, str) and raw_provider_kind
+        else None
+    )
+    event_key = str(
+        payload.get("trace_id")
+        or event.run_id
+        or f"{event.sid}:{event.seq}:{event.ts}"
+    )
+    return await asyncio.to_thread(
+        task_trigger_store.enqueue_turn_end,
+        event_type=event.type,
+        event_key=event_key,
+        root_id=event.root_id,
+        session_id=event.sid,
+        reason=payload.get("reason"),
+        timestamp=event.ts,
+        provider_kind=provider_kind,
+        cwd=str(fields.get("cwd") or ""),
+        node_id=str(fields.get("node_id") or "primary"),
+    )
+
+
+def bind_task_turn_end_triggers() -> None:
+    async def _on_turn_end(event: BusEvent) -> None:
+        await persist_task_turn_end(event)
+
+    bus.unsubscribe("task_turn_end_triggers")
+    bus.subscribe(
+        "lifecycle.turn_*",
+        _on_turn_end,
+        priority=310,
+        name="task_turn_end_triggers",
+    )
+    logger.info("event_bus: registered task turn-end triggers subscriber")
+
+
+def bind_pre_turn_hooks() -> None:
+    """Dispatch ``lifecycle.turn_start`` to every installed extension that
+    declares an ``entrypoints.hooks.pre_turn`` backend path. Fire-and-forget,
+    isolated errors — one failing hook never blocks another or the turn.
+
+    Mirror of ``bind_post_turn_hooks``: subscribes to the existing
+    turn-start bus event the orchestrator already publishes, so it touches no
+    turn-execution path (no convergence-invariant risk). Each hook is a
+    sandboxed backend-host invocation via ``invoke_extension_backend``. The
+    body carries the turn context (session id + payload); hooks fetch whatever
+    else they need (prompt, cwd) via core internal endpoints, exactly as
+    post-turn hooks do."""
+    import extension_backend_loader
+
+    async def _on_turn_start(event: BusEvent) -> None:
+        try:
+            import extension_store
+            hooks = extension_store.pre_turn_hooks()
+            if not hooks:
+                return
+            from env_compat import get_env
+            import json as _json
+            base_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
+            body = _json.dumps({
+                "session_id": event.sid,
+                "app_session_id": event.sid,
+                "turn_type": event.type,
+                "payload": event.payload or {},
+            }).encode("utf-8")
+            for ext_id, path in hooks:
+                async def _invoke(eid: str = ext_id, p: str = path) -> None:
+                    try:
+                        await extension_backend_loader.invoke_extension_backend(
+                            eid, p.lstrip("/"), method="POST", body_bytes=body, base_url=base_url,
+                        )
+                    except Exception:
+                        logger.exception("pre-turn hook %s failed", eid)
+                t = asyncio.create_task(_invoke(), name=f"pre-turn-{ext_id}-{event.sid[:8]}")
+                t.add_done_callback(
+                    lambda task: _log_hook_task_exception(task, "pre-turn")
+                )
+        except Exception:
+            logger.exception("pre-turn hook dispatch failed for %s", event.sid)
+
+    bus.unsubscribe("extension_pre_turn_hooks")
+    bus.subscribe(
+        "lifecycle.turn_start",
+        _on_turn_start,
+        priority=300,
+        name="extension_pre_turn_hooks",
+    )
+    logger.info("event_bus: registered extension pre-turn hooks subscriber")

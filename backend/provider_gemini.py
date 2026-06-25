@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,14 +26,30 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
+from provider import (
+    Provider,
+    RecoveredPopen,
+    StreamEvent,
+    await_line_tailer_drained,
+    build_better_agent_run_env,
+    path_exists_off_loop,
+    popen_is_running_off_loop,
+    schedule_loop_task,
+    runner_argv,
+)
 from provider_run_config import normalize_provider_run_config
 from cli_paths import resolve_cli_binary
+from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
+import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
+    iter_run_dirs,
     pid_alive as _pid_alive,
+    prune_old_completed_runs,
+    reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
 )
 
@@ -260,7 +275,6 @@ class RunState:
     processed_line: int = 0
     tailer: Optional["object"] = None  # GeminiJsonlTailer; typed loosely to avoid import cycle
     tailer_task: Optional[asyncio.Task] = None
-    bootstrap_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -286,7 +300,7 @@ class GeminiProvider(Provider):
     # gemini-cli 0.42 has no non-interactive fork primitive
     # (issue google-gemini/gemini-cli#22563). Every fork-using feature
     # (fork-and-send, adversarial sync, prompt-engineer refine,
-    # rearranger, manager-mode delegate-fork) must read this flag and
+    # manager-mode delegate-fork) must read this flag and
     # disable itself for gemini sessions.
     supports_fork: ClassVar[bool] = False
     # Gemini uses provider-native MCP/settings files, not the in-process
@@ -333,6 +347,7 @@ class GeminiProvider(Provider):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,
@@ -353,6 +368,7 @@ class GeminiProvider(Provider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         if mode == "manager":
             mode = "team"
@@ -362,6 +378,7 @@ class GeminiProvider(Provider):
             raise RuntimeError(
                 f"provider {self.id} is defunct; cannot start new runs"
             )
+        self.assert_not_suspended(action="start new runs")
         if self.record.get("mode", "subscription") == "subscription":
             raise RuntimeError(GEMINI_SUBSCRIPTION_UNSUPPORTED)
         if reasoning_effort:
@@ -383,7 +400,7 @@ class GeminiProvider(Provider):
             )
         # `fork` is gated by the class-level capability
         # `supports_fork=False`. Backend callers (session_manager.fork,
-        # adv_sync, prompt-engineer-refine, rearranger) should check
+        # adv_sync, prompt-engineer-refine) should check
         # the capability and skip; if one of them still passes
         # fork=True we fail loudly here as the last line of defence.
         # `supervised` is allowed — claude's supervisor isn't a CLI
@@ -401,10 +418,16 @@ class GeminiProvider(Provider):
 
         runner_mode = "manager" if mode == "team" else mode
         from session_manager import manager as _sm
-        import config_store
         import user_prefs
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
+        from permission import resolve_for_run as _resolve_perm
+        _permission = _resolve_perm(
+            sess_rec=_sess_rec,
+            worker_sess_rec=_worker_sess_rec,
+            is_worker=is_worker,
+            fallback_kind=self.KIND,
+        )
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -412,9 +435,16 @@ class GeminiProvider(Provider):
             "cwd": cwd,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "permission": _permission,
             "session_id": session_id,
             "mode": runner_mode,
+            "source": source or "",
             "app_session_id": app_session_id,
+            "active_capability_ids": [
+                str(cid)
+                for cid in (_sess_rec.get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -435,11 +465,14 @@ class GeminiProvider(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=_sess_rec,
+                    worker_record=_worker_sess_rec,
+                )
             ),
         }
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
@@ -505,7 +538,7 @@ class GeminiProvider(Provider):
         self._runs[run_id] = rs
         self._write_backend_state(rs)
 
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"gemini-bootstrap-{run_id[:8]}",
@@ -522,7 +555,7 @@ class GeminiProvider(Provider):
         # 1) Poll for state.json
         runner_state: Optional[dict] = None
         while True:
-            if state_path.exists():
+            if await path_exists_off_loop(state_path):
                 try:
                     parsed = json.loads(state_path.read_text(encoding="utf-8"))
                     if parsed.get("session_id"):
@@ -535,8 +568,8 @@ class GeminiProvider(Provider):
             # state.json with null session_id + dead runner is a pre-run
             # failure (e.g. invalid --resume target); the old
             # `and not state_path.exists()` gate would spin forever.
-            if rs.popen.poll() is not None:
-                if complete_path.exists():
+            if not await popen_is_running_off_loop(rs.popen):
+                if await path_exists_off_loop(complete_path):
                     break
                 await self._emit_early_failure(
                     rs, f"runner exited early with code {rs.popen.returncode}"
@@ -578,12 +611,15 @@ class GeminiProvider(Provider):
                 )
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
-            # Mirror ClaudeProvider._on_tailer_progress: each cursor
-            # advance updates in-memory state AND persists to disk so
-            # crash recovery sees an up-to-date processed_line and skips
-            # already-replayed events.
+            # Mirror ClaudeProvider._on_tailer_progress: called
+            # synchronously from the tailer's read loop, so this MUST
+            # stay non-blocking. In-memory state updates immediately
+            # (cheap; this is what the deterministic drain polls); the
+            # actual `backend_state.json` write hands off to
+            # `cursor_ledger_worker`, off this call path entirely.
             _rs.processed_line = n
-            self._write_backend_state(_rs)
+            from cursor_ledger_worker import worker as cursor_ledger_worker
+            cursor_ledger_worker.note(_rs.run_id, lambda: self._write_backend_state(_rs))
 
         rs.tailer = GeminiJsonlTailer(
             path=events_path,
@@ -609,7 +645,7 @@ class GeminiProvider(Provider):
         complete_path = rs.run_dir / "complete.json"
         try:
             while True:
-                if complete_path.exists():
+                if await path_exists_off_loop(complete_path):
                     break
                 # INVARIANT: process death MUST end this loop. If the
                 # runner is SIGKILLed (OOM, manual kill, OS) it never
@@ -621,17 +657,29 @@ class GeminiProvider(Provider):
                 # writing complete.json"`) synthesize the error
                 # complete event. A short grace window lets a normal
                 # exit's complete.json land before we synthesize.
-                if rs.popen.poll() is not None:
+                if not await popen_is_running_off_loop(rs.popen):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while not complete_path.exists() and loop.time() < grace_end:
+                    while (
+                        not await path_exists_off_loop(complete_path)
+                        and loop.time() < grace_end
+                    ):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)
                     break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
-            # Brief grace period for the tailer to drain trailing lines
-            # before we tell it to stop.
-            await asyncio.sleep(0.2)
+            # Deterministic drain: the runner appends every event line
+            # BEFORE writing complete.json, so wait until the tailer's
+            # line cursor covers the file as it stands now. A fixed
+            # sleep guess let `complete` overtake trailing lines when
+            # the poll tailer lagged — the turn loop then broke and the
+            # lines never reached the render tree (stale-content grabs).
+            await await_line_tailer_drained(
+                path=rs.run_dir / "session_events.jsonl",
+                get_cursor=lambda: rs.processed_line,
+                run_id=rs.run_id,
+                on_drained=lambda: self._flush_cursor_ledger(rs),
+            )
             if rs.tailer is not None:
                 rs.tailer.stop()
             if rs.tailer_task is not None:
@@ -712,8 +760,72 @@ class GeminiProvider(Provider):
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)
+            if rs.session_id:
+                import spawn_ledger
+                spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+
+    async def _flush_cursor_ledger(self, rs: RunState) -> None:
+        """Block until `cursor_ledger_worker` has written this run's
+        latest known cursor to `backend_state.json`, once a drain
+        concludes — crash recovery must see the true final cursor, not
+        whatever was last coalesced. Off-loop so the event loop itself
+        never blocks on the write."""
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        await asyncio.to_thread(cursor_ledger_worker.flush_now, rs.run_id)
+
+    def attach_recovered_run(
+        self,
+        *,
+        desc: dict,
+        queue: asyncio.Queue,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Re-attach a still-running detached gemini-family runner after
+        a backend restart.
+
+        The recovered descriptor proves the runner is still alive. Rebuild the
+        in-memory RunState and restart the normal tailer/completion watcher so
+        post-restart events are streamed immediately and the turn finalizes in
+        this backend lifetime.
+        """
+        run_id = str(desc.get("run_id") or "")
+        pid = desc.get("pid")
+        if not run_id or not pid or run_id in self._runs:
+            return False
+        try:
+            runner_pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        try:
+            processed_line = int(desc.get("processed_line") or 0)
+        except (TypeError, ValueError):
+            processed_line = 0
+
+        rs = RunState(
+            run_id=run_id,
+            run_dir=_runs_root() / run_id,
+            popen=RecoveredPopen(runner_pid),
+            mode=desc.get("mode") or "native",
+            app_session_id=desc.get("app_session_id") or "",
+            queue=queue,
+            session_id=desc.get("session_id"),
+            processed_line=processed_line,
+            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            cancelled=bool(desc.get("cancelled", False)),
+            persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
+            target_message_id=desc.get("target_message_id"),
+            turn_run_id=desc.get("turn_run_id"),
+        )
+        self._runs[run_id] = rs
+        self._write_backend_state(rs)
+        schedule_loop_task(
+            loop,
+            self._bootstrap_run(rs),
+            name=f"{self.KIND}-recover-bootstrap-{run_id[:8]}",
+        )
+        return True
 
     def _post_cancel_hook(self, rs: RunState) -> None:
         """Wake the tailer's stop_event so it exits its poll-sleep
@@ -747,12 +859,12 @@ class GeminiProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
-        for child in _runs_root().iterdir():
-            if not child.is_dir():
-                continue
-            if run_id_filter is not None and child.name not in run_id_filter:
-                continue
-            if (child / "reconciled.marker").exists():
+        if config_store.provider_suspended(self.id):
+            return recovered
+
+        for child in iter_run_dirs(run_id_filter):
+            marker_path = child / "reconciled.marker"
+            if marker_path.exists() and marker_matches_current(marker_path, self.KIND):
                 continue
             complete_path = child / "complete.json"
             has_complete_json = complete_path.exists()
@@ -829,6 +941,8 @@ class GeminiProvider(Provider):
                 "cancelled": bool(bs.get("cancelled", False)),
                 "mode": bs.get("mode") or rs_disk.get("mode") or "native",
                 "provider_id": bs.get("provider_id") or self.id,
+                "provider_kind": bs.get("provider_kind") or self.KIND,
+                "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
                 "recovered_as": "live_orphan" if live_orphan else "dead_orphan",
@@ -840,27 +954,7 @@ class GeminiProvider(Provider):
     # prune_old_runs
     # ------------------------------------------------------------------
     def prune_old_runs(self, max_age_days: int = 7) -> int:
-        if not _runs_root().exists():
-            return 0
-        cutoff = datetime.now() - timedelta(days=max_age_days)
-        removed = 0
-        for child in _runs_root().iterdir():
-            if not child.is_dir():
-                continue
-            complete_path = child / "complete.json"
-            if not complete_path.exists():
-                continue
-            try:
-                mtime = datetime.fromtimestamp(complete_path.stat().st_mtime)
-            except OSError:
-                continue
-            if mtime < cutoff:
-                try:
-                    shutil.rmtree(child)
-                    removed += 1
-                except OSError as e:
-                    logger.warning("prune: failed to rm %s: %s", child, e)
-        return removed
+        return prune_old_completed_runs(max_age_days)
 
     # ------------------------------------------------------------------
     # run_headless — one-shot `gemini -p -o json`
@@ -874,8 +968,13 @@ class GeminiProvider(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         cmd: list[str] = ["gemini", "-p", prompt, "-o", "json"]
+        if no_tools:
+            # Plan mode = read-only; the model cannot run mutating tools.
+            cmd += ["--approval-mode", "plan"]
         resume_target = resume_sid or session_id
         if resume_target:
             cmd += ["-r", resume_target]
@@ -929,7 +1028,7 @@ class GeminiProvider(Provider):
             return None
         # Translate gemini's `{session_id, response, stats}` envelope
         # to the claude-shaped `{result, session_id, usage,
-        # total_cost_usd}` every downstream consumer (rearranger, etc.)
+        # total_cost_usd}` every downstream consumer
         # already speaks. INVARIANT: keep both shapes in `raw` so
         # gemini-aware callers can still introspect, but expose the
         # claude keys at the top level. Subscription mode has no
@@ -992,7 +1091,7 @@ class GeminiProvider(Provider):
         if not any(kw in corpus for kw in self._GEMINI_RATE_LIMIT_KEYWORDS):
             return None
 
-        return self._fallback_rate_limit(hours=1)
+        return None
 
     # ------------------------------------------------------------------
     # rewind — we simulate rewind by clearing the session_id so the

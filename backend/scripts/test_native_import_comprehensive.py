@@ -34,14 +34,14 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
-os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
+os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import native_import  # noqa: E402
 logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)  # silence intentional error logs
@@ -50,6 +50,7 @@ logging.getLogger("keyring").setLevel(logging.CRITICAL)
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
 import config_store  # noqa: E402
+import project_store  # noqa: E402
 
 CLAUDE_HOME = Path(_TMP_HOME) / "claude-home"
 os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_HOME)
@@ -172,6 +173,72 @@ def test_extract_text() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# B2. internal prompt filtering
+# --------------------------------------------------------------------------- #
+
+def test_internal_import_prompt_filter() -> None:
+    F = native_import._is_internal_import_prompt
+    internal = [
+        "<self>\n<role>worker</role>",
+        "<self>\n<role>manager</role>",
+        "<worker-prep>\nYou are about to be added to a project",
+        "<machine-completion-prep>\nYou are a reusable machine-completion worker.",
+        "<search-worker-provision>\nYou are a reusable session-search ranking worker.",
+        "<get-requirements-processor-prep>\nYou are a reusable requirements lookup worker.",
+        "<file-editor-provision>\nYou are the reusable base session for Better Agent file editing.",
+        "<project-structure-maintainer-provision>\nYou are the reusable project-structure maintainer.",
+        "<verdict-prompt>\nYou are an adversarial supervisor.",
+        "<command-name>/login</command-name>\n<command-message>login</command-message>",
+        "<system_bootstrap>\nYou are the manager half of a two-session coding assistant.",
+        "Use these selected capabilities for this run only. They are active context, not a task to modify config.",
+        "The following injected context is from Better Agent, not from the user.",
+        "---\nname: test-ui-expert\ndescription: Private operating contract",
+        "=== YOUR WORKSPACE ===\n/Users/ofekron/nns-windsurf/agents/agents_workspaces/x",
+        "You are a technical analysis expert and a super ninja trader optimizing a trading strategy.",
+        "Better Agent requires a parent-session reply after subagent work.",
+        "Better Agent run.sh startup checker for Z.AI",
+        "You are adversarial reviewer for a Better Agent RCA. Keep report under 200 words.",
+        "You are worker:testape — the SINGLE global TestApe e2e worker in the user's main Better Agent instance.",
+        "Adversarial review under 200 words. Symptom: duplicate prompt send.",
+        "You are a HOSTILE adversarial code reviewer. Be ruthless, not hedging.",
+        "Read-only adversarial validation in /Users/ofekron/better-claude. Do not edit files.",
+        "# testape/eval_js\nadapter_id: \"web_9224_np_automation\"",
+        "▶ 👤 USER is there a tool/framework library w/e out there that auto syncs SDK + cli + mcp for an api?",
+        "In /Users/ofekron/better-claude, read-only: find where allowed reasoning_effort values are defined.",
+        "Please review the following git diff representing the addition of a template option.",
+        "Investigate this TestApe product bug in /Users/ofekron/testape and return commit-ready facts.",
+        "Using the TestApe web adapter, open http://localhost:3000/ and capture a screenshot.",
+        "open https://example.com and report the visible H1 text --- You are the dedicated TestApe UI-testing expert.",
+        "A device worker must fill a login form. Username is literal 'alice@example.com'.",
+        "A sign-in form has two fields. Field 'username' takes the literal value 'alice@example.com'.",
+        "Convert these verified discoveries into small reusable transition flows/subflows.",
+        "Analyze these detector/run measurements for wall-clock, retry, polling, and replay cost.",
+        "Preserve observed analytics confirmations from this run evidence.",
+        "Runtime UI test only. Do not inspect files. Do not run shell commands.",
+        "Reply with exactly: TESTAPE_OK",
+    ]
+    for prompt in internal:
+        check(F(prompt), f"internal prompt not filtered: {prompt[:60]}")
+    check(not F("Fix imported session filtering"), "real user prompt filtered")
+    check(not F("Use TestApe to debug this app issue"), "real user TestApe request filtered")
+    check(not F("review this feature and fix problems"), "ordinary review request filtered")
+    N = native_import._normalize_import_prompt
+    check(N("fix this\n# Global preferences\n## Responsiveness first\nInjected") == "fix this",
+          "global prefs suffix stripped")
+    check(N("fix this\nThe following injected context is from Better Agent, not from the user.\nInjected") == "fix this",
+          "BA injected context suffix stripped")
+    check(N("fix this\nUse these selected capabilities for this run only. They are active context\nInjected") == "fix this",
+          "selected capability suffix stripped")
+    check(N("explain this heading:\n# Global preferences") == "explain this heading:\n# Global preferences",
+          "global prefs false positive preserved")
+    multipart = native_import._extract_text({"message": {"content": [
+        {"type": "text", "text": "real ask"},
+        {"type": "text", "text": "# Global preferences\n## Responsiveness first\nInjected"},
+    ]}})
+    check(N(multipart) == "real ask", "multipart injected suffix stripped")
+
+
+# --------------------------------------------------------------------------- #
 # C. segmentation differential over the combinatorial space
 # --------------------------------------------------------------------------- #
 
@@ -188,7 +255,7 @@ def test_segmentation_differential() -> None:
       B. No turn is fully empty (prompt OR events).
       C. A boundary event never appears inside any turn's events.
       D. When ≥1 boundary exists, every turn has a non-empty prompt;
-         when 0 boundaries, exactly one turn with an empty prompt.
+         when 0 boundaries, no turns are emitted.
     """
     seg = native_import._segment_turns
     total = 0
@@ -204,7 +271,8 @@ def test_segmentation_differential() -> None:
 
             # A. preservation + order (identity)
             flat = [e for t in got for e in t.events]
-            check([id(x) for x in flat] == [id(x) for x in non_boundary_events],
+            expected_events = non_boundary_events if n_boundaries else []
+            check([id(x) for x in flat] == [id(x) for x in expected_events],
                   f"A events not preserved exactly/in-order: {combo}")
             # B. no fully-empty turn
             check(all(t.prompt or t.events for t in got), f"B empty turn: {combo}")
@@ -214,7 +282,7 @@ def test_segmentation_differential() -> None:
                   f"C boundary leaked into events: {combo}")
             # D. prompt-emptiness rule
             if n_boundaries == 0:
-                check(len(got) == 1 and got[0].prompt == "", f"D no-boundary turn: {combo}")
+                check(len(got) == 0, f"D no-boundary skipped: {combo}")
             else:
                 check(all(t.prompt for t in got), f"D empty prompt with boundaries: {combo}")
     check(total >= 1000, f"segmentation space too small: {total}")
@@ -298,7 +366,8 @@ def test_enumerate_claude() -> None:
                 check(s.jsonl_path.endswith(f"{s.native_id}.jsonl"), "jsonl path")
                 check(s.cwd == "", "claude cwd not recoverable")
                 check(s.created_at.endswith("Z"), "created_at iso")
-                check(s.registry_key == f"claude:{s.native_id}", "registry key")
+                check(s.registry_key.startswith("pid:claude:"), "provider-scoped registry key")
+                check(s.legacy_registry_key == f"claude:{s.native_id}", "legacy registry key")
 
     # non-jsonl files and nested dirs are ignored
     with tempfile.TemporaryDirectory() as td:
@@ -311,16 +380,25 @@ def test_enumerate_claude() -> None:
     # missing projects dir → empty, no crash
     check(native_import._enumerate_claude("pid", {"config_dir": "/nonexistent-xyz-123"}) == [], "missing dir")
 
-    # config_dir empty → falls back to CLAUDE_CONFIG_DIR env
-    with tempfile.TemporaryDirectory() as td:
+    # config_dir empty → provider-owned default ~/.claude, not process CLAUDE_CONFIG_DIR.
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as env_td:
+        home = Path(td)
+        default_claude = home / ".claude"
         old = os.environ.get("CLAUDE_CONFIG_DIR")
-        os.environ["CLAUDE_CONFIG_DIR"] = td
+        old_home = os.environ.get("HOME")
+        os.environ["CLAUDE_CONFIG_DIR"] = env_td
+        os.environ["HOME"] = td
         try:
-            _make_claude_layout(Path(td), {"envproj": ["e1"]})
+            _make_claude_layout(Path(env_td), {"envproj": ["e1"]})
+            _make_claude_layout(default_claude, {"homeproj": ["h1"]})
             found = native_import._enumerate_claude("pid", {"config_dir": ""})
-            check({s.native_id for s in found} == {"e1"}, "env fallback")
+            check({s.native_id for s in found} == {"h1"}, "ignores process CLAUDE_CONFIG_DIR")
         finally:
             os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_HOME) if old is None else old
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
 
 
 def test_claude_cwd_recovery_and_project_filter() -> None:
@@ -474,16 +552,24 @@ def test_enumerate_codex() -> None:
 def test_registry() -> None:
     native_import._registry_save({})  # start clean
     check(native_import._registry_get("claude:nope") is None, "absent → None")
-    native_import._registry_set("claude:a", "root-a")
-    check(native_import._registry_get("claude:a") == "root-a", "set/get")
-    native_import._registry_set("claude:a", "root-a2")  # overwrite
-    check(native_import._registry_get("claude:a") == "root-a2", "overwrite")
-    native_import._registry_set("codex:b", "root-b")
+    root_a = session_manager.create(name="root-a", cwd="/tmp", model="sonnet")["id"]
+    root_a2 = session_manager.create(name="root-a2", cwd="/tmp", model="sonnet")["id"]
+    root_b = session_manager.create(name="root-b", cwd="/tmp", model="sonnet")["id"]
+    session_manager.flush_pending_persists()
+    native_import._registry_set("claude:a", root_a)
+    check(native_import._registry_get("claude:a") == root_a, "set/get")
+    native_import._registry_set("claude:a", root_a2)  # overwrite
+    check(native_import._registry_get("claude:a") == root_a2, "overwrite")
+    native_import._registry_set("codex:b", root_b)
     check(native_import.already_imported_keys() == {"claude:a", "codex:b"}, "keys set")
 
     # persists across reload
     loaded = native_import._registry_load()
-    check(loaded == {"claude:a": "root-a2", "codex:b": "root-b"}, "persisted json")
+    check(loaded == {"claude:a": root_a2, "codex:b": root_b}, "persisted json")
+
+    session_manager.delete(root_a2)
+    check(native_import._registry_get("claude:a") is None, "stale get pruned")
+    check(native_import.already_imported_keys() == {"codex:b"}, "stale key pruned from key set")
 
     # corrupt registry file → recovers to empty, no crash
     native_import._registry_path().write_text("{not json", encoding="utf-8")
@@ -530,6 +616,7 @@ def _assert_session_invariants(root_id: str) -> None:
     check(sess is not None, "session exists")
     check(sess["orchestration_mode"] == "native", "mode native")
     check(sess["source"] == "import", "imported sessions tagged source=import")
+    check(sess.get("user_initiated") is True, "imported sessions tagged user_initiated")
     msgs = sess["messages"]
     check(len(msgs) >= 2, "has messages")
     check(msgs[0]["role"] == "user", "starts with user")
@@ -573,32 +660,42 @@ def test_ingest_claude_matrix() -> None:
         before = len(session_store.list_sessions())
         check(native_import.import_session(sess) == root_id, f"[{name}] idempotent root")
         check(len(session_store.list_sessions()) == before, f"[{name}] no dup session")
+        if name == "single turn":
+            session_manager.delete(root_id)
+            reimported = native_import.import_session(sess)
+            check(reimported != root_id, f"[{name}] stale registry re-import creates live root")
+            check(session_manager.get(reimported) is not None, f"[{name}] re-imported root exists")
+            root_id = reimported
         # force re-import creates a NEW session
         forced = native_import.import_session(sess, force=True)
         check(forced != root_id, f"[{name}] force creates new")
         _assert_session_invariants(forced)
 
-    # Synthetic-turn cases: content with no user prompt still ingests as
-    # exactly one placeholder turn (assistant-only, lone tool_result).
+    # Content with no recovered user prompt is skipped, never imported as a
+    # fake "(imported turn)" user message.
     for name, lines in [
         ("only assistant", [_cassistant([{"type": "text", "text": "lonely"}])]),
         ("only tool_result", [json.dumps({"type": "user", "uuid": str(uuid.uuid4()), "timestamp": "2026-01-01T00:00:00Z",
                                           "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "y"}]}})]),
     ]:
         sess = _new_native(lines=lines)
-        root_id = native_import.import_session(sess)
-        loaded = session_manager.get(root_id)
-        check(len(loaded["messages"]) == 2, f"[{name}] one synthetic turn")
-        check(loaded["messages"][0]["content"] == "(imported turn)", f"[{name}] placeholder prompt")
+        before = len(session_store.list_sessions())
+        raised = False
+        try:
+            native_import.import_session(sess)
+        except native_import.SkippedNativeSession:
+            raised = True
+        check(raised, f"[{name}] skipped without prompt")
+        check(len(session_store.list_sessions()) == before, f"[{name}] created no session")
 
-    # truly empty session → ValueError, no session created
+    # truly empty session → skipped, no session created
     before_empty = len(session_store.list_sessions())
     raised = False
     try:
         native_import.import_session(_new_native(lines=[]))
-    except ValueError:
+    except native_import.SkippedNativeSession:
         raised = True
-    check(raised, "[empty] should raise ValueError")
+    check(raised, "[empty] should be skipped")
     check(len(session_store.list_sessions()) == before_empty, "empty created no session")
 
     # malformed lines are skipped, valid ones still import
@@ -606,6 +703,78 @@ def test_ingest_claude_matrix() -> None:
     root_id = native_import.import_session(sess)
     loaded = session_manager.get(root_id)
     check(sum(1 for m in loaded["messages"] if m["role"] == "user") == 1, "malformed skipped, real imported")
+    check(loaded["created_at"].startswith("2026-01-01"), "created_at preserves first native user prompt date")
+    check(loaded["messages"][0]["timestamp"].startswith("2026-01-01"), "user timestamp preserves prompt date")
+    check(loaded["messages"][1]["timestamp"].startswith("2026-01-02"), "assistant timestamp preserves native date")
+    check(loaded["updated_at"].startswith("2026-01-01"), "updated_at preserves native user prompt date")
+    disk = json.loads((Path(_TMP_HOME) / "sessions" / f"{root_id}.json").read_text(encoding="utf-8"))
+    check(disk["created_at"].startswith("2026-01-01"), "disk created_at preserves first native user prompt date")
+    check(disk["updated_at"].startswith("2026-01-01"), "disk updated_at preserves native user prompt date")
+    disk["created_at"] = "2026-06-30T00:00:00"
+    disk["updated_at"] = "2026-06-30T00:00:00"
+    session_store.write_session_full(disk, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(repaired["repaired"] >= 1, "repair reports timestamp correction")
+    check(fixed["created_at"].startswith("2026-01-01"), "repair restores created_at from first user prompt")
+    check(fixed["updated_at"].startswith("2026-01-01"), "repair restores updated_at from last user prompt")
+    fixed["messages"][0]["content"] = "real ask\n# Global preferences\n## Responsiveness first\nInjected"
+    session_store.write_session_full(fixed, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(repaired["repaired"] >= 1, "repair reports injected suffix correction")
+    check(fixed["messages"][0]["content"] == "real ask", "repair strips injected suffix from first user prompt")
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(fixed["messages"][0]["content"] == "real ask", "repair is idempotent after suffix strip")
+    fixed["messages"][0]["content"] = "=== YOUR WORKSPACE ===\n/Users/ofekron/nns-windsurf/agents/agents_workspaces/x"
+    session_store.write_session_full(fixed, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    check(repaired["deleted"] >= 1, "repair reports generated prompt deletion")
+    check(session_store.get_session(root_id) is None, "repair deletes generated imported root")
+
+
+def test_repair_enforces_loaded_project_scope() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        allowed = str(Path(td, "allowed").resolve())
+        outside = str(Path(td, "outside").resolve())
+        generated = str(Path(td, "agents", "agents_workspaces",
+                             "12345678-1234-1234-1234-123456789abc").resolve())
+        project_store.add_project(generated)
+
+        def make_imported(cwd: str) -> str:
+            root = session_manager.create(
+                name="imported",
+                model="sonnet",
+                cwd=cwd,
+                orchestration_mode="native",
+                source="import",
+                user_initiated=True,
+                created_at="2026-01-01T00:00:00",
+            )
+            root["messages"] = [{
+                "id": str(uuid.uuid4()),
+                "role": "user",
+                "content": "real ask",
+                "timestamp": "2026-01-01T00:00:00",
+            }]
+            session_store.write_session_full(
+                root,
+                bump_updated_at=False,
+                preserve_projection_fields=True,
+            )
+            native_import._registry_set(f"test:{root['id']}", root["id"])
+            return root["id"]
+
+        keep_id = make_imported(allowed)
+        drop_id = make_imported(outside)
+        repaired = native_import.repair_imported_roots([allowed])
+        check(repaired["deleted"] >= 1, "repair reports out-of-project deletion")
+        check(repaired["removed_projects"] >= 1, "repair reports generated project removal")
+        check(session_store.get_session(keep_id) is not None, "in-project import kept")
+        check(session_store.get_session(drop_id) is None, "out-of-project import deleted")
+        projects = {p.get("path") for p in project_store.list_projects()}
+        check(generated not in projects, "generated project removed")
 
 
 # --------------------------------------------------------------------------- #
@@ -629,19 +798,32 @@ def test_ingest_codex() -> None:
             rollout = _new_codex_rollout(td, f"r{n_texts}.jsonl", [f"answer {i}" for i in range(n_texts)])
             sess = native_import.NativeSession(
                 provider_id="", provider_kind="codex", native_id=f"cx{n_texts}",
-                jsonl_path=str(rollout), cwd="/repo", title="",
+                jsonl_path=str(rollout), cwd="/repo", title="codex question",
             )
             root_id = native_import.import_session(sess)
             loaded = session_manager.get(root_id)
             msgs = loaded["messages"]
-            # codex drops user prompts → exactly one synthetic turn
+            # codex recovery has no user event, so import uses the thread title
+            # as the recovered user prompt.
             check(len(msgs) == 2, f"codex n={n_texts} one turn (2 msgs), got {len(msgs)}")
             check(msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant", "codex roles")
+            check(msgs[0]["content"] == "codex question", "codex prompt recovered from title")
             asst_events = msgs[1]["events"]
             check(len(asst_events) == n_texts, f"codex n={n_texts} events {len(asst_events)} != {n_texts}")
             check(loaded["cwd"] == "/repo", "codex cwd recovered")
             # idempotent
             check(native_import.import_session(sess) == root_id, "codex idempotent")
+
+        no_prompt = native_import.NativeSession(
+            provider_id="", provider_kind="codex", native_id="cx-no-prompt",
+            jsonl_path=str(_new_codex_rollout(td, "noprompt.jsonl", ["answer"])), cwd="/repo", title="",
+        )
+        raised = False
+        try:
+            native_import.import_session(no_prompt)
+        except native_import.SkippedNativeSession:
+            raised = True
+        check(raised, "codex without recoverable prompt skipped")
 
 
 # --------------------------------------------------------------------------- #
@@ -815,7 +997,7 @@ def test_ingest_gemini() -> None:
             lone_raised = True
         check(lone_raised, "gemini user-only (no reply) → ValueError")
 
-        # truly empty (meta only) → ValueError
+        # truly empty (meta only) → skipped
         empty_path = chats / "session-empty.jsonl"
         empty_path.write_text(json.dumps({"sessionId": "gem-empty", "startTime": "t",
                                           "kind": "main"}) + "\n", encoding="utf-8")
@@ -824,9 +1006,104 @@ def test_ingest_gemini() -> None:
             native_import.import_session(native_import.NativeSession(
                 provider_id="", provider_kind="gemini", native_id="gem-empty",
                 jsonl_path=str(empty_path), cwd="", title=""))
-        except ValueError:
+        except native_import.SkippedNativeSession:
             raised = True
-        check(raised, "gemini empty → ValueError")
+        check(raised, "gemini empty → skipped")
+
+
+# --------------------------------------------------------------------------- #
+# pi enumeration + ingest
+# --------------------------------------------------------------------------- #
+
+def _make_pi_session(path: Path, *, session_id: str,
+                     turns: list[tuple[str, str | None]],
+                     cwd: str = "/code/pi-proj",
+                     started: str = "2026-01-01T00:00:00.000Z") -> None:
+    lines = [json.dumps({"type": "session", "version": 3, "id": session_id,
+                         "timestamp": started, "cwd": cwd})]
+    parent: str | None = None
+    for index, (user_text, asst_text) in enumerate(turns):
+        user_id = f"u{index}"
+        lines.append(json.dumps({"type": "message", "id": user_id, "parentId": parent,
+                                 "timestamp": started,
+                                 "message": {"role": "user", "content": user_text,
+                                             "timestamp": 1767225600000 + index}}))
+        parent = user_id
+        if asst_text is not None:
+            asst_id = f"a{index}"
+            lines.append(json.dumps({"type": "message", "id": asst_id, "parentId": parent,
+                                     "timestamp": started,
+                                     "message": {"role": "assistant", "content": [
+                                         {"type": "thinking", "thinking": "think through pi import"},
+                                         {"type": "text", "text": asst_text},
+                                         {"type": "toolCall", "id": f"tool-{index}",
+                                          "name": "bash", "arguments": {"command": "pwd"}},
+                                     ]}}))
+            lines.append(json.dumps({"type": "message", "id": f"r{index}", "parentId": asst_id,
+                                     "timestamp": started,
+                                     "message": {"role": "toolResult",
+                                                 "toolCallId": f"tool-{index}",
+                                                 "toolName": "bash",
+                                                 "content": [{"type": "text", "text": cwd}],
+                                                 "isError": False}}))
+            parent = f"r{index}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_enumerate_pi() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as session_root:
+        session_root = Path(session_root)
+        old = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+        os.environ["PI_CODING_AGENT_SESSION_DIR"] = str(session_root)
+        try:
+            _make_pi_session(session_root / "--code-pi-proj--" / "2026_pi-one.jsonl",
+                             session_id="pi-one", turns=[("first pi prompt", "reply")])
+            found = native_import._enumerate_pi()
+            by_id = {s.native_id: s for s in found}
+            check(set(by_id) == {"pi-one"}, f"pi enum ids {set(by_id)}")
+            sess = by_id["pi-one"]
+            check(sess.provider_kind == "pi", "kind pi")
+            check(sess.provider_id == "", "pi has no BA provider id")
+            check(sess.cwd == "/code/pi-proj", "pi cwd from header")
+            check(sess.title == "first pi prompt", "pi title from first prompt")
+            check(sess.created_at == "2026-01-01T00:00:00.000Z", "pi created_at from header")
+            check(any(s.native_id == "pi-one" for s in native_import.enumerate_native_sessions()),
+                  "global native enum includes pi")
+            check(all(s.provider_kind != "pi" for s in native_import.enumerate_native_sessions(["missing-provider"])),
+                  "provider-scoped enum excludes pi")
+        finally:
+            if old is None:
+                os.environ.pop("PI_CODING_AGENT_SESSION_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_SESSION_DIR"] = old
+
+
+def test_ingest_pi() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as session_root:
+        session_root = Path(session_root)
+        path = session_root / "--code-pi-proj--" / "2026_pi-import.jsonl"
+        _make_pi_session(path, session_id="pi-import", turns=[
+            ("Inspect this pi session", "Pi import reply."),
+            ("Continue pi import", "Second pi reply."),
+        ])
+        sess = native_import.NativeSession(
+            provider_id="", provider_kind="pi", native_id="pi-import",
+            jsonl_path=str(path), cwd="/code/pi-proj", title="",
+            created_at="2026-01-01T00:00:00.000Z",
+        )
+        root_id = native_import.import_session(sess)
+        _assert_session_invariants(root_id)
+        loaded = session_manager.get(root_id)
+        user_msgs = [m for m in loaded["messages"] if m["role"] == "user"]
+        asst_msgs = [m for m in loaded["messages"] if m["role"] == "assistant"]
+        check([m["content"] for m in user_msgs] == ["Inspect this pi session", "Continue pi import"],
+              "pi prompts imported")
+        check(len(asst_msgs) == 2 and all(len(m.get("events") or []) >= 2 for m in asst_msgs),
+              "pi assistant events imported")
+        check(native_import.import_session(sess) == root_id, "pi idempotent")
 
 
 def test_status_fallback() -> None:
@@ -884,7 +1161,7 @@ def test_restart_survival() -> None:
             check(final["imported"] == 2, f"resume imported r3/r4 remainder, got {final['imported']}")
             check(final["skipped"] == 2, f"resume skipped pre-crash r1/r2, got {final['skipped']}")
             check(final["failed"] == 0, "no failures on resume")
-            check(native_import.already_imported_keys() == {"claude:r1", "claude:r2", "claude:r3", "claude:r4"},
+            check(len(native_import.already_imported_keys()) == 4,
                   "all four sessions in registry after resume")
             persisted = native_import._load_persisted_job()
             check(persisted and persisted["status"] == "done", "persisted final status is done")
@@ -912,6 +1189,19 @@ def test_job() -> None:
     # dedicated provider so the seeded/default providers can't leak in.
     with tempfile.TemporaryDirectory() as job_home:
         _make_claude_layout(Path(job_home), {"jobproj": ["j1", "j2"]})
+        internal = Path(job_home) / "projects" / "jobproj" / "internal.jsonl"
+        internal.write_text(
+            json.dumps({"type": "user", "uuid": str(uuid.uuid4()),
+                        "message": {"role": "user", "content": [{
+                            "type": "text",
+                            "text": "Better Agent run.sh startup checker for Z.AI",
+                        }]},
+                        "timestamp": "2026-01-01T00:00:00Z"}) + "\n" +
+            json.dumps({"type": "assistant", "uuid": str(uuid.uuid4()),
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        "timestamp": "2026-01-01T00:00:01Z"}) + "\n",
+            encoding="utf-8",
+        )
         provider = config_store.add_provider({
             "name": "t-claude", "kind": "claude", "mode": "subscription", "config_dir": job_home,
         })
@@ -920,19 +1210,20 @@ def test_job() -> None:
             native_import.start_import([pid])
             final = _poll_done(15)
             check(final["status"] == "done", f"claude job done, got {final['status']}")
-            check(final["total"] == 2, f"total 2, got {final['total']}")
+            check(final["total"] == 3, f"total 3, got {final['total']}")
             check(final["imported"] == 2, f"imported 2, got {final['imported']}")
+            check(final["skipped"] == 1, f"internal skipped 1, got {final['skipped']}")
             check(final["failed"] == 0, f"no failures, got {final['failed']}")
 
             # re-run → all skipped (idempotent at job level)
             native_import.start_import([pid])
             final = _poll_done(15)
             check(final["imported"] == 0, f"rerun imports 0, got {final['imported']}")
-            check(final["skipped"] == 2, f"rerun skips 2, got {final['skipped']}")
+            check(final["skipped"] == 3, f"rerun skips 3, got {final['skipped']}")
 
             # scoped enumeration returns only this provider's sessions
             sessions = native_import.enumerate_native_sessions([pid])
-            check({s.native_id for s in sessions} == {"j1", "j2"}, "scoped enum")
+            check({s.native_id for s in sessions} == {"j1", "j2", "internal"}, "scoped enum")
         finally:
             try:
                 config_store.delete_provider(pid)
@@ -968,6 +1259,7 @@ def test_unknown_kind_not_enumerated() -> None:
 def main() -> None:
     test_is_user_prompt()
     test_extract_text()
+    test_internal_import_prompt_filter()
     test_segmentation_differential()
     test_derive_title()
     test_codex_iso()
@@ -976,11 +1268,14 @@ def main() -> None:
     test_enumerate_codex()
     test_registry()
     test_ingest_claude_matrix()
+    test_repair_enforces_loaded_project_scope()
     test_ingest_codex()
     test_enumerate_agy()
     test_enumerate_gemini()
+    test_enumerate_pi()
     test_ingest_agy()
     test_ingest_gemini()
+    test_ingest_pi()
     test_status_fallback()
     test_unknown_kind_not_enumerated()
     test_restart_survival()

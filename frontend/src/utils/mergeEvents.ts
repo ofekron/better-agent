@@ -21,6 +21,95 @@ export function isCreationPanelKind(kind: WorkerPanel["panel_kind"] | undefined)
   return kind === "sub_session_created" || kind === "session_created";
 }
 
+/** MCP tool short names (suffix after the last `__`) that spawn a panel
+ * 1:1 in the SAME assistant message they fire in. `create_worker` is
+ * excluded: it's approval-gated and its worker panel appears later via a
+ * separate delegation (ask/delegate), so its tool_use has no same-message
+ * panel and would desync the positional match. */
+const DELEGATION_TOOL_SHORT_NAMES = new Set([
+  "ask",
+  "mssg",
+  "delegate_task",
+  "create_session",
+  "create_sub_session",
+]);
+
+function toolShortName(name: string): string {
+  const idx = name.lastIndexOf("__");
+  return idx === -1 ? name : name.slice(idx + 2);
+}
+
+/** Delegation tool_use blocks across the manager stream, in firing order.
+ * Each carries the index of the event ENTRY that contains it. Multiple
+ * delegation tool_use blocks in one entry (parallel asks) yield multiple
+ * records sharing that entry index. */
+function delegationToolUses(
+  managerEvents: WSEvent[],
+): { entryIndex: number; short: string }[] {
+  const out: { entryIndex: number; short: string }[] = [];
+  managerEvents.forEach((ev, entryIndex) => {
+    if (ev.type !== "agent_message") return;
+    const data = ev.data as
+      | { type?: string; message?: { content?: unknown } }
+      | undefined;
+    if (!data || data.type !== "assistant") return;
+    const content = data.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const raw of content) {
+      if (!raw || typeof raw !== "object") continue;
+      const block = raw as { type?: string; name?: string };
+      if (block.type !== "tool_use" || typeof block.name !== "string") continue;
+      const short = toolShortName(block.name);
+      if (DELEGATION_TOOL_SHORT_NAMES.has(short)) out.push({ entryIndex, short });
+    }
+  });
+  return out;
+}
+
+function panelMatchesTool(short: string, w: WorkerPanel): boolean {
+  switch (short) {
+    case "create_sub_session":
+      return w.panel_kind === "sub_session_created";
+    case "create_session":
+      return w.panel_kind === "session_created";
+    case "ask":
+      return w.run_mode === "team_ask" || w.run_mode === "fork";
+    case "mssg":
+    case "delegate_task":
+      return w.run_mode === "team_message";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Render-stable anchor per panel: the index right after the event entry
+ * holding the tool_use that triggered the delegation. Derived here instead
+ * of trusting the backend-stamped `insert_at`, which is captured
+ * synchronously at MCP-tool-fire time — BEFORE the triggering tool_use
+ * event has been tail-appended to the message — so it lands ahead of its
+ * own tool call (e.g. a `create_sub_session → ask` sub-session group
+ * rendering before `create_sub_session`). Panels iterate in firing (append)
+ * order and consume compatible delegation tool_use blocks positionally; a
+ * panel with no compatible tool_use in this message (e.g. a Codex native
+ * subagent) is left out and falls back to its stored `insert_at`.
+ */
+export function derivePanelAnchors(
+  managerEvents: WSEvent[],
+  workers: WorkerPanel[],
+): Map<string, number> {
+  const toolUses = delegationToolUses(managerEvents);
+  const anchors = new Map<string, number>();
+  let cursor = 0;
+  for (const w of workers) {
+    if (cursor < toolUses.length && panelMatchesTool(toolUses[cursor].short, w)) {
+      anchors.set(w.delegation_id, toolUses[cursor].entryIndex + 1);
+      cursor += 1;
+    }
+  }
+  return anchors;
+}
+
 /**
  * Build stable timeline streams. Each worker panel is a single contiguous
  * collapsible block, inserted at the point in the manager stream where its
@@ -39,17 +128,22 @@ export function tagEvents(
   let seq = 0;
   let managerIndex = 0;
 
-  // Order panels by their delegation point. Legacy panels without
-  // `insert_at` sort to the end in creation order — no worse than before.
+  // Order panels by their delegation point. The anchor is derived from the
+  // triggering tool_use position (render-stable); the backend-stamped
+  // `insert_at` is the fallback for panels with no matching tool_use, and
+  // legacy panels without either sort to the end in creation order.
+  const anchors = derivePanelAnchors(managerEvents, workers);
   const ordered = workers
-    .map((worker, index) => ({
-      worker,
-      index,
-      insertAt:
-        typeof worker.insert_at === "number"
-          ? worker.insert_at
-          : Number.POSITIVE_INFINITY,
-    }))
+    .map((worker, index) => {
+      const derived = anchors.get(worker.delegation_id);
+      const insertAt =
+        typeof derived === "number"
+          ? derived
+          : typeof worker.insert_at === "number"
+            ? worker.insert_at
+            : Number.POSITIVE_INFINITY;
+      return { worker, index, insertAt };
+    })
     .sort((a, b) => {
       if (a.insertAt !== b.insertAt) return a.insertAt - b.insertAt;
       return a.index - b.index;
@@ -79,6 +173,9 @@ export function tagEvents(
         entityLabel,
         panelKind: w.panel_kind,
         startedAt: w.started_at,
+        providerId: w.provider_id,
+        model: w.model,
+        reasoningEffort: w.reasoning_effort,
         seq: seq++,
       });
       return;
@@ -91,6 +188,9 @@ export function tagEvents(
         entityLabel,
         panelKind: w.panel_kind,
         startedAt: w.started_at,
+        providerId: w.provider_id,
+        model: w.model,
+        reasoningEffort: w.reasoning_effort,
         seq: seq++,
       });
     }
@@ -143,6 +243,9 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
     entityLabel: tagged[0].entityLabel,
     panelKind: tagged[0].panelKind,
     startedAt: tagged[0].startedAt,
+    providerId: tagged[0].providerId,
+    model: tagged[0].model,
+    reasoningEffort: tagged[0].reasoningEffort,
     events: [],
     timestamps: [],
   };
@@ -159,6 +262,9 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
         entityLabel: t.entityLabel,
         panelKind: t.panelKind,
         startedAt: t.startedAt,
+        providerId: t.providerId,
+        model: t.model,
+        reasoningEffort: t.reasoningEffort,
         events: [t.event],
         timestamps: [eventTimestamp(t.event)],
       };

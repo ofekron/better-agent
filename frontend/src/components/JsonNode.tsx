@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /** If a string looks like embedded JSON (starts with { or [), try to parse
  *  it so we can render it with a nested JsonNode instead of a raw string. */
@@ -15,15 +15,40 @@ function tryParseEmbeddedJson(value: string): unknown | null {
   return null;
 }
 
-function JsonString({ keyName, value }: { keyName?: string; value: string }) {
+function JsonString({
+  keyName,
+  value,
+  collapseSignal = 0,
+  expandAllOnOpen = true,
+}: {
+  keyName?: string;
+  value: string;
+  collapseSignal?: number;
+  expandAllOnOpen?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const didMountRef = useRef(false);
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    setExpanded(false);
+  }, [collapseSignal]);
+
   const embedded = tryParseEmbeddedJson(value);
   if (embedded !== null) {
     return (
       <div className="json-node json-embedded">
         {keyName && <span className="json-key">"{keyName}": </span>}
         <span className="json-embedded-tag" title="Embedded JSON string">json</span>
-        <JsonNode value={embedded} defaultOpen />
+        <JsonNode
+          value={embedded}
+          defaultOpen
+          collapseSignal={collapseSignal}
+          expandAllOnOpen={expandAllOnOpen}
+        />
       </div>
     );
   }
@@ -72,18 +97,46 @@ function JsonString({ keyName, value }: { keyName?: string; value: string }) {
   );
 }
 
-export function JsonNode({ keyName, value, defaultOpen = false }: {
+export function JsonNode({
+  keyName,
+  value,
+  defaultOpen = false,
+  collapseSignal = 0,
+  expandAllOnOpen = true,
+  defaultOpenDescendants = false,
+}: {
   keyName?: string;
   value: unknown;
   defaultOpen?: boolean;
+  collapseSignal?: number;
+  expandAllOnOpen?: boolean;
+  defaultOpenDescendants?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [openDescendants, setOpenDescendants] = useState(defaultOpenDescendants);
+  const didMountRef = useRef(false);
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    setOpen(false);
+    setOpenDescendants(false);
+  }, [collapseSignal]);
 
   if (value === null) return <span className="json-line">{keyName && <span className="json-key">"{keyName}": </span>}<span className="json-null">null</span></span>;
   if (typeof value === "boolean") return <span className="json-line">{keyName && <span className="json-key">"{keyName}": </span>}<span className="json-bool">{String(value)}</span></span>;
   if (typeof value === "number") return <span className="json-line">{keyName && <span className="json-key">"{keyName}": </span>}<span className="json-num">{value}</span></span>;
   if (typeof value === "string") {
-    return <JsonString keyName={keyName} value={value} />;
+    return (
+      <JsonString
+        keyName={keyName}
+        value={value}
+        collapseSignal={collapseSignal}
+        expandAllOnOpen={expandAllOnOpen}
+      />
+    );
   }
 
   const isArray = Array.isArray(value);
@@ -95,9 +148,15 @@ export function JsonNode({ keyName, value, defaultOpen = false }: {
     return <span className="json-line">{keyName && <span className="json-key">"{keyName}": </span>}{openBrace}{closeBrace}</span>;
   }
 
+  const toggleOpen = () => {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    setOpenDescendants(nextOpen && expandAllOnOpen);
+  };
+
   return (
     <div className="json-node">
-      <span className="json-toggle" onClick={() => setOpen(o => !o)}>
+      <span className="json-toggle" onClick={toggleOpen}>
         <span className="json-arrow">{open ? "\u25BC" : "\u25B6"}</span>
         {keyName && <span className="json-key">"{keyName}": </span>}
         {openBrace}
@@ -106,7 +165,15 @@ export function JsonNode({ keyName, value, defaultOpen = false }: {
       {open && (
         <div className="json-children">
           {entries.map(([k, v]) => (
-            <JsonNode key={k} keyName={isArray ? undefined : k} value={v} />
+            <JsonNode
+              key={k}
+              keyName={isArray ? undefined : k}
+              value={v}
+              defaultOpen={openDescendants}
+              defaultOpenDescendants={openDescendants}
+              collapseSignal={collapseSignal}
+              expandAllOnOpen={expandAllOnOpen}
+            />
           ))}
         </div>
       )}

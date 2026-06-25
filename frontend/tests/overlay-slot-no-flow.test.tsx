@@ -22,13 +22,13 @@ function ruleBody(selector: string): string {
 }
 
 const OVERLAY_MODULE: ExtensionFrontendModule = {
-  extension_id: "ofek-dev.machine-nodes",
-  extension_name: "Machine nodes",
+  extension_id: "test.overlay-fixture",
+  extension_name: "Overlay fixture",
   slot: "global-approval-overlay",
   id: "node-approvals",
   label: "Node approvals",
   kind: "module",
-  module_url: "/api/extensions/ofek-dev.machine-nodes/frontend/ui/x.entry.js",
+  module_url: "/api/extensions/test.overlay-fixture/frontend/ui/x.entry.js",
 };
 
 afterEach(() => cleanup());
@@ -57,5 +57,45 @@ describe("overlay extension-module-slot has no flow footprint", () => {
     const slot = container.querySelector(".extension-module-slot");
     expect(slot).not.toBeNull();
     expect(slot!.classList.contains("extension-module-slot--overlay")).toBe(true);
+  });
+
+  it("right-panel fill variant gives extension roots a flex height contract", () => {
+    const body = ruleBody(".extension-module-slot--right-panel-fill {");
+    expect(body).toMatch(/display:\s*flex/);
+    expect(body).toMatch(/flex:\s*1 1 auto/);
+    expect(body).toMatch(/min-height:\s*0/);
+
+    const childBody = ruleBody(".extension-module-slot--right-panel-fill > div {");
+    expect(childBody).toMatch(/display:\s*flex/);
+    expect(childBody).toMatch(/flex:\s*1 1 auto/);
+    expect(childBody).toMatch(/min-height:\s*0/);
+  });
+
+  it("composer action slots hug button-sized extension controls", () => {
+    const body = ruleBody(".extension-module-slot--composer-actions {");
+    expect(body).toMatch(/display:\s*inline-flex/);
+    expect(body).toMatch(/min-height:\s*0/);
+    expect(body).toMatch(/width:\s*auto/);
+
+    const mobileBody = ruleBody(".extension-module-slot--composer-actions,");
+    expect(mobileBody).toMatch(/min-height:\s*0/);
+    expect(mobileBody).toMatch(/width:\s*auto/);
+  });
+
+  it("ExtensionModuleSlot forwards the right-panel fill variant class onto its container", () => {
+    const { container } = render(
+      <ExtensionModuleSlot
+        module={OVERLAY_MODULE}
+        className="extension-module-slot--right-panel-fill"
+      />,
+    );
+    const slot = container.querySelector(".extension-module-slot");
+    expect(slot).not.toBeNull();
+    expect(slot!.classList.contains("extension-module-slot--right-panel-fill")).toBe(true);
+  });
+
+  it("App renders the TestApe Screen module with the right-panel fill variant", () => {
+    const app = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app).toMatch(/rightPanelTab === "screen"[\s\S]*className="extension-module-slot--right-panel-fill"/);
   });
 });

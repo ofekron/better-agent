@@ -14,11 +14,6 @@ export default defineConfig({
       src: path.resolve(__dirname, "src"),
       react: REACT,
       "react-dom": REACT_DOM,
-      "@better-agent/provider-config-sync-core/diff": path.resolve(__dirname, "../provider-config-sync/packages/provider-config-sync-core/src/diff.ts"),
-      "@better-agent/provider-config-sync-core/items": path.resolve(__dirname, "../provider-config-sync/packages/provider-config-sync-core/src/items.ts"),
-      "@better-agent/provider-config-sync-core": path.resolve(__dirname, "../provider-config-sync/packages/provider-config-sync-core/src/index.ts"),
-      "@better-agent/provider-config-sync-ui/styles.css": path.resolve(__dirname, "../provider-config-sync/packages/provider-config-sync-ui/src/styles.css"),
-      "@better-agent/provider-config-sync-ui": path.resolve(__dirname, "../provider-config-sync/packages/provider-config-sync-ui/src/index.ts"),
     },
   },
   test: {

@@ -11,8 +11,6 @@ shared store (sqlite / redis).
 """
 
 import asyncio
-import ipaddress
-import os
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -80,19 +78,6 @@ def get_session_secret() -> str:
     return SESSION_SECRET if _BOOTSTRAPPED else _EPHEMERAL_SECRET
 
 
-def is_test_auth_bypass_request(request) -> bool:
-    if os.environ.get("BETTER_CLAUDE_TEST_AUTH_BYPASS") != "1":
-        return False
-    client = request.client
-    host = client.host if client else None
-    if not host:
-        return False
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return host == "localhost"
-
-
 # ---------------------------------------------------------------------
 # Bearer tokens — for native (Capacitor) clients that can't rely on
 # cross-origin session cookies. The Capacitor WebView runs at
@@ -108,9 +93,27 @@ def is_test_auth_bypass_request(request) -> bool:
 _TOKEN_NAMESPACE = "bc-bearer-v1"
 _TOKEN_MAX_AGE = 30 * 86400  # 30 days, mirrors SessionMiddleware
 
+# Short-lived access tokens for the QR / refresh-token flow (qr_auth.py).
+# Distinct salt so they can't be swapped for the 30-day password bearer;
+# verify_token accepts both, so the auth gate stays a single stateless
+# check. Expiry is short because qr_auth hands out a rotating refresh
+# token to mint fresh ones.
+_ACCESS_NAMESPACE = "bc-qr-access-v1"
+ACCESS_MAX_AGE = 15 * 60  # 15 minutes
+
 
 def _serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(get_session_secret(), salt=_TOKEN_NAMESPACE)
+
+
+def _access_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(get_session_secret(), salt=_ACCESS_NAMESPACE)
+
+
+def current_username() -> str | None:
+    """The configured user, or None pre-bootstrap. Used by qr_auth to
+    stamp the subject into issued sessions."""
+    return _USERNAME
 
 
 def create_token(username: str) -> str:
@@ -119,18 +122,30 @@ def create_token(username: str) -> str:
     return _serializer().dumps({"username": username})
 
 
+def create_access_token(username: str) -> str:
+    """Short-lived (`ACCESS_MAX_AGE`) bearer for the refresh-token flow."""
+    return _access_serializer().dumps({"username": username})
+
+
 def verify_token(token: str | None) -> dict | None:
     """Decode + return the embedded user dict, or None if the token
-    is missing / malformed / expired / signed by a stale secret."""
+    is missing / malformed / expired / signed by a stale secret.
+
+    Accepts either the 30-day password bearer or a 15-minute QR access
+    token — same {username} contract, different salt + max age."""
     if not token:
         return None
-    try:
-        payload = _serializer().loads(token, max_age=_TOKEN_MAX_AGE)
-    except (BadSignature, SignatureExpired):
-        return None
-    if not isinstance(payload, dict) or "username" not in payload:
-        return None
-    return {"username": payload["username"]}
+    for serializer, max_age in (
+        (_serializer(), _TOKEN_MAX_AGE),
+        (_access_serializer(), ACCESS_MAX_AGE),
+    ):
+        try:
+            payload = serializer.loads(token, max_age=max_age)
+        except (BadSignature, SignatureExpired):
+            continue
+        if isinstance(payload, dict) and "username" in payload:
+            return {"username": payload["username"]}
+    return None
 
 
 # Constant-time string equality. `argon2.verify` already does this for

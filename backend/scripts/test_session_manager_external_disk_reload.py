@@ -51,6 +51,33 @@ def main() -> int:
         finally:
             session_store.session_file_fingerprint = real_fingerprint
 
+        original_stat = path.stat()
+        original_text = path.read_text(encoding="utf-8")
+        original_fingerprint = real_fingerprint(sid)
+        mutated_text = original_text.replace(
+            "external reload",
+            "external change",
+            1,
+        )
+        assert mutated_text != original_text
+        assert len(mutated_text) == len(original_text)
+        path.write_text(mutated_text, encoding="utf-8")
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        assert path.stat().st_size == original_stat.st_size
+        assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
+        assert real_fingerprint(sid) != original_fingerprint
+
+        session_manager._root_file_checked_at[
+            sid
+        ] = time.monotonic() - session_manager_mod.EXTERNAL_RELOAD_POLL_INTERVAL_S
+        preserved_mtime = session_manager.get(sid)
+        assert preserved_mtime is not None
+        assert preserved_mtime["name"] == "external change"
+        print("PASS preserved-mtime session rewrite invalidates cached root")
+
         external = json.loads(path.read_text(encoding="utf-8"))
         external["messages"] = [
             {

@@ -1,6 +1,6 @@
-/** Themed SVG icons — all use `currentColor` so they inherit CSS color. */
+/** Themed SVG icons. Most use `currentColor`; palette icons own their fills. */
 
-import { type CSSProperties } from "react";
+import { type CSSProperties, useId } from "react";
 
 export type IconName =
   | "clipboard"
@@ -42,7 +42,12 @@ export type IconName =
   | "star"
   | "arrow-up"
   | "home"
-  | "server";
+  | "server"
+  | "more-vertical"
+  | "circle"
+  | "info"
+  | "assistant-start"
+  | "testape";
 
 interface IconProps {
   name: IconName;
@@ -110,7 +115,13 @@ const PATHS: Record<IconName, string> = {
   "arrow-up": "m5 12 7-7 7 7M12 19V5",
   home: "m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 22V12h6v10",
   server: "M2 3h20v6H2zM2 15h20v6H2zM6 6h.01M6 18h.01",
+  "more-vertical": "M12 5v.01M12 12v.01M12 19v.01",
+  circle: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
+  info: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01",
+  "assistant-start": "",
   mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8",
+  testape:
+    "M5 10a3 3 0 1 0 0 6 M19 10a3 3 0 1 1 0 6 M12 6a6 6 0 0 0-6 6c0 3.3 2.7 6 6 6s6-2.7 6-6a6 6 0 0 0-6-6z M10 11h.01 M14 11h.01 M11 14h2 M10 16a2 2 0 0 0 4 0",
 };
 
 /** Known icon names — the single source extensions validate their manifest
@@ -118,6 +129,67 @@ const PATHS: Record<IconName, string> = {
 export const ICON_NAMES: readonly string[] = Object.keys(PATHS);
 
 export default function Icon({ name, size = 16, className, style }: IconProps) {
+  const safeId = useId().replace(/:/g, "");
+  const gradientId = `assistant-start-${safeId}`;
+  const starGradientId = `star-${safeId}`;
+
+  if (name === "star") {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        className={className}
+        style={style}
+        aria-hidden
+      >
+        <defs>
+          <linearGradient id={starGradientId} x1="4" y1="2" x2="20" y2="20" gradientUnits="userSpaceOnUse">
+            <stop stopColor="var(--purple-80)" />
+            <stop offset="0.55" stopColor="var(--accent)" />
+            <stop offset="1" stopColor="var(--agent)" />
+          </linearGradient>
+        </defs>
+        <path d={PATHS.star} fill={`url(#${starGradientId})`} />
+      </svg>
+    );
+  }
+
+  if (name === "assistant-start") {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        className={className}
+        style={style}
+        aria-hidden
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="4" y1="4" x2="20" y2="20" gradientUnits="userSpaceOnUse">
+            <stop stopColor="var(--purple-80)" />
+            <stop offset="0.55" stopColor="var(--accent)" />
+            <stop offset="1" stopColor="var(--agent)" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"
+          fill={`url(#${gradientId})`}
+        />
+        <path
+          d="M18.5 16l.8 1.7 1.7.8-1.7.8-.8 1.7-.8-1.7-1.7-.8 1.7-.8.8-1.7z"
+          fill="var(--agent)"
+        />
+        <path
+          d="M6.2 15.2l.55 1.15 1.15.55-1.15.55-.55 1.15-.55-1.15-1.15-.55 1.15-.55.55-1.15z"
+          fill="var(--purple-80)"
+        />
+      </svg>
+    );
+  }
+
   return (
     <svg
       width={size}

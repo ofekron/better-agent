@@ -36,6 +36,7 @@ import node_link
 import node_store
 import perf
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 from provider import Provider, StreamEvent
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
@@ -138,6 +139,7 @@ class RemoteProviderProxy(Provider):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,
@@ -158,11 +160,13 @@ class RemoteProviderProxy(Provider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         if mode == "manager":
             mode = "team"
         if mode not in ("native", "team"):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
+        self.assert_not_suspended(action="start new runs")
         # Layer-3 capability defense (matches GeminiProvider.start_run).
         # `supports_manager_mode` + `supports_fork` reflect the v1
         # assumption above (remote = Claude only → all True). If a
@@ -185,6 +189,12 @@ class RemoteProviderProxy(Provider):
         # Resolve the session's root_id so the node can ingest into the
         # right events.jsonl directory.
         from session_manager import manager as session_manager
+        session_record = session_manager.get(app_session_id) or {}
+        worker_record = (
+            session_manager.get(worker_agent_session_id)
+            if worker_agent_session_id
+            else {}
+        )
         root_id = session_manager._root_id_for(
             worker_agent_session_id or app_session_id
         )
@@ -210,6 +220,7 @@ class RemoteProviderProxy(Provider):
                 "app_session_id": app_session_id,
                 "persist_to": worker_agent_session_id or app_session_id,
                 "mode": mode,
+                "source": source or "",
                 "session_id": session_id,
                 "cwd": cwd,
                 "started_at": started_at,
@@ -258,6 +269,7 @@ class RemoteProviderProxy(Provider):
             "reasoning_effort": reasoning_effort,
             "session_id": session_id,
             "mode": mode,
+            "source": source or "",
             "app_session_id": app_session_id,
             "worker_agent_session_id": worker_agent_session_id,
             "mssg_sender_session_id": mssg_sender_session_id,
@@ -280,10 +292,13 @@ class RemoteProviderProxy(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=session_record,
+                    worker_record=worker_record,
+                )
             ),
         }
         # spawn_run send is async. If it raises (node disconnected
@@ -384,7 +399,9 @@ class RemoteProviderProxy(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         # One-shot request/response RPC: the node's own provider runs
         # `claude -p` and returns the JSON envelope. The CLI is bounded
         # by its own `timeout`; the WS round-trip gets a generous
@@ -401,8 +418,10 @@ class RemoteProviderProxy(Provider):
                 "fork": fork,
                 "cwd": cwd,
                 "timeout": timeout,
+                "no_tools": no_tools,
             },
             timeout=rpc_timeout,
+            version_ready_required=True,
         )
         if not isinstance(resp, dict):
             return None

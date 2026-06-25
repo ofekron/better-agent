@@ -34,42 +34,67 @@ calls `client.interrupt()` on sight.
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 import http.client
+import threading
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
+import chat_store
 import extension_store
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+    normalize_ask_mode,
+)
 from env_compat import get_env
+from loopback_http import raise_loopback_http_error
+from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
+    CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
+    CREATE_CHAT_DESCRIPTION as _CREATE_CHAT_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
+    DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
+    LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+    SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
+)
+from orchestration_tool_schemas import (
+    DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+    ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
+)
+from provider_catalog_mcp import available_provider_models_response
+from user_interaction_tool_contracts import (
+    REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
+    REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
 )
 
 # internal_token mtime-cache. The in-process MCP server callbacks
 # capture `internal_token` in a closure at spawn time — risky once a
-# runner outlives a token rotation (e.g. a long babysitter linger):
-# captured closures would keep using the stale value and start 403-ing.
+# runner outlives a token rotation: captured closures would keep using
+# the stale value and start 403-ing.
 #
 # `_load_internal_token()` re-reads `ba_home()/internal_token` per
 # MCP call but caches on mtime so steady-state cost is one stat() per
 # call, not one read(). Closures fall back to their captured value if
 # the file read fails (e.g. unset BETTER_CLAUDE_HOME, fs error).
 _token_cache: dict = {"token": None, "mtime": 0.0}
-
-
 def _load_internal_token() -> Optional[str]:
     try:
         from paths import ba_home as _ba_home
@@ -87,22 +112,46 @@ from i18n import t
 from continuation import normalize_context_overflow_error
 from provider_run_config import write_skill_tree
 from reasoning_effort import claude_sdk_effort
+from runner_guard import apply_ghost_completion_guard
 from runtime_skills import (
     CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
     materialize_runtime_skills,
 )
 
 
+def _claude_cache_env() -> dict[str, str]:
+    """CLI subprocess env enabling the 1-hour prompt-cache TTL.
+
+    ENABLE_PROMPT_CACHING_1H short-circuits the CLI's remote feature gate
+    so every request carries cache_control ttl:"1h" plus the
+    extended-cache-ttl beta header, keeping the stable prefix (system
+    prompt + MCP tool defs + skills) cached across idle gaps longer than
+    the 5-minute default TTL. An inherited FORCE_PROMPT_CACHING_5M is
+    checked first by the CLI and remains a deliberate shell-level opt-out;
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS or a HIPAA org disables the
+    beta header independently.
+    """
+    return {"ENABLE_PROMPT_CACHING_1H": "1"}
+
+
 def _resolve_claude_cli() -> Optional[str]:
-    candidates = [
-        Path.home() / ".local/bin/claude",
-        Path("/usr/local/bin/claude"),
-        Path.home() / ".npm-global/bin/claude",
-    ]
-    for p in candidates:
-        if p.exists() and p.is_file():
-            return str(p)
-    return shutil.which("claude")
+    from cli_paths import resolve_cli_binary
+
+    resolved = resolve_cli_binary("claude")
+    if os.name == "nt" and resolved:
+        path = Path(resolved)
+        npm_dir = path.parent
+        packaged_exe = (
+            npm_dir
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+        if packaged_exe.is_file():
+            return str(packaged_exe)
+    return resolved
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -110,17 +159,344 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLINotFoundError,
     ClaudeSDKClient,
+    HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ProcessError,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    UserMessage,
     create_sdk_mcp_server,
     tool,
 )
 
 from paths import encode_cwd
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
+from tool_approval_client import describe_tool_call as _describe_tool_call
+from tool_approval_client import request_tool_approval
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
+
+
+async def _deny_background_tool_use(hook_input, tool_use_id, context):
+    """PreToolUse backstop for the no-background policy (see
+    runs_dir.BACKGROUND_WORK_TOOLS): deny any tool input that still
+    requests background execution or a remote (inherently background)
+    sandbox, whatever the tool. The CLI's native
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS switch already strips these from
+    the tool schemas — this hook covers future CLI schema changes."""
+    tool_input = (hook_input or {}).get("tool_input") or {}
+    wants_bg = bool(tool_input.get("run_in_background"))
+    wants_remote = str(tool_input.get("isolation") or "") == "remote"
+    if not wants_bg and not wants_remote:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Background execution is disabled — run this in the "
+                "foreground and wait for it to complete."
+            ),
+        }
+    }
+
+
+def _background_policy_hooks() -> dict:
+    """Hook set enforcing the no-background policy on every tool call
+    (matcher None = all tools)."""
+    return {
+        "PreToolUse": [
+            HookMatcher(matcher=None, hooks=[_deny_background_tool_use]),
+        ],
+    }
+
+
+_RESPONSE_NO_PROGRESS_TIMEOUT_S = 0
+_RESPONSE_ACTIVITY_POLL_S = 1.0
+_MCP_LIST_TIMEOUT_S = 8.0
+_MCP_CALL_TIMEOUT_S = 300.0
+_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1380.0
+# An in-flight tool call counts as response progress: the CLI is silent while
+# a tool executes, so the no-progress watchdog must not read a long MCP/Bash
+# call as a wedged CLI. The backstop must exceed the longest declared tool
+# budget (delegate / browser-test MCP tools run up to 24h); the CLI's own tool
+# timeouts eventually emit an error tool_result, which clears the entry.
+_TOOL_CALL_BUSY_BACKSTOP_S = 25 * 60 * 60
+_TOOL_CALL_BUSY_WARN_S = 30 * 60
+
+
+def _block_type(block: object) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return type(block).__name__
+
+
+def _block_field(block: object, field: str) -> Optional[str]:
+    value = block.get(field) if isinstance(block, dict) else getattr(block, field, None)
+    return value if isinstance(value, str) and value else None
+
+
+class _OutstandingToolCalls:
+    """Tool calls of the current turn with a tool_use seen and no tool_result
+    yet. Scoped per `_run_one_turn` so a discarded interrupted tail cannot
+    leak stale entries into the next turn."""
+
+    def __init__(self) -> None:
+        self._started: dict[str, float] = {}
+        self._warned: set[str] = set()
+
+    def apply(self, msg: object) -> None:
+        if isinstance(msg, AssistantMessage):
+            for block in (msg.content or []):
+                if _block_type(block) in ("ToolUseBlock", "tool_use"):
+                    tool_id = _block_field(block, "id")
+                    if tool_id:
+                        self._started.setdefault(tool_id, time.monotonic())
+            return
+        if isinstance(msg, UserMessage):
+            content = getattr(msg, "content", None)
+            if not isinstance(content, list):
+                return
+            for block in content:
+                if _block_type(block) in ("ToolResultBlock", "tool_result"):
+                    tool_id = _block_field(block, "tool_use_id")
+                    if tool_id:
+                        self._started.pop(tool_id, None)
+                        self._warned.discard(tool_id)
+
+    def busy(self, log: logging.Logger) -> bool:
+        now = time.monotonic()
+        active = False
+        for tool_id, started in self._started.items():
+            age = now - started
+            if age >= _TOOL_CALL_BUSY_BACKSTOP_S:
+                continue
+            if age >= _TOOL_CALL_BUSY_WARN_S and tool_id not in self._warned:
+                self._warned.add(tool_id)
+                log.warning(
+                    "tool call %s still outstanding after %.0fs — watchdog held open",
+                    tool_id, age,
+                )
+            active = True
+        return active
+
+
+class _RunnerActivity:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_progress_at = time.monotonic()
+
+    def mark(self) -> None:
+        with self._lock:
+            self._last_progress_at = time.monotonic()
+
+    def last_progress_at(self) -> float:
+        with self._lock:
+            return self._last_progress_at
+
+
+_BackgroundActivityProbe = Callable[[], Awaitable[bool]]
+
+
+_runner_activity_var: contextvars.ContextVar[Optional[_RunnerActivity]] = (
+    contextvars.ContextVar("runner_activity", default=None)
+)
+_active_runner_activity_lock = threading.Lock()
+_active_runner_activity: Optional[_RunnerActivity] = None
+
+
+def _set_active_runner_activity(activity: Optional[_RunnerActivity]) -> None:
+    global _active_runner_activity
+    with _active_runner_activity_lock:
+        _active_runner_activity = activity
+
+
+def _mark_runner_activity() -> None:
+    activity = _runner_activity_var.get()
+    if activity is None:
+        with _active_runner_activity_lock:
+            activity = _active_runner_activity
+    if activity is not None:
+        activity.mark()
+
+
+def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
+    return env
+
+
+async def _mcp_json_request(
+    config: dict[str, Any],
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    command = str(config.get("command") or "").strip()
+    if not command:
+        raise RuntimeError("MCP server config missing command")
+    proc = await asyncio.create_subprocess_exec(
+        command,
+        *[str(arg) for arg in config.get("args") or []],
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=_mcp_subprocess_env(config),
+        limit=SUBPROCESS_LINE_LIMIT_BYTES,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+
+    async def _send(payload: dict[str, Any]) -> None:
+        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+
+    async def _read_response() -> dict[str, Any]:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+        if not line:
+            raise RuntimeError("MCP server closed stdout")
+        response = json.loads(line.decode("utf-8", "replace"))
+        if response.get("error"):
+            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
+        return response.get("result") or {}
+
+    try:
+        await _send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "better-agent-runner", "version": "1"},
+            },
+        })
+        await _read_response()
+        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
+        return await _read_response()
+    finally:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+
+async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        result = await _mcp_json_request(config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S)
+    except Exception:
+        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
+        return []
+    tools = result.get("tools") or []
+    return [item for item in tools if isinstance(item, dict)]
+
+
+def _mcp_call_timeout_s(config: dict[str, Any], tool_name: str, args: dict[str, Any]) -> float:
+    configured_timeout = config.get("tool_timeout_sec")
+    if (
+        isinstance(configured_timeout, (int, float))
+        and not isinstance(configured_timeout, bool)
+        and configured_timeout > 0
+    ):
+        return float(configured_timeout)
+    server_name = str(config.get("_server_name") or config.get("server_name") or "")
+    if (
+        server_name in {"get-requirements", "better-agent-requirements"}
+        and tool_name == "fire_get_requirements"
+        and args.get("wait") is True
+    ):
+        return _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
+    return _MCP_CALL_TIMEOUT_S
+
+
+async def _mcp_call_tool(
+    config: dict[str, Any],
+    tool_name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    result = await _mcp_json_request(
+        config,
+        "tools/call",
+        {"name": tool_name, "arguments": args},
+        timeout=_mcp_call_timeout_s(config, tool_name, args),
+    )
+    if "content" not in result:
+        text = (
+            json.dumps(result["structuredContent"], ensure_ascii=False, indent=2)
+            if "structuredContent" in result
+            else json.dumps(result, ensure_ascii=False)
+        )
+        result["content"] = [{"type": "text", "text": text}]
+    if result.get("isError"):
+        result["is_error"] = True
+    return result
+
+
+async def _bridge_native_extension_mcp_servers(
+    inputs: dict[str, Any],
+    *,
+    user_facing: bool,
+    bare: bool,
+) -> dict[str, dict[str, Any]]:
+    configs = extension_store.native_mcp_server_configs(
+        inputs,
+        user_facing=user_facing,
+        bare=bare,
+    )
+    bridged: dict[str, dict[str, Any]] = {}
+    tool_lists = await asyncio.gather(*(
+        _mcp_list_tools(server_name, config)
+        for server_name, config in configs.items()
+    ))
+    for (server_name, config), tools in zip(configs.items(), tool_lists):
+        sdk_tools = []
+        for item in tools:
+            raw_tool_name = str(item.get("name") or "").strip()
+            if not raw_tool_name:
+                continue
+            input_schema = item.get("inputSchema")
+            if not isinstance(input_schema, dict):
+                input_schema = {"type": "object", "properties": {}}
+
+            bridged_config = {**config, "_server_name": server_name}
+
+            async def _handler(args: dict[str, Any], *, _config=bridged_config, _tool_name=raw_tool_name) -> dict[str, Any]:
+                return await _mcp_call_tool(_config, _tool_name, args)
+
+            sdk_tools.append(tool(
+                raw_tool_name,
+                str(item.get("description") or f"{server_name} MCP tool {raw_tool_name}"),
+                input_schema,
+            )(_handler))
+        if sdk_tools:
+            bridged[server_name] = create_sdk_mcp_server(
+                name=server_name,
+                version="1.0.0",
+                tools=sdk_tools,
+            )
+    return bridged
+
+
+class ResponseNoProgressError(RuntimeError):
+    pass
+
+
+def _resolve_claude_config_dir(raw: str) -> Path:
+    if raw:
+        return Path(os.path.expanduser(os.path.expandvars(raw)))
+    return Path.home() / ".claude"
 
 
 def _materialize_claude_skill_plugin(
@@ -132,7 +508,6 @@ def _materialize_claude_skill_plugin(
 ) -> Optional[dict[str, str]]:
     if bare_config:
         return None
-
     plugin_dir = run_dir / "claude-runtime-skills-plugin"
     skills_root = plugin_dir / "skills"
     count = materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
@@ -200,6 +575,15 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
                 "default — available node_ids appear in <known_workers>."
             ),
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": (
+                "OPTIONAL: working directory for the new worker session. "
+                "Defaults to (inherits) the creating session's cwd; set it "
+                "only to target a different project root."
+            ),
+        },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
 }
@@ -209,48 +593,151 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "target_session_id": {
             "type": "string",
-            "description": "Better Agent session_id of the team member to message.",
+            "description": "Better Agent session_id of the target session.",
+        },
+        "target_worker_id": {
+            "type": "string",
+            "description": "Registered worker id, equal to that worker's agent_session_id.",
+        },
+        "target_worker_pool": {
+            "type": "string",
+            "description": "Worker-pool tag. The backend routes to an idle worker in that pool.",
+        },
+        "pool_affinity_key": {
+            "type": "string",
+            "description": "Optional thread key for target_worker_pool; repeat it to route back to the same pool worker.",
         },
         "message": {
             "type": "string",
             "description": "Message to enqueue for the target session.",
         },
-    },
-    "required": ["target_session_id", "message"],
-}
-
-_DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "task": {
-            "type": "string",
-            "description": "The task to hand off. Routed automatically unless target_session_id is set.",
-        },
-        "target_session_id": {
-            "type": ["string", "null"],
-            "description": (
-                "OPTIONAL — set ONLY to bypass auto-routing and send to a "
-                "specific session. Omit to let the router pick (search or create)."
-            ),
-        },
         "provider_id": {
             "type": ["string", "null"],
-            "description": "OPTIONAL — provider for a newly-created target session. Defaults to the creating session's provider.",
+            "description": "OPTIONAL — provider for this continuation turn.",
         },
         "model": {
             "type": ["string", "null"],
-            "description": "OPTIONAL — model for a newly-created target session. Defaults to the creating session's model.",
+            "description": "OPTIONAL — model for this continuation turn.",
         },
         "reasoning_effort": {
             "type": ["string", "null"],
-            "description": "OPTIONAL — reasoning effort for a newly-created target session. Defaults to the creating session's effort.",
+            "description": "OPTIONAL — reasoning effort for this continuation turn.",
         },
-        "sub_session": {
-            "type": "boolean",
-            "description": "OPTIONAL — default true. If false, auto-created targets are standalone native sessions instead of hidden sub-sessions.",
+        "collapse_key": {
+            "type": "string",
+            "description": "Optional key for coalescing pending mssg work on the target session.",
+        },
+        "collapse_policy": {
+            "type": "string",
+            "enum": ["take_latest"],
+            "description": "When collapse_key is set, take_latest keeps one pending message and replaces it with the newest body.",
         },
     },
-    "required": ["task"],
+    "required": ["message"],
+}
+
+
+_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {
+            "type": "string",
+            "description": "The shared team chat to read/post.",
+        },
+        "message": {
+            "type": "string",
+            "description": (
+                "Optional non-empty message to append (stamped with your id). "
+                "Empty/whitespace means read-only: just return new messages."
+            ),
+        },
+        "history_mode": {
+            "type": "string",
+            "enum": ["unread_history", "caught_up"],
+            "description": (
+                "Optional first-read override. unread_history treats existing "
+                "messages as unseen; caught_up starts at the current chat head. "
+                "Ignored after this session already has a chat cursor."
+            ),
+        },
+    },
+    "required": ["chat_id"],
+}
+
+_READ_CHAT_HISTORY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The shared team chat to inspect."},
+        "limit": {
+            "type": "integer",
+            "description": "Maximum messages to return, clamped to 1..200. Defaults to 50.",
+        },
+        "before_seq": {
+            "type": ["integer", "null"],
+            "description": "Return messages older than this sequence. Omit for newest history.",
+        },
+    },
+    "required": ["chat_id"],
+}
+
+_READ_CHAT_HISTORY_DESCRIPTION = (
+    "Read shared chat history without changing your unread cursor. Use this when "
+    "you need older context but do not want those messages marked as seen."
+)
+
+_CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "Unique id for the new chat."},
+        "name": {"type": "string", "description": "Optional human-readable name."},
+        "new_readers_see_history": {
+            "type": "boolean",
+            "description": (
+                "Whether sessions with no chat cursor see existing messages as unread "
+                "on first read. Defaults to true."
+            ),
+        },
+        "sender_policy": {
+            "type": "string",
+            "enum": ["open", "allowlist", "disallowlist"],
+            "description": (
+                "Who may post. open allows everyone, allowlist allows only sender_ids, "
+                "disallowlist blocks sender_ids. Defaults to open."
+            ),
+        },
+        "sender_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Session ids used by allowlist or disallowlist sender policy.",
+        },
+    },
+    "required": ["chat_id"],
+}
+
+_SET_CHAT_SENDER_POLICY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "Chat whose sender policy will change."},
+        "sender_policy": {
+            "type": "string",
+            "enum": ["open", "allowlist", "disallowlist"],
+            "description": "open allows everyone; allowlist allows only sender_ids; disallowlist blocks sender_ids.",
+        },
+        "sender_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Session ids used by allowlist or disallowlist sender policy.",
+        },
+    },
+    "required": ["chat_id", "sender_policy"],
+}
+
+_DELETE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The chat to delete permanently."},
+    },
+    "required": ["chat_id"],
 }
 
 _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
@@ -285,6 +772,16 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the new session. Defaults to the creating session's effort.",
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
+        },
+        "mcp_servers": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
 }
@@ -313,6 +810,16 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the sub-session. Defaults to the creating session's effort.",
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — working directory for the sub-session. Defaults to (inherits) the creating session's cwd.",
+        },
+        "mcp_servers": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": [],
 }
@@ -328,6 +835,18 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "fork mode this is the session to branch from."
             ),
         },
+        "target_worker_id": {
+            "type": "string",
+            "description": "Registered worker id, equal to that worker's agent_session_id. Direct mode only.",
+        },
+        "target_worker_pool": {
+            "type": "string",
+            "description": "Worker-pool tag. The backend routes direct mode to an idle worker in that pool.",
+        },
+        "pool_affinity_key": {
+            "type": "string",
+            "description": "Optional thread key for target_worker_pool; repeat it to route back to the same pool worker.",
+        },
         "message": {
             "type": "string",
             "description": "Message / full task instructions for the session.",
@@ -339,6 +858,18 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "'direct' (default) runs the requested session. 'fork' "
                 "branches an existing session for isolated review/check work; "
                 "do not use fork for brand-new sessions."
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "enum": [
+                ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+            ],
+            "description": (
+                "wait_and_grab_last_assistant_mssg_in_turn waits and returns the reply; "
+                "continue_and_expect_mssg_back_async returns after enqueue and "
+                "expects a later mssg back."
             ),
         },
         "worker_description": {
@@ -361,17 +892,36 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "delete its Better Agent session after the call."
             ),
         },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for this continuation/fork turn.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for this continuation/fork turn.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for this continuation/fork turn.",
+        },
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
 }
 
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "chat",
+    "create_chat",
     "create_session",
     "create_sub_session",
+    "delete_chat",
     "delegate_task",
+    "ensure_named_worker",
+    "list_available_provider_models",
     "mssg",
+    "read_chat_history",
+    "set_chat_sender_policy",
 })
 
 
@@ -528,6 +1078,11 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+    try:
+        from runs_dir import _append_run_state_ledger
+        _append_run_state_ledger(path, data)
+    except Exception:
+        logger.exception("failed to append run-state ledger")
 
 
 # ============================================================================
@@ -649,8 +1204,10 @@ def _post_loopback_sync(
 
     while True:
         try:
+            _mark_runner_activity()
             return _request_once(internal_token)
         except urllib.error.HTTPError as e:
+            _mark_runner_activity()
             live_token = _load_internal_token()
             if (
                 e.code == 403
@@ -660,11 +1217,16 @@ def _post_loopback_sync(
             ):
                 tried_live_token_after_forbidden = True
                 try:
+                    _mark_runner_activity()
                     return _request_once(live_token)
                 except urllib.error.HTTPError:
+                    _mark_runner_activity()
                     raise e
+            if e.code != 403:
+                raise_loopback_http_error(e)
             raise
         except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
+            _mark_runner_activity()
             recovered = recover() if recover is not None else None
             if recovered is not None:
                 return recovered
@@ -748,6 +1310,12 @@ def _recover_delegate_result(client_delegation_id: str) -> Optional[dict]:
     }
 
 
+def _resolve_tool_cwd(args: dict[str, Any], inherited_cwd: str) -> str:
+    """cwd override-or-inherit: use the caller-supplied cwd if provided,
+    otherwise inherit the creating session's cwd."""
+    return str(args.get("cwd") or "").strip() or inherited_cwd
+
+
 def _build_create_worker_tool(
     *,
     app_session_id: str,
@@ -790,9 +1358,11 @@ def _build_create_worker_tool(
             "worker_description": worker_description,
             "justification": justification,
             "orchestration_mode": orchestration_mode,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "client_request_id": f"cw_{_uuid.uuid4().hex[:10]}",
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_worker_sync, payload)
@@ -801,6 +1371,80 @@ def _build_create_worker_tool(
         return _tool_success_result(result)
 
     return create_worker
+
+
+def _build_ensure_named_worker_tool(
+    *,
+    cwd: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_ensure_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/workers/provision",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="ensure-named-worker POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("ensure_named_worker", _ENSURE_NAMED_WORKER_DESCRIPTION, _ENSURE_NAMED_WORKER_INPUT_SCHEMA)
+    async def ensure_named_worker(args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args.get("name") or "").strip()
+        worker_cwd = _resolve_tool_cwd(args, cwd)
+        orchestration_mode = str(args.get("orchestration_mode") or "").strip()
+        if not name or not orchestration_mode:
+            return {
+                "content": [{"type": "text", "text": "name and orchestration_mode are required"}],
+                "is_error": True,
+            }
+        if orchestration_mode == "manager":
+            orchestration_mode = "team"
+        if orchestration_mode not in ("team", "native"):
+            return {
+                "content": [{"type": "text", "text": "orchestration_mode must be 'team' or 'native'"}],
+                "is_error": True,
+            }
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        spec = {
+            "role_key": name,
+            "description": args.get("description") or f"worker:{name}",
+            "orchestration_mode": orchestration_mode,
+            "provision_prompt": args.get("provision_prompt"),
+            "provider_id": args.get("provider_id"),
+            "model": args.get("model"),
+            "reasoning_effort": args.get("reasoning_effort"),
+            "node_id": node_id,
+            "tags": [name],
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
+        }
+        payload = {"cwd": worker_cwd, "workers": [spec]}
+        try:
+            result = await asyncio.to_thread(_post_ensure_sync, payload)
+        except Exception as e:
+            return _tool_error_response("ensure_named_worker", e)
+        workers = (result or {}).get("workers") or []
+        if not workers:
+            return _tool_error_response(
+                "ensure_named_worker",
+                RuntimeError("provision returned no worker"),
+            )
+        worker = workers[0]
+        return _tool_success_result({
+            "agent_session_id": worker.get("agent_session_id"),
+            "name": worker.get("name"),
+            "created": bool(worker.get("created")),
+            "orchestration_mode": worker.get("orchestration_mode"),
+            "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+        })
+
+    return ensure_named_worker
 
 
 # ============================================================================
@@ -827,19 +1471,30 @@ def _build_mssg_tool(
     @tool("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA)
     async def mssg(args: dict[str, Any]) -> dict[str, Any]:
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
                     "type": "text",
-                    "text": "target_session_id and message are required",
+                    "text": "one target and message are required",
                 }],
                 "is_error": True,
             }
         payload = {
             "sender_session_id": sender_session_id,
             "target_session_id": target_session_id,
+            "target_worker_id": target_worker_id,
+            "target_worker_pool": target_worker_pool,
+            "pool_affinity_key": pool_affinity_key,
             "message": message,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "collapse_key": str(args.get("collapse_key") or "").strip(),
+            "collapse_policy": str(args.get("collapse_policy") or "").strip(),
         }
         try:
             result = await asyncio.to_thread(_post_mssg_sync, payload)
@@ -848,6 +1503,149 @@ def _build_mssg_tool(
         return _tool_success_result(result)
 
     return mssg
+
+
+def _build_chat_tool(*, sender_session_id: str):
+    @tool("chat", _CHAT_DESCRIPTION, _CHAT_INPUT_SCHEMA)
+    async def chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        message = str(args.get("message") or "")
+        history_mode = str(args.get("history_mode") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                chat_store.post_and_read,
+                chat_id=chat_id,
+                reader_id=sender_session_id,
+                message=message,
+                history_mode=history_mode,
+            )
+        except Exception as e:
+            return _tool_error_response("chat", e)
+        return _tool_success_result(result)
+
+    return chat
+
+
+def _build_read_chat_history_tool():
+    @tool("read_chat_history", _READ_CHAT_HISTORY_DESCRIPTION, _READ_CHAT_HISTORY_INPUT_SCHEMA)
+    async def read_chat_history(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        try:
+            result = await asyncio.to_thread(
+                chat_store.read_history,
+                chat_id=chat_id,
+                limit=int(args.get("limit") or 50),
+                before_seq=args.get("before_seq"),
+            )
+        except Exception as e:
+            return _tool_error_response("read_chat_history", e)
+        return _tool_success_result(result)
+
+    return read_chat_history
+
+
+def _build_list_available_provider_models_tool():
+    @tool(
+        "list_available_provider_models",
+        _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
+        _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    )
+    async def list_available_provider_models(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                available_provider_models_response,
+                str(args.get("provider") or ""),
+                str(args.get("model") or ""),
+                str(args.get("reasoning_effort") or ""),
+            )
+        except Exception as e:
+            return _tool_error_response("list_available_provider_models", e)
+        return _tool_success_result(result)
+
+    return list_available_provider_models
+
+
+def _build_create_chat_tool(*, sender_session_id: str):
+    @tool("create_chat", _CREATE_CHAT_DESCRIPTION, _CREATE_CHAT_INPUT_SCHEMA)
+    async def create_chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        name = str(args.get("name") or "").strip()
+        new_readers_see_history = args.get("new_readers_see_history", True)
+        sender_policy = str(args.get("sender_policy") or "").strip()
+        sender_ids = args.get("sender_ids")
+        try:
+            result = await asyncio.to_thread(
+                chat_store.create_chat,
+                chat_id=chat_id,
+                created_by=sender_session_id,
+                name=name,
+                new_readers_see_history=new_readers_see_history,
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
+            )
+        except Exception as e:
+            return _tool_error_response("create_chat", e)
+        return _tool_success_result(result)
+
+    return create_chat
+
+
+def _build_set_chat_sender_policy_tool(*, sender_session_id: str):
+    @tool("set_chat_sender_policy", _SET_CHAT_SENDER_POLICY_DESCRIPTION, _SET_CHAT_SENDER_POLICY_INPUT_SCHEMA)
+    async def set_chat_sender_policy(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        sender_policy = str(args.get("sender_policy") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                chat_store.set_sender_policy,
+                chat_id=chat_id,
+                owner_id=sender_session_id,
+                sender_policy=sender_policy,
+                sender_ids=args.get("sender_ids"),
+            )
+        except Exception as e:
+            return _tool_error_response("set_chat_sender_policy", e)
+        return _tool_success_result(result)
+
+    return set_chat_sender_policy
+
+
+def _build_delete_chat_tool():
+    @tool("delete_chat", _DELETE_CHAT_DESCRIPTION, _DELETE_CHAT_INPUT_SCHEMA)
+    async def delete_chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        try:
+            existed = await asyncio.to_thread(chat_store.delete_chat, chat_id)
+        except Exception as e:
+            return _tool_error_response("delete_chat", e)
+        return _tool_success_result({"chat_id": chat_id, "deleted": existed})
+
+    return delete_chat
 
 
 def _build_delegate_task_tool(
@@ -885,11 +1683,13 @@ def _build_delegate_task_tool(
             "sender_session_id": sender_session_id,
             "task": task,
             "target_session_id": target,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "sub_session": args.get("sub_session") is not False,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_delegate_task_sync, payload)
@@ -898,6 +1698,94 @@ def _build_delegate_task_tool(
         return _tool_success_result(result)
 
     return delegate_task
+
+
+_CAPABILITY_ID_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "capability_id": {
+            "type": "string",
+            "description": "Full capability id, e.g. 'ofek.testape:testape'.",
+        }
+    },
+    "required": ["capability_id"],
+}
+_CAPABILITY_HTTP_TIMEOUT = 30.0
+
+
+def _build_capability_tools(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    """Better Agent runtime-capability management. Lets the model scope its own
+    session — load a capability (its MCP + skill become available next turn),
+    release it, or list what's loadable. Core owns the write; these tools POST
+    over the internal loopback."""
+    url_path = f"/api/internal/sessions/{app_session_id}/capabilities"
+
+    def _post(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path=url_path,
+            timeout=_CAPABILITY_HTTP_TIMEOUT,
+            non_json_t_key="runner.mssg_non_json",
+            log_prefix="capabilities POST",
+            backoff_cap=5.0,
+        )
+
+    async def _run_action(name: str, payload: dict) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(_post, payload)
+        except Exception as e:
+            return _tool_error_response(name, e)
+        return _tool_success_result(result)
+
+    @tool(
+        "list_capabilities",
+        "List the scoped capabilities loadable in this session and which are active.",
+        {"type": "object", "properties": {}},
+    )
+    async def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
+        return await _run_action("list_capabilities", {"action": "list"})
+
+    @tool(
+        "load_capability",
+        "Load a scoped capability into this session. Its MCP + skill become "
+        "available on the next turn.",
+        _CAPABILITY_ID_INPUT_SCHEMA,
+    )
+    async def load_capability(args: dict[str, Any]) -> dict[str, Any]:
+        capability_id = str(args.get("capability_id") or "").strip()
+        if not capability_id:
+            return {
+                "content": [{"type": "text", "text": "capability_id is required"}],
+                "is_error": True,
+            }
+        return await _run_action(
+            "load_capability", {"action": "load", "capability_id": capability_id}
+        )
+
+    @tool(
+        "release_capability",
+        "Release a previously loaded capability from this session.",
+        _CAPABILITY_ID_INPUT_SCHEMA,
+    )
+    async def release_capability(args: dict[str, Any]) -> dict[str, Any]:
+        capability_id = str(args.get("capability_id") or "").strip()
+        if not capability_id:
+            return {
+                "content": [{"type": "text", "text": "capability_id is required"}],
+                "is_error": True,
+            }
+        return await _run_action(
+            "release_capability", {"action": "release", "capability_id": capability_id}
+        )
+
+    return [list_capabilities, load_capability, release_capability]
 
 
 def _build_create_session_tool(
@@ -934,12 +1822,15 @@ def _build_create_session_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "name": name,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "orchestration_mode": args.get("orchestration_mode") or "native",
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
+            "mcp_servers": args.get("mcp_servers") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -978,11 +1869,14 @@ def _build_create_sub_session_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "description": str(args.get("description") or "").strip(),
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
+            "mcp_servers": args.get("mcp_servers") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)
@@ -1005,19 +1899,34 @@ def _build_ask_tool(
     @tool("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA)
     async def ask(args: dict[str, Any]) -> dict[str, Any]:
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
-        if not target_session_id or not message:
+        try:
+            mode = normalize_ask_mode(args.get("mode"))
+        except ValueError as exc:
+            return {
+                "content": [{"type": "text", "text": str(exc)}],
+                "is_error": True,
+            }
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
                     "type": "text",
-                    "text": "target_session_id and message are required",
+                    "text": "one target and message are required",
                 }],
                 "is_error": True,
             }
         if run_mode not in ("direct", "fork"):
             return {
                 "content": [{"type": "text", "text": "run_mode must be 'direct' or 'fork'"}],
+                "is_error": True,
+            }
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+            return {
+                "content": [{"type": "text", "text": "async ask mode requires run_mode='direct'"}],
                 "is_error": True,
             }
         ephemeral = bool(args.get("ephemeral"))
@@ -1031,6 +1940,11 @@ def _build_ask_tool(
             }
 
         if run_mode == "fork":
+            if not target_session_id:
+                return {
+                    "content": [{"type": "text", "text": "run_mode='fork' requires target_session_id"}],
+                    "is_error": True,
+                }
             # Fork reuses the delegation engine (per-(caller, session) branch +
             # structured jsonl-offset outcome). ask is the model-facing name;
             # the fork execution path stays single-source in run_delegation.
@@ -1045,7 +1959,9 @@ def _build_ask_tool(
                 "instructions": message,
                 "worker_session_id": target_session_id,
                 "worker_description": worker_description,
-                "model": model,
+                "provider_id": str(args.get("provider_id") or "").strip() or None,
+                "model": str(args.get("model") or "").strip() or model,
+                "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
@@ -1078,8 +1994,15 @@ def _build_ask_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "target_session_id": target_session_id,
+            "target_worker_id": target_worker_id,
+            "target_worker_pool": target_worker_pool,
+            "pool_affinity_key": pool_affinity_key,
             "message": message,
             "ask_id": ask_id,
+            "mode": mode,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
         }
 
         def _post_ask_sync() -> dict:
@@ -1088,11 +2011,11 @@ def _build_ask_tool(
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/ask",
-                timeout=_DELEGATE_HTTP_TIMEOUT,
+                timeout=30 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else _DELEGATE_HTTP_TIMEOUT,
                 non_json_t_key="runner.mssg_non_json",
                 log_prefix="ask POST",
                 backoff_cap=60.0,
-                recover=lambda: _recover_ask_result(ask_id),
+                recover=(None if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else lambda: _recover_ask_result(ask_id)),
             )
 
         try:
@@ -1189,6 +2112,7 @@ def _build_request_user_input_tool(
             }
         payload = {
             "app_session_id": app_session_id,
+            "kind": "input",
             "questions": questions,
             "timeout_seconds": args.get("timeout_seconds"),
         }
@@ -1199,6 +2123,47 @@ def _build_request_user_input_tool(
         return _tool_success_result(result)
 
     return request_user_input
+
+
+def _build_request_user_approval_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_request_user_approval_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/user-input/request",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_file_panel_non_json",
+            log_prefix="request-user-approval POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("request_user_approval", _REQUEST_USER_APPROVAL_DESCRIPTION, _REQUEST_USER_APPROVAL_SCHEMA)
+    async def request_user_approval(args: dict[str, Any]) -> dict[str, Any]:
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return {
+                "content": [{"type": "text", "text": "`prompt` is required"}],
+                "is_error": True,
+            }
+        payload = {
+            "app_session_id": app_session_id,
+            "kind": "approval",
+            "prompt": prompt,
+            "timeout_seconds": args.get("timeout_seconds"),
+        }
+        try:
+            result = await asyncio.to_thread(_post_request_user_approval_sync, payload)
+        except Exception as e:
+            return _tool_error_response("request-user-approval", e)
+        return _tool_success_result(result)
+
+    return request_user_approval
 
 
 def _build_start_file_discussion_tool(
@@ -1313,16 +2278,12 @@ def _build_propose_sessions_tool(
     return propose_sessions
 
 
-# ============================================================================
-# Usage aggregation
-# ============================================================================
-def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
-    out: dict[str, int] = {}
-    for d in ((a or {}), (b or {})):
-        for k, v in (d or {}).items():
-            if isinstance(v, (int, float)):
-                out[k] = int(out.get(k, 0)) + int(v)
-    return out
+def _message_id(message: object) -> Optional[str]:
+    if isinstance(message, dict):
+        value = message.get("message_id") or message.get("id")
+    else:
+        value = getattr(message, "message_id", None) or getattr(message, "id", None)
+    return str(value) if value else None
 
 
 def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
@@ -1330,7 +2291,38 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
 
 
 # ============================================================================
-# Runner lifecycle primitives — heartbeat + babysitter linger
+# Prompt composition
+# ============================================================================
+
+
+def _compose_prompt_text(prompt: str, files: list, log: logging.Logger) -> str:
+    """Final prompt text sent to the CLI: file-attachment preamble + prompt."""
+    if not files:
+        return prompt
+    file_sections: list[str] = []
+    for f in files:
+        try:
+            raw = base64.b64decode(f.get("data", ""))
+            name = f.get("name", "unknown")
+        except Exception:
+            log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+            file_sections.append(
+                f"<file name=\"{name}\">\n{text}\n</file>"
+            )
+        except UnicodeDecodeError:
+            file_sections.append(
+                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
+            )
+    file_preamble = "\n\n".join(file_sections)
+    return f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+
+
+
+# ============================================================================
+# Runner lifecycle primitives — heartbeat
 # ============================================================================
 
 
@@ -1368,83 +2360,41 @@ async def _heartbeat_writer(
             pass
 
 
-async def _linger_for_background_work(
-    run_dir: Path,
-    log: logging.Logger,
+def _apply_task_message(msg: object, tasks: set[str]) -> None:
+    """Fold one SDK message into the in-flight background-subagent set.
+
+    `TaskStartedMessage` adds the task; a terminal `TaskNotificationMessage`
+    (completed/failed/stopped) removes it. Anything else is ignored."""
+    if isinstance(msg, TaskStartedMessage):
+        tid = getattr(msg, "task_id", None)
+        if tid:
+            tasks.add(tid)
+    elif isinstance(msg, TaskNotificationMessage):
+        tid = getattr(msg, "task_id", None)
+        if tid:
+            tasks.discard(tid)
+
+
+async def _background_response_activity_active(
     *,
-    poll_interval_s: float = 2.0,
-) -> None:
-    """Babysitter: stay alive while detached background work
-    (run_in_background shells, Monitor watchers) is still running.
-
-    Called AFTER the run-level complete.json is on disk — the turn is
-    over from the backend's perspective and new prompts spawn fresh
-    --resume instances. The SDK client is still connected, so the CLI
-    (and therefore its background shells, which die with it) survives.
-    With the timer tools disallowed and stdin silent, nothing can start
-    a turn on this instance, so the fresh instance is the only writer
-    to the session jsonl (lifecycle tests T16/T17).
-
-    On the FIRST busy poll it touches the `run_dir/lingering` sentinel —
-    the backend publishes `run.lingering` off that file, so a normal
-    turn whose runner merely takes a second to shut down never flashes
-    a "background work running" UI state.
-
-    Exits when the background work ends, or sweeps it and exits when
-    the run-level cancel sentinel appears (the user's stop/kill lever).
-    """
-    from proc_control import process_control
-    pc = process_control()
-    cancel_path = run_dir / "cancel"
-    lingering = False
-    consecutive_failures = 0
-    while True:
-        if cancel_path.exists():
-            # Idempotent: a turn cancelled mid-flight already swept in
-            # _run_one_turn; a cancel that raced turn end (or arrived
-            # during the linger) sweeps here.
-            try:
-                swept = pc.kill_detached_descendant_groups(
-                    os.getpid(),
-                )
-                log.info(
-                    "babysitter: cancel sentinel — swept %d detached "
-                    "group(s), exiting", swept,
-                )
-            except Exception:
-                logger.exception("babysitter cancel sweep failed")
-            return
-        try:
-            busy = await asyncio.to_thread(
-                pc.has_detached_descendants,
-                os.getpid(), frozenset(),
+    outstanding_tasks: set[str],
+    process_controller: object,
+    log: logging.Logger,
+) -> bool:
+    if outstanding_tasks:
+        return True
+    try:
+        return bool(
+            await asyncio.to_thread(
+                process_controller.has_detached_descendants,
+                os.getpid(),
+                frozenset(),
             )
-            consecutive_failures = 0
-        except Exception:
-            # Fail toward staying alive: exiting kills the CLI and every
-            # background shell with it. Only give up after sustained
-            # failure of the signal itself.
-            consecutive_failures += 1
-            logger.exception(
-                "babysitter signal check failed (%d/5)", consecutive_failures,
-            )
-            if consecutive_failures >= 5:
-                log.warning("babysitter: signal check broken — exiting")
-                return
-            await asyncio.sleep(poll_interval_s)
-            continue
-        if not busy:
-            if lingering:
-                log.info("babysitter: background work ended — exiting")
-            return
-        if not lingering:
-            lingering = True
-            try:
-                (run_dir / "lingering").touch()
-            except OSError:
-                logger.exception("babysitter: lingering sentinel write failed")
-            log.info("babysitter: detached background work alive — lingering")
-        await asyncio.sleep(poll_interval_s)
+        )
+    except Exception:
+        log.exception("runner background activity check failed")
+        return False
+
 
 
 # ============================================================================
@@ -1489,6 +2439,93 @@ async def _drain_until_result(
             return True
 
 
+async def _receive_response_message(
+    resp_iter,
+    *,
+    timeout_s: float,
+    activity: Optional[_RunnerActivity] = None,
+    background_activity: Optional[_BackgroundActivityProbe] = None,
+) -> object:
+    if timeout_s <= 0:
+        return await resp_iter.__anext__()
+
+    receive_task = asyncio.create_task(resp_iter.__anext__())
+    static_started_at = time.monotonic()
+    try:
+        while True:
+            if background_activity is not None and await background_activity():
+                if activity is not None:
+                    activity.mark()
+                else:
+                    static_started_at = time.monotonic()
+            last_progress_at = (
+                activity.last_progress_at() if activity is not None else static_started_at
+            )
+            remaining = timeout_s - (time.monotonic() - last_progress_at)
+            if remaining <= 0:
+                raise ResponseNoProgressError(
+                    f"Claude runner made no response progress for {timeout_s:.0f}s"
+                )
+            done, _pending = await asyncio.wait(
+                {receive_task},
+                timeout=min(_RESPONSE_ACTIVITY_POLL_S, remaining),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in done:
+                if activity is not None:
+                    activity.mark()
+                return receive_task.result()
+    except BaseException:
+        if not receive_task.done():
+            receive_task.cancel()
+            with suppress(BaseException):
+                await receive_task
+        raise
+
+
+def _jsonl_byte_offset_after_lines(path: Path, line_count: int) -> Optional[int]:
+    if line_count <= 0:
+        return 0
+    try:
+        with path.open("rb") as f:
+            for _ in range(line_count):
+                if f.readline() == b"":
+                    return None
+            return f.tell()
+    except OSError:
+        return None
+
+
+def _fork_prefix_byte_offset(path: Path, line_count: int, log: logging.Logger) -> int:
+    deadline = time.monotonic() + 2.0
+    while True:
+        offset = _jsonl_byte_offset_after_lines(path, line_count)
+        if offset is not None:
+            return offset
+        if time.monotonic() >= deadline:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            log.warning(
+                "fork prefix boundary unavailable for %s lines in %s; starting at EOF %d",
+                line_count,
+                path,
+                size,
+            )
+            return size
+        time.sleep(0.05)
+
+
+def _fork_parent_line_count(provider_run_config: object) -> int:
+    if not isinstance(provider_run_config, dict):
+        return 0
+    try:
+        return int(provider_run_config.get("fork_parent_line_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 async def _run_one_turn(
     *,
     client: ClaudeSDKClient,
@@ -1504,6 +2541,10 @@ async def _run_one_turn(
     claude_config_dir: Path,
     log: logging.Logger,
     cancel_path: Optional[Path] = None,
+    interactive_permissions: bool = False,
+    current_turn_holder: Optional[list] = None,
+    no_progress_timeout_s: float = _RESPONSE_NO_PROGRESS_TIMEOUT_S,
+    fork_parent_line_count: int = 0,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -1544,16 +2585,30 @@ async def _run_one_turn(
 
     discovered_sid: Optional[str] = None
     total_usage: dict = {}
+    assistant_usage_snapshots: list[tuple[Optional[str], object]] = []
+    result_usage: object = None
     success = False
     error: Optional[str] = None
     cancelled = False
     sdk_output_parts: list[str] = []
+    # Last text block of the last PRIMARY assistant message (subagent
+    # messages carry parent_tool_use_id and live in their own jsonl).
+    # Stamped into complete.json as `final_assistant_text` so the
+    # backend's tailer drain can verify the CLI flushed the turn's
+    # final text line before firing `complete`.
+    final_assistant_text: Optional[str] = None
     context_window: Optional[int] = None
     last_stop_reason: Optional[str] = None
+    result_seen = False
+    assistant_seen = False
     # Tool names the model called this turn — surfaced in complete.json
     # for the UI/telemetry. (Reap is decided by live background processes,
     # not tool names.)
     used_tools: set[str] = set()
+    # In-flight subagent tasks (`TaskStarted`/`TaskNotification` bookends).
+    # Feeds the no-progress watchdog's activity probe: a turn is not stuck
+    # while a subagent is still running.
+    outstanding_tasks: set[str] = set()
 
     # Cancel sentinel watcher: polls for `cancel_path` every ~150ms
     # and calls client.interrupt() on sight. Default = run-level
@@ -1584,30 +2639,30 @@ async def _run_one_turn(
             except asyncio.TimeoutError:
                 pass
 
+    from proc_control import process_control
+
+    response_activity_process_controller = process_control()
+    outstanding_tool_calls = _OutstandingToolCalls()
+
+    async def _background_activity_probe() -> bool:
+        if outstanding_tool_calls.busy(log):
+            return True
+        return await _background_response_activity_active(
+            outstanding_tasks=outstanding_tasks,
+            process_controller=response_activity_process_controller,
+            log=log,
+        )
+
     watcher_task: Optional[asyncio.Task] = None
+    activity = _RunnerActivity()
+    activity_token = _runner_activity_var.set(activity)
+    _set_active_runner_activity(activity)
 
     try:
+        if current_turn_holder is not None:
+            current_turn_holder[0] = turn_id
         # Inject file contents into the prompt for non-image attachments.
-        if files:
-            file_sections: list[str] = []
-            for f in files:
-                try:
-                    raw = base64.b64decode(f.get("data", ""))
-                    name = f.get("name", "unknown")
-                except Exception:
-                    log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
-                    continue
-                try:
-                    text = raw.decode("utf-8")
-                    file_sections.append(
-                        f"<file name=\"{name}\">\n{text}\n</file>"
-                    )
-                except UnicodeDecodeError:
-                    file_sections.append(
-                        f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-                    )
-            file_preamble = "\n\n".join(file_sections)
-            prompt = f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+        prompt = _compose_prompt_text(prompt, files, log)
 
         if images:
             content: list[dict] = []
@@ -1633,6 +2688,18 @@ async def _run_one_turn(
                 }
 
             await client.query(_multimodal_msg())
+        elif interactive_permissions:
+            # can_use_tool set → SDK requires an async-iterable prompt.
+            _text = prompt
+
+            async def _text_msg():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": _text}]},
+                    "parent_tool_use_id": None,
+                }
+
+            await client.query(_text_msg())
         else:
             await client.query(prompt)
 
@@ -1641,9 +2708,15 @@ async def _run_one_turn(
         resp_iter = client.receive_response()
         while True:
             try:
-                msg = await resp_iter.__anext__()
+                msg = await _receive_response_message(
+                    resp_iter,
+                    timeout_s=no_progress_timeout_s,
+                    activity=activity,
+                    background_activity=_background_activity_probe,
+                )
             except StopAsyncIteration:
                 break
+            outstanding_tool_calls.apply(msg)
             if cancelled_cell[0]:
                 # Interrupt landed. Don't process this turn's tail — but DO
                 # drain it to the terminating ResultMessage so the client
@@ -1654,16 +2727,41 @@ async def _run_one_turn(
                 break
 
             if isinstance(msg, SystemMessage):
+                # Track in-flight subagents for the no-progress watchdog's
+                # activity probe. No-ops for non-Task system messages.
+                _apply_task_message(msg, outstanding_tasks)
                 data = msg.data or {}
                 if data.get("subtype") == "init":
                     sid = data.get("session_id")
                     if sid and sid != discovered_sid:
                         discovered_sid = sid
-                        state["session_id"] = sid
-                        state["jsonl_path"] = str(
+                        jsonl_path = (
                             claude_config_dir / "projects"
                             / encode_cwd(cwd) / f"{sid}.jsonl"
                         )
+                        if fork_parent_line_count > 0:
+                            pre_query_byte_offset = _fork_prefix_byte_offset(
+                                jsonl_path,
+                                fork_parent_line_count,
+                                log,
+                            )
+                        state["session_id"] = sid
+                        state["jsonl_path"] = str(jsonl_path)
+                        state["pre_query_byte_offset"] = pre_query_byte_offset
+                        try:
+                            state["pre_query_jsonl_inode"] = jsonl_path.stat().st_ino
+                        except OSError:
+                            state["pre_query_jsonl_inode"] = None
+                        # Persist the provider CLI's pid so restart recovery can
+                        # tell a still-running CLI (whose wrapper died) from a
+                        # genuinely dead run and re-attach instead of declaring
+                        # it failed. SDK-internal; best-effort.
+                        try:
+                            _cli_proc = client._transport._process
+                            _cli_pid = getattr(_cli_proc, "pid", None)
+                            state["cli_pid"] = int(_cli_pid) if _cli_pid else None
+                        except Exception:
+                            state["cli_pid"] = None
                         try:
                             _atomic_write_json(state_path, state)
                             log.info("state.json written: session_id=%s", sid)
@@ -1671,50 +2769,65 @@ async def _run_one_turn(
                             logger.exception("failed to write state.json")
 
             elif isinstance(msg, AssistantMessage):
+                assistant_seen = True
                 # Capture assistant text as fallback for when the CLI
                 # doesn't write a session jsonl (e.g. API credentials).
                 # ALSO record tool names (surfaced in complete.json).
+                msg_texts: list[str] = []
                 for block in (msg.content or []):
                     if isinstance(block, dict) and block.get("type") == "text":
                         t_ = block.get("text")
                         if isinstance(t_, str) and t_:
-                            sdk_output_parts.append(t_)
+                            msg_texts.append(t_)
                     elif hasattr(block, "text") and block.text:
-                        sdk_output_parts.append(block.text)
+                        msg_texts.append(block.text)
                     # Tool-use block — record tool name for lazy decision.
-                    btype = (
-                        block.get("type") if isinstance(block, dict)
-                        else type(block).__name__
-                    )
-                    if btype == "ToolUseBlock" or btype == "tool_use":
-                        tname = (
-                            block.get("name") if isinstance(block, dict)
-                            else getattr(block, "name", None)
-                        )
+                    if _block_type(block) in ("ToolUseBlock", "tool_use"):
+                        tname = _block_field(block, "name")
                         if tname:
                             used_tools.add(tname)
+                sdk_output_parts.extend(msg_texts)
+                if msg_texts and not getattr(msg, "parent_tool_use_id", None):
+                    final_assistant_text = msg_texts[-1]
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    total_usage = _sum_usage(total_usage, usage)
+                    assistant_usage_snapshots.append((_message_id(msg), usage))
                 # API-level error surfaced by the SDK on the assistant
                 # message (e.g. `rate_limit`, `auth`, etc.). Capture it
                 # NOW — Z.AI's `ResultMessage.subtype` mislabels these
                 # as "success" despite `is_error=True`, so we'd lose the
                 # real classification if we waited for the result frame.
+                # The machine label itself can be wrong: the CLI stamps
+                # Z.AI context-window overflows as `max_output_tokens`
+                # while the human-readable text says "context window
+                # limit" — so the error message TEXT wins over the label
+                # when it matches a context-overflow phrase. Otherwise
+                # turn_manager's overflow→continuation gate never fires.
                 msg_error = getattr(msg, "error", None)
                 if msg_error and not error:
-                    error = str(msg_error)
+                    error = (
+                        normalize_context_overflow_error(" ".join(msg_texts))
+                        or str(msg_error)
+                    )
                 sr = getattr(msg, "stop_reason", None)
                 if sr:
                     last_stop_reason = sr
 
             elif isinstance(msg, ResultMessage):
+                result_seen = True
                 success = not msg.is_error
                 rsr = getattr(msg, "stop_reason", None)
                 if rsr:
                     last_stop_reason = rsr
                 if msg.is_error and not error:
-                    error = msg.subtype or "error"
+                    # Same label-vs-text rule as the assistant-message
+                    # capture: an overflow phrase in the result text wins
+                    # over the CLI's generic subtype.
+                    error = (
+                        normalize_context_overflow_error(msg.result)
+                        or msg.subtype
+                        or "error"
+                    )
                 if msg.result and not sdk_output_parts:
                     sdk_output_parts.append(msg.result)
                 # Z.AI returns subtype="unknown" for timeouts — the real
@@ -1726,7 +2839,7 @@ async def _run_one_turn(
                         error = "timeout"
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    total_usage = _sum_usage(total_usage, usage)
+                    result_usage = usage
                 # Extract context window from model usage metadata.
                 # model_usage is {"model_name": {contextWindow, ...}, ...}
                 mu = getattr(msg, "model_usage", None)
@@ -1738,15 +2851,35 @@ async def _run_one_turn(
                             break
                 break
 
+        if result_seen:
+            try:
+                await resp_iter.__anext__()
+            except StopAsyncIteration:
+                pass
+            except Exception as e:
+                if _is_network_error(e):
+                    raise
+                logger.exception("SDK response stream failed while closing")
+                success = False
+                if not error:
+                    error = f"{type(e).__name__}: {e}"
+
     except asyncio.CancelledError:
         cancelled_cell[0] = True
         error = t("runner.cancelled")
+    except ResponseNoProgressError as e:
+        log.warning("%s", e)
+        error = f"{type(e).__name__}: {e}"
     except Exception as e:
         if _is_network_error(e):
             raise
         logger.exception("SDK run failed")
         error = f"{type(e).__name__}: {e}"
     finally:
+        _set_active_runner_activity(None)
+        _runner_activity_var.reset(activity_token)
+        if current_turn_holder is not None:
+            current_turn_holder[0] = None
         cancel_seen.set()
         if watcher_task and not watcher_task.done():
             watcher_task.cancel()
@@ -1760,6 +2893,27 @@ async def _run_one_turn(
     cancelled = cancelled_cell[0]
     if cancelled and not error:
         error = t("runner.cancelled")
+
+    total_usage = (
+        aggregate_claude_turn_usage(assistant_usage_snapshots, result_usage)
+        or {}
+    )
+
+    # Ghost-completion guard: when a second --resume CLI is spawned while
+    # a previous instance still holds the session, the CLI cross-process
+    # enqueues the prompt into the live instance and returns a zero-token
+    # "success" ResultMessage with NO assistant output — the prompt was
+    # never executed by THIS run. Shared with the Codex runner so both
+    # providers fail closed identically instead of binding a fake reply.
+    success, error = apply_ghost_completion_guard(
+        success=success,
+        cancelled=cancelled,
+        error=error,
+        prompt=prompt,
+        assistant_seen=assistant_seen,
+        total_usage=total_usage,
+        result_seen=result_seen,
+    )
 
     overflow_error = _context_overflow_error(last_stop_reason)
     if overflow_error:
@@ -1798,6 +2952,7 @@ async def _run_one_turn(
         "context_window": context_window,
         "finished_at": datetime.now().isoformat(),
         "sdk_output": " ".join(sdk_output_parts).strip() or None,
+        "final_assistant_text": final_assistant_text,
         "turn_id": turn_id,
         "used_tools": sorted(used_tools),
     }
@@ -1814,6 +2969,7 @@ async def _run_one_turn(
         "total_usage": total_usage,
         "context_window": context_window,
         "sdk_output_parts": sdk_output_parts,
+        "final_assistant_text": final_assistant_text,
         "final_success": final_success,
         "used_tools": used_tools,
     }
@@ -1845,6 +3001,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     model = inputs.get("model")
     reasoning_effort = claude_sdk_effort(inputs.get("reasoning_effort"))
+    permission_mode = (inputs.get("permission") or {}).get("mode") or "bypassPermissions"
     session_id = inputs.get("session_id")
     if session_id == "null":
         session_id = None
@@ -1855,9 +3012,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     ]
     # Fail closed: the backend strips the CLI's in-process timer tools
     # (replaced by its durable scheduler). A claude with live timer
-    # tools could start a turn while this runner lingers for background
-    # work, racing a fresh --resume instance on the shared session
-    # jsonl. If the backend didn't strip them, refuse to spawn.
+    # tools could start a turn of its own, racing a fresh --resume
+    # instance on the shared session jsonl. If the backend didn't strip
+    # them, refuse to spawn.
     from runs_dir import TIMER_TOOLS as _TIMER_TOOLS
     _missing_timer_strips = [
         name for name in _TIMER_TOOLS if name not in disallowed_tools
@@ -1869,6 +3026,30 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             f"{_missing_timer_strips} — refusing to spawn",
         )
         return 1
+    # Fail closed: background execution is forbidden on every run (see
+    # runs_dir.BACKGROUND_WORK_TOOLS). Refuse to spawn if the backend
+    # didn't strip the background-interaction tools, and re-assert the
+    # CLI's native disable switches regardless of the spawner's env so a
+    # misconfigured caller can't re-enable backgrounding.
+    from runs_dir import (
+        AUTO_BACKGROUND_ENV as _AUTO_BG_ENV,
+        BACKGROUND_TASKS_DISABLE_ENV as _BG_DISABLE_ENV,
+        BACKGROUND_WORK_TOOLS as _BG_TOOLS,
+        BG_EXIT_HANDOFF_DISABLE_ENV as _BG_HANDOFF_ENV,
+    )
+    _missing_bg_strips = [
+        name for name in _BG_TOOLS if name not in disallowed_tools
+    ]
+    if _missing_bg_strips:
+        _fail(
+            run_dir,
+            "input.json disallowed_tools is missing background tools "
+            f"{_missing_bg_strips} — refusing to spawn",
+        )
+        return 1
+    os.environ[_BG_DISABLE_ENV] = "1"
+    os.environ[_BG_HANDOFF_ENV] = "1"
+    os.environ.pop(_AUTO_BG_ENV, None)
     # `is None` (not `or`): an explicit empty list means "load NO setting
     # sources" (bare / supervised isolation). `or` would collapse [] back to
     # the default and silently re-enable user/project CLAUDE.md + settings.
@@ -1877,11 +3058,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     # Resolve the Claude config directory (respects CLAUDE_CONFIG_DIR env).
     _cfg_dir_raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    _claude_config_dir = (
-        Path(os.path.expandvars(_cfg_dir_raw))
-        if _cfg_dir_raw
-        else Path.home() / ".claude"
-    )
+    _claude_config_dir = _resolve_claude_config_dir(_cfg_dir_raw)
 
     # Build MCP server config
     mcp_servers: dict = {}
@@ -1889,12 +3066,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     backend_url = inputs.get("backend_url")
     internal_token = inputs.get("internal_token")
     disabled_builtin_tools = _disabled_builtin_tools(inputs)
+    # Bare (TestApe-isolated) sessions are capability-stripped and also
+    # suppress user-facing extras later in MCP setup, so compute this before
+    # any MCP-server gating checks use it.
+    _bare = bool(inputs.get("bare_config", False))
     mssg_sender_session_id = (
         inputs.get("mssg_sender_session_id") or app_session_id
     )
 
     team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        extension_store.extension_id_for_role('team-orchestration')
     )
 
     if mssg_sender_session_id and backend_url and internal_token:
@@ -1914,6 +3095,30 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))
+        if "ensure_named_worker" not in disabled_builtin_tools:
+            communicate_tools.append(_build_ensure_named_worker_tool(
+                cwd=cwd,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "list_available_provider_models" not in disabled_builtin_tools:
+            communicate_tools.append(_build_list_available_provider_models_tool())
+        if "chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "read_chat_history" not in disabled_builtin_tools:
+            communicate_tools.append(_build_read_chat_history_tool())
+        if "create_chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_create_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "set_chat_sender_policy" not in disabled_builtin_tools:
+            communicate_tools.append(_build_set_chat_sender_policy_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "delete_chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_delete_chat_tool())
         if communicate_tools:
             communicate_server = create_sdk_mcp_server(
                 name="communicate",
@@ -1960,6 +3165,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             )
             mcp_servers["handoff"] = handoff_server
 
+    # Capability management — let the model scope its own session (load/release/
+    # list scoped capabilities). Internal, non-bare sessions only; bare sessions
+    # are deliberately capability-stripped.
+    if app_session_id and backend_url and internal_token and not _bare:
+        mcp_servers["capabilities"] = create_sdk_mcp_server(
+            name="capabilities",
+            version="1.0.0",
+            tools=_build_capability_tools(
+                app_session_id=str(app_session_id),
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ),
+        )
+
     if mode == "manager" and team_orchestration_enabled:
         if not app_session_id or not backend_url or not internal_token:
             _fail(
@@ -1996,7 +3215,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # scheduler). They DO get the credential broker — a bare device worker
     # needs it to fetch login secrets — wired off the bare signal instead
     # of the user-facing one.
-    _bare = bool(inputs.get("bare_config", False))
     _user_facing_extras = open_file_panel_enabled and not _bare
     _cred_enabled = open_file_panel_enabled or _bare
 
@@ -2016,7 +3234,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             backend_url=backend_url,
             internal_token=internal_token,
         )
-        tools = [ofp_tool, request_user_input_tool]
+        request_user_approval_tool = _build_request_user_approval_tool(
+            app_session_id=app_session_id or "",
+            backend_url=backend_url,
+            internal_token=internal_token,
+        )
+        tools = [ofp_tool, request_user_input_tool, request_user_approval_tool]
         if file_editing_mode:
             tools.append(_build_start_file_discussion_tool(
                 app_session_id=app_session_id or "",
@@ -2024,11 +3247,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 internal_token=internal_token,
             ))
         ofp_server = create_sdk_mcp_server(
-            name="open-file-panel",
+            name="ui",
             version="1.0.0",
             tools=tools,
         )
-        mcp_servers["open-file-panel"] = ofp_server
+        mcp_servers["ui"] = ofp_server
 
     # NOTE: the Ask container (ASK_SINGLETON_ID) runs NO claude turns of its
     # own — its search turns are orchestrated server-side by
@@ -2041,15 +3264,25 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         bare=_bare,
     ).items():
         mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
-    for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
-        inputs,
-        user_facing=bool(_user_facing_extras and app_session_id),
-        bare=_bare,
-    ).items():
-        if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
-            mcp_servers[_extension_mcp_name] = _extension_mcp_config
-            continue
-        mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+    if _bare:
+        for _extension_mcp_name, _extension_mcp_config in (
+            await _bridge_native_extension_mcp_servers(
+                inputs,
+                user_facing=bool(_user_facing_extras and app_session_id),
+                bare=_bare,
+            )
+        ).items():
+            mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+    if not _bare:
+        for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
+            inputs,
+            user_facing=bool(_user_facing_extras and app_session_id),
+            bare=_bare,
+        ).items():
+            if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
+                mcp_servers[_extension_mcp_name] = _extension_mcp_config
+                continue
+            mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
 
     fork = bool(inputs.get("fork", False))
 
@@ -2090,10 +3323,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     extra_args = {"exclude-dynamic-system-prompt-sections": None}
     if _bare:
-        extra_args["bare"] = None
+        # Claude Code 2.1.x on Windows treats --bare as an unauthenticated
+        # environment for subscription auth, yielding "Not logged in" even
+        # when the regular CLI is logged in. Keep isolation via empty
+        # setting_sources, no runtime skill plugin, and disabled slash commands.
         extra_args["disable-slash-commands"] = None
 
-    provider_run_config = inputs.get("provider_run_config") or {}
+    raw_provider_run_config = inputs.get("provider_run_config")
+    provider_run_config = raw_provider_run_config if isinstance(raw_provider_run_config, dict) else {}
     skill_plugin = _materialize_claude_skill_plugin(
         run_dir,
         cwd,
@@ -2102,9 +3339,76 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     plugins = [skill_plugin] if skill_plugin else []
 
+    # CAVEAT (unverified): can_use_tool is registered even on resumed turns
+    # (resume=session_id). If the Claude Agent SDK rejects can_use_tool+resume
+    # at query time, every non-first interactive turn breaks. Needs a live SDK
+    # probe to confirm; if it fails, add probe-and-degrade here (force bypass
+    # for the turn + surface a one-time notice) — never a silent fallback.
+    # Interactive tool approvals: for permission modes that ask, register a
+    # can_use_tool callback that round-trips to the backend → frontend. The
+    # SDK only invokes it when the mode actually requires approval, so it's
+    # safe to register for any non-bypass mode. bypassPermissions/dontAsk
+    # never ask, so no callback (and no async-iterable prompt constraint).
+    interactive_permissions = (
+        permission_mode in ("default", "acceptEdits", "plan", "auto")
+        and bool(backend_url)
+        and bool(internal_token)
+        and bool(app_session_id)
+    )
+    can_use_tool_cb = None
+    if interactive_permissions:
+        _approval_run_id = run_dir.name
+        _approval_cancel_path = run_dir / "cancel"
+        _approval_backend_url = backend_url
+        _approval_token = internal_token
+        _approval_session = app_session_id
+
+        async def _wait_cancel() -> bool:
+            while True:
+                if _approval_cancel_path.exists():
+                    return True
+                await asyncio.sleep(0.5)
+
+        async def _can_use_tool(tool_name, tool_input, context):
+            summary = _describe_tool_call(tool_name, tool_input)
+            # Race the backend decision against the turn cancel sentinel so
+            # Stop aborts an in-flight approval instead of hanging up to the
+            # backend timeout. The losing task is cancelled.
+            approval_task = asyncio.ensure_future(asyncio.to_thread(
+                request_tool_approval,
+                backend_url=_approval_backend_url,
+                internal_token=_approval_token,
+                app_session_id=_approval_session,
+                run_id=_approval_run_id,
+                provider_kind="claude",
+                tool_name=str(tool_name),
+                summary=summary,
+            ))
+            cancel_task = asyncio.ensure_future(_wait_cancel())
+            done, pending = await asyncio.wait(
+                {approval_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if cancel_task in done:
+                return PermissionResultDeny(
+                    behavior="deny", message="Cancelled by user",
+                )
+            approved = approval_task.result() if approval_task in done else False
+            if approved:
+                return PermissionResultAllow(behavior="allow")
+            return PermissionResultDeny(
+                behavior="deny",
+                message="Denied by user in Better Agent",
+            )
+
+        can_use_tool_cb = _can_use_tool
+
     options = ClaudeAgentOptions(
         mcp_servers=mcp_servers,
-        permission_mode="bypassPermissions",
+        permission_mode=permission_mode,
+        can_use_tool=can_use_tool_cb,
+        hooks=_background_policy_hooks(),
         cwd=cwd,
         model=model,
         effort=reasoning_effort,
@@ -2113,9 +3417,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         setting_sources=setting_sources,
         disallowed_tools=disallowed_tools,
         enable_file_checkpointing=True,
+        # SDK default is 1 MiB per stdout JSON line; a single image
+        # tool_result (base64 embedded twice per line by the CLI) exceeds
+        # that and kills the turn mid-run with SDKJSONDecodeError.
+        max_buffer_size=SUBPROCESS_LINE_LIMIT_BYTES,
         cli_path=_resolve_claude_cli(),
         extra_args=extra_args,
         plugins=plugins,
+        env=_claude_cache_env(),
         **_runner_options,
     )
 
@@ -2167,6 +3476,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "complete": False,
     }
     state_path = run_dir / "state.json"
+    fork_parent_line_count = _fork_parent_line_count(provider_run_config)
 
     # On resume, write state.json EARLY (before connecting) so the backend
     # bootstrap can start tailing immediately without waiting for the SDK
@@ -2190,8 +3500,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # vs a healthy one (long tool call, streaming). The heartbeat
     # stops if the event loop is blocked (stuck SDK receive_response).
     _heartbeat_shutdown = asyncio.Event()
+    _current_turn_holder = [None]
     _heartbeat_task = asyncio.create_task(
-        _heartbeat_writer(run_dir, [None], _heartbeat_shutdown),
+        _heartbeat_writer(run_dir, _current_turn_holder, _heartbeat_shutdown),
         name="runner-heartbeat",
     )
 
@@ -2230,11 +3541,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 run_dir=run_dir,
                 turn_id=run_dir.name,
                 pre_query_byte_offset=pre_query_byte_offset,
+                fork_parent_line_count=fork_parent_line_count if fork else 0,
                 state=state,
                 state_path=state_path,
                 cwd=cwd,
                 claude_config_dir=_claude_config_dir,
                 log=log,
+                interactive_permissions=interactive_permissions,
+                current_turn_holder=_current_turn_holder,
             )
         except Exception as e:
             if not _is_network_error(e):
@@ -2272,9 +3586,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             continue
 
         # Success — reset backoff for future transient errors.
-        # NOTE: no disconnect here — the client stays connected so the
-        # CLI (and its background shells) survive the babysitter linger
-        # below; disconnect happens after the linger ends.
+        # Disconnect happens right after the completion artifacts are
+        # durable below — the runner is strictly per-turn (background
+        # execution is disabled on every run, see runs_dir
+        # BACKGROUND_TASKS_DISABLE_ENV), so nothing outlives the turn.
         _retry_backoff = 2.0
         break
 
@@ -2287,10 +3602,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     cancelled = turn_result["cancelled"]
     sdk_output_parts = turn_result["sdk_output_parts"]
     final_success = turn_result["final_success"]
+    final_assistant_text = turn_result.get("final_assistant_text")
     context_window = turn_result.get("context_window")
 
     # Write complete.json (run-level — the backend's _watch_complete
-    # finalizes the turn off this file while the babysitter lingers).
+    # finalizes the turn off this file).
     complete = {
         "success": final_success,
         "session_id": discovered_sid,
@@ -2299,6 +3615,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "context_window": context_window,
         "finished_at": datetime.now().isoformat(),
         "sdk_output": " ".join(sdk_output_parts).strip() or None,
+        "final_assistant_text": final_assistant_text,
     }
     try:
         # Atomic: the backend's _watch_complete fires on this file's
@@ -2319,20 +3636,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         logger.exception("failed to finalize state.json")
 
-    # Babysitter linger: complete.json is durable (the backend finalized
-    # the turn off it; new prompts spawn fresh --resume instances), but
-    # the CLI stays connected and alive while detached background work
-    # (run_in_background shells, Monitor watchers) is still running.
-    # The heartbeat keeps refreshing runner_alive throughout so the
-    # backend can tell a live babysitter from a dead orphan.
-    await _linger_for_background_work(run_dir, log)
-
+    # Per-turn process: the turn is finalized (complete.json + state.json
+    # durable) — close the CLI and exit. Background execution is disabled
+    # on every run, so no work can outlive this process.
     try:
-        await client.disconnect()
+        # Bounded: a hung disconnect must not pin this process — the
+        # backend's wind-down escalation reaps a runner that outlives
+        # its grace window, but exiting promptly here is the normal path.
+        await asyncio.wait_for(client.disconnect(), timeout=15.0)
+    except asyncio.TimeoutError:
+        logger.warning("client.disconnect() timed out — exiting anyway")
     except Exception:
         logger.exception("client.disconnect() failed")
 
-    # Linger over and CLI closed → stop the heartbeat, THEN remove the
+    # CLI closed → stop the heartbeat, THEN remove the
     # `runner_alive` sentinel. Stopping BEFORE the unlink prevents a final
     # heartbeat tick from re-creating the file after we delete it. The
     # sentinel thus outlives the completion artifact the watchdog waits

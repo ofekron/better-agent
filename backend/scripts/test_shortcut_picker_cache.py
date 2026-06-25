@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import _test_home
@@ -23,6 +24,10 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 class _ProviderHandler(BaseHTTPRequestHandler):
     calls = 0
+    delay = 0.0
+    status = 200
+    text = "[0]"
+    retry_after = "60"
     lock = threading.Lock()
 
     def do_POST(self):
@@ -31,9 +36,16 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             self.rfile.read(length)
         with self.lock:
             type(self).calls += 1
-        body = json.dumps({"content": [{"text": "[0]"}]}).encode("utf-8")
-        self.send_response(200)
+        if type(self).delay:
+            time.sleep(type(self).delay)
+        if type(self).status >= 400:
+            body = json.dumps({"error": "rate limited"}).encode("utf-8")
+        else:
+            body = json.dumps({"content": [{"text": type(self).text}]}).encode("utf-8")
+        self.send_response(type(self).status)
         self.send_header("content-type", "application/json")
+        if type(self).status == 429:
+            self.send_header("retry-after", type(self).retry_after)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -45,12 +57,15 @@ class _ProviderHandler(BaseHTTPRequestHandler):
 async def _run() -> bool:
     import shortcut_picker
 
+    await asyncio.to_thread(shortcut_picker.prewarm_http_stack)
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     shortcut_picker._cache.clear()
     shortcut_picker._inflight.clear()
+    shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.2
     shortcut_picker.user_prefs.get_shortcut_responses = lambda: ["TLDR", "/Adv"]
     shortcut_picker.config_store.get_default_provider = lambda: {
         "id": "test-provider",
@@ -78,6 +93,81 @@ async def _run() -> bool:
         third = await shortcut_picker.pick_shortcuts("different output")
         if third != ["TLDR"] or _ProviderHandler.calls != 2:
             print(f"{FAIL} distinct input result={third!r} calls={_ProviderHandler.calls}")
+            return False
+
+        _ProviderHandler.delay = 0.4
+        slow_start = time.monotonic()
+        slow = await shortcut_picker.pick_shortcuts("slow output")
+        elapsed = time.monotonic() - slow_start
+        if slow != ["TLDR", "/Adv"] or elapsed > 0.35:
+            print(f"{FAIL} slow picker did not fall back quickly result={slow!r} elapsed={elapsed:.3f}")
+            return False
+        await asyncio.sleep(0.35)
+        _ProviderHandler.delay = 0.0
+        cached_slow = await shortcut_picker.pick_shortcuts("slow output")
+        if cached_slow != ["TLDR"]:
+            print(f"{FAIL} timed-out picker did not populate cache: {cached_slow!r}")
+            return False
+
+        _ProviderHandler.delay = 0.15
+        cancelled_task = asyncio.create_task(shortcut_picker.pick_shortcuts("cancelled output"))
+        await asyncio.sleep(0.02)
+        cancelled_task.cancel()
+        try:
+            await cancelled_task
+            print(f"{FAIL} cancelled picker did not propagate cancellation")
+            return False
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.2)
+        _ProviderHandler.delay = 0.0
+        after_cancel = await shortcut_picker.pick_shortcuts("after cancelled output")
+        if after_cancel != ["TLDR"]:
+            print(f"{FAIL} cancelled picker stranded provider lease: {after_cancel!r}")
+            return False
+
+        errors = []
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        try:
+            _ProviderHandler.delay = 0.08
+            _ProviderHandler.status = 429
+            shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.01
+            failed = await shortcut_picker.pick_shortcuts("rate limited output")
+            if failed != ["TLDR", "/Adv"]:
+                print(f"{FAIL} rate-limited picker did not return fallback: {failed!r}")
+                return False
+            await asyncio.sleep(0.2)
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+            _ProviderHandler.delay = 0.0
+            _ProviderHandler.status = 200
+            shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.2
+
+        if errors:
+            print(f"{FAIL} rate-limited background task leaked loop errors: {errors!r}")
+            return False
+        if shortcut_picker._inflight:
+            print(f"{FAIL} rate-limited picker left inflight tasks: {shortcut_picker._inflight!r}")
+            return False
+
+        calls_after_limit = _ProviderHandler.calls
+        _ProviderHandler.text = "[1]"
+        suppressed = await shortcut_picker.pick_shortcuts("another rate limited output")
+        if suppressed != ["TLDR", "/Adv"] or _ProviderHandler.calls != calls_after_limit:
+            print(f"{FAIL} provider cooldown did not suppress retry: {suppressed!r}")
+            return False
+
+        original_provider = shortcut_picker.config_store.get_default_provider
+        shortcut_picker.config_store.get_default_provider = lambda: {
+            **original_provider(),
+            "api_key": "different-test-key",
+        }
+        retried = await shortcut_picker.pick_shortcuts("rate limited output")
+        _ProviderHandler.text = "[0]"
+        if retried != ["/Adv"]:
+            print(f"{FAIL} rate-limited fallback was cached instead of retried: {retried!r}")
             return False
 
         print(f"{PASS} shortcut picker coalesces and caches exact duplicate requests")

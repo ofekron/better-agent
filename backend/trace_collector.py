@@ -1,9 +1,11 @@
-"""Trace collection for orchestration visibility.
+"""Per-turn trace collection for analytics.
 
-Captures every CLI call's input prompt, raw output, parsed output,
-token usage, timing, and step metadata into a structured trace.
-Traces are persisted to ~/.better-claude/traces/ as JSON files
-with a JSONL index for fast grep.
+Each CLI call's token usage, timing, and step metadata are captured into a
+TraceCollector and appended to ``~/.better-claude/traces/index.jsonl`` as a
+compact single-line entry. The index is the substrate for the analytics
+page; ``trace_step`` events stream live to the render tree via the WS
+callback. Token-usage accounting helpers are reused across the live turn
+path (runner / turn_manager / orchestrator).
 """
 
 import json
@@ -12,8 +14,11 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
+from typing import Awaitable, Callable, Iterable, Iterator, Optional
+
+import portable_lock
 from paths import ba_home
-from typing import Awaitable, Callable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +29,120 @@ TOKEN_USAGE_KEYS = (
     "cache_read_input_tokens",
 )
 
+# Optional cache-write TTL breakdown. Present only when the provider
+# reports it (Anthropic nests it as usage.cache_creation.ephemeral_*);
+# omitted — never zero-filled — when absent, so the UI can distinguish
+# "no 1h writes" from "provider doesn't report the split".
+CACHE_BREAKDOWN_KEYS = (
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+)
+_NESTED_CACHE_CREATION_FIELDS = {
+    "cache_creation_5m_tokens": "ephemeral_5m_input_tokens",
+    "cache_creation_1h_tokens": "ephemeral_1h_input_tokens",
+}
+
+# Only direct human input counts as a user turn. Delegated turns (mssg /
+# team_ask / delegate_task), scheduled, supervisor, and internal/system turns
+# are all non-user — they are BA-injected prompts, not a human typing.
+USER_TURN_KINDS = frozenset({"direct_user"})
+_TEAM_USER_SOURCES = {
+    "mssg": "mssg",
+    "team_ask": "team_ask",
+    "delegate_task": "delegate_task",
+}
+
+
+def classify_turn_kind(
+    *,
+    source: Optional[str],
+    user_initiated: bool,
+    user_prompt: str,
+) -> str:
+    clean_source = str(source or "").strip()
+    if clean_source in _TEAM_USER_SOURCES:
+        return _TEAM_USER_SOURCES[clean_source]
+    if user_initiated and user_prompt.strip():
+        return "direct_user"
+    if not clean_source and user_prompt.strip():
+        return "direct_user"
+    return "system"
+
+
+def is_user_turn_index_entry(entry: dict) -> bool:
+    kind = str((entry or {}).get("turn_kind") or "").strip()
+    if kind:
+        return kind in USER_TURN_KINDS
+    source = str((entry or {}).get("turn_source") or (entry or {}).get("source") or "").strip()
+    if source:
+        return False
+    return bool((entry or {}).get("user_prompt_preview"))
+
 
 def _normalize_token_usage(usage: object) -> Optional[dict]:
     if not isinstance(usage, dict):
         return None
     if not any(k in usage for k in TOKEN_USAGE_KEYS):
         return None
-    return {k: int(usage.get(k) or 0) for k in TOKEN_USAGE_KEYS}
+    out = {k: int(usage.get(k) or 0) for k in TOKEN_USAGE_KEYS}
+    nested = usage.get("cache_creation")
+    nested = nested if isinstance(nested, dict) else {}
+    for flat_key in CACHE_BREAKDOWN_KEYS:
+        if flat_key in usage:
+            out[flat_key] = int(usage.get(flat_key) or 0)
+        elif _NESTED_CACHE_CREATION_FIELDS[flat_key] in nested:
+            out[flat_key] = int(
+                nested.get(_NESTED_CACHE_CREATION_FIELDS[flat_key]) or 0,
+            )
+    return out
+
+
+def _merge_usage(usages: Iterable[dict]) -> Optional[dict]:
+    total = {k: 0 for k in TOKEN_USAGE_KEYS}
+    saw_any = False
+    for usage in usages:
+        normalized = _normalize_token_usage(usage)
+        if normalized is None:
+            continue
+        saw_any = True
+        for key in TOKEN_USAGE_KEYS:
+            total[key] += normalized[key]
+        for key in CACHE_BREAKDOWN_KEYS:
+            if key in normalized:
+                total[key] = total.get(key, 0) + normalized[key]
+    return total if saw_any else None
+
+
+def merge_token_usages(usages: Iterable[dict]) -> Optional[dict]:
+    """Public field-wise merge of token_usage dicts (base keys summed,
+    cache-write TTL breakdown summed only where present)."""
+    return _merge_usage(usages)
+
+
+def aggregate_claude_usage_snapshots(
+    snapshots: Iterable[tuple[Optional[str], object]],
+) -> Optional[dict]:
+    keyed: dict[str, dict] = {}
+    unkeyed: list[dict] = []
+    for message_id, usage in snapshots:
+        normalized = _normalize_token_usage(usage)
+        if normalized is None:
+            continue
+        if message_id:
+            keyed[str(message_id)] = normalized
+        else:
+            unkeyed.append(normalized)
+    return _merge_usage([*keyed.values(), *unkeyed])
+
+
+def aggregate_claude_turn_usage(
+    assistant_snapshots: Iterable[tuple[Optional[str], object]],
+    result_usage: object = None,
+) -> Optional[dict]:
+    normalized_result = _normalize_token_usage(result_usage)
+    if normalized_result is not None:
+        return normalized_result
+    return aggregate_claude_usage_snapshots(assistant_snapshots)
 
 
 def _traces_dir() -> Path:
@@ -41,6 +153,19 @@ def _traces_dir() -> Path:
     A12: single root helper per store — every read/write below
     funnels through this one."""
     return ba_home() / "traces"
+
+
+@contextmanager
+def _index_lock() -> Iterator[None]:
+    path = ba_home() / "traces_index.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        portable_lock.lock_ex(handle.fileno())
+        yield
+    finally:
+        portable_lock.unlock(handle.fileno())
+        handle.close()
 
 
 class TraceStep:
@@ -99,26 +224,29 @@ class TraceStep:
 class TraceCollector:
     """Collects trace data for a single orchestration run.
 
-    Usage:
-        trace = TraceCollector(session_id, user_prompt)
-        trace.set_ws_callback(ws_callback)
-
-        step = trace.start_step("routing")
-        step.input_prompt = routing_prompt
-        result = await self._run_cli(...)
-        step.raw_output = result["output"]
-        step.parsed_output = parsed_decision
-        step.token_usage = extract_token_usage(result["events"])
-        await trace.end_step(step)
-
-        trace.finalize()
-        trace.save()
+    Steps stream live to the render tree as ``trace_step`` WS events; on
+    ``save()`` a compact index entry is appended to ``index.jsonl``, the
+    substrate the analytics page reads.
     """
 
-    def __init__(self, session_id: str, user_prompt: str):
+    def __init__(
+        self,
+        session_id: str,
+        user_prompt: str,
+        *,
+        source: Optional[str] = None,
+        user_initiated: bool = True,
+    ):
         self.trace_id = f"tr_{uuid.uuid4().hex[:12]}"
         self.session_id = session_id
         self.user_prompt = user_prompt
+        self.turn_source = str(source or "").strip()
+        self.user_initiated = bool(user_initiated)
+        self.turn_kind = classify_turn_kind(
+            source=self.turn_source,
+            user_initiated=self.user_initiated,
+            user_prompt=user_prompt,
+        )
         self.timestamp = datetime.now().isoformat()
         self.steps: list[TraceStep] = []
         self._started_at = time.monotonic()
@@ -176,45 +304,30 @@ class TraceCollector:
                     total[key] = total.get(key, 0) + (val or 0)
         return total
 
-    def to_dict(self) -> dict:
-        return {
-            "trace_id": self.trace_id,
-            "session_id": self.session_id,
-            "user_prompt": self.user_prompt,
-            "timestamp": self.timestamp,
-            "duration_ms": self.total_duration_ms,
-            "total_token_usage": self.total_token_usage,
-            "step_count": len(self.steps),
-            "steps": [s.to_dict() for s in self.steps],
-        }
-
     def to_index_entry(self) -> dict:
-        """Compact single-line entry for the index file."""
+        """Compact single-line entry appended to the index file."""
         return {
             "trace_id": self.trace_id,
             "session_id": self.session_id,
             "timestamp": self.timestamp,
             "user_prompt_preview": self.user_prompt[:100],
+            "turn_source": self.turn_source,
+            "turn_kind": self.turn_kind,
+            "user_initiated": self.user_initiated,
             "duration_ms": self.total_duration_ms,
             "step_count": len(self.steps),
             "total_token_usage": self.total_token_usage,
         }
 
     def save(self):
-        """Persist trace to disk: full trace file + index entry."""
+        """Append this turn's compact index entry to ``index.jsonl``."""
         try:
-            session_trace_dir = _traces_dir() / self.session_id
-            session_trace_dir.mkdir(parents=True, exist_ok=True)
-
-            # Full trace
-            trace_path = session_trace_dir / f"{self.trace_id}.json"
-            trace_path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-
-            # Index (append)
             index_path = _traces_dir() / "index.jsonl"
-            with open(index_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(self.to_index_entry()) + "\n")
-
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_line = json.dumps(self.to_index_entry())
+            with _index_lock():
+                with open(index_path, "a", encoding="utf-8") as f:
+                    f.write(index_line + "\n")
             logger.info(
                 "Trace saved: %s (session=%s, steps=%d, duration=%sms)",
                 self.trace_id, self.session_id, len(self.steps), self.total_duration_ms,
@@ -224,7 +337,7 @@ class TraceCollector:
 
 
 # ============================================================================
-# Helpers
+# Token-usage helpers (consumed by the live turn path)
 # ============================================================================
 
 def extract_token_usage(events: list[dict]) -> Optional[dict]:
@@ -251,8 +364,7 @@ def extract_token_usage(events: list[dict]) -> Optional[dict]:
                 return tu
 
     # 2) Fallback: aggregate assistant.message.usage across agent_message events.
-    agg: dict[str, int] = {}
-    saw_any = False
+    snapshots: list[tuple[Optional[str], object]] = []
     for e in events:
         if not isinstance(e, dict):
             continue
@@ -267,12 +379,8 @@ def extract_token_usage(events: list[dict]) -> Optional[dict]:
         usage = message.get("usage")
         if not isinstance(usage, dict):
             continue
-        for k in TOKEN_USAGE_KEYS:
-            v = usage.get(k)
-            if isinstance(v, int):
-                agg[k] = agg.get(k, 0) + v
-                saw_any = True
-    return agg if saw_any else None
+        snapshots.append((message.get("id"), usage))
+    return aggregate_claude_usage_snapshots(snapshots)
 
 
 def extract_provider_result_token_usage(result: dict) -> Optional[dict]:
@@ -283,38 +391,14 @@ def extract_provider_result_token_usage(result: dict) -> Optional[dict]:
 
 
 # ============================================================================
-# Query functions
+# Index reader (analytics substrate)
 # ============================================================================
-
-def list_traces(session_id: Optional[str] = None, limit: int = 100) -> list[dict]:
-    """Read index.jsonl and return trace entries, newest first."""
-    index_path = _traces_dir() / "index.jsonl"
-    if not index_path.exists():
-        return []
-
-    entries = []
-    for line in reversed(index_path.read_text(encoding="utf-8").splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-            if session_id and entry.get("session_id") != session_id:
-                continue
-            entries.append(entry)
-            if len(entries) >= limit:
-                break
-        except json.JSONDecodeError:
-            continue
-    return entries
-
 
 def iter_trace_index() -> Iterator[dict]:
     """Stream every trace index entry in append order (oldest first).
 
-    Unlike ``list_traces`` (newest-first, capped at 100), this yields the
-    full index so read-only analytics can filter the whole history by a
-    timestamp range. Skips unparseable lines defensively.
+    Yields the full index so read-only analytics can filter the whole
+    history by a timestamp range. Skips unparseable lines defensively.
     """
     index_path = _traces_dir() / "index.jsonl"
     if not index_path.exists():
@@ -327,156 +411,3 @@ def iter_trace_index() -> Iterator[dict]:
             yield json.loads(line)
         except json.JSONDecodeError:
             continue
-
-
-def get_trace(trace_id: str) -> Optional[dict]:
-    """Find and load a full trace by trace_id."""
-    if not _traces_dir().exists():
-        return None
-    for session_dir in _traces_dir().iterdir():
-        if not session_dir.is_dir():
-            continue
-        trace_path = session_dir / f"{trace_id}.json"
-        if trace_path.exists():
-            try:
-                return json.loads(trace_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return None
-    return None
-
-
-def search_traces(query: str, limit: int = 50) -> list[dict]:
-    """Grep across index.jsonl for matching entries."""
-    index_path = _traces_dir() / "index.jsonl"
-    if not index_path.exists():
-        return []
-
-    results = []
-    query_lower = query.lower()
-    for line in reversed(index_path.read_text(encoding="utf-8").splitlines()):
-        if query_lower in line.lower():
-            try:
-                results.append(json.loads(line.strip()))
-                if len(results) >= limit:
-                    break
-            except json.JSONDecodeError:
-                continue
-    return results
-
-
-def grep_traces(
-    pattern: str,
-    field: str = "all",
-    session_id: Optional[str] = None,
-    step_type: Optional[str] = None,
-    limit: int = 50,
-) -> list[dict]:
-    """Deep search into full trace files, matching against prompts/outputs.
-
-    Args:
-        pattern: text to search for (case-insensitive)
-        field: "prompts", "outputs", "all"
-        session_id: filter to a specific session
-        step_type: filter to a specific step type (routing, thread_execution, etc.)
-        limit: max results
-
-    Returns list of matches: {trace_id, step_index, step_type, field, match_context, ...}
-    """
-    if not _traces_dir().exists():
-        return []
-
-    pattern_lower = pattern.lower()
-    results = []
-
-    dirs = [_traces_dir() / session_id] if session_id else sorted(_traces_dir().iterdir(), reverse=True)
-    for session_dir in dirs:
-        if not session_dir.is_dir():
-            continue
-        for trace_file in sorted(session_dir.glob("*.json"), reverse=True):
-            try:
-                trace = json.loads(trace_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-
-            for i, step in enumerate(trace.get("steps", [])):
-                if step_type and step.get("step_type") != step_type:
-                    continue
-
-                matches_in = []
-                if field in ("prompts", "all"):
-                    prompt = step.get("input_prompt", "")
-                    if pattern_lower in prompt.lower():
-                        # Extract match context (100 chars around first hit)
-                        pos = prompt.lower().find(pattern_lower)
-                        start = max(0, pos - 50)
-                        end = min(len(prompt), pos + len(pattern) + 50)
-                        matches_in.append(("input_prompt", prompt[start:end]))
-
-                if field in ("outputs", "all"):
-                    output = step.get("raw_output", "")
-                    if pattern_lower in output.lower():
-                        pos = output.lower().find(pattern_lower)
-                        start = max(0, pos - 50)
-                        end = min(len(output), pos + len(pattern) + 50)
-                        matches_in.append(("raw_output", output[start:end]))
-
-                for matched_field, context in matches_in:
-                    results.append({
-                        "trace_id": trace.get("trace_id"),
-                        "session_id": trace.get("session_id"),
-                        "timestamp": trace.get("timestamp"),
-                        "user_prompt_preview": trace.get("user_prompt", "")[:100],
-                        "step_index": i,
-                        "step_type": step.get("step_type"),
-                        "thread_name": step.get("thread_name"),
-                        "matched_field": matched_field,
-                        "match_context": context,
-                    })
-                    if len(results) >= limit:
-                        return results
-
-    return results
-
-
-def get_latest_trace(session_id: Optional[str] = None) -> Optional[dict]:
-    """Get the most recent full trace, optionally for a specific session."""
-    entries = list_traces(session_id=session_id, limit=1)
-    if not entries:
-        return None
-    return get_trace(entries[0]["trace_id"])
-
-
-def get_trace_stats(session_id: Optional[str] = None) -> dict:
-    """Aggregate stats across all traces (or for a session)."""
-    entries = list_traces(session_id=session_id, limit=10000)
-    if not entries:
-        return {"count": 0}
-
-    total_duration = 0
-    total_tokens: dict[str, int] = {}
-    total_steps = 0
-    step_type_counts: dict[str, int] = {}
-
-    for entry in entries:
-        total_duration += entry.get("duration_ms") or 0
-        total_steps += entry.get("step_count", 0)
-        for key, val in entry.get("total_token_usage", {}).items():
-            total_tokens[key] = total_tokens.get(key, 0) + (val or 0)
-
-    # For step type breakdown, load a sample of full traces
-    sample_traces = entries[:20]
-    for entry in sample_traces:
-        trace = get_trace(entry["trace_id"])
-        if trace:
-            for step in trace.get("steps", []):
-                st = step.get("step_type", "unknown")
-                step_type_counts[st] = step_type_counts.get(st, 0) + 1
-
-    return {
-        "count": len(entries),
-        "total_duration_ms": total_duration,
-        "avg_duration_ms": round(total_duration / len(entries)) if entries else 0,
-        "total_token_usage": total_tokens,
-        "total_steps": total_steps,
-        "step_type_counts": step_type_counts,
-    }

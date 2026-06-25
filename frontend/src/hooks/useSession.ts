@@ -2,13 +2,10 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type {
   OpenFilePanel,
   OrchestrationMode,
-  RearrangerStats,
-  RearrangerTree,
   RunInfo,
   Session,
   ChatMessage,
   CapabilityContext,
-  TokenUsage,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -19,8 +16,28 @@ import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 import { API } from "../api";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
+import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
+import { subscribeMany } from "../lib/eventBus";
 
 export { sortSessionsForList };
+
+export interface CreateSessionOptions {
+  name: string;
+  model: string;
+  cwd: string;
+  orchestrationMode?: OrchestrationMode;
+  browserHarnessEnabled?: boolean;
+  providerId?: string;
+  browserHarnessHeadless?: boolean;
+  fileEditEnabled?: boolean;
+  fileEditPath?: string;
+  nodeId?: string;
+  reasoningEffort?: string;
+  permission?: Record<string, string>;
+  clientSessionId?: string;
+  capabilityContexts?: CapabilityContext[];
+  folderId?: string | null;
+}
 
 export type SessionMetadataPatch = {
   inline_tags?: InlineTag[];
@@ -35,11 +52,15 @@ export type SessionMetadataPatch = {
   reasoning_effort?: string;
   cwd?: string;
   provider_id?: string;
+  permission?: Session["permission"];
   supervisor_enabled?: boolean;
   supervisor_custom_prompt?: string;
   pinned?: boolean;
+  topbar_pinned?: boolean;
+  topbar_pinned_at?: string | null;
   archived?: boolean;
   worker_eligible?: boolean;
+  agent_rename_allowed?: boolean;
   working_mode?: Session["working_mode"];
   working_mode_meta?: Session["working_mode_meta"];
   notes?: import("../types").Note[];
@@ -48,6 +69,8 @@ export type SessionMetadataPatch = {
   messages?: ChatMessage[];
   message_count?: number;
   updated_at?: string;
+  last_user_prompt_at?: string;
+  last_opened_at?: string;
   pagination?: Session["pagination"];
   right_panel_open?: boolean;
   right_panel_active_tab?:
@@ -56,12 +79,23 @@ export type SessionMetadataPatch = {
     | "canvas"
     | "comments"
     | "todos"
+    | "screen"
+    | "changes"
+    | "communications"
+    | "board"
     | null;
+  right_panel_width?: number | null;
+  right_panel_mobile_height?: number | null;
+  right_panel_todos_dismissed?: boolean;
+  right_panel_auto_opened_by?: Session["right_panel_auto_opened_by"];
+  sidebar_minimized?: boolean;
 };
 
 type SessionMetadataUpdater =
   | SessionMetadataPatch
   | ((session: Session) => SessionMetadataPatch);
+
+type ReconcilePreserveRegistry = Record<string, Record<string, SessionMetadataUpdater>>;
 
 export type SessionListFilters = {
   projectPath?: string;
@@ -77,6 +111,11 @@ export type SessionListFilters = {
   modes?: string[];
   sources?: string[];
   sortBy?: string;
+  /** Status-bucket grouping as the strongest sort key (below empty-new +
+   * pinned). Backend-owned (pref `session_status_sort`); the value here
+   * mirrors the `/api/sessions` response so the local re-sort matches the
+   * backend page order. */
+  statusSort?: boolean;
 };
 
 function sameStringList(a?: string[], b?: string[]): boolean {
@@ -84,6 +123,30 @@ function sameStringList(a?: string[], b?: string[]): boolean {
   const right = b ?? [];
   if (left.length !== right.length) return false;
   return left.every((value, index) => value === right[index]);
+}
+
+/** True only when this list fetch covers the full, unfiltered global
+ * session universe (no narrowing filter active). The sessionRegistry is
+ * the ALL-projects source of truth for per-project running/unread
+ * aggregates, so only a global fetch may `replaceFromRows` (which evicts
+ * everything not in the page). A fetch narrowed to one project (or search/
+ * tag/folder/etc.) is a subset — replacing from it would wipe every OTHER
+ * project's sessions out of the registry, zeroing their aggregate badges
+ * until a fresh WS delta happened to re-materialize them. Narrowed fetches
+ * therefore `seedFromRows` (fill-only) instead. */
+export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
+  return (
+    !f.projectPath &&
+    !(f.search ?? "").trim() &&
+    !f.showArchived &&
+    (f.fileEditMode ?? "any") === "any" &&
+    !(f.folderIds?.length) &&
+    !(f.tagIds?.length) &&
+    !(f.providerIds?.length) &&
+    !(f.modelIds?.length) &&
+    !(f.modes?.length) &&
+    !(f.sources?.length)
+  );
 }
 
 function sameSessionListFilters(
@@ -103,7 +166,8 @@ function sameSessionListFilters(
     sameStringList(a.modelIds, b.modelIds) &&
     sameStringList(a.modes, b.modes) &&
     sameStringList(a.sources, b.sources) &&
-    (a.sortBy ?? "") === (b.sortBy ?? "")
+    (a.sortBy ?? "") === (b.sortBy ?? "") &&
+    Boolean(a.statusSort) === Boolean(b.statusSort)
   );
 }
 
@@ -135,6 +199,31 @@ function isSidebarVisibleSession(session: Session): boolean {
     (session.working_mode === "file_editing" &&
       session.working_mode_meta?.persistent === true)
   );
+}
+
+function canLocallyInsertIntoSessionList(
+  session: Session,
+  filters: SessionListFilters,
+): boolean {
+  if (!isSidebarVisibleSession(session)) return false;
+  // Mirrors backend session_matches_project: all_projects sessions (e.g. the
+  // assistant singleton) belong to every project regardless of cwd.
+  if (
+    filters.projectPath &&
+    !session.all_projects &&
+    session.cwd !== filters.projectPath
+  )
+    return false;
+  if (filters.search?.trim()) return false;
+  if (!filters.showArchived && session.archived) return false;
+  if (filters.fileEditMode && filters.fileEditMode !== "any") return false;
+  if (filters.folderIds?.length) return false;
+  if (filters.tagIds?.length) return false;
+  if (filters.providerIds?.length) return false;
+  if (filters.modelIds?.length) return false;
+  if (filters.modes?.length) return false;
+  if (filters.sources?.length) return false;
+  return true;
 }
 
 /** Return the two forks bound to an adv-sync overlay, in
@@ -170,11 +259,11 @@ function totalEventCount(msg: ChatMessage): number {
   return n;
 }
 
-export function mergeEventlessMessageDelta(
+export function mergeProjectedMessageDelta(
   current: ChatMessage,
   incoming: ChatMessage,
 ): ChatMessage {
-  if (!incoming.event_payload_omitted) return incoming;
+  if (!incoming.omitted_payloads?.events) return incoming;
   const next: ChatMessage = { ...incoming };
   if (incoming.events === undefined && current.events !== undefined) {
     next.events = current.events;
@@ -207,8 +296,8 @@ export function mergeIncomingMessageSnapshot(
       return null;
     }
     if (incoming.isStreaming !== true) {
-      if (incoming.event_payload_omitted) {
-        return mergeEventlessMessageDelta(current, incoming);
+      if (incoming.omitted_payloads?.events) {
+        return mergeProjectedMessageDelta(current, incoming);
       }
       const replayText = incoming.content ?? "";
       const liveText = current.content ?? "";
@@ -229,7 +318,7 @@ export function mergeIncomingMessageSnapshot(
       }
     }
   }
-  return mergeEventlessMessageDelta(current, incoming);
+  return mergeProjectedMessageDelta(current, incoming);
 }
 
 /** Walk the tree rooted at `tree` and apply `mutate` to the node whose
@@ -333,6 +422,223 @@ export function messageHasUuid(msg: ChatMessage, uuid: string): boolean {
   return false;
 }
 
+function isLivePlaceholder(msg: ChatMessage): boolean {
+  return (
+    msg.role === "assistant" &&
+    msg.isStreaming === true &&
+    msg.id.startsWith("live-") &&
+    typeof msg.seq !== "number"
+  );
+}
+
+function mergeEventsByUuid(
+  placeholderEvents: WSEvent[] | undefined,
+  canonicalEvents: WSEvent[] | undefined,
+): WSEvent[] | undefined {
+  if (!placeholderEvents?.length) return canonicalEvents;
+  if (!canonicalEvents?.length) return placeholderEvents;
+  const merged = [...placeholderEvents];
+  const byUuid = new Map<string, number>();
+  merged.forEach((event, index) => {
+    const uuid = extractLiveEventUuid(event);
+    if (uuid) byUuid.set(uuid, index);
+  });
+  for (const event of canonicalEvents) {
+    const uuid = extractLiveEventUuid(event);
+    if (!uuid) {
+      merged.push(event);
+      continue;
+    }
+    const existing = byUuid.get(uuid);
+    if (existing === undefined) {
+      byUuid.set(uuid, merged.length);
+      merged.push(event);
+    } else {
+      merged[existing] = event;
+    }
+  }
+  return merged;
+}
+
+function mergePlaceholderWorkers(
+  placeholderWorkers: ChatMessage["workers"],
+  canonicalWorkers: ChatMessage["workers"],
+): ChatMessage["workers"] {
+  if (!placeholderWorkers?.length) return canonicalWorkers;
+  if (!canonicalWorkers?.length) return placeholderWorkers;
+  const merged = placeholderWorkers.map((worker) => ({ ...worker }));
+  const byDelegation = new Map<string, number>();
+  merged.forEach((worker, index) => {
+    if (worker.delegation_id) byDelegation.set(worker.delegation_id, index);
+  });
+  for (const worker of canonicalWorkers) {
+    const idx = worker.delegation_id
+      ? byDelegation.get(worker.delegation_id)
+      : undefined;
+    if (idx === undefined) {
+      merged.push(worker);
+      if (worker.delegation_id) byDelegation.set(worker.delegation_id, merged.length - 1);
+      continue;
+    }
+    const placeholder = merged[idx];
+    merged[idx] = {
+      ...placeholder,
+      ...worker,
+      events: mergeEventsByUuid(placeholder.events, worker.events) ?? [],
+    };
+  }
+  return merged;
+}
+
+function shouldAdoptLivePlaceholder(
+  placeholder: ChatMessage,
+  canonical: ChatMessage,
+): boolean {
+  if (!isLivePlaceholder(placeholder) || canonical.role !== "assistant") return false;
+  for (const event of canonical.events ?? []) {
+    const uuid = extractLiveEventUuid(event);
+    if (uuid && messageHasUuid(placeholder, uuid)) return true;
+  }
+  const canonicalDelegations = new Set(
+    (canonical.workers ?? [])
+      .map((worker) => worker.delegation_id)
+      .filter((id): id is string => !!id),
+  );
+  if (canonicalDelegations.size > 0) {
+    for (const worker of placeholder.workers ?? []) {
+      if (worker.delegation_id && canonicalDelegations.has(worker.delegation_id)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function findLivePlaceholderToAdopt(
+  messages: ChatMessage[],
+  canonical: ChatMessage,
+  canonicalIndex?: number,
+): number {
+  const sameGroupCandidates: number[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (i === canonicalIndex) continue;
+    const sameGroup = samePromptGroupForAdoption(messages, i, canonical);
+    if (sameGroup && isLivePlaceholder(messages[i])) sameGroupCandidates.push(i);
+    if (
+      shouldAdoptLivePlaceholder(messages[i], canonical) &&
+      (sameGroup || typeof canonical.seq !== "number")
+    ) {
+      return i;
+    }
+  }
+  if (
+    canonical.isStreaming === true &&
+    totalEventCount(canonical) === 0 &&
+    typeof canonical.seq === "number" &&
+    sameGroupCandidates.length === 1
+  ) {
+    return sameGroupCandidates[0];
+  }
+  return -1;
+}
+
+function previousUserSeqForIndex(
+  messages: ChatMessage[],
+  beforeIndex: number,
+): number | null {
+  for (let i = beforeIndex - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user" && typeof message.seq === "number") {
+      return message.seq;
+    }
+  }
+  return null;
+}
+
+function previousUserSeqForCanonical(
+  messages: ChatMessage[],
+  canonical: ChatMessage,
+): number | null {
+  if (typeof canonical.seq !== "number") return null;
+  let seq: number | null = null;
+  for (const message of messages) {
+    if (
+      message.role === "user" &&
+      typeof message.seq === "number" &&
+      message.seq < canonical.seq &&
+      (seq === null || message.seq > seq)
+    ) {
+      seq = message.seq;
+    }
+  }
+  return seq;
+}
+
+function samePromptGroupForAdoption(
+  messages: ChatMessage[],
+  placeholderIndex: number,
+  canonical: ChatMessage,
+): boolean {
+  const canonicalUserSeq = previousUserSeqForCanonical(messages, canonical);
+  if (canonicalUserSeq === null) return false;
+  const placeholderUserSeq = previousUserSeqForIndex(messages, placeholderIndex);
+  return placeholderUserSeq === canonicalUserSeq;
+}
+
+function adoptLivePlaceholder(
+  placeholder: ChatMessage,
+  canonical: ChatMessage,
+): ChatMessage {
+  return {
+    ...canonical,
+    content: canonical.content || placeholder.content,
+    events: mergeEventsByUuid(placeholder.events, canonical.events) ?? [],
+    workers: mergePlaceholderWorkers(placeholder.workers, canonical.workers),
+  };
+}
+
+export function mergeIncomingMessagesForNode(
+  existing: ChatMessage[],
+  messages: ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map<string, number>();
+  existing.forEach((m, i) => byId.set(m.id, i));
+  const merged = [...existing];
+  for (const m of messages) {
+    const idx = byId.get(m.id);
+    let next: ChatMessage | null = m;
+    if (idx !== undefined) {
+      const ex = merged[idx];
+      next = mergeIncomingMessageSnapshot(ex, m);
+      if (next === null) continue;
+    }
+    if (next.role === "assistant") {
+      const placeholderIdx = findLivePlaceholderToAdopt(merged, next, idx);
+      if (placeholderIdx !== -1) {
+        next = adoptLivePlaceholder(merged[placeholderIdx], next);
+        merged.splice(placeholderIdx, 1);
+        byId.clear();
+        merged.forEach((message, index) => byId.set(message.id, index));
+      }
+    }
+    const nextIdx = byId.get(next.id);
+    if (nextIdx !== undefined) {
+      merged[nextIdx] = next;
+    } else {
+      byId.set(next.id, merged.length);
+      merged.push(next);
+    }
+  }
+  merged.sort((a, b) => {
+    const sa =
+      typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
+    const sb =
+      typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
+    return sa - sb;
+  });
+  return merged;
+}
+
 /** Pure reducer for one live WS turn-event over a node's message list.
  *
  * Routes the event onto the in-flight assistant (via
@@ -426,12 +732,20 @@ export function useSession(authStatus?: string) {
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
   const [sessionLoading, setSessionLoading] = useState(false);
+  // Non-null when the most recent selectSession REST fetch failed
+  // (timeout, network, non-OK). Rendered as an error state with a
+  // retry so a failed select is never a silent dead click.
+  const [sessionLoadError, setSessionLoadError] = useState<{
+    sessionId: string;
+    message: string;
+  } | null>(null);
   // WS subscription target — set ONLY after REST resolves and seq cursors
   // are seeded. Prevents the WS subscribe from firing during the
   // optimistic swap (which has since_seq=0 and events_from_seq=0,
   // causing the backend to flood us with all messages and events).
   const [wsTargetSessionId, setWsTargetSessionId] = useState<string | null>(null);
   const selectRequestIdRef = useRef(0);
+  const selectInFlightIdRef = useRef<string | null>(null);
   // Per-session highest seq we have applied locally. Sent as
   // `since_seq` on every WS subscribe so backend can replay only
   // what's new. Ref so reads are always fresh inside callbacks
@@ -574,6 +888,10 @@ export function useSession(authStatus?: string) {
     if (!t || t.sid !== sessionId) return;
     armOpenQuietTimer();
   };
+  useEffect(() => () => {
+    clearOpenQuietTimer();
+    openTimingRef.current = null;
+  }, []);
   // Per-session list of currently-running CLI runs as reported by
   // the backend's `run_state` event. Backend is the source of truth
   // for "is something running" — frontend just mirrors. Stored as
@@ -607,8 +925,138 @@ export function useSession(authStatus?: string) {
   const sessionsNextOffsetRef = useRef(0);
   const sessionsLoadingPageRef = useRef(false);
   const sessionListRequestSeqRef = useRef(0);
+  const sessionListFiltersReadyRef = useRef(false);
   const currentSessionRef = useRef<Session | null>(null);
   currentSessionRef.current = currentSession;
+
+  // Single sort entry-point for the sidebar list. Reads folderView/sortBy/
+  // statusSort/search from the live filters ref so every call site stays a
+  // one-arg call. When status sort is on (and not searching), injects the
+  // registry-backed rank; otherwise behaves exactly as the time-only sort.
+  const sortForList = useCallback((list: Session[]) => {
+    const f = sessionListFiltersRef.current;
+    const folderView = f.folderView ?? false;
+    const sortBy = f.sortBy ?? "updated_at";
+    const searchActive = Boolean(f.search?.trim());
+    const rankOf = f.statusSort && !searchActive ? statusRankForRow : undefined;
+    return sortSessionsForList(list, folderView, sortBy, rankOf);
+  }, []);
+
+  const applySessionPatchEverywhere = useCallback((
+    sessionId: string,
+    patchOrUpdater: SessionMetadataUpdater,
+  ) => {
+    const apply = (session: Session): Session => {
+      const patch =
+        typeof patchOrUpdater === "function"
+          ? patchOrUpdater(session)
+          : patchOrUpdater;
+      const next: Session = { ...session };
+      if (patch.inline_tags !== undefined) next.inline_tags = patch.inline_tags;
+      if (patch.adv_sync_overlays !== undefined)
+        next.adv_sync_overlays = patch.adv_sync_overlays;
+      if (patch.open_file_panels !== undefined)
+        next.open_file_panels = patch.open_file_panels;
+      if (patch.open_config_panels !== undefined)
+        next.open_config_panels = patch.open_config_panels;
+      if (patch.draft_input !== undefined) next.draft_input = patch.draft_input;
+      if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
+      if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;
+      if (patch.fork_closed !== undefined) next.fork_closed = patch.fork_closed;
+      if (patch.model !== undefined) next.model = patch.model;
+      if (patch.reasoning_effort !== undefined) {
+        next.reasoning_effort = patch.reasoning_effort as Session["reasoning_effort"];
+      }
+      if (patch.cwd !== undefined) next.cwd = patch.cwd;
+      if (patch.provider_id !== undefined) next.provider_id = patch.provider_id;
+      if (patch.permission !== undefined) next.permission = patch.permission;
+      if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
+      if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
+      if (patch.pinned !== undefined) next.pinned = patch.pinned;
+      if (patch.topbar_pinned !== undefined) next.topbar_pinned = patch.topbar_pinned;
+      if (patch.topbar_pinned_at !== undefined) next.topbar_pinned_at = patch.topbar_pinned_at;
+      if (patch.archived !== undefined) next.archived = patch.archived;
+      if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
+      if (patch.agent_rename_allowed !== undefined) next.agent_rename_allowed = patch.agent_rename_allowed;
+      if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;
+      if (patch.working_mode_meta !== undefined) next.working_mode_meta = patch.working_mode_meta;
+      if (patch.notes !== undefined) next.notes = patch.notes;
+      if (patch.current_todos !== undefined) next.current_todos = patch.current_todos;
+      if (patch.current_tasks !== undefined) next.current_tasks = patch.current_tasks;
+      if (patch.messages !== undefined) next.messages = patch.messages;
+      if (patch.message_count !== undefined) next.message_count = patch.message_count;
+      if (patch.updated_at !== undefined) next.updated_at = patch.updated_at;
+      if (patch.last_user_prompt_at !== undefined) next.last_user_prompt_at = patch.last_user_prompt_at;
+      if (patch.last_opened_at !== undefined) next.last_opened_at = patch.last_opened_at;
+      if (patch.pagination !== undefined) next.pagination = patch.pagination;
+      if (patch.right_panel_open !== undefined)
+        next.right_panel_open = patch.right_panel_open;
+      if (patch.right_panel_active_tab !== undefined)
+        next.right_panel_active_tab = patch.right_panel_active_tab;
+      if (patch.right_panel_width !== undefined)
+        next.right_panel_width = patch.right_panel_width;
+      if (patch.right_panel_mobile_height !== undefined)
+        next.right_panel_mobile_height = patch.right_panel_mobile_height;
+      if (patch.right_panel_todos_dismissed !== undefined)
+        next.right_panel_todos_dismissed = patch.right_panel_todos_dismissed;
+      if (patch.right_panel_auto_opened_by !== undefined)
+        next.right_panel_auto_opened_by = patch.right_panel_auto_opened_by;
+      if (patch.sidebar_minimized !== undefined)
+        next.sidebar_minimized = patch.sidebar_minimized;
+      const keys = Object.keys(patch) as (keyof SessionMetadataPatch)[];
+      return keys.some(
+        (key) =>
+          (session as unknown as Record<string, unknown>)[key] !==
+          (next as unknown as Record<string, unknown>)[key],
+      ) ? next : session;
+    };
+
+    setSessions((prev) => {
+      let changed = false;
+      const patched = prev
+        .map((s) => {
+          if (s.id !== sessionId) return s;
+          const next = apply(s);
+          if (next !== s) changed = true;
+          return next;
+        })
+        .filter(isSidebarVisibleSession);
+      if (!changed && patched.length === prev.length) return prev;
+      const sorted = sortForList(patched);
+      if (
+        sorted.length === prev.length &&
+        sorted.every((session, index) => session === prev[index])
+      ) {
+        return prev;
+      }
+      return sorted;
+    });
+    setCurrentSession((prev) =>
+      prev ? updateNodeById(prev, sessionId, apply) : prev
+    );
+
+    const rootId = sessionTreeRootByNodeRef.current.get(sessionId);
+    if (rootId) {
+      const cached = sessionTreeCacheRef.current.get(rootId);
+      if (cached) {
+        const updated = updateNodeById(cached, sessionId, apply);
+        if (updated !== cached) sessionTreeCacheRef.current.set(rootId, updated);
+      }
+    }
+  }, [sortForList]);
+
+  const stampSessionLastOpened = useCallback((sessionId: string, at: string) => {
+    applySessionPatchEverywhere(sessionId, { last_opened_at: at });
+  }, [applySessionPatchEverywhere]);
+
+  const markSessionOpened = useCallback((sessionId: string, at = new Date().toISOString()) => {
+    stampSessionLastOpened(sessionId, at);
+    void fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {});
+    return at;
+  }, [stampSessionLastOpened]);
 
   useEffect(() => {
     if (!currentSession || wsTargetSessionId === null) return;
@@ -617,24 +1065,25 @@ export function useSession(authStatus?: string) {
 
   const mergeSessionPage = useCallback(
     (prev: Session[], page: Session[], replace: boolean) => {
-      const filters = sessionListFiltersRef.current;
-      const folderView = filters.folderView ?? false;
-      const sortBy = filters.sortBy ?? "updated_at";
+      // Pure sort/merge ONLY. Do NOT mutate `sessionRegistry` here — this
+      // runs as a `setSessions` updater, which React executes during its
+      // render pass. Mutating an external store that `useSyncExternalStore`
+      // subscribes to (SessionStatusBadge) mid-render triggers React's
+      // "getSnapshot should be cached" infinite loop (#185). Registry
+      // seeding happens in `fetchSessionPage`, outside the updater.
       if (replace) {
         const backendIds = new Set(page.map((s) => s.id));
         const pendingOffline = prev.filter(
           (s) => s.offline_pending && !backendIds.has(s.id),
         );
-        return sortSessionsForList([...pendingOffline, ...page], folderView, sortBy);
+        return sortForList([...pendingOffline, ...page]);
       }
       const existingIds = new Set(prev.map((s) => s.id));
-      return sortSessionsForList(
+      return sortForList(
         [...prev, ...page.filter((s) => !existingIds.has(s.id))],
-        folderView,
-        sortBy,
       );
     },
-    [],
+    [sortForList],
   );
 
   const fetchSessionPage = useCallback(
@@ -642,22 +1091,30 @@ export function useSession(authStatus?: string) {
       offset: number,
       replace: boolean,
       filterSnapshot: SessionListFilters = sessionListFiltersRef.current,
+      limitOverride?: number,
+      silent = false,
     ) => {
       if (sessionsLoadingPageRef.current && !replace) return;
       const requestSeq = ++sessionListRequestSeqRef.current;
       sessionsLoadingPageRef.current = true;
       if (!replace) setSessionsLoadingMore(true);
-      if (replace && sessionsLoadedRef.current) setSessionsSearching(true);
+      // Silent background refreshes (status-churn refetch) must not flash
+      // the search spinner — it is reserved for user-initiated fetches.
+      if (replace && !silent && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
+      let incompleteSnapshot = false;
       try {
         const params = new URLSearchParams({
           offset: String(offset),
-          limit: String(SESSION_LIST_PAGE_SIZE),
+          limit: String(limitOverride ?? SESSION_LIST_PAGE_SIZE),
         });
         const filters = filterSnapshot;
         if (filters.projectPath) params.set("project_path", filters.projectPath);
-        if (filters.search?.trim()) params.set("search", filters.search.trim());
-        if (filters.searchFields) params.set("search_fields", filters.searchFields.join(","));
+        const searchQuery = filters.search?.trim() ?? "";
+        if (searchQuery) {
+          params.set("search", searchQuery);
+          if (filters.searchFields) params.set("search_fields", filters.searchFields.join(","));
+        }
         if (filters.showArchived) params.set("show_archived", "true");
         if (filters.fileEditMode === "yes") params.set("file_edit_mode", "true");
         if (filters.fileEditMode === "no") params.set("file_edit_mode", "false");
@@ -680,9 +1137,32 @@ export function useSession(authStatus?: string) {
         }
         const data = await res.json();
         if (replace && requestSeq !== sessionListRequestSeqRef.current) return;
+        if (replace && offset === 0 && data?.snapshot_complete === false) {
+          incompleteSnapshot = true;
+          window.setTimeout(() => {
+            void fetchSessionPage(0, true, filterSnapshot, limitOverride, silent);
+          }, 150);
+          return;
+        }
         const rawPage = data.sessions || [];
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
+        if (replace && offset === 0 && isGlobalUnfilteredFetch(filters)) {
+          // Only a full, unfiltered global page may replace the registry
+          // (the ALL-projects aggregate source of truth). A project- or
+          // otherwise-narrowed replace would evict every other project's
+          // sessions, zeroing their running/unread badges — the bug this
+          // guard closes. See isGlobalUnfilteredFetch.
+          sessionRegistry.replaceFromRows(page);
+        } else {
+          // Seed the registry from this page (async callback — NOT during
+          // render) so deeper-page rows have a live entry for both the
+          // status rank and the running/unread badge. Only fills missing
+          // sids; never clobbers a fresher live entry. Also the path for
+          // every narrowed replace fetch (project/search/tag/…), so a
+          // project switch never wipes background projects' aggregates.
+          sessionRegistry.seedFromRows(page);
+        }
         setSessions((prev) => mergeSessionPage(prev, page, replace));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
@@ -691,7 +1171,7 @@ export function useSession(authStatus?: string) {
       } finally {
         if (!replace) setSessionsLoadingMore(false);
         if (requestSeq === sessionListRequestSeqRef.current) {
-          if (replace) setSessionsLoaded(true);
+          if (replace && !incompleteSnapshot) setSessionsLoaded(true);
           if (replace) setSessionsSearching(false);
           sessionsLoadingPageRef.current = false;
         }
@@ -701,14 +1181,62 @@ export function useSession(authStatus?: string) {
     [mergeSessionPage],
   );
 
+  // Programmatic sidebar refreshes (turn completion, WS deltas, reconnect,
+  // metadata updates) are silent — the search spinner is reserved for
+  // user-initiated fetches (the filter-change effect).
   const fetchSessions = useCallback(async (filterSnapshot?: SessionListFilters) => {
-    await fetchSessionPage(0, true, filterSnapshot);
+    await fetchSessionPage(0, true, filterSnapshot, undefined, true);
   }, [fetchSessionPage]);
 
   const loadMoreSessions = useCallback(async () => {
     if (!sessionsLoaded || !sessionsHasMoreRef.current) return;
     await fetchSessionPage(sessionsNextOffsetRef.current, false);
   }, [fetchSessionPage, sessionsLoaded]);
+
+  // Re-paginate the FULL loaded span (not just page 0) so a status-churn
+  // refetch doesn't collapse the user's scroll depth back to one page.
+  // Capped at the backend's max page size (le=200): beyond 200 loaded rows
+  // the refetch covers only the top 200 — acceptable since the top status
+  // buckets are what the user is sorting toward.
+  const refetchLoadedSpan = useCallback(() => {
+    const loaded = sessionsRef.current.length;
+    const span = Math.min(Math.max(loaded, SESSION_LIST_PAGE_SIZE), 200);
+    void fetchSessionPage(0, true, sessionListFiltersRef.current, span, true);
+  }, [fetchSessionPage]);
+
+  // Status sort only: keep the list fresh against live status churn. On any
+  // status-affecting delta, (a) re-sort loaded rows off the live registry
+  // (immediate, authoritative interim view) and (b) debounce a full-span
+  // re-pagination so sessions on unloaded/deeper pages bubble in. The
+  // refetch debounce (2.5s) clears the backend's 2s monitoring-snapshot
+  // tick so the live re-sort and the refetch don't fight.
+  useEffect(() => {
+    if (!sessionListFilters.statusSort) return;
+    let resortTimer: number | undefined;
+    let refetchTimer: number | undefined;
+    const onDelta = () => {
+      window.clearTimeout(resortTimer);
+      resortTimer = window.setTimeout(() => {
+        setSessions((prev) => sortForList([...prev]));
+      }, 60);
+      window.clearTimeout(refetchTimer);
+      refetchTimer = window.setTimeout(() => {
+        refetchLoadedSpan();
+      }, 2500);
+    };
+    const unsub = subscribeMany([
+      ["session_monitoring_changed", onDelta],
+      ["session_running_changed", onDelta],
+      ["session_unread_changed", onDelta],
+      ["session_user_input_changed", onDelta],
+      ["session_marker_changed", onDelta],
+    ]);
+    return () => {
+      unsub();
+      window.clearTimeout(resortTimer);
+      window.clearTimeout(refetchTimer);
+    };
+  }, [sessionListFilters.statusSort, sortForList, refetchLoadedSpan]);
 
   useEffect(() => {
     // Fire on mount + whenever we transition to 'authed'. If the mount-time
@@ -720,6 +1248,10 @@ export function useSession(authStatus?: string) {
 
   useEffect(() => {
     if (!sessionsLoaded) return;
+    if (!sessionListFiltersReadyRef.current) {
+      sessionListFiltersReadyRef.current = true;
+      return;
+    }
     sessionsNextOffsetRef.current = 0;
     void fetchSessionPage(0, true, sessionListFilters);
   }, [fetchSessionPage, sessionListFilters, sessionsLoaded]);
@@ -730,23 +1262,46 @@ export function useSession(authStatus?: string) {
     );
   }, []);
 
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    setSessions((prev) => {
+      const sorted = sortForList([...prev]);
+      if (
+        sorted.length === prev.length &&
+        sorted.every((session, index) => session === prev[index])
+      ) {
+        return prev;
+      }
+      return sorted;
+    });
+  }, [
+    sessionListFilters.folderView,
+    sessionListFilters.sortBy,
+    sessionListFilters.statusSort,
+    sessionListFilters.search,
+    sessionsLoaded,
+    sortForList,
+  ]);
+
   const createSession = useCallback(
-    async (
-      name: string,
-      model: string,
-      cwd: string,
-      orchestrationMode: OrchestrationMode = "team",
-      browserHarnessEnabled: boolean = true,
-      providerId?: string,
-      browserHarnessHeadless: boolean = true,
-      fileEditEnabled: boolean = false,
-      fileEditPath?: string,
-      nodeId: string = "primary",
-      reasoningEffort?: string,
-      clientSessionId?: string,
-      capabilityContexts?: CapabilityContext[],
-      folderId?: string | null,
-    ) => {
+    async (opts: CreateSessionOptions) => {
+      const {
+        name,
+        model,
+        cwd,
+        orchestrationMode = "team",
+        browserHarnessEnabled = true,
+        providerId,
+        browserHarnessHeadless = true,
+        fileEditEnabled = false,
+        fileEditPath,
+        nodeId = "primary",
+        reasoningEffort,
+        permission,
+        clientSessionId,
+        capabilityContexts,
+        folderId,
+      } = opts;
       startOp("session:create");
       try {
         const res = await fetchWithTimeout(`${API}/api/sessions`, {
@@ -765,6 +1320,7 @@ export function useSession(authStatus?: string) {
             file_edit_path: fileEditPath,
             node_id: nodeId,
             reasoning_effort: reasoningEffort,
+            permission: permission && Object.keys(permission).length > 0 ? permission : undefined,
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
             folder_id: folderId || undefined,
@@ -774,20 +1330,23 @@ export function useSession(authStatus?: string) {
           throw await responseError(res);
         }
         const session = await res.json();
-        const filters = sessionListFiltersRef.current;
+        const listFilters = sessionListFiltersRef.current;
+        if (!canLocallyInsertIntoSessionList(session, listFilters)) {
+          void fetchSessionPage(0, true, listFilters);
+        }
         // Dedup: the backend's `session_created` WS broadcast can land
         // on this same tab before this POST `await` resolves, in which
         // case `appendSessionIfNew` already inserted it. Without this
         // check the sidebar shows the new session twice.
-        setSessions((prev) =>
-          sortSessionsForList(
-            prev.some((s) => s.id === session.id)
-              ? prev.map((s) => (s.id === session.id ? session : s))
-              : [session, ...prev],
-            filters.folderView ?? false,
-            filters.sortBy ?? "updated_at",
-          ),
-        );
+        if (canLocallyInsertIntoSessionList(session, listFilters)) {
+          setSessions((prev) =>
+            sortForList(
+              prev.some((s) => s.id === session.id)
+                ? prev.map((s) => (s.id === session.id ? session : s))
+                : [session, ...prev],
+            ),
+          );
+        }
         lastEventSeqBySessionRef.current = {
           ...lastEventSeqBySessionRef.current,
           [session.id]: 0,
@@ -797,35 +1356,28 @@ export function useSession(authStatus?: string) {
         completeOp("session:create");
       }
     },
-    [fetchSessions]
+    [sortForList]
   );
 
   const addOfflineSession = useCallback((session: Session) => {
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
-        : sortSessionsForList(
-            [session, ...prev],
-            sessionListFiltersRef.current.folderView ?? false,
-            sessionListFiltersRef.current.sortBy ?? "updated_at",
-          ),
+        : sortForList([session, ...prev]),
     );
     selectRequestIdRef.current++;
+    selectInFlightIdRef.current = null;
     setCurrentSession(session);
     setWsTargetSessionId(null);
-  }, []);
+  }, [sortForList]);
 
   const restoreOfflineSession = useCallback((session: Session) => {
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
-        : sortSessionsForList(
-            [session, ...prev],
-            sessionListFiltersRef.current.folderView ?? false,
-            sessionListFiltersRef.current.sortBy ?? "updated_at",
-          ),
+        : sortForList([session, ...prev]),
     );
-  }, []);
+  }, [sortForList]);
 
   const forkSession = useCallback(
     async (parentId: string, name?: string) => {
@@ -846,6 +1398,7 @@ export function useSession(authStatus?: string) {
       completeOp(opId);
       await fetchSessions();
       selectRequestIdRef.current++;
+      selectInFlightIdRef.current = null;
       // Functional update: the parent session's draft may have changed
       // between the fork POST and this state commit. Since the fork
       // switches focus to the child (new session, empty draft), there's
@@ -890,17 +1443,59 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  const reconcilePreservesRef = useRef<ReconcilePreserveRegistry>({});
+  const preserveSessionMetadataThroughReconcile = useCallback(
+    (sessionId: string, key: string, patchOrUpdater: SessionMetadataUpdater) => {
+      reconcilePreservesRef.current = {
+        ...reconcilePreservesRef.current,
+        [sessionId]: {
+          ...(reconcilePreservesRef.current[sessionId] ?? {}),
+          [key]: patchOrUpdater,
+        },
+      };
+    },
+    [],
+  );
+  const clearSessionMetadataReconcilePreserve = useCallback(
+    (sessionId: string, key: string) => {
+      const byKey = reconcilePreservesRef.current[sessionId];
+      if (!byKey || !(key in byKey)) return;
+      const nextByKey = { ...byKey };
+      delete nextByKey[key];
+      const next = { ...reconcilePreservesRef.current };
+      if (Object.keys(nextByKey).length === 0) delete next[sessionId];
+      else next[sessionId] = nextByKey;
+      reconcilePreservesRef.current = next;
+    },
+    [],
+  );
+  const applyReconcilePreserves = useCallback((node: Session): Session => {
+    const applyOne = (current: Session): Session => {
+      const preserves = reconcilePreservesRef.current[current.id];
+      let next = current;
+      if (preserves) {
+        for (const patchOrUpdater of Object.values(preserves)) {
+          const patch = typeof patchOrUpdater === "function"
+            ? patchOrUpdater(next)
+            : patchOrUpdater;
+          next = { ...next, ...patch } as Session;
+        }
+      }
+      if (next.forks?.length) {
+        next = { ...next, forks: next.forks.map(applyOne) };
+      }
+      return next;
+    };
+    return applyOne(node);
+  }, []);
+
   const selectSession = useCallback(async (id: string) => {
+    if (selectInFlightIdRef.current === id) return;
+    selectInFlightIdRef.current = id;
     const myReqId = ++selectRequestIdRef.current;
     const opId = `session:select:${id}`;
     startOp(opId);
-    // Stamp last-opened on the backend (fire-and-forget) so the "last
-    // opened" session sort reflects this selection. Does not gate the
-    // open flow; backend bumps last_opened_at without touching updated_at.
-    void fetch(`${API}/api/sessions/${encodeURIComponent(id)}/opened`, {
-      method: "POST",
-      credentials: "include",
-    }).catch(() => {});
+    setSessionLoadError(null);
     // Drop WS target immediately so the WS hook unsubscribes from the
     // old session. The new target is set only after REST resolves and
     // seq cursors are seeded — prevents since_seq=0 flood.
@@ -927,13 +1522,22 @@ export function useSession(authStatus?: string) {
     const cur = currentSessionRef.current;
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
     if (cachedTree) {
-      setCurrentSession(cachedTree);
+      const viewedSessionId = cachedTree.id;
+      const openedAt = markSessionOpened(viewedSessionId);
+      const cachedTreeWithOpenedAt = updateNodeById(cachedTree, viewedSessionId, (node) => {
+        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
+        const openedMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
+        return { ...node, last_opened_at: openedAt };
+      });
+      setCurrentSession(cachedTreeWithOpenedAt);
       const t = openTimingRef.current;
       if (t && t.sid === id) {
         t.restMs = 0;
         armOpenQuietTimer();
       }
       setWsTargetSessionId(id);
+      selectInFlightIdRef.current = null;
       setSessionLoading(false);
       completeOp(opId);
       return;
@@ -952,6 +1556,11 @@ export function useSession(authStatus?: string) {
       if (!res.ok) {
         if (res.status === 401) {
           window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
+          return;
+        }
+        const err = await responseError(res);
+        if (myReqId === selectRequestIdRef.current) {
+          setSessionLoadError({ sessionId: id, message: err.message });
         }
         return;
       }
@@ -961,6 +1570,14 @@ export function useSession(authStatus?: string) {
       // reads forks from `currentSession.forks`.
       const tree = (await res.json()) as Session;
       if (myReqId !== selectRequestIdRef.current) return;
+      const viewedSessionId = tree.id;
+      const openedAt = markSessionOpened(viewedSessionId);
+      const treeWithOpenedAt = updateNodeById(tree, viewedSessionId, (node) => {
+        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
+        const openedMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
+        return { ...node, last_opened_at: openedAt };
+      });
       // Record REST-resolve checkpoint for the open-latency probe.
       // The quiet timer only arms once restMs is set, so any replay/
       // live event that lands before this point is folded into the
@@ -984,27 +1601,27 @@ export function useSession(authStatus?: string) {
       // during the fetch — the REST response was generated before those
       // messages existed, so carryDrafts alone would lose them.
       setCurrentSession((prev) => {
-        if (!prev || prev.id !== tree.id) {
+        if (!prev || prev.id !== treeWithOpenedAt.id) {
           console.info(
             "[stale-dbg] selectSession %s: direct tree (prev=%s tree=%s)",
-            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", tree.id.slice(0, 8),
+            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", treeWithOpenedAt.id.slice(0, 8),
           );
-          return tree;
+          return treeWithOpenedAt;
         }
         if (
           treeHasStreamingAssistant(prev) &&
-          treeHasStreamingAssistant(tree)
+          treeHasStreamingAssistant(treeWithOpenedAt)
         ) {
           console.info("[stale-dbg] selectSession %s: kept prev (streaming)", id.slice(0, 8));
           return prev;
         }
-        const carried = carryDrafts(prev, tree);
-        const treeAsst = tree.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
+        const carried = carryDrafts(prev, treeWithOpenedAt);
+        const treeAsst = treeWithOpenedAt.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
         const prevAsst = prev.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
         console.info(
           "[stale-dbg] selectSession %s: merging tree_msgs=%d prev_msgs=%d tree_last_evts=%d prev_last_evts=%d",
           id.slice(0, 8),
-          tree.messages?.length ?? 0, prev.messages?.length ?? 0,
+          treeWithOpenedAt.messages?.length ?? 0, prev.messages?.length ?? 0,
           treeAsst?.events?.length ?? 0, prevAsst?.events?.length ?? 0,
         );
         if (prev.messages?.length) {
@@ -1071,57 +1688,84 @@ export function useSession(authStatus?: string) {
       }
       // All seq cursors are seeded — safe to let the WS subscribe now.
       setWsTargetSessionId(id);
-    } catch {
-      // ignore
+    } catch (e) {
+      if (myReqId === selectRequestIdRef.current) {
+        const timedOut = e instanceof DOMException && e.name === "AbortError";
+        setSessionLoadError({
+          sessionId: id,
+          message: timedOut
+            ? "timeout"
+            : e instanceof Error
+              ? e.message
+              : String(e),
+        });
+      }
     } finally {
+      if (myReqId === selectRequestIdRef.current) {
+        selectInFlightIdRef.current = null;
+      }
       setSessionLoading(false);
       completeOp(opId);
     }
-  }, [cachedSessionTreeFor]);
+  }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
+
+  const removeSessionLocally = useCallback((id: string) => {
+    forgetSessionTree(id);
+    setSessions((prev) => {
+      if (!prev.some((s) => s.id === id)) return prev;
+      return prev.filter((s) => s.id !== id);
+    });
+    setCurrentSession((prev) => {
+      if (!prev) return prev;
+      if (prev.id === id) return null;
+      const dropFork = (node: Session): Session => {
+        const forks = node.forks;
+        if (!forks || forks.length === 0) return node;
+        let changed = false;
+        const next: Session[] = [];
+        for (const f of forks) {
+          if (f.id === id) {
+            changed = true;
+            continue;
+          }
+          const recursed = dropFork(f);
+          if (recursed !== f) changed = true;
+          next.push(recursed);
+        }
+        return changed ? { ...node, forks: next } : node;
+      };
+      const updated = dropFork(prev);
+      return updated === prev ? prev : updated;
+    });
+    setWsTargetSessionId((prev) => prev === id ? null : prev);
+  }, [forgetSessionTree]);
 
   const deleteSession = useCallback(
     async (id: string) => {
       const opId = `session:delete:${id}`;
+      const wasCurrentSession = currentSessionRef.current?.id === id;
       startOp(opId);
+      removeSessionLocally(id);
       try {
-        await fetch(`${API}/api/sessions/${id}`, {
+        const response = await fetch(`${API}/api/sessions/${id}`, {
           method: "DELETE",
           credentials: "include",
         });
+        if (!response.ok) {
+          throw await responseError(response);
+        }
+      } catch (err: unknown) {
+        failOp(opId, err instanceof Error ? err.message : String(err));
+        await fetchSessions();
+        if (wasCurrentSession) {
+          await selectSession(id);
+        }
+        throw err;
       } finally {
         completeOp(opId);
       }
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      forgetSessionTree(id);
-      // If we deleted a fork inside the open tree, splice it out of
-      // its parent's `forks` array. If we deleted the root the user
-      // is currently viewing, clear `currentSession` entirely. Either
-      // way, focus + multi-WS subscribe fall through naturally on
-      // next render via the tree-walking effect.
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        if (prev.id === id) return null;
-        const dropFork = (node: Session): Session => {
-          const forks = node.forks;
-          if (!forks || forks.length === 0) return node;
-          let changed = false;
-          const next: Session[] = [];
-          for (const f of forks) {
-            if (f.id === id) {
-              changed = true;
-              continue;
-            }
-            const recursed = dropFork(f);
-            if (recursed !== f) changed = true;
-            next.push(recursed);
-          }
-          return changed ? { ...node, forks: next } : node;
-        };
-        return dropFork(prev);
-      });
-      setWsTargetSessionId((prev) => prev === id ? null : prev);
     },
-    [forgetSessionTree]
+    [fetchSessions, removeSessionLocally, selectSession]
   );
 
   const bumpLastSeq = useCallback(
@@ -1195,28 +1839,7 @@ export function useSession(authStatus?: string) {
     ): Session => {
       return updateNodeById(prev, sessionId, (node) => {
         const existing = node.messages || [];
-        const byId = new Map<string, number>();
-        existing.forEach((m, i) => byId.set(m.id, i));
-        const merged = [...existing];
-        for (const m of messages) {
-          const idx = byId.get(m.id);
-          if (idx !== undefined) {
-            const ex = merged[idx];
-            const next = mergeIncomingMessageSnapshot(ex, m);
-            if (next !== null) merged[idx] = next;
-          } else {
-            byId.set(m.id, merged.length);
-            merged.push(m);
-          }
-        }
-        merged.sort((a, b) => {
-          const sa =
-            typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
-          const sb =
-            typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
-          return sa - sb;
-        });
-        return { ...node, messages: merged };
+        return { ...node, messages: mergeIncomingMessagesForNode(existing, messages) };
       });
     },
     []
@@ -1378,6 +2001,53 @@ export function useSession(authStatus?: string) {
     },
     []
   );
+
+  // Self-healing reconciliation for stuck "Running…" badges: the
+  // backend can remove a run_state entry and drop the paired
+  // `run_state` WS notification (e.g. broadcast throws, or removal
+  // happens via the passive background prune, which never emits) —
+  // the frontend then mirrors a stale non-empty run list forever,
+  // since `run_state` is push-only with no periodic re-poll. Every
+  // 15s, any run older than the grace period gets a one-shot check
+  // against the backend's authoritative per-run snapshot; a 404
+  // means the backend already forgot it, so we drop it locally too.
+  const runReconcileInFlightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const RECONCILE_GRACE_MS = 30_000;
+    const id = setInterval(() => {
+      const now = Date.now();
+      for (const [sessionId, runs] of Object.entries(
+        runStateBySessionRef.current
+      )) {
+        for (const run of runs) {
+          const key = `${sessionId}:${run.run_id}`;
+          if (runReconcileInFlightRef.current.has(key)) continue;
+          const startedAt = Date.parse(run.started_at);
+          if (!Number.isFinite(startedAt) || now - startedAt < RECONCILE_GRACE_MS)
+            continue;
+          runReconcileInFlightRef.current.add(key);
+          fetch(
+            `${API}/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(run.run_id)}/details`,
+            { credentials: "include" }
+          )
+            .then((r) => {
+              if (r.status === 404) {
+                const current = runStateBySessionRef.current[sessionId] ?? [];
+                applyRunState(
+                  sessionId,
+                  current.filter((r2) => r2.run_id !== run.run_id)
+                );
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              runReconcileInFlightRef.current.delete(key);
+            });
+        }
+      }
+    }, 15_000);
+    return () => clearInterval(id);
+  }, [applyRunState]);
 
   /** Mark the last streaming assistant message as terminal (turn
    * completed or stopped). Sets `isStreaming: false` and optionally
@@ -1578,6 +2248,96 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  const applyMessageContent = useCallback(
+    (sessionId: string, msgId: string, content: string) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          const idx = msgs.findIndex((m) => m.id === msgId);
+          if (idx === -1) return node;
+          if ((msgs[idx].content ?? "") === content) return node;
+          const next: ChatMessage = {
+            ...msgs[idx],
+            content,
+            isStale: false,
+            isDetached: false,
+          };
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    []
+  );
+
+  const applyMessageContinuation = useCallback(
+    (sessionId: string, msgId: string, chainDepth: number | null) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          const idx = msgs.findIndex((m) => m.id === msgId);
+          if (idx === -1) return node;
+          if ((msgs[idx].continuation_active ?? null) === chainDepth)
+            return node;
+          const next: ChatMessage = { ...msgs[idx] };
+          if (chainDepth == null) {
+            delete next.continuation_active;
+          } else {
+            next.continuation_active = chainDepth;
+          }
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    []
+  );
+
+  /** Patch `run_meta` (per-turn provider/model/effort actually used) on an
+   *  assistant message in response to `message_run_meta_changed` WS frames.
+   *  Re-stamped by the backend each retry iteration, so a mid-message
+   *  selector switch (rate-limit 'continue on another provider') updates the
+   *  badge live to match the provider running the succeeding attempt. */
+  const applyMessageRunMeta = useCallback(
+    (
+      sessionId: string,
+      msgId: string,
+      runMeta: ChatMessage["run_meta"],
+    ) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          const idx = msgs.findIndex((m) => m.id === msgId);
+          if (idx === -1) return node;
+          const current = msgs[idx].run_meta ?? null;
+          const incoming = runMeta ?? null;
+          if (
+            JSON.stringify(current) === JSON.stringify(incoming)
+          )
+            return node;
+          const next: ChatMessage = { ...msgs[idx] };
+          if (incoming) {
+            next.run_meta = runMeta ?? undefined;
+          } else {
+            delete next.run_meta;
+          }
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    []
+  );
+
   /** Stamp the user's pick (`chosen_session_id`) on an assistant message in
    * response to `message_ask_choice_changed` WS frames — keeps the chosen
    * picker row highlighted across reloads / tabs / previous turns. */
@@ -1708,16 +2468,9 @@ export function useSession(authStatus?: string) {
       if (!response.ok) return;
       const data = await response.json();
       const nextPinned = Boolean(data.pinned);
-      setSessions((prev) =>
-        sortSessionsForList(
-          prev.map((s) => (s.id === sessionId ? { ...s, pinned: nextPinned } : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
-        )
-      );
-      void fetchSessions();
+      applySessionPatchEverywhere(sessionId, { pinned: nextPinned });
     },
-    [fetchSessions]
+    [applySessionPatchEverywhere]
   );
 
   const unpinOtherSessions = useCallback(
@@ -1729,22 +2482,17 @@ export function useSession(authStatus?: string) {
       });
       if (!response.ok) return;
       const data = await response.json();
-      const unpinnedIds = new Set(
+      const unpinnedIds = new Set<string>(
         Array.isArray(data.unpinned_ids)
           ? data.unpinned_ids.filter((id: unknown): id is string => typeof id === "string")
           : [],
       );
       if (!unpinnedIds.size) return;
-      setSessions((prev) =>
-        sortSessionsForList(
-          prev.map((s) => (unpinnedIds.has(s.id) ? { ...s, pinned: false } : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
-        )
-      );
-      void fetchSessions();
+      for (const id of unpinnedIds) {
+        applySessionPatchEverywhere(id, { pinned: false });
+      }
     },
-    [fetchSessions]
+    [applySessionPatchEverywhere]
   );
 
   const archiveSession = useCallback(
@@ -1756,10 +2504,51 @@ export function useSession(authStatus?: string) {
         body: JSON.stringify({ archived }),
       });
       setSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? { ...s, archived } : s))
+        sortForList(
+          prev
+            .map((s) => (s.id === sessionId ? { ...s, archived } : s))
+            .filter(isSidebarVisibleSession),
+        )
       );
     },
-    []
+    [sortForList]
+  );
+
+  const moveSessionToProject = useCallback(
+    async (sessionId: string, cwd: string): Promise<Session> => {
+      const opId = `session:move:${sessionId}`;
+      startOp(opId);
+      try {
+        const res = await fetch(`${API}/api/sessions/${sessionId}/move-to-project`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cwd }),
+        });
+        if (!res.ok) {
+          const detail = (await res.json().catch(() => null))?.detail;
+          throw new Error(
+            typeof detail === "string" ? detail : `move failed (${res.status})`,
+          );
+        }
+        const created: Session = await res.json();
+        setSessions((prev) =>
+          sortForList(
+            prev
+              .map((s) =>
+                s.id === sessionId
+                  ? { ...s, archived: true, moved_to_session_id: created.id }
+                  : s,
+              )
+              .filter(isSidebarVisibleSession),
+          )
+        );
+        return created;
+      } finally {
+        completeOp(opId);
+      }
+    },
+    [sortForList]
   );
 
   const toggleWorkerEligible = useCallback(
@@ -1772,6 +2561,21 @@ export function useSession(authStatus?: string) {
       });
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, worker_eligible } : s))
+      );
+    },
+    []
+  );
+
+  const toggleAgentRenameAllowed = useCallback(
+    async (sessionId: string, agent_rename_allowed: boolean) => {
+      await fetch(`${API}/api/sessions/${sessionId}/agent_rename_allowed`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_rename_allowed }),
+      });
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, agent_rename_allowed } : s))
       );
     },
     []
@@ -1796,125 +2600,19 @@ export function useSession(authStatus?: string) {
     [updateSessionName]
   );
 
-  /** Patch the rearranger-related fields on the current session. Used by
-   * App to apply `rearranger_updated` / `rearranger_state` WS events. */
-  const updateRearranger = useCallback(
-    (
-      sessionId: string,
-      patch: {
-        enabled?: boolean;
-        tree?: RearrangerTree | null;
-        rearranger_session_id?: string | null;
-        last_message_count?: number;
-        rearranger_stats?: RearrangerStats | null;
-        token_usage_total?: TokenUsage | null;
-        token_usage_last?: TokenUsage | null;
-      }
-    ) => {
-      const apply = (s: Session): Session => {
-        const next: Session = { ...s };
-        if (patch.enabled !== undefined) next.rearranger_enabled = patch.enabled;
-        if (patch.tree !== undefined) next.rearranger_tree = patch.tree;
-        if (patch.rearranger_session_id !== undefined) {
-          next.rearranger_session_id = patch.rearranger_session_id;
-        }
-        if (patch.last_message_count !== undefined) {
-          next.rearranger_last_message_count = patch.last_message_count;
-        }
-        if (patch.rearranger_stats !== undefined) {
-          next.rearranger_stats = patch.rearranger_stats;
-        }
-        if (patch.token_usage_total !== undefined && patch.token_usage_total) {
-          next.token_usage_total = patch.token_usage_total;
-        }
-        if (patch.token_usage_last !== undefined && patch.token_usage_last) {
-          next.token_usage_last = patch.token_usage_last;
-        }
-        return next;
-      };
-      setSessions((prev) =>
-        sortSessionsForList(
-          prev.map((s) => (s.id === sessionId ? apply(s) : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
-        )
-      );
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, apply);
-      });
-    },
-    []
-  );
-
   /** Merge a partial metadata patch ({inline_tags?, draft_input?, fork_closed?})
-   * into the session record. Used both as the optimistic local
-   * updater (typing, tag add/remove) AND as the WS broadcast applier
-   * (cross-tab sync). The two are unified so a single reducer owns
-   * the merge — no skew between optimistic and broadcast paths. */
+   * into every local copy of the session record. Used both as the optimistic
+   * local updater (typing, tag add/remove) AND as the WS broadcast applier
+   * (cross-tab sync). The shared reducer also re-sorts the sidebar list by
+   * the active sort field so frontend-only patches take effect immediately. */
   const applySessionMetadata = useCallback(
     (
       sessionId: string,
       patchOrUpdater: SessionMetadataUpdater
     ) => {
-      const apply = (s: Session): Session => {
-        const patch =
-          typeof patchOrUpdater === "function"
-            ? patchOrUpdater(s)
-            : patchOrUpdater;
-        const next: Session = { ...s };
-        if (patch.inline_tags !== undefined) next.inline_tags = patch.inline_tags;
-        if (patch.adv_sync_overlays !== undefined)
-          next.adv_sync_overlays = patch.adv_sync_overlays;
-        if (patch.open_file_panels !== undefined)
-          next.open_file_panels = patch.open_file_panels;
-        if (patch.open_config_panels !== undefined)
-          next.open_config_panels = patch.open_config_panels;
-        if (patch.draft_input !== undefined) next.draft_input = patch.draft_input;
-        if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
-        if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;
-        if (patch.fork_closed !== undefined) next.fork_closed = patch.fork_closed;
-        if (patch.model !== undefined) next.model = patch.model;
-        if (patch.reasoning_effort !== undefined) {
-          next.reasoning_effort = patch.reasoning_effort as Session["reasoning_effort"];
-        }
-        if (patch.cwd !== undefined) next.cwd = patch.cwd;
-        if (patch.provider_id !== undefined) next.provider_id = patch.provider_id;
-        if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
-        if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
-        if (patch.pinned !== undefined) next.pinned = patch.pinned;
-        if (patch.archived !== undefined) next.archived = patch.archived;
-        if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
-        if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;
-        if (patch.working_mode_meta !== undefined) next.working_mode_meta = patch.working_mode_meta;
-        if (patch.notes !== undefined) next.notes = patch.notes;
-        if (patch.current_todos !== undefined) next.current_todos = patch.current_todos;
-        if (patch.current_tasks !== undefined) next.current_tasks = patch.current_tasks;
-        if (patch.messages !== undefined) next.messages = patch.messages;
-        if (patch.message_count !== undefined) next.message_count = patch.message_count;
-        if (patch.updated_at !== undefined) next.updated_at = patch.updated_at;
-        if (patch.pagination !== undefined) next.pagination = patch.pagination;
-        if (patch.right_panel_open !== undefined)
-          next.right_panel_open = patch.right_panel_open;
-        if (patch.right_panel_active_tab !== undefined)
-          next.right_panel_active_tab = patch.right_panel_active_tab;
-        return next;
-      };
-      setSessions((prev) =>
-        sortSessionsForList(
-          prev
-            .map((s) => (s.id === sessionId ? apply(s) : s))
-            .filter(isSidebarVisibleSession),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
-        )
-      );
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, apply);
-      });
+      applySessionPatchEverywhere(sessionId, patchOrUpdater);
     },
-    []
+    [applySessionPatchEverywhere]
   );
 
   /** Prepend a freshly-born NON-fork session (from a WS
@@ -1925,51 +2623,19 @@ export function useSession(authStatus?: string) {
    * out backend-side). */
   const appendSessionIfNew = useCallback((session: Session) => {
     if (!isSidebarVisibleSession(session)) return;
-    const filters = sessionListFiltersRef.current;
+    if (!canLocallyInsertIntoSessionList(session, sessionListFiltersRef.current)) {
+      refetchLoadedSpan();
+      return;
+    }
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
-      return sortSessionsForList(
-        [session, ...prev],
-        filters.folderView ?? false,
-        filters.sortBy ?? "updated_at",
-      );
+      return sortForList([session, ...prev]);
     });
-  }, []);
+  }, [refetchLoadedSpan, sortForList]);
 
-  /** Drop a session by id (from a WS `session_deleted` event). Mirrors
-   * the optimistic removal in `deleteSession`, but driven by the WS
-   * event so other tabs converge AND so the originating tab still
-   * cleans up if the REST response was lost / the request was
-   * cancelled mid-flight. Idempotent by id. */
   const dropSessionIfPresent = useCallback((id: string) => {
-    forgetSessionTree(id);
-    setSessions((prev) => {
-      if (!prev.some((s) => s.id === id)) return prev;
-      return prev.filter((s) => s.id !== id);
-    });
-    setCurrentSession((prev) => {
-      if (!prev) return prev;
-      if (prev.id === id) return null;
-      const dropFork = (node: Session): Session => {
-        const forks = node.forks;
-        if (!forks || forks.length === 0) return node;
-        let changed = false;
-        const next: Session[] = [];
-        for (const f of forks) {
-          if (f.id === id) {
-            changed = true;
-            continue;
-          }
-          const recursed = dropFork(f);
-          if (recursed !== f) changed = true;
-          next.push(recursed);
-        }
-        return changed ? { ...node, forks: next } : node;
-      };
-      const updated = dropFork(prev);
-      return updated === prev ? prev : updated;
-    });
-  }, [forgetSessionTree]);
+    removeSessionLocally(id);
+  }, [removeSessionLocally]);
 
   /** Append a freshly-born fork (from a WS `session_forked` event) into
    * the live tree. The fork is added under its `parent_session_id`'s
@@ -2061,6 +2727,7 @@ export function useSession(authStatus?: string) {
 
   const clearCurrentSession = useCallback(() => {
     selectRequestIdRef.current++;
+    selectInFlightIdRef.current = null;
     setCurrentSession(null);
     setWsTargetSessionId(null);
   }, []);
@@ -2076,7 +2743,7 @@ export function useSession(authStatus?: string) {
       query: string,
       signal?: AbortSignal,
     ): Promise<{
-      session_ids: string[];
+      results: Session[];
       reasoning: string;
       error: string | null;
     } | null> => {
@@ -2097,21 +2764,21 @@ export function useSession(authStatus?: string) {
             // best-effort detail extraction
           }
           return {
-            session_ids: [],
+            results: [],
             reasoning: "",
             error: detail,
           };
         }
         const data = await res.json();
         return {
-          session_ids: Array.isArray(data.session_ids) ? data.session_ids : [],
+          results: Array.isArray(data.results) ? data.results : [],
           reasoning: typeof data.reasoning === "string" ? data.reasoning : "",
           error: typeof data.error === "string" ? data.error : null,
         };
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
         return {
-          session_ids: [],
+          results: [],
           reasoning: "",
           error: e instanceof Error ? e.message : "search_failed",
         };
@@ -2143,7 +2810,7 @@ export function useSession(authStatus?: string) {
    * returned stale cache; this replaces it with the reconciled state
    * without a loading indicator or optimistic swap. */
   const applySessionReconciled = useCallback(
-    (rootId: string) => {
+    (rootId: string, authoritative = false) => {
       const cur = currentSessionRef.current;
       // Only refetch if the user is viewing this root (or a fork in it).
       if (!cur) return;
@@ -2152,7 +2819,7 @@ export function useSession(authStatus?: string) {
       const isStreaming = cur.messages?.some(
         (m) => m.role === "assistant" && m.isStreaming
       );
-      if (isStreaming) {
+      if (isStreaming && !authoritative) {
         console.info("[stale-dbg] applySessionReconciled %s: skipped (streaming)", rootId.slice(0, 8));
         return;
       }
@@ -2163,7 +2830,7 @@ export function useSession(authStatus?: string) {
         "[stale-dbg] applySessionReconciled %s: refetching (prev msgs=%d last_asst_evts=%d)",
         rootId.slice(0, 8), prevMsgCount, lastAsst?.events?.length ?? 0,
       );
-      fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
+      return fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
         credentials: "include",
       })
         .then((res) => (res.ok ? res.json() : null))
@@ -2179,15 +2846,16 @@ export function useSession(authStatus?: string) {
           );
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
-            const carried = carryDrafts(prev, tree);
-            if (prev.messages?.length) {
-              return addMissingMessages(carried, prev.id, prev.messages);
+            let carried = carryDrafts(prev, tree);
+            if (!authoritative && prev.messages?.length) {
+              carried = addMissingMessages(carried, prev.id, prev.messages);
             }
-            return carried;
+            return applyReconcilePreserves(carried);
           });
+          return undefined;
         });
     },
-    [exchangePageSize]
+    [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize]
   );
 
   /** Update a user message's `status` field, located by `lifecycle_msg_id`.
@@ -2238,6 +2906,7 @@ export function useSession(authStatus?: string) {
     restoreOfflineSession,
     forkSession,
     selectSession,
+    markSessionOpened,
     clearCurrentSession,
     deleteSession,
     addMessages,
@@ -2253,9 +2922,12 @@ export function useSession(authStatus?: string) {
     togglePin,
     unpinOtherSessions,
     archiveSession,
+    moveSessionToProject,
     toggleWorkerEligible,
-    updateRearranger,
+    toggleAgentRenameAllowed,
     applySessionMetadata,
+    preserveSessionMetadataThroughReconcile,
+    clearSessionMetadataReconcilePreserve,
     appendSessionIfNew,
     refreshSessions: fetchSessions,
     setSessionListFilters: updateSessionListFilters,
@@ -2270,6 +2942,9 @@ export function useSession(authStatus?: string) {
     applyMessageRecovering,
     applyMessageRetrying,
     applyMessageAutoRetry,
+    applyMessageContent,
+    applyMessageContinuation,
+    applyMessageRunMeta,
     applyMessageAskResult,
     applyMessageAskChoice,
     processingByRoot,
@@ -2281,6 +2956,7 @@ export function useSession(authStatus?: string) {
     getNode,
     loadOlderMessages,
     sessionLoading,
+    sessionLoadError,
     searchSessions,
   };
 }

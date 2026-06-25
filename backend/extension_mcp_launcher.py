@@ -28,6 +28,7 @@ def _runtime_inputs() -> dict:
         "provider_id": get_env("BETTER_CLAUDE_PROVIDER_ID"),
         "mode": get_env("BETTER_CLAUDE_MODE"),
         "working_mode": get_env("BETTER_CLAUDE_WORKING_MODE"),
+        "provisioned_tool_profile": get_env("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE"),
         "bare_config": get_env("BETTER_CLAUDE_BARE_CONFIG") == "1",
         "open_file_panel_enabled": get_env("BETTER_CLAUDE_USER_FACING") == "1",
         "disabled_builtin_extensions": [
@@ -35,6 +36,16 @@ def _runtime_inputs() -> dict:
             for item in get_env("BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS").split(",")
             if item
         ],
+        # Threaded from `_native_mcp_launcher_env` so a capability-gated MCP
+        # (predicate `contains: {active_capability_ids: ...}`) re-resolves the
+        # same way it was built; without this the launcher predicate fails
+        # closed and the server refuses to start (`extension MCP unavailable`).
+        "active_capability_ids": [
+            item
+            for item in get_env("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS").split(",")
+            if item
+        ],
+        "extension_mcp_launcher_context": True,
     }
 
 

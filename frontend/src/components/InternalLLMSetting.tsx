@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
 
-/** Per-task assignment of provider + model + reasoning effort for the
+/** Per-task runtime profile assignment for the
  * backend's internal LLM calls (requirement analysis, config-sync review,
  * search/Ask worker, project-structure edit, and the default for new
  * sessions). Every field is optional — an unset field inherits from the
@@ -18,20 +19,29 @@ type Assignment = {
 
 const INHERIT = "";
 
-export function InternalLLMSetting() {
+interface InternalLLMSettingProps {
+  tasks?: string[];
+  showHint?: boolean;
+  extensionId?: string;
+}
+
+export function InternalLLMSetting({ tasks: taskOverride, showHint = true, extensionId = "" }: InternalLLMSettingProps = {}) {
   const { t } = useTranslation();
-  const [tasks, setTasks] = useState<string[]>([]);
+  const [loadedTasks, setLoadedTasks] = useState<string[]>([]);
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [providers, setProviders] = useState<Provider[]>([]);
   const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const settingsEndpoint = extensionId
+    ? `${API}/api/extensions/${encodeURIComponent(extensionId)}/internal-llm`
+    : `${API}/api/settings/internal-llm`;
 
   useEffect(() => {
     trackPromise("internalLlm:load", () =>
-      fetch(`${API}/api/settings/internal-llm`)
+      fetch(settingsEndpoint)
         .then((r) => r.json())
         .then((data: { tasks?: string[]; assignments?: Record<string, Assignment> }) => {
-          setTasks(data.tasks || []);
+          setLoadedTasks(data.tasks || []);
           setAssignments(data.assignments || {});
         }),
     ).promise.catch(() => {});
@@ -43,7 +53,7 @@ export function InternalLLMSetting() {
           setDefaultProviderId(data.default_provider_id ?? null);
         }),
     ).promise.catch(() => {});
-  }, []);
+  }, [settingsEndpoint]);
 
   const providerById = useMemo(() => {
     const m: Record<string, Provider> = {};
@@ -77,7 +87,7 @@ export function InternalLLMSetting() {
     setSaving(true);
     try {
       await trackPromise("internalLlm:save", () =>
-        fetch(`${API}/api/settings/internal-llm`, {
+        fetch(settingsEndpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ assignments: next }),
@@ -91,10 +101,12 @@ export function InternalLLMSetting() {
   };
 
   const taskLabel = (task: string) => t(`settings.internalLlmTask.${task}`, task);
+  const tasks = taskOverride ?? loadedTasks;
+  if (tasks.length === 0) return null;
 
   return (
     <div className="internal-llm-setting">
-      <div className="context-strategy-hint">{t("settings.internalLlmHint")}</div>
+      {showHint && <div className="context-strategy-hint">{t("settings.internalLlmHint")}</div>}
       {tasks.map((task) => {
         const a = assignments[task] || {};
         const provider = effectiveProvider(task);
@@ -110,49 +122,40 @@ export function InternalLLMSetting() {
             <div className="internal-llm-task">{taskLabel(task)}</div>
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmProvider")}</span>
-              <select
+              <Select
                 value={a.provider_id || INHERIT}
                 disabled={saving}
-                onChange={(e) => void change(task, "provider_id", e.target.value)}
-              >
-                <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => void change(task, "provider_id", v)}
+                options={[
+                  { value: INHERIT, label: t("settings.internalLlmInherit") },
+                  ...providers.map((p) => ({ value: p.id, label: p.name })),
+                ]}
+              />
             </label>
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmModel")}</span>
-              <select
+              <Select
                 value={a.model || INHERIT}
                 disabled={saving}
-                onChange={(e) => void change(task, "model", e.target.value)}
-              >
-                <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => void change(task, "model", v)}
+                options={[
+                  { value: INHERIT, label: t("settings.internalLlmInherit") },
+                  ...modelOptions.map((m) => ({ value: m, label: m })),
+                ]}
+              />
             </label>
             {effortOptions.length > 0 && (
               <label className="context-strategy-row">
                 <span>{t("settings.internalLlmEffort")}</span>
-                <select
+                <Select
                   value={a.reasoning_effort || INHERIT}
                   disabled={saving}
-                  onChange={(e) => void change(task, "reasoning_effort", e.target.value)}
-                >
-                  <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                  {effortOptions.map((e2) => (
-                    <option key={e2} value={e2}>
-                      {e2}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => void change(task, "reasoning_effort", v)}
+                  options={[
+                    { value: INHERIT, label: t("settings.internalLlmInherit") },
+                    ...effortOptions.map((e2) => ({ value: e2, label: e2 })),
+                  ]}
+                />
               </label>
             )}
           </div>

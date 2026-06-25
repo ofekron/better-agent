@@ -1,11 +1,19 @@
-import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import Icon from "./Icon";
-import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
+import {
+  ExtensionModuleSlot,
+  ExtensionCatalogRecovery,
+  useExtensionFrontendCatalog,
+  useExtensionFrontendModules,
+} from "./ExtensionSlots";
 import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
-import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
+import { fileToPastedImage, insertTextAtSelection, promptClipboardPayload } from "../utils/imageAttach";
+import { mergeIncomingImages } from "../utils/shareAttach";
 import { fileToAttachment } from "../utils/fileAttach";
+import { linkifyFilePaths } from "../utils/linkifyFilePaths";
 import { splitPreview, applyQueuedEdit } from "../utils/queuedPreview";
 import {
   AtMentionDropdown,
@@ -79,14 +87,19 @@ interface Props {
   draft: string;
   onDraftChange: (value: string) => void;
   onEngineer?: (draft: string) => void;
+  onSendToNewSession?: (prompt: string, images: PastedImage[], files: FileAttachment[]) => boolean | Promise<boolean>;
   onFork?: (prompt: string, images: PastedImage[]) => boolean | Promise<boolean>;
   canFork?: boolean;
   forkTargetLabel?: string;
   queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
-  onPromoteQueued: () => void;
-  onSteerQueued?: () => void;
-  onCancelQueued?: () => void;
-  onQueuedTextEdit?: (text: string) => void;
+  queuedPrompts?: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number }[];
+  onPromoteQueued: (queuedId?: string) => void;
+  onPromoteQueuedMulti?: (queuedIds: string[]) => void;
+  onSteerQueued?: (queuedId?: string) => void;
+  onCancelQueued?: (queuedId?: string) => void;
+  onQueuedTextEdit?: (text: string, queuedId?: string) => void;
+  onQueuedEditStart?: (queuedId?: string) => void;
+  onQueuedEditFinish?: (queuedId?: string) => void;
   onReviewLastWork?: () => void;
   sendTarget?: "worker" | "supervisor";
   onSendTargetChange?: (target: "worker" | "supervisor") => void;
@@ -103,6 +116,9 @@ interface Props {
   supervisorEnabled?: boolean;
   /** Flip the supervisor toggle. */
   onToggleSupervisor?: (enabled: boolean) => void;
+  /** Reopen the supervisor prompt modal to edit the custom prompt
+   *  while supervisor is already enabled. */
+  onEditSupervisorPrompt?: () => void;
   /** Graduate the supervisor's claude session into a new native BC root
    *  and re-back the supervisor on this session as a fork of the
    *  graduated session. Only meaningful when `supervisorEnabled` and
@@ -115,7 +131,7 @@ interface Props {
   nextTurnCapabilities?: CapabilityContext[];
   onRemoveNextTurnCapability?: (sourceId: string) => void;
   /** Move the queued prompt to notes instead. */
-  onQueuedToNote?: (text: string) => void;
+  onQueuedToNote?: (text: string, queuedId: string) => void;
   /** Interrupt the active streaming turn. */
   onStop?: () => void;
   /** Stop request was sent but not yet acknowledged. */
@@ -131,6 +147,7 @@ interface Props {
   /** Machine snapshots for resolving node_id → display name. */
   machines?: NodeSnapshot[];
   headerNode?: ReactNode;
+  overflowPanelNode?: ReactNode;
 }
 
 export function InputArea({
@@ -144,14 +161,19 @@ export function InputArea({
   draft,
   onDraftChange,
   onEngineer,
+  onSendToNewSession,
   onFork,
   canFork = false,
   forkTargetLabel,
   queuedPrompt,
+  queuedPrompts,
   onPromoteQueued,
+  onPromoteQueuedMulti,
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
+  onQueuedEditStart,
+  onQueuedEditFinish,
   onReviewLastWork,
   sendTarget,
   onSendTargetChange,
@@ -161,6 +183,7 @@ export function InputArea({
   onImagesChange,
   supervisorEnabled,
   onToggleSupervisor,
+  onEditSupervisorPrompt,
   onSeparateSupervisor,
   onAddNote,
   onAddCapabilityToNextTurn,
@@ -175,21 +198,54 @@ export function InputArea({
   currentNodeId = "primary",
   machines = [],
   headerNode,
+  overflowPanelNode,
 }: Props) {
   const { t } = useTranslation();
-  const overflowMenuModules = useExtensionFrontendModules("input-overflow-menu");
+  const overflowCatalog = useExtensionFrontendCatalog("input-overflow-menu");
+  const overflowMenuModules = overflowCatalog.modules;
+  const composerActionModules = useExtensionFrontendModules("composer-actions");
   const viewport = useViewport();
   // On touch-class viewports the soft keyboard's Enter typically
   // means newline. Sending requires the explicit Send button so the
   // user can compose multi-line prompts without surprise submits.
   const enterIsNewline = viewport.mode !== "desktop";
   const compactActionMenus = viewport.mode === "mobile";
+  const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
+  // Persisted display preference: collapse the whole queued-prompts list to a
+  // one-line "n queued prompts" summary strip. Defaults collapsed on mobile
+  // where vertical space is scarce; a stored preference always wins.
+  const [queueCollapsed, setQueueCollapsed] = useLocalStorage(
+    "better-agent-queued-list-collapsed",
+    viewport.mode === "mobile",
+  );
+  // Multi-select for bulk queue actions (cancel/interrupt). Not persisted —
+  // resets on remount; pruned below whenever the underlying queue changes so
+  // stale ids (already sent/cancelled elsewhere) never linger in a selection.
+  const [selectedQueuedIds, setSelectedQueuedIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setSelectedQueuedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const liveIds = new Set(visibleQueuedPrompts.map((item) => item.id));
+      const next = new Set([...prev].filter((id) => liveIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleQueuedPrompts]);
+  const toggleQueuedSelect = useCallback((id: string) => {
+    setSelectedQueuedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [focusModalOpen, setFocusModalOpen] = useState(false);
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const focusTextareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const submitInFlightRef = useRef(false);
@@ -245,6 +301,15 @@ export function InputArea({
   // onImagesChange) without re-creating the callback on every keystroke.
   useEffect(() => { localDraftRef.current = localDraft; }, [localDraft]);
 
+  const updateDraftText = useCallback((next: string) => {
+    setLocalDraft(next);
+    localDraftRef.current = next;
+    lastSyncedRef.current = next;
+    pendingLocalSeq.current++;
+    if (ignoreNextDraft !== null) setIgnoreNextDraft(null);
+    onDraftChange(next);
+  }, [ignoreNextDraft, onDraftChange]);
+
   // Wraps setImages to also persist to the backend. Pass `persist: false`
   // when restoring from backend (avoids echo) or clearing on send (parent
   // handles the clear via handleDraftClearImmediate).
@@ -257,12 +322,17 @@ export function InputArea({
   }, [onImagesChange]);
 
   // Resize the textarea to fit content whenever it changes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 200) + "px";
-  }, [localDraft]);
+    const style = window.getComputedStyle(el);
+    const minHeight = Number.parseFloat(style.minHeight) || 40;
+    const maxHeight = Number.parseFloat(style.maxHeight) || 200;
+    el.style.height = "0px";
+    const contentHeight = el.scrollHeight;
+    el.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxHeight)}px`;
+    el.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+  }, [localDraft, sessionId, disabled]);
 
   // Auto-focus the prompt input whenever the session changes or the
   // component first mounts with a valid session. Skips when the user
@@ -276,12 +346,23 @@ export function InputArea({
   useEffect(() => {
     if (!sessionId) return;
     if (viewport.mode !== "desktop") return;
+    if (focusModalOpen) return;
     const el = textareaRef.current;
     if (!el || el.disabled) return;
     const active = document.activeElement;
     if (active && active !== el && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
     el.focus();
-  }, [sessionId, viewport.mode, disabled]);
+  }, [sessionId, viewport.mode, disabled, focusModalOpen]);
+
+  useEffect(() => {
+    if (!focusModalOpen) return;
+    requestAnimationFrame(() => {
+      const el = focusTextareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [focusModalOpen]);
 
 
   // Close the overflow menu on outside clicks.
@@ -305,6 +386,22 @@ export function InputArea({
     setFiles([]);
     setIgnoreNextDraft(null);
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reconcile draft_images injected WHILE this session is already mounted
+  // (e.g. the OS share sheet attaching a screenshot to the open session).
+  // The restore effect above only runs on session switch, so without this
+  // an external inject would never surface. Additive only: appends prop
+  // entries not already present, so it neither clobbers in-progress local
+  // composition nor fights the send-clear path. Writes straight to local
+  // state (no onImagesChange) since the parent already owns these values.
+  const draftImagesKey = useMemo(
+    () => draftImages?.map((i) => i.base64).join("\n") ?? "",
+    [draftImages],
+  );
+  useEffect(() => {
+    if (!draftImages || draftImages.length === 0) return;
+    setImagesLocal((prev) => mergeIncomingImages(prev, draftImages));
+  }, [draftImagesKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const canSend = (localDraft.trim() || images.length > 0 || files.length > 0 || tagCount > 0) && !disabled;
   const promptMentionItems = useMemo(
@@ -346,10 +443,7 @@ export function InputArea({
       const before = localDraft.slice(0, triggerStart);
       const after = localDraft.slice(triggerEnd);
       const next = before + insertion + after;
-      setLocalDraft(next);
-      lastSyncedRef.current = next;
-      pendingLocalSeq.current++;
-      onDraftChange(next);
+      updateDraftText(next);
       setMentionState(null);
       // Restore focus + position cursor after insertion
       requestAnimationFrame(() => {
@@ -361,7 +455,46 @@ export function InputArea({
         }
       });
     },
-    [localDraft, onDraftChange],
+    [localDraft, updateDraftText],
+  );
+
+  // Insert text into the draft at the caret (or over the selection),
+  // reusing the same setLocalDraft + pendingLocalSeq + onDraftChange path
+  // as typing so the gDSFP draft-resync above never clobbers it.
+  const insertDraftText = useCallback(
+    (text: string) => {
+      if (!text) return;
+      const el = textareaRef.current;
+      const start = el?.selectionStart ?? localDraft.length;
+      const end = el?.selectionEnd ?? localDraft.length;
+      const before = localDraft.slice(0, start);
+      const after = localDraft.slice(end);
+      const next = before + text + after;
+      updateDraftText(next);
+      requestAnimationFrame(() => {
+        const node = textareaRef.current;
+        if (node) {
+          node.focus();
+          const pos = before.length + text.length;
+          node.setSelectionRange(pos, pos);
+        }
+      });
+    },
+    [localDraft, updateDraftText],
+  );
+
+  const replaceDraftText = useCallback(
+    (text: string) => {
+      updateDraftText(text);
+      setMentionState(null);
+      requestAnimationFrame(() => {
+        const node = textareaRef.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(text.length, text.length);
+      });
+    },
+    [updateDraftText],
   );
 
   const detectMention = useCallback(
@@ -447,6 +580,11 @@ export function InputArea({
     }
   }, [localDraft, images, disabled, onFork, canFork, onDraftChange]);
 
+  const handleSendToNewSession = useCallback(() => {
+    if (!onSendToNewSession) return;
+    void submitDraft(onSendToNewSession);
+  }, [onSendToNewSession, submitDraft]);
+
   const handleScheduleSubmit = useCallback(
     async (payload: ScheduleSendPayload): Promise<boolean> => {
       if (!onSchedule || !sessionId) return false;
@@ -474,10 +612,10 @@ export function InputArea({
       e.preventDefault();
       const trimmed = localDraft.trim();
       if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
-        onPromoteQueued();
+        if (canSteer && onSteerQueued && _isStreaming) onSteerQueued();
+        else onPromoteQueued();
       } else {
-        if (canSteer && onSteer && _isStreaming) handleSteer();
-        else handleSend();
+        handleSend();
       }
     }
   };
@@ -485,14 +623,7 @@ export function InputArea({
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
     const cursorPos = e.target.selectionStart ?? v.length;
-    // Instant local update so the textarea never lags.
-    setLocalDraft(v);
-    lastSyncedRef.current = v;
-    pendingLocalSeq.current++;
-    // User typed — any in-flight stale-echo guard is moot.
-    if (ignoreNextDraft !== null) setIgnoreNextDraft(null);
-    // Notify parent immediately — App.tsx debounces applySessionMetadata.
-    onDraftChange(v);
+    updateDraftText(v);
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
@@ -516,13 +647,26 @@ export function InputArea({
   }, [setImages]);
 
   const handlePaste = useCallback(
-    (e: React.ClipboardEvent) => {
-      const files = imageFilesFromClipboard(e.clipboardData);
-      if (files.length === 0) return;
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const payload = promptClipboardPayload(e.clipboardData);
+      if (payload.imageFiles.length === 0) return;
       e.preventDefault();
-      files.forEach(addImageFile);
+      if (payload.text) {
+        const target = e.currentTarget;
+        const next = insertTextAtSelection(
+          localDraftRef.current,
+          payload.text,
+          target.selectionStart,
+          target.selectionEnd,
+        );
+        updateDraftText(next.value);
+        requestAnimationFrame(() => {
+          target.setSelectionRange(next.cursor, next.cursor);
+        });
+      }
+      payload.imageFiles.forEach(addImageFile);
     },
-    [addImageFile]
+    [addImageFile, updateDraftText]
   );
 
   const removeImage = useCallback((index: number) => {
@@ -563,6 +707,30 @@ export function InputArea({
       ? t("input.queueSendButton")
       : t("input.sendButton");
   const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const handleFocusModalSend = useCallback(() => {
+    setFocusModalOpen(false);
+    handlePrimarySend();
+  }, [handlePrimarySend]);
+  const showMobileSteerActions = compactActionMenus && steerIsPrimary;
+  const stopButton = somethingRunning && onStop ? (
+    <button
+      className={`stop-btn${isStopping ? " stopping" : ""}`}
+      data-testid="stop-btn"
+      onClick={isStopping ? undefined : onStop}
+      disabled={!!isStopping}
+      title={t("message.stopButton")}
+      aria-label={t("message.stopButton")}
+    >
+      {isStopping ? (
+        <span className="stop-btn-spinner" />
+      ) : (
+        <>
+          <Icon name="x-circle" size={14} />
+          <span className="stop-btn-label">{t("message.stopButton")}</span>
+        </>
+      )}
+    </button>
+  ) : null;
 
   return (
     <div className="input-area" data-testid="input-area">
@@ -600,27 +768,117 @@ export function InputArea({
           ))}
         </div>
       )}
-      {queuedPrompt && (
+      {visibleQueuedPrompts.length > 0 && (
+        <div
+          className={`queued-list-header${queueCollapsed ? " is-collapsed" : ""}`}
+          data-testid="queued-list-header"
+        >
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            data-testid="queued-list-toggle"
+            title={queueCollapsed ? t("input.queuedListExpand") : t("input.queuedListCollapse")}
+            aria-label={queueCollapsed ? t("input.queuedListExpand") : t("input.queuedListCollapse")}
+            aria-expanded={!queueCollapsed}
+            onClick={() => setQueueCollapsed(!queueCollapsed)}
+          >
+            <Icon name={queueCollapsed ? "chevron-right" : "chevron-down"} size={14} />
+          </button>
+          <span
+            className="queued-list-summary"
+            data-testid="queued-list-summary"
+            role="button"
+            tabIndex={0}
+            onClick={() => setQueueCollapsed(!queueCollapsed)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") setQueueCollapsed(!queueCollapsed);
+            }}
+          >
+            {t(
+              visibleQueuedPrompts.length === 1
+                ? "input.queuedListSummary_1"
+                : "input.queuedListSummary_other",
+              { count: visibleQueuedPrompts.length },
+            )}
+          </span>
+          {visibleQueuedPrompts.length > 1 && (
+            <div className="queued-list-bulk-actions" data-testid="queued-list-bulk-actions">
+              {onCancelQueued && (
+                <button
+                  className="queued-cancel-btn"
+                  type="button"
+                  data-testid="queued-bulk-cancel"
+                  onClick={() => {
+                    if (selectedQueuedIds.size > 0) {
+                      selectedQueuedIds.forEach((id) => onCancelQueued(id));
+                      setSelectedQueuedIds(new Set());
+                    } else {
+                      onCancelQueued();
+                    }
+                  }}
+                >
+                  {selectedQueuedIds.size > 0
+                    ? t("input.queuedCancelSelected", { count: selectedQueuedIds.size })
+                    : t("input.queuedCancelAll")}
+                </button>
+              )}
+              {onPromoteQueuedMulti && (
+                <button
+                  className="promote-btn interrupt"
+                  type="button"
+                  data-testid="queued-bulk-interrupt"
+                  onClick={() => {
+                    const ids = selectedQueuedIds.size > 0
+                      ? [...selectedQueuedIds]
+                      : visibleQueuedPrompts.map((item) => item.id);
+                    onPromoteQueuedMulti(ids);
+                    setSelectedQueuedIds(new Set());
+                  }}
+                >
+                  {selectedQueuedIds.size > 0
+                    ? t("input.queuedInterruptSelected", { count: selectedQueuedIds.size })
+                    : t("input.queuedInterruptAll")}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {!queueCollapsed && visibleQueuedPrompts.map((item) => (
         <QueuedPromptBanner
-          preview={queuedPrompt.preview}
-          images={queuedPrompt.images}
-          imagesCount={queuedPrompt.imagesCount}
-          files={queuedPrompt.files}
-          filesCount={queuedPrompt.filesCount}
-          onPromote={onPromoteQueued}
-          onSteer={canSteer ? onSteerQueued : undefined}
-          onCancel={onCancelQueued!}
-          onEdit={onQueuedTextEdit}
-          onSaveToNote={onQueuedToNote ?? undefined}
-          interruptLabel={t("input.interruptButton")}
-          interruptTitle={t("input.interruptTitle")}
+          key={item.id}
+          preview={item.preview}
+          images={item.images}
+          imagesCount={item.imagesCount}
+          files={item.files}
+          filesCount={item.filesCount}
+          selectable={visibleQueuedPrompts.length > 1}
+          selected={selectedQueuedIds.has(item.id)}
+          onToggleSelect={() => toggleQueuedSelect(item.id)}
+          onPromote={() => onPromoteQueued(item.id)}
+          onSteer={canSteer && _isStreaming && onSteerQueued ? () => onSteerQueued(item.id) : undefined}
+          onCancel={onCancelQueued ? () => onCancelQueued(item.id) : undefined}
+          onEdit={onQueuedTextEdit ? (text) => onQueuedTextEdit(text, item.id) : undefined}
+          onEditStart={onQueuedEditStart ? () => onQueuedEditStart(item.id) : undefined}
+          onEditFinish={onQueuedEditFinish ? () => onQueuedEditFinish(item.id) : undefined}
+          onSaveToNote={onQueuedToNote ? (text) => onQueuedToNote(text, item.id) : undefined}
           steerLabel={t("input.steerButton")}
           steerTitle={t("input.steerTitle")}
+          interruptLabel={t("input.interruptButton")}
+          interruptTitle={t("input.interruptTitle")}
           cancelLabel={t("app.cancel")}
+          confirmLabel={t("app.confirm")}
           queuedLabel={t("input.queuedLabel")}
+          editLabel={t("input.queuedEdit")}
+          editTitle={t("input.queuedEditTitle")}
+          moreActionsLabel={t("input.queuedMoreActions")}
+          saveToNoteLabel={t("input.queuedSaveToNote")}
+          minimizeLabel={t("input.queuedMinimize")}
+          expandLabel={t("input.queuedExpand")}
+          selectLabel={t("input.queuedSelect")}
           compactActions={compactActionMenus}
         />
-      )}
+      ))}
       {forkTargetLabel && (
         <div
           className="input-fork-target"
@@ -628,6 +886,30 @@ export function InputArea({
           data-testid="input-fork-target"
         >
           → <strong>{forkTargetLabel}</strong>
+        </div>
+      )}
+      {showMobileSteerActions && (
+        <div className="mobile-steer-actions" data-testid="mobile-steer-actions">
+          {stopButton}
+          <div className="mobile-steer-action-pair">
+            <button
+              onClick={handleSteer}
+              disabled={!canSend}
+              className="send-btn steer"
+              data-testid="send-btn"
+              title={primarySendTitle}
+            >
+              {t("input.steerButton")}
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className="send-btn queue"
+              data-testid="queue-btn"
+            >
+              {t("input.queueSendButton")}
+            </button>
+          </div>
         </div>
       )}
       <div className="input-row" style={{ position: "relative" }}>
@@ -700,15 +982,45 @@ export function InputArea({
           onChange={handleAttachmentChange}
         />
         <button
-          onClick={handlePrimarySend}
-          disabled={!canSend}
-          className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
-          data-testid="send-btn"
-          title={primarySendTitle}
+          type="button"
+          className="composer-focus-btn"
+          data-testid="composer-focus-btn"
+          onClick={() => setFocusModalOpen(true)}
+          disabled={disabled}
+          title={t("input.focusModeOpen")}
+          aria-label={t("input.focusModeOpen")}
         >
-          {primarySendLabel}
+          <Icon name="expand" size={16} />
         </button>
-        {somethingRunning && canSteer && onSteer && !compactActionMenus && (
+        {/* Composer-action modules (e.g. composer-fill) render inline on
+            desktop; on mobile they move into the ⋯ overflow menu below. */}
+        {!compactActionMenus && composerActionModules.map((module) => (
+          <ExtensionModuleSlot
+            key={`${module.extension_id}:${module.id}`}
+            module={module}
+            className="extension-module-slot--composer-actions"
+            context={{
+              sessionId,
+              draft: localDraft,
+              onInsertText: insertDraftText,
+              onReplaceText: replaceDraftText,
+              disabled,
+              isStreaming: _isStreaming,
+            }}
+          />
+        ))}
+        {!showMobileSteerActions && (
+          <button
+            onClick={handlePrimarySend}
+            disabled={!canSend}
+            className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+            data-testid="send-btn"
+            title={primarySendTitle}
+          >
+            {primarySendLabel}
+          </button>
+        )}
+        {steerIsPrimary && !compactActionMenus && (
           <button
             onClick={handleSend}
             disabled={!canSend}
@@ -729,30 +1041,44 @@ export function InputArea({
             {t("input.interruptSendButton")}
           </button>
         )}
-        {somethingRunning && onStop && !compactActionMenus && (
-          <button
-            className={`stop-btn${isStopping ? " stopping" : ""}`}
-            data-testid="stop-btn"
-            onClick={isStopping ? undefined : onStop}
-            disabled={!!isStopping}
-            title={t("message.stopButton")}
-          >
-            {isStopping ? <span className="stop-btn-spinner" /> : t("message.stopButton")}
-          </button>
-        )}
+        {!showMobileSteerActions && stopButton}
         <div className="input-overflow-wrapper">
           <button
             ref={overflowTriggerRef}
             className="input-overflow-trigger"
             onClick={() => setMenuOpen((o) => !o)}
-            title="More actions"
-            aria-label="More actions"
+            title={t("app.moreActions")}
+            aria-label={t("app.moreActions")}
           >
             ⋯
           </button>
           {menuOpen && (
             <div className="input-overflow-menu">
-              {compactActionMenus && somethingRunning && canSteer && onSteer && (
+              {overflowPanelNode ? (
+                <div className="input-overflow-panel">
+                  {overflowPanelNode}
+                </div>
+              ) : null}
+              {/* On mobile, composer-action modules (e.g. composer-fill) live
+                  here rather than inline. Same context as the inline slot plus
+                  closeMenu so a picked suggestion can also dismiss the menu. */}
+              {compactActionMenus && composerActionModules.map((module) => (
+                <ExtensionModuleSlot
+                  key={`${module.extension_id}:${module.id}`}
+                  module={module}
+                  className="extension-module-slot--composer-actions"
+                  context={{
+                    sessionId,
+                    draft: localDraft,
+                    onInsertText: insertDraftText,
+                    onReplaceText: replaceDraftText,
+                    disabled,
+                    isStreaming: _isStreaming,
+                    closeMenu: () => setMenuOpen(false),
+                  }}
+                />
+              ))}
+              {compactActionMenus && steerIsPrimary && !showMobileSteerActions && (
                 <button
                   className="overflow-menu-item"
                   data-testid="queue-btn"
@@ -773,20 +1099,17 @@ export function InputArea({
                   {t("input.interruptSendButton")}
                 </button>
               )}
-              {compactActionMenus && somethingRunning && onStop && (
-                <button
-                  className="overflow-menu-item"
-                  data-testid="stop-btn"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    if (!isStopping) onStop();
-                  }}
-                  disabled={!!isStopping}
-                  title={t("message.stopButton")}
-                >
-                  {isStopping ? t("message.stopButton") : t("message.stopButton")}
-                </button>
-              )}
+              <button
+                className="overflow-menu-item"
+                data-testid="composer-focus-menu-btn"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setFocusModalOpen(true);
+                }}
+                disabled={disabled}
+              >
+                <Icon name="expand" size={14} /> {t("input.focusModeOpen")}
+              </button>
               <button
                 className="overflow-menu-item"
                 onClick={() => { attachmentInputRef.current?.click(); setMenuOpen(false); }}
@@ -822,6 +1145,19 @@ export function InputArea({
                   <Icon name="clock" size={14} /> {t("schedule.scheduleSend")}
                 </button>
               )}
+              {onSendToNewSession && (
+                <button
+                  className="overflow-menu-item"
+                  data-testid="send-to-new-session-btn"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    handleSendToNewSession();
+                  }}
+                  disabled={!canSend}
+                >
+                  <Icon name="folder-plus" size={14} /> {t("input.sendToNewSession")}
+                </button>
+              )}
               {onAddCapabilityToNextTurn && (
                 <button
                   className="overflow-menu-item"
@@ -832,7 +1168,7 @@ export function InputArea({
                   disabled={disabled}
                   data-testid="add-turn-capability-btn"
                 >
-                  <Icon name="sparkles" size={14} /> Add capability to next turn
+                  <Icon name="assistant-start" size={14} /> Add capability to next turn
                 </button>
               )}
               {onEngineer && (
@@ -849,6 +1185,7 @@ export function InputArea({
                   {t("input.engineerButton")}
                 </button>
               )}
+              <ExtensionCatalogRecovery catalog={overflowCatalog} />
               {overflowMenuModules.map((module) => (
                 <ExtensionModuleSlot
                   key={`${module.extension_id}:${module.id}`}
@@ -862,6 +1199,7 @@ export function InputArea({
                     onReviewLastWork,
                     onSendTargetChange,
                     onToggleSupervisor,
+                    onEditPrompt: onEditSupervisorPrompt,
                     onSeparateSupervisor,
                     closeMenu: () => setMenuOpen(false),
                   }}
@@ -907,6 +1245,67 @@ export function InputArea({
           ))}
         </div>
       )}
+      {focusModalOpen && (
+        <div
+          className="modal-overlay composer-focus-overlay"
+          onClick={() => setFocusModalOpen(false)}
+        >
+          <div
+            className="modal-content composer-focus-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="composer-focus-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header composer-focus-header">
+              <h2 id="composer-focus-title">{t("input.focusModeTitle")}</h2>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setFocusModalOpen(false)}
+                aria-label={t("common.close")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body composer-focus-body">
+              <textarea
+                ref={focusTextareaRef}
+                className="composer-focus-textarea"
+                data-testid="composer-focus-textarea"
+                value={localDraft}
+                onChange={(e) => updateDraftText(e.target.value)}
+                onPaste={handlePaste}
+                placeholder={
+                  disabled
+                    ? t("input.placeholderDisabled")
+                    : t("input.placeholderActive")
+                }
+                disabled={disabled}
+              />
+            </div>
+            <div className="modal-footer composer-focus-footer">
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setFocusModalOpen(false)}
+              >
+                {t("common.close")}
+              </button>
+              <button
+                type="button"
+                className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+                data-testid="composer-focus-send-btn"
+                onClick={handleFocusModalSend}
+                disabled={!canSend}
+                title={primarySendTitle}
+              >
+                {primarySendLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -915,6 +1314,36 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function QueuedTagCards({
+  comments,
+  collapsed = false,
+}: {
+  comments: ReturnType<typeof splitPreview>["comments"];
+  collapsed?: boolean;
+}) {
+  if (comments.length === 0) return null;
+  return (
+    <div className={`queued-tags-cards${collapsed ? " is-collapsed" : ""}`}>
+      {comments.map((c, i) => {
+        const fileHeader =
+          c.file && c.range ? `${c.file}:${c.range}` :
+          c.file ? c.file : null;
+        return (
+          <div key={i} className="comment-card inline-tags-card queued-tag-card">
+            {fileHeader && (
+              <div className="inline-tags-card-anchor">{fileHeader}</div>
+            )}
+            {c.selected && (
+              <div className="inline-tags-card-selected">{c.selected}</div>
+            )}
+            <div className="comment-card-comment">{c.comment}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 /** Editable banner showing a queued prompt. Click to expand an inline editor.
@@ -928,17 +1357,30 @@ function QueuedPromptBanner({
   imagesCount,
   files,
   filesCount,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
   onPromote,
   onSteer,
   onCancel,
   onEdit,
+  onEditStart,
+  onEditFinish,
   onSaveToNote,
-  interruptLabel,
-  interruptTitle,
   steerLabel,
   steerTitle,
+  interruptLabel,
+  interruptTitle,
   cancelLabel,
+  confirmLabel,
   queuedLabel,
+  editLabel,
+  editTitle,
+  moreActionsLabel,
+  saveToNoteLabel,
+  minimizeLabel,
+  expandLabel,
+  selectLabel,
   compactActions = false,
 }: {
   preview: string;
@@ -946,21 +1388,41 @@ function QueuedPromptBanner({
   imagesCount?: number;
   files?: FileAttachment[];
   filesCount?: number;
-  onPromote: () => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+  onPromote?: () => void;
   onSteer?: () => void;
-  onCancel: () => void;
+  onCancel?: () => void;
   onEdit?: (text: string) => void;
+  onEditStart?: () => void;
+  onEditFinish?: () => void;
   onSaveToNote?: (text: string) => void;
-  interruptLabel: string;
-  interruptTitle: string;
   steerLabel: string;
   steerTitle: string;
+  interruptLabel: string;
+  interruptTitle: string;
   cancelLabel: string;
+  confirmLabel: string;
   queuedLabel: string;
+  editLabel: string;
+  editTitle: string;
+  moreActionsLabel: string;
+  saveToNoteLabel: string;
+  minimizeLabel: string;
+  expandLabel: string;
+  selectLabel?: string;
   compactActions?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  // Persisted display preference: once minimized, future queued prompts
+  // honor the same choice (mirrors the sidebar-minimize pattern) so the
+  // banner stays out of the way until the user expands it again.
+  const [minimized, setMinimized] = useLocalStorage(
+    "better-agent-queued-prompt-minimized",
+    false,
+  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { comments, userText } = useMemo(() => splitPreview(preview), [preview]);
   const hasComments = comments.length > 0;
@@ -969,6 +1431,11 @@ function QueuedPromptBanner({
   // re-attach the envelope on commit; otherwise the raw preview.
   const displayText = hasComments ? userText : preview;
   const [editText, setEditText] = useState(displayText);
+  const onEditFinishRef = useRef(onEditFinish);
+
+  useEffect(() => {
+    onEditFinishRef.current = onEditFinish;
+  }, [onEditFinish]);
 
   useEffect(() => {
     if (editing && inputRef.current) {
@@ -992,10 +1459,16 @@ function QueuedPromptBanner({
     return () => document.removeEventListener("mousedown", handler);
   }, [actionsOpen]);
 
+  useEffect(() => {
+    if (!editing) return;
+    return () => onEditFinishRef.current?.();
+  }, [editing]);
+
   const startEditing = useCallback(() => {
     setEditText(displayText);
+    onEditStart?.();
     setEditing(true);
-  }, [displayText]);
+  }, [displayText, onEditStart]);
 
   const commitEdit = useCallback(() => {
     const trimmed = editText.trim();
@@ -1006,99 +1479,209 @@ function QueuedPromptBanner({
     setEditing(false);
   }, [editText, hasComments, preview, onEdit]);
 
-  if (editing) {
+  const cancelEdit = useCallback(() => {
+    setEditText(displayText);
+    setEditing(false);
+  }, [displayText]);
+
+  const imageCount = images && images.length > 0 ? images.length : (imagesCount ?? 0);
+  const fileCount = files && files.length > 0 ? files.length : (filesCount ?? 0);
+
+  // Minimized view: a single-line strip that keeps the user aware a
+  // prompt is queued (label + truncated preview + a count of any hidden
+  // attachments/comments) and leaves the primary Interrupt action and an
+  // expand toggle reachable, while hiding the bulky tag cards, attachment
+  // thumbnails and inline editor. Takes priority over the editing view so
+  // collapsing always wins.
+  if (minimized) {
+    const summaryBits: string[] = [];
+    if (imageCount > 0) {
+      summaryBits.push(`${imageCount} image${imageCount !== 1 ? "s" : ""}`);
+    }
+    if (fileCount > 0) {
+      summaryBits.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
+    }
     return (
-      <div className="queued-prompt-banner" data-testid="queued-prompt-banner">
-        <span className="queued-prompt-label">{queuedLabel}</span>
-        <textarea
-          ref={inputRef}
-          className="queued-prompt-edit-input"
-          value={editText}
-          rows={3}
-          onChange={(e) => setEditText(e.target.value)}
-          onBlur={commitEdit}
+      <div
+        className={`queued-prompt-banner is-minimized${hasComments ? " has-tags" : ""}`}
+        data-testid="queued-prompt-banner"
+        data-minimized="true"
+      >
+        <div className="queued-prompt-header">
+          {selectable && onToggleSelect && (
+            <input
+              type="checkbox"
+              className="queued-select-checkbox"
+              data-testid="queued-select-checkbox"
+              checked={selected}
+              onChange={onToggleSelect}
+              aria-label={selectLabel}
+              title={selectLabel}
+            />
+          )}
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            data-testid="queued-expand-btn"
+            title={expandLabel}
+            aria-label={expandLabel}
+            aria-expanded={false}
+            onClick={() => setMinimized(false)}
+          >
+            <Icon name="chevron-right" size={14} />
+          </button>
+          <span className="queued-prompt-label">{queuedLabel}</span>
+        </div>
+        <QueuedTagCards comments={comments} collapsed />
+        <span
+          className="queued-prompt-preview"
+          onClick={() => setMinimized(false)}
+          title={expandLabel}
+          role="button"
+          tabIndex={0}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              commitEdit();
-            } else if (e.key === "Escape") {
-              setEditText(preview);
-              setEditing(false);
-            }
+            if (e.key === "Enter" || e.key === " ") setMinimized(false);
           }}
-        />
-        {compactActions ? null : (
-          <>
-            <button
-              className="queued-cancel-btn"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                onCancel();
-              }}
-            >
-              {cancelLabel}
-            </button>
-            {onSaveToNote && (
-              <button
-                className="queued-note-btn"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onSaveToNote(editText.trim() || preview);
-                }}
-              >
-                <Icon name="memo" size={15} />
-              </button>
-            )}
-            {onSteer && (
-              <button
-                className="promote-btn steer"
-                data-testid="queued-steer-btn"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onSteer();
-                }}
-                title={steerTitle}
-              >
-                {steerLabel}
-              </button>
-            )}
-          </>
-        )}
-        <button
-          className="promote-btn interrupt"
-          data-testid="queued-interrupt-btn"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onPromote();
-          }}
-          title={interruptTitle}
         >
-          {interruptLabel}
-        </button>
-        {compactActions && (
-          <QueuedPromptOverflowMenu
-            open={actionsOpen}
-            setOpen={setActionsOpen}
-            onCancel={onCancel}
-            cancelLabel={cancelLabel}
-            onSteer={onSteer}
-            steerLabel={steerLabel}
-            steerTitle={steerTitle}
-            onSaveToNote={
-              onSaveToNote ? () => onSaveToNote(editText.trim() || preview) : undefined
-            }
-          />
+          {linkifyFilePaths(displayText)}
+        </span>
+        {summaryBits.length > 0 && (
+          <span className="queued-attachments-count" data-testid="queued-minimized-summary">
+            {summaryBits.join(" · ")}
+          </span>
         )}
+        <div className="queued-prompt-actions">
+          {compactActions ? null : (
+            <>
+              {onCancel && (
+                <button className="queued-cancel-btn" onClick={onCancel}>
+                  {cancelLabel}
+                </button>
+              )}
+              {onSaveToNote && (
+                <button
+                  className="queued-note-btn"
+                  onClick={() => onSaveToNote(preview)}
+                  title={saveToNoteLabel}
+                >
+                  <Icon name="memo" size={15} />
+                </button>
+              )}
+            </>
+          )}
+          {onSteer && (
+            <button
+              className="promote-btn"
+              data-testid="queued-steer-btn"
+              onClick={onSteer}
+              title={steerTitle}
+            >
+              {steerLabel}
+            </button>
+          )}
+          {onPromote && (
+            <button
+              className="promote-btn interrupt"
+              data-testid="queued-interrupt-btn"
+              onClick={onPromote}
+              title={interruptTitle}
+            >
+              {interruptLabel}
+            </button>
+          )}
+          {compactActions && (onCancel || onSaveToNote) && (
+            <QueuedPromptOverflowMenu
+              open={actionsOpen}
+              setOpen={setActionsOpen}
+              onCancel={onCancel}
+              cancelLabel={cancelLabel}
+              onSaveToNote={onSaveToNote ? () => onSaveToNote(preview) : undefined}
+              moreActionsLabel={moreActionsLabel}
+              saveToNoteLabel={saveToNoteLabel}
+            />
+          )}
+        </div>
       </div>
     );
   }
 
   const hasImages = (images?.length ?? 0) > 0 || (imagesCount ?? 0) > 0;
   const hasFiles = (files?.length ?? 0) > 0 || (filesCount ?? 0) > 0;
+  const editModal = editing ? (
+    <div className="queued-edit-backdrop" role="presentation" onMouseDown={cancelEdit}>
+      <div
+        className="queued-edit-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={editLabel}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="queued-edit-modal-header">
+          <div className="queued-edit-modal-title">{editLabel}</div>
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            aria-label={cancelLabel}
+            onClick={cancelEdit}
+          >
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+        <textarea
+          ref={inputRef}
+          className="queued-prompt-edit-input"
+          value={editText}
+          rows={8}
+          onChange={(e) => setEditText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              commitEdit();
+            } else if (e.key === "Escape") {
+              cancelEdit();
+            }
+          }}
+        />
+        <div className="queued-prompt-actions queued-edit-modal-actions">
+          <button className="queued-cancel-btn" type="button" onClick={cancelEdit}>
+            {cancelLabel}
+          </button>
+          <button className="promote-btn" type="button" onClick={commitEdit}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
+    <>
     <div className={`queued-prompt-banner${hasComments ? " has-tags" : ""}${hasImages || hasFiles ? " has-attachments" : ""}`} data-testid="queued-prompt-banner">
-      <span className="queued-prompt-label">{queuedLabel}</span>
+      <div className="queued-prompt-header">
+        {selectable && onToggleSelect && (
+          <input
+            type="checkbox"
+            className="queued-select-checkbox"
+            data-testid="queued-select-checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            aria-label={selectLabel}
+            title={selectLabel}
+          />
+        )}
+        <span className="queued-prompt-label">{queuedLabel}</span>
+        <button
+          className="queued-minimize-btn"
+          type="button"
+          data-testid="queued-minimize-btn"
+          title={minimizeLabel}
+          aria-label={minimizeLabel}
+          aria-expanded={true}
+          onClick={() => setMinimized(true)}
+        >
+          <Icon name="chevron-down" size={14} />
+        </button>
+      </div>
       {(hasImages || hasFiles) && (
         <div className="queued-attachments">
           {images?.map((img, i) => (
@@ -1120,90 +1703,76 @@ function QueuedPromptBanner({
           )}
         </div>
       )}
-      {hasComments && (
-        <div className="queued-tags-cards">
-          {comments.map((c, i) => {
-            const fileHeader =
-              c.file && c.range ? `${c.file}:${c.range}` :
-              c.file ? c.file : null;
-            return (
-              <div key={i} className="comment-card inline-tags-card queued-tag-card">
-                {fileHeader && (
-                  <div className="inline-tags-card-anchor">{fileHeader}</div>
-                )}
-                {c.selected && (
-                  <div className="inline-tags-card-selected">{c.selected}</div>
-                )}
-                <div className="comment-card-comment">{c.comment}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <QueuedTagCards comments={comments} />
       <span
         className="queued-prompt-preview"
         onClick={startEditing}
-        title="Click to edit"
+        title={editTitle}
         role="button"
         tabIndex={0}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") startEditing();
         }}
       >
-        {hasComments ? userText : preview}
+        {linkifyFilePaths((hasComments ? userText : preview) || editLabel)}
       </span>
       <div className="queued-prompt-actions">
         {compactActions ? null : (
           <>
-            <button
-              className="queued-cancel-btn"
-              onClick={onCancel}
-            >
-              {cancelLabel}
-            </button>
+            {onCancel && (
+              <button
+                className="queued-cancel-btn"
+                onClick={onCancel}
+              >
+                {cancelLabel}
+              </button>
+            )}
             {onSaveToNote && (
               <button
                 className="queued-note-btn"
                 onClick={() => onSaveToNote(preview)}
-                title="Save to notes"
+                title={saveToNoteLabel}
               >
                 <Icon name="memo" size={15} />
               </button>
             )}
-            {onSteer && (
-              <button
-                className="promote-btn steer"
-                data-testid="queued-steer-btn"
-                onClick={onSteer}
-                title={steerTitle}
-              >
-                {steerLabel}
-              </button>
-            )}
           </>
         )}
-        <button
-          className="promote-btn interrupt"
-          data-testid="queued-interrupt-btn"
-          onClick={onPromote}
-          title={interruptTitle}
-        >
-          {interruptLabel}
-        </button>
-        {compactActions && (
+        {onSteer && (
+          <button
+            className="promote-btn"
+            data-testid="queued-steer-btn"
+            onClick={onSteer}
+            title={steerTitle}
+          >
+            {steerLabel}
+          </button>
+        )}
+        {onPromote && (
+          <button
+            className="promote-btn interrupt"
+            data-testid="queued-interrupt-btn"
+            onClick={onPromote}
+            title={interruptTitle}
+          >
+            {interruptLabel}
+          </button>
+        )}
+        {compactActions && (onCancel || onSaveToNote) && (
           <QueuedPromptOverflowMenu
             open={actionsOpen}
             setOpen={setActionsOpen}
             onCancel={onCancel}
             cancelLabel={cancelLabel}
-            onSteer={onSteer}
-            steerLabel={steerLabel}
-            steerTitle={steerTitle}
             onSaveToNote={onSaveToNote ? () => onSaveToNote(preview) : undefined}
+            moreActionsLabel={moreActionsLabel}
+            saveToNoteLabel={saveToNoteLabel}
           />
         )}
       </div>
     </div>
+    {editModal}
+    </>
   );
 }
 
@@ -1212,42 +1781,42 @@ function QueuedPromptOverflowMenu({
   setOpen,
   onCancel,
   cancelLabel,
-  onSteer,
-  steerLabel,
-  steerTitle,
   onSaveToNote,
+  moreActionsLabel,
+  saveToNoteLabel,
 }: {
   open: boolean;
   setOpen: (open: boolean | ((open: boolean) => boolean)) => void;
-  onCancel: () => void;
+  onCancel?: () => void;
   cancelLabel: string;
-  onSteer?: () => void;
-  steerLabel: string;
-  steerTitle: string;
   onSaveToNote?: () => void;
+  moreActionsLabel: string;
+  saveToNoteLabel: string;
 }) {
   return (
     <div className="queued-overflow-wrapper">
       <button
         className="queued-overflow-trigger"
         type="button"
-        title="More queued actions"
-        aria-label="More queued actions"
+        title={moreActionsLabel}
+        aria-label={moreActionsLabel}
         onClick={() => setOpen((value) => !value)}
       >
         ⋯
       </button>
       {open && (
         <div className="queued-overflow-menu">
-          <button
-            className="overflow-menu-item"
-            onClick={() => {
-              setOpen(false);
-              onCancel();
-            }}
-          >
-            {cancelLabel}
-          </button>
+          {onCancel && (
+            <button
+              className="overflow-menu-item"
+              onClick={() => {
+                setOpen(false);
+                onCancel();
+              }}
+            >
+              {cancelLabel}
+            </button>
+          )}
           {onSaveToNote && (
             <button
               className="overflow-menu-item"
@@ -1256,20 +1825,7 @@ function QueuedPromptOverflowMenu({
                 onSaveToNote();
               }}
             >
-              <Icon name="memo" size={14} /> Save to notes
-            </button>
-          )}
-          {onSteer && (
-            <button
-              className="overflow-menu-item"
-              data-testid="queued-steer-btn"
-              onClick={() => {
-                setOpen(false);
-                onSteer();
-              }}
-              title={steerTitle}
-            >
-              {steerLabel}
+              <Icon name="memo" size={14} /> {saveToNoteLabel}
             </button>
           )}
         </div>

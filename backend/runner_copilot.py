@@ -26,7 +26,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
+from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ def _new_uuid() -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def _write_state(run_dir: Path, state: dict[str, Any]) -> None:
@@ -307,13 +309,17 @@ def _fail(run_dir: Path, error: str) -> None:
     )
 
 
+def _prepend_capability_context(prompt: str, inputs: dict[str, Any]) -> str:
+    return prepend_capability_context(prompt, inputs)
+
+
 async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     copilot_bin = resolve_cli_binary("copilot")
     if not copilot_bin:
         _fail(run_dir, "copilot CLI not found on PATH")
         return 1
 
-    prompt = str(inputs.get("prompt") or "")
+    prompt = _prepend_capability_context(str(inputs.get("prompt") or ""), inputs)
     model = str(inputs.get("model") or "").strip()
     cwd = str(inputs.get("cwd") or os.getcwd())
     session_id = str(inputs.get("session_id") or "").strip()

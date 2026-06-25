@@ -37,6 +37,10 @@ export type WSEventType =
   // Turn lifecycle + worker events
   | "turn_start"
   | "manager_event" // legacy backward compat
+  | "model_switched"
+  // Provider fell back to a different model mid-turn; rendered as a
+  // dedicated event in MessageBubble.
+  | "model_fallback"
   | "turn_complete"
   // Server-side ack that the user's prompt has been persisted to disk
   // (and an empty streaming-assistant placeholder created beside it).
@@ -47,6 +51,13 @@ export type WSEventType =
   // `since_seq=N`. Carries every persisted message with `seq >= N` so
   // the frontend can converge on the canonical state on (re)connect.
   | "messages_replay"
+  | "snapshot_begin"
+  | "snapshot_chunk"
+  | "snapshot_end"
+  | "snapshot_restart_required"
+  | "snapshot_refresh_required"
+  | "snapshot_refresh_complete"
+  | "snapshot_cancelled"
   // Backend reconcile (post-restart) appended late events to a
   // COLLAPSED historical turn — its stale stub must be replaced so an
   // expanded turn re-fetches fresh full events.
@@ -80,6 +91,9 @@ export type WSEventType =
   | "workers_changed"
   | "session_organization_changed"
   | "user_prefs_changed"
+  // Per-machine UI selection (selected project + remembered sessions)
+  // changed; payload is the full ui_selection snapshot.
+  | "ui_selection_changed"
   // Credential-broker consent list changed; refetch GET /api/credentials/pending.
   | "credential_consent_changed"
   | "projects_changed"
@@ -88,12 +102,11 @@ export type WSEventType =
   | "turn_started"
   | "turn_stopped"
   | "turn_detached"
-  | "trace_step"
   | "session_renamed"
   | "rewind_complete"
-  // Experimental rearranger feature (see backend/rearranger.py)
-  | "rearranger_state"
-  | "rearranger_updated"
+  // Interactive tool/command approval (Claude can_use_tool / Codex app-server).
+  | "tool_approval_requested"
+  | "tool_approval_resolved"
   // Per-session metadata patch (inline_tags, draft_input, fork_closed) —
   // broadcast on every REST mutation so other tabs converge.
   | "session_metadata_updated"
@@ -108,8 +121,17 @@ export type WSEventType =
   // Provider list / active-provider changed — frontend refetches its
   // ModelSelector + open ProvidersModal so all tabs converge.
   | "provider_changed"
+  // Streaming provider-CLI install (Settings → Provider CLI tools).
+  // provider_setup streams installer stdout/stderr line-by-line
+  // (progress) and a terminal state (finished); useProviderInstalls
+  // owns the registry projection.
+  | "provider_install_progress"
+  | "provider_install_finished"
   | "provider_config_sync_changed"
   | "extensions_changed"
+  // The set of remote extensions with an available update changed —
+  // frontend refetches `/api/extensions/updates`.
+  | "extension_updates_changed"
   // Per-provider model catalog delta — fired by the daily refresher
   // (and manual refresh endpoints) when the cached model list changes.
   // Frontend refetches `/api/models`. Payload carries four disjoint
@@ -137,6 +159,12 @@ export type WSEventType =
   | "message_retrying_changed"
   // A turn succeeded after backend automatic retry attempts.
   | "message_auto_retry_changed"
+  // Backend projected final/recovered assistant text for a message.
+  | "message_content_updated"
+  // Backend toggled the context-window continuation banner.
+  | "message_continuation_changed"
+  // Per-turn run metadata (model/provider) refreshed on the assistant message.
+  | "message_run_meta_changed"
   // Per-turn session-picker payload (`propose_sessions` result) stamped on
   // the producing assistant message; drives the inline picker per turn.
   | "message_ask_result_changed"
@@ -154,11 +182,18 @@ export type WSEventType =
   // `sessionRegistry` mirrors and powers `<SessionStatusBadge>` /
   // `<ProjectStatusBadge>` consumers via the typed eventBus.
   | "session_running_changed"
+  | "session_monitoring_changed"
   // Per-session unread-cursor transition. Fires on every event-append
   // in `apply_event` AND on ack via POST /api/sessions/{id}/seen.
   // Authoritative state is `session_manager._unread_counts`
   // (lazy-hydrated from the persisted `last_seen_event_uid`).
   | "session_unread_changed"
+  | "session_provenance_changed"
+  // Per-session unseen-error transition. Set when a turn ends in an
+  // unrecoverable error, cleared on view-ack or next successful turn.
+  | "session_error_changed"
+  // Per-session pending request_user_input count changed.
+  | "session_user_input_changed"
   // Extension attention marker on a session changed (set/cleared).
   | "session_marker_changed"
   // Multi-machine: live up/down transitions of worker-nodes.
@@ -181,6 +216,15 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // Frontend-flattened provider tool result. Matched results are paired
+  // with their tool card; orphaned results render as standalone output.
+  | "tool_result"
+  // Live PR-creation notice. Normally diverted in `useWebSocket` to the
+  // ephemeral chat-panel toast (commit 9653bf49) because pr-link has no
+  // uuid and never lands on the render tree; kept in the union so any
+  // frame that does reach `MessageBubble.renderGroupedEvents` (e.g. a
+  // future replay path) still type-checks and renders via PrLinkEvent.
+  | "pr_link"
   // Backend startup task lifecycle delta (register/done/failed/reset).
   // `useWebSocket` re-dispatches as a window CustomEvent that
   // `StartupTasksBanner` listens to; the banner's authoritative
@@ -194,13 +238,12 @@ export type WSEventType =
   | "queue_consumed"
   // Manager's todo list snapshot, pushed after every delegation cycle.
   | "todos_snapshot"
-  // A runner started/stopped babysitter-lingering (turn over, background
-  // shells/monitors still running). Payload: {app_session_id, run_id,
-  // lingering}. Snapshot: GET /api/sessions/{id}/background.
-  | "run_lingering"
   // The session's schedule list changed (created/fired/cancelled).
   // Payload carries the full authoritative list.
-  | "schedules_updated";
+  | "schedules_updated"
+  // Global ping: some schedule mutated in some session. Snapshot:
+  // GET /api/schedules (the Schedules page refetches on receipt).
+  | "schedules_changed";
 
 export interface WSEvent {
   type: WSEventType;
@@ -226,6 +269,9 @@ export interface Schedule {
   interval_seconds: number | null;
   created_at: string;
   last_fired_at: string | null;
+  /** Enrichment on GET /api/schedules only (Schedules page). */
+  session_name?: string | null;
+  session_exists?: boolean;
 }
 
 /** Snapshot of one machine (node) in the multi-machine topology.
@@ -241,6 +287,11 @@ export interface NodeSnapshot {
   state: "connected" | "disconnected" | "unknown";
   connected_at: number | null;
   last_seen: number | null;
+  app_commit_sha: string;
+  app_dirty: boolean;
+  primary_commit_sha: string;
+  primary_dirty: boolean;
+  version_status: "ok" | "mismatch" | "unknown";
 }
 
 /** A single member in a project mapping group — one project on one node. */
@@ -267,6 +318,11 @@ export interface NodeStateChangedData {
   node_id: string;
   state: "connected" | "disconnected" | "unknown";
   last_seen: number | null;
+  app_commit_sha?: string;
+  app_dirty?: boolean;
+  primary_commit_sha?: string;
+  primary_dirty?: boolean;
+  version_status?: "ok" | "mismatch" | "unknown";
 }
 
 /** A worker-node awaiting operator approval before it can join the
@@ -345,6 +401,9 @@ export interface WorkerInfo {
   last_active?: string;
   delegation_count?: number;
   token_usage?: TokenUsage;
+  tags?: string[];
+  team_binding?: "bound" | "available";
+  team_role?: string;
 }
 
 export interface RequirementTag {
@@ -450,15 +509,26 @@ export interface UserInputQuestion {
   options: UserInputOption[];
 }
 
-export interface UserInputRequest {
+interface UserInteractionRequestBase {
   request_id: string;
   app_session_id: string;
-  questions: UserInputQuestion[];
   status: "pending" | "resolved" | "cancelled" | "expired";
   created_at: number;
   expires_at?: number | null;
   resolved_at?: number | null;
 }
+
+export interface UserInputRequest extends UserInteractionRequestBase {
+  kind: "input";
+  questions: UserInputQuestion[];
+}
+
+export interface UserApprovalRequest extends UserInteractionRequestBase {
+  kind: "approval";
+  prompt: string;
+}
+
+export type UserInteractionRequest = UserInputRequest | UserApprovalRequest;
 
 export interface WorkerPanel {
   delegation_id: string;
@@ -487,6 +557,9 @@ export interface WorkerPanel {
   /** Orchestration mode the worker Better Agent session runs in. May be undefined
    * on legacy panels persisted before the redesign. */
   orchestration_mode?: OrchestrationMode;
+  provider_id?: string | null;
+  model?: string | null;
+  reasoning_effort?: ReasoningEffort | "" | null;
   is_new: boolean;
   instructions_preview: string;
   events: WSEvent[];
@@ -511,6 +584,9 @@ export interface TaggedEvent {
   entityLabel: string;
   panelKind?: WorkerPanel["panel_kind"];
   startedAt?: string;
+  providerId?: string | null;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | "" | null;
   seq: number;
 }
 
@@ -521,6 +597,9 @@ export interface EntityBlock {
   entityLabel: string;
   panelKind?: WorkerPanel["panel_kind"];
   startedAt?: string;
+  providerId?: string | null;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | "" | null;
   events: WSEvent[];
   /** Timestamps matching each event (parallel array). */
   timestamps: (string | undefined)[];
@@ -536,6 +615,15 @@ export interface MessageFile {
   name: string;
   media_type: string;
   size: number;
+}
+
+export interface OmittedPayloadRef {
+  revision: string;
+  href?: string;
+}
+
+export interface OmittedPayloads {
+  events?: OmittedPayloadRef;
 }
 
 export interface ChatMessage {
@@ -559,6 +647,7 @@ export interface ChatMessage {
   file_discussion_id?: string | null;
   role: "user" | "assistant";
   content: string;
+  cli_prompt?: string | null;
   events: WSEvent[];
   tokenUsage?: TokenUsage;
   timestamp: string;
@@ -616,15 +705,30 @@ export interface ChatMessage {
    * message (manager session in manager mode, native session otherwise).
    * Set via `turn_start` / `turn_complete` WS frames. */
   agent_session_id?: string | null;
+  /** Provider/model/effort used for THIS turn, stamped at turn start.
+   * Absent on turns created before this field existed (no backfill).
+   * Drives the per-turn provider/model/effort badge in the bubble. */
+  run_meta?: {
+    provider_id?: string | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
+  } | null;
   workers?: WorkerPanel[];
   images?: MessageImage[];
   files?: MessageFile[];
-  trace_id?: string;
   agent_message_uuid?: string | null;
-  event_payload_omitted?: boolean;
+  omitted_payloads?: OmittedPayloads;
   /** Origin of this message. Set on user messages created by the supervisor
    * verdict loop so the frontend can nest them under the original user msg. */
   source?: string;
+  team_message?: {
+    message?: string;
+    metadata?: {
+      sender_session_id?: string;
+      sender_name?: string;
+    };
+    wrapper_tag?: string;
+  } | null;
   /** Id of the parent user message for sub-turn prompts (supervisor verdict,
    * worker delegation, etc.). Used to render jump-to-parent navigation. */
   parent_id?: string;
@@ -713,43 +817,6 @@ export interface QueuedPrompt {
   created_at?: string;
 }
 
-/** Reference from a rearranged tree node back to a concrete original
- * trace step — the rearranger re-parents flat trace steps under a goal
- * hierarchy and each node's `trace_refs` points at the step(s) it
- * represents. `step_index` is a 0-based index into the linked trace's
- * `steps` array. */
-export interface TraceRef {
-  trace_id: string;
-  step_index: number;
-}
-
-/** Experimental rearranger: a hierarchical intent tree emitted by a
- * side Claude CLI session. See backend/rearranger.py + backend/rearranger_prompt.py.
- * `level` is 0..3; root is always level 0. */
-export interface RearrangerNode {
-  title: string;
-  summary: string;
-  level: number;
-  /** Optional: the concrete trace step(s) this node re-parents. Leaf
-   * nodes typically have exactly one ref; inner nodes may have zero
-   * (pure grouping) or multiple (span summary). */
-  trace_refs?: TraceRef[];
-  children: RearrangerNode[];
-}
-
-export interface RearrangerTree {
-  root: RearrangerNode;
-}
-
-/** Accumulated spend for the rearranger side-session. Tracked per
- * better-agent session so the UI can show "chat vs. rearranger" as a
- * group-by breakdown alongside the grand total. */
-export interface RearrangerStats {
-  call_count: number;
-  total_cost_usd: number;
-  token_usage: TokenUsage;
-}
-
 /** Lightweight worker entry returned in the session list payload — just
  * the agent_session_id + orchestration_mode. The full WorkerInfo (with
  * name, status, token usage) is fetched through the Team Orchestration extension. */
@@ -779,13 +846,20 @@ export interface SessionWorkerRef {
 
 export type WorkerCreationPolicy = "ask" | "approve" | "deny";
 
+export interface SessionSearchResult {
+  id: string;
+  name: string;
+  cwd: string;
+  first_user_prompt: string;
+}
+
 /** Result of a turn's `propose_sessions` MCP tool, stamped per-turn on the
  * producing assistant message (`ChatMessage.ask_result`), pushed via
  * `message_ask_result_changed`, and rendered as the inline session picker
  * below that turn. Reusable in any session that proposes, not just the
  * Ask singleton. */
 export interface AskResult {
-  session_ids: string[];
+  results: SessionSearchResult[];
   reasoning: string;
   /** Model's suggestion for the project the user should create the new
    * session in (pre-fills `NewSessionModal`). Empty string when the model
@@ -831,11 +905,18 @@ export interface Session {
   /** True only for a frontend-created session waiting in the durable
    * offline-action backlog. Cleared when POST /api/sessions succeeds. */
   offline_pending?: boolean;
+  /** Internal/isolated worker session (e.g. TestApe-provisioned). Its cwd is
+   * never auto-registered as a project, so project-scoped routing must not
+   * redirect away from it. */
+  bare_config?: boolean;
   file_path?: string;
+  agent_session_id?: string | null;
   manager_agent_session_id?: string | null;
   native_agent_session_id?: string | null;
   parent_session_id?: string | null;
   forked_from_agent_sid?: string | null;
+  moved_to_session_id?: string | null;
+  moved_from_session_id?: string | null;
   pagination?: {
     total_messages: number;
     oldest_loaded_seq: number | null;
@@ -863,16 +944,28 @@ export interface Session {
    * (backend migrates on read). CLI-created sessions are tagged "cli" so
    * the sidebar can render a badge. "import" = ingested from a native
    * provider CLI session. */
-  source?: "web" | "cli" | "extension" | "import";
+  source?: "web" | "cli" | "extension" | "import" | "internal";
+  /** Whether the user is AWARE of having created this session (UI/CLI
+   * create, import, file-edit, a fork, or a worker the user approved via
+   * the popup) versus a session the system or an agent spun up on its own
+   * (provisioning, agent create_session, auto-approved workers, internal
+   * forks). Orthogonal to `source`. Backend migrates legacy records on
+   * read; defaults to false (fail-closed) for non-user-aware sessions. */
+  user_initiated?: boolean;
   virtual?: boolean;
   extension_id?: string;
   backing_session_ids?: string[];
   metadata?: Record<string, unknown>;
   name: string;
   model: string;
+  model_history?: string[];
   reasoning_effort?: ReasoningEffort | "";
+  permission?: Permission;
   provider_id?: string;
   cwd: string;
+  /** Session belongs to every project regardless of cwd (e.g. the
+   * assistant singleton). Mirrors backend session_matches_project. */
+  all_projects?: boolean;
   /** Multi-machine: which node the session's filesystem ops route to.
    * `"primary"` for single-machine deploys (the sentinel for the local
    * backend) and for sessions created before the multi-machine cutover. */
@@ -915,12 +1008,6 @@ export interface Session {
   /** Custom per-turn prompt for the supervisor. Empty string → use the
    * default adversarial verdict prompt. Persisted on the backend session. */
   supervisor_custom_prompt?: string;
-  // Experimental rearranger feature — per-session opt-in.
-  rearranger_enabled?: boolean;
-  rearranger_tree?: RearrangerTree | null;
-  rearranger_session_id?: string | null;
-  rearranger_last_message_count?: number;
-  rearranger_stats?: RearrangerStats | null;
   inline_tags?: InlineTag[];
   /** Per-message text substitutions produced by the adversarial-sync
    * ping-pong loop (orchs.adv_sync). Same push channel as inline_tags
@@ -999,10 +1086,15 @@ export interface Session {
   browser_harness_enabled?: boolean;
   browser_harness_headless?: boolean;
   pinned?: boolean;
+  topbar_pinned?: boolean;
+  topbar_pinned_at?: string | null;
   archived?: boolean;
   /** User opted this session in as eligible for the Team worker picker.
    * Only sessions with this flag appear in the "mark existing" picker. */
   worker_eligible?: boolean;
+  /** Whether the agent itself may rename this session's title after
+   * creation (e.g. via ai-title auto-naming). Defaults to false. */
+  agent_rename_allowed?: boolean;
   /** Per-session scratchpad notes. Persisted on the backend, pushed
    * via `session_metadata_updated` for cross-tab convergence. */
   notes?: Note[];
@@ -1016,7 +1108,7 @@ export interface Session {
    * separation. */
   current_tasks?: TaskItem[];
   /** Right-panel UI state — persisted per-session. `right_panel_open`
-   * defaults to true (default-on-read at the backend load boundary);
+   * defaults to false (default-on-read at the backend load boundary);
    * `right_panel_active_tab` defaults to null (render-time fallback
    * picks the first tab with content, or 'files' if all empty). */
   right_panel_open?: boolean;
@@ -1026,7 +1118,35 @@ export interface Session {
     | "canvas"
     | "comments"
     | "todos"
+    | "screen"
+    | "changes"
+    | "communications"
+    | "board"
     | null;
+  right_panel_width?: number | null;
+  right_panel_mobile_height?: number | null;
+  right_panel_todos_dismissed?: boolean;
+  right_panel_auto_opened_by?: Array<
+    | "files"
+    | "notes"
+    | "canvas"
+    | "comments"
+    | "todos"
+    | "navigate"
+    | "screen"
+    | "communications"
+    | "board"
+  >;
+  sidebar_minimized?: boolean;
+  /** Sidebar-list decorate fields — added by the backend session-list
+   * decorate step, NOT on the persisted tree. Live badges read status from
+   * `sessionRegistry`; these power the status-sort row-rank fallback for
+   * deeper-page rows the registry has not seeded yet. */
+  is_running?: boolean;
+  monitoring_state?: string;
+  unread_count?: number;
+  pending_user_input_count?: number;
+  markers?: Record<string, { color: string; tooltip: string; sound?: boolean; tag?: string }>;
 }
 
 export interface Note {
@@ -1051,49 +1171,13 @@ export interface TodoItem {
  * TodoItem — the backend uses the identical field set. */
 export type TaskItem = TodoItem;
 
-export interface TraceStep {
-  trace_id: string;
-  step_index: number;
-  step_type: string;
-  thread_id?: string;
-  thread_name?: string;
-  ephemeral: boolean;
-  input_prompt: string;
-  raw_output: string;
-  parsed_output?: unknown;
-  parse_error?: string;
-  token_usage?: Record<string, number>;
-  duration_ms?: number;
-  error?: string;
-  subagent_types?: string[];
-}
-
-export interface Trace {
-  trace_id: string;
-  session_id: string;
-  user_prompt: string;
-  timestamp: string;
-  duration_ms?: number;
-  total_token_usage: Record<string, number>;
-  step_count: number;
-  steps: TraceStep[];
-}
-
-export interface TraceIndexEntry {
-  trace_id: string;
-  session_id: string;
-  timestamp: string;
-  user_prompt_preview: string;
-  duration_ms?: number;
-  step_count: number;
-  total_token_usage: Record<string, number>;
-}
-
 export interface FileNode {
   name: string;
   path: string;
   type: "file" | "directory";
   children?: FileNode[];
+  children_loaded?: boolean;
+  has_more_children?: boolean;
 }
 
 export type SearchMethod = "path" | "name" | "symbols";
@@ -1127,7 +1211,25 @@ export interface BrowseResult {
 }
 
 export type ProviderMode = "subscription" | "api_key";
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ProviderRunner = "native" | "better_agent_runner";
+// "off" is pi's native no-thinking level; "max" is opencode's top --variant.
+export type ReasoningEffort = "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,
+ * {"approval","sandbox"} for codex. {} = inherit the provider default. */
+export type Permission = Record<string, string>;
+/** Axis → allowed-values map for the provider's permission selector(s). */
+export type PermissionOptions = Record<string, string[]>;
+
+/** A pending interactive tool/command approval from a runner mid-turn. */
+export interface ToolApproval {
+  approval_id: string;
+  app_session_id: string;
+  run_id: string;
+  provider_kind: string;
+  tool_name: string;
+  summary: Record<string, unknown>;
+}
 
 export interface Provider {
   id: string;
@@ -1138,8 +1240,13 @@ export interface Provider {
   config_dir: string;
   custom_models: string[];
   default_model: string;
+  runner: ProviderRunner;
+  runner_options: ProviderRunner[];
+  suspended: boolean;
   reasoning_effort_options: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | "";
+  permission_options: PermissionOptions;
+  default_permission: Permission;
   /** Last model the user chose for this provider (backend-remembered).
    * Pickers pre-choose it over `default_model` when switching provider. */
   last_model?: string;
@@ -1147,7 +1254,7 @@ export interface Provider {
   has_api_key: boolean;
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
-   * Adversarial Sync, Prompt-Engineer refine, Rearranger toggle.
+   * Adversarial Sync, Prompt-Engineer refine.
    * Backend-resolved from Provider.supports_fork. */
   supports_fork: boolean;
   /** Whether this provider can drive the persistent "manager" session

@@ -15,7 +15,7 @@ describe("Ask proposal dismissal", () => {
   it("passes a persisted dismiss action to the Ask picker", () => {
     expect(appSource).toContain("const handleAskDismiss = useCallback");
     expect(appSource).toContain('chosen_session_id: "__dismissed__"');
-    expect(appSource).toContain("onDismiss: () => handleAskDismiss(g.assistantMessage!.id)");
+    expect(appSource).toContain("onDismiss: () => handleAskDismiss(g.responseMessage!.id)");
   });
 
   it("renders Never Mind as a secondary proposal action", () => {

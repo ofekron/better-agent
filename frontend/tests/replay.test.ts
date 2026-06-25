@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import {
-  mergeEventlessMessageDelta,
+  mergeProjectedMessageDelta,
+  mergeIncomingMessagesForNode,
   mergeIncomingMessageSnapshot,
 } from "../src/hooks/useSession";
 
@@ -17,6 +18,17 @@ function textEvent(uuid: string, text: string) {
       },
     },
   };
+}
+
+async function waitFor(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  predicate: () => boolean,
+) {
+  for (let i = 0; i < 20; i++) {
+    if (predicate()) return true;
+    await h.flush();
+  }
+  return false;
 }
 
 describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
@@ -94,6 +106,10 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       },
     });
     await h.flush();
+    await waitFor(
+      h,
+      () => h.raw.container.textContent?.includes("fresh assistant") === true,
+    );
 
     const view = h.toJSON();
     expect(view.chat.messages.filter((m) => m.id === "u")).toHaveLength(1);
@@ -129,6 +145,221 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     h.unmount();
   });
 
+  it("messages_delta adopts an early live placeholder into the canonical assistant", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-early",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("early-live", "streamed before delta")],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: [],
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u", "a-canonical"]);
+    const canonical = merged.find((m) => m.id === "a-canonical");
+    expect(canonical?.events).toEqual([textEvent("early-live", "streamed before delta")]);
+  });
+
+  it("messages_replay removes an adopted live placeholder when canonical already has the same uuid", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-early",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("same-live", "partial text")],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "final text",
+          seq: 1,
+          events: [textEvent("same-live", "final text")],
+          completed_at: "2026-06-29T20:00:00.000000",
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u", "a-canonical"]);
+    const canonical = merged.find((m) => m.id === "a-canonical");
+    expect(canonical?.events).toEqual([textEvent("same-live", "final text")]);
+  });
+
+  it("placeholder adoption keeps adjacent prompt groups isolated", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u1", content: "first", seq: 0 }),
+        makeUserMsg({ id: "u2", content: "second", seq: 2 }),
+        makeAssistantMsg({
+          id: "live-second",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("second-live", "belongs to second")],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-first",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: [],
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u1", "a-first", "u2", "live-second"]);
+    expect(merged.find((m) => m.id === "a-first")?.events).toEqual([]);
+    expect(merged.find((m) => m.id === "live-second")?.events).toEqual([
+      textEvent("second-live", "belongs to second"),
+    ]);
+  });
+
+  it("placeholder adoption preserves worker panel events on the canonical assistant", () => {
+    const workerEvent = textEvent("worker-live", "worker streamed early");
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-worker",
+          seq: undefined,
+          isStreaming: true,
+          workers: [{
+            delegation_id: "d1",
+            worker_session_id: "w1",
+            worker_description: "worker",
+            events: [workerEvent],
+          }],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: [],
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u", "a-canonical"]);
+    expect(merged.find((m) => m.id === "a-canonical")?.workers?.[0]).toMatchObject({
+      delegation_id: "d1",
+      events: [workerEvent],
+    });
+  });
+
+  it("placeholder adoption normalizes missing event arrays to empty arrays", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-worker",
+          seq: undefined,
+          isStreaming: true,
+          workers: [{
+            delegation_id: "d1",
+            worker_session_id: "w1",
+            worker_description: "worker",
+            events: undefined,
+          }],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: undefined,
+          workers: [{
+            delegation_id: "d1",
+            worker_session_id: "w1",
+            worker_description: "worker",
+            events: undefined,
+          }],
+        }),
+      ],
+    );
+
+    const canonical = merged.find((m) => m.id === "a-canonical");
+    expect(canonical?.events).toEqual([]);
+    expect(canonical?.workers?.[0].events).toEqual([]);
+  });
+
+  it("placeholder adoption ignores empty seq-less canonical snapshots without overlap", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-unrelated",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("unrelated-live", "unrelated")],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-seq-less",
+          content: "",
+          seq: undefined,
+          isStreaming: true,
+          events: [],
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u", "live-unrelated", "a-seq-less"]);
+    expect(merged.find((m) => m.id === "a-seq-less")?.events).toEqual([]);
+  });
+
+  it("placeholder adoption does not guess when one prompt group has multiple live placeholders", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-one",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("live-one", "one")],
+        }),
+        makeAssistantMsg({
+          id: "live-two",
+          seq: undefined,
+          isStreaming: true,
+          events: [textEvent("live-two", "two")],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: [],
+        }),
+      ],
+    );
+
+    expect(merged.map((m) => m.id)).toEqual(["u", "a-canonical", "live-one", "live-two"]);
+    expect(merged.find((m) => m.id === "a-canonical")?.events).toEqual([]);
+  });
+
   it("compact messages_delta updates finalized fields without dropping streamed events", () => {
     const streamedEvent = {
       type: "agent_message" as const,
@@ -157,7 +388,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       seq: 1,
       isStreaming: false,
       events: undefined,
-      event_payload_omitted: true,
+      omitted_payloads: { events: { revision: "rev-1" } },
       workers: [{
         delegation_id: "d1",
         worker_session_id: "w1",
@@ -166,7 +397,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       } as never],
     });
 
-    const msg = mergeEventlessMessageDelta(current, compact);
+    const msg = mergeProjectedMessageDelta(current, compact);
     expect(msg.content).toBe("partial complete");
     expect(msg.isStreaming).toBe(false);
     expect(msg.events).toEqual([streamedEvent]);
@@ -192,7 +423,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       seq: 1,
       isStreaming: false,
       events: undefined,
-      event_payload_omitted: true,
+      omitted_payloads: { events: { revision: "rev-1" } },
       completed_at: "2026-06-19T21:44:16.000000",
     });
 
@@ -307,8 +538,12 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       },
     });
     await h.flush();
+    await waitFor(
+      h,
+      () => h.toJSON().chat.messages.map((m) => m.id).join(",") === "u1,a",
+    );
 
-    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1"]);
+    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "a"]);
     expect(h.raw.container.textContent).toContain("second");
     h.unmount();
   });
@@ -340,6 +575,10 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       ],
     } as unknown as Parameters<typeof h.emit>[0]);
     await h.flush();
+    await waitFor(
+      h,
+      () => h.toJSON().chat.messages.filter((m) => m.role === "user").map((m) => m.id).join(",") === "u1",
+    );
 
     expect(
       h.toJSON().chat.messages.filter((m) => m.role === "user").map((m) => m.id),

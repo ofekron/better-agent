@@ -1,6 +1,6 @@
 """Backend regression test for FR-FILE.0.1 — file viewer MUST auto-open
-on entry to a File-Mode session, now under the multi-file / one-session-
-per-project-cwd model.
+on entry to a File-Mode session, now under the provisioned-fork
+model.
 
 Pins the contract that:
   1. file_editor.start(persistent=True) marks the session with
@@ -8,9 +8,8 @@ Pins the contract that:
      so the frontend overlay derivation auto-mounts on entry.
   2. file_editor.start(persistent=False) (temporal flavor) marks meta
      without `persistent` so the temporal-flavor Done button stays.
-  3. Upgrade-only: a temporal session for a cwd, then a persistent
-     start for the SAME cwd → meta.persistent upgraded in place
-     (same session — one session per cwd).
+  3. A temporal start and a persistent start for the same cwd create
+     separate sessions; persistent is no longer a cwd-singleton upgrade.
   4. Sidebar visibility: persistent file-mode sessions appear in
      GET /api/sessions; temporal file-mode + prompt_engineering hide.
   5. POST /api/sessions with `file_edit_path` routes through
@@ -18,8 +17,8 @@ Pins the contract that:
      record carries working_mode + meta.file_paths.
   6. Newly created sessions don't carry the legacy file_edit_path field.
 
-Each test uses its OWN project dir as cwd — sessions are keyed per
-project cwd now, so sharing one cwd would cross-join tests.
+Each start creates a fresh user-facing file-editor session; the warm base
+is shared per cwd/provider/model.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_file_edit_session_persistent.py
@@ -27,10 +26,12 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
+import time
+import threading
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home
@@ -44,6 +45,63 @@ if _BACKEND not in sys.path:
 import file_editor  # noqa: E402
 import working_mode  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+
+_async_start = file_editor.start
+
+
+def _sync_start(*args, **kwargs):
+    return asyncio.run(_async_start(*args, **kwargs))
+
+
+file_editor.start = _sync_start  # type: ignore[assignment]
+
+_FAKE_BASES: dict[tuple[str, str, str, str], str] = {}
+_FAKE_BASES_LOCK = threading.Lock()
+
+
+async def _fake_ensure_file_edit_base(cfg):
+    key = (cfg.cwd, cfg.provider_id, cfg.model, cfg.node_id)
+    with _FAKE_BASES_LOCK:
+        sid = _FAKE_BASES.get(key)
+        if sid and session_manager.get(sid):
+            return sid
+        base = session_manager.create(
+            name="file-editing-base",
+            model=cfg.model,
+            cwd=cfg.cwd,
+            orchestration_mode="native",
+            source="internal",
+            provider_id=cfg.provider_id,
+            reasoning_effort=cfg.reasoning_effort or None,
+            node_id=cfg.node_id,
+            bare_config=False,
+            worker_creation_policy="deny",
+        )
+        fake_agent_sid = f"fake-base-sid-{len(_FAKE_BASES)}"
+        session_manager._run(
+            base["id"],
+            lambda s: s.__setitem__("agent_session_id", fake_agent_sid),
+            {"kind": "test_agent_sid_set"},
+        )
+        working_mode.mark_working_mode(
+            base["id"],
+            mode=file_editor.BASE_MODE,
+            meta={
+                "cwd": cfg.cwd,
+                "provider_id": cfg.provider_id,
+                "model": cfg.model,
+                "machine_completion": False,
+                "version": file_editor.FILE_EDIT_BASE_SPEC.version,
+                "node_id": cfg.node_id,
+                "provisioned_at": time.time(),
+            },
+        )
+        _FAKE_BASES[key] = base["id"]
+        return base["id"]
+
+
+file_editor._ensure_file_edit_base = _fake_ensure_file_edit_base  # type: ignore[assignment]
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -105,20 +163,26 @@ def test_temporal_marks_meta_without_persistent() -> bool:
     return True
 
 
-def test_resume_upgrades_persistent_flag() -> bool:
+def test_same_cwd_persistent_start_creates_fresh_session() -> bool:
     """Existing temporal session for a cwd + a later persistent=True
-    start for the SAME cwd → same session, meta.persistent upgraded."""
+    start for the SAME cwd → distinct sessions; persistent is per-session."""
     d = _project("upgrade")
     fp = _write(d, "c.txt")
-    r1 = file_editor.start(str(fp), cwd=str(d))                 # temporal
-    r2 = file_editor.start(str(fp), cwd=str(d), persistent=True)  # upgrade
-    if r1["session_id"] != r2["session_id"]:
-        print("  expected idempotent join to return same session id")
+    r1 = file_editor.start(str(fp), cwd=str(d))
+    r2 = file_editor.start(str(fp), cwd=str(d), persistent=True)
+    if r1["session_id"] == r2["session_id"]:
+        print("  expected a fresh session, not a cwd-keyed join")
         return False
-    sess = session_manager.get(r2["session_id"])
-    meta = (sess or {}).get("working_mode_meta") or {}
-    if meta.get("persistent") is not True:
-        print(f"  expected meta.persistent=True after upgrade, got {meta.get('persistent')!r}")
+    meta1 = (session_manager.get(r1["session_id"]) or {}).get("working_mode_meta") or {}
+    meta2 = (session_manager.get(r2["session_id"]) or {}).get("working_mode_meta") or {}
+    if meta1.get("persistent"):
+        print(f"  temporal session should remain temporal, got {meta1.get('persistent')!r}")
+        return False
+    if meta2.get("persistent") is not True:
+        print(f"  new persistent session missing flag, got {meta2.get('persistent')!r}")
+        return False
+    if meta1.get("base_session_id") != meta2.get("base_session_id"):
+        print("  same cwd/model/provider should reuse the warm base")
         return False
     return True
 
@@ -224,7 +288,7 @@ def test_session_record_has_no_legacy_file_edit_path_field() -> bool:
 TESTS = [
     ("persistent flag stamps meta + file_paths", test_persistent_marks_meta),
     ("temporal flag leaves meta.persistent falsy", test_temporal_marks_meta_without_persistent),
-    ("resume upgrades persistent flag (cwd-keyed)", test_resume_upgrades_persistent_flag),
+    ("same cwd persistent start creates fresh session", test_same_cwd_persistent_start_creates_fresh_session),
     ("should_hide_from_sidebar respects persistent flag", test_sidebar_visibility_persistent_vs_temporal),
     ("list_sessions includes persistent + excludes temporal", test_list_sessions_includes_persistent_but_excludes_temporal),
     ("list_sessions summary includes working_mode_meta", test_list_sessions_summary_includes_working_mode_meta),

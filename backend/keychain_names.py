@@ -4,7 +4,9 @@ PRIMARY_SERVICE = "better-agent"
 LEGACY_SERVICE = "better-claude"
 
 
-def service_names(primary: str = PRIMARY_SERVICE, legacy: str = LEGACY_SERVICE) -> tuple[str, ...]:
+def service_names(primary: str | None = None, legacy: str | None = None) -> tuple[str, ...]:
+    primary = PRIMARY_SERVICE if primary is None else primary
+    legacy = LEGACY_SERVICE if legacy is None else legacy
     names: list[str] = []
     for name in (primary, legacy):
         if name and name not in names:

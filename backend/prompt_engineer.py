@@ -5,12 +5,12 @@ Lifecycle:
   start    -> idempotent: creates an eng session if none exists for the
               parent, otherwise returns the existing one (resume).
   finalize -> read the temp file's current content (becomes the parent prompt).
-  cleanup  -> caller cancels the eng session's runners + rearranger first,
+  cleanup  -> caller cancels the eng session's runners first,
               then delegate here to drop the session record + temp dir.
               Idempotent — already-gone sessions are silently no-op'd so
               the parent-delete cascade can't double-fire and crash.
 
-Coordinator + rearranger calls live in main.py — this module is pure
+Coordinator calls live in main.py — this module is pure
 state plumbing so it can stay decoupled from the FastAPI app object.
 """
 
@@ -140,6 +140,8 @@ async def start(parent_session_id: str, draft: str, mode: str) -> dict:
         provider_id=parent.get("provider_id"),
         reasoning_effort=parent.get("reasoning_effort"),
         node_id=node_id,
+        # The user explicitly invoked prompt-engineering on this session.
+        user_initiated=True,
     )
 
     if mode == "fork":
@@ -224,7 +226,7 @@ async def cleanup(eng_session_id: str) -> bool:
     node hosts it).
 
     Caller MUST have already awaited coordinator.cancel_session(...)
-    AND rearranger.stop(...) BEFORE calling this.
+    BEFORE calling this.
     Idempotent: returns False if already gone. Temp-dir removal is
     best-effort — a dead node must not block deleting the record."""
     import asyncio
@@ -260,10 +262,10 @@ def register_bus_subscribers() -> None:
     cleanup now lives next to the mode owner.
 
     Idempotent — re-binding (e.g. uvicorn --reload) unsubscribes the
-    previous registration. Priority 250 (higher than the rearranger
-    at 200) — the working_mode catch-all subscribes too and runs at
-    260, so this one wins for `prompt_engineering` and the catch-all
-    early-exits on the same kind to avoid double-cleanup.
+    previous registration. Priority 250 — the working_mode catch-all
+    subscribes too and runs at 260, so this one wins for
+    `prompt_engineering` and the catch-all early-exits on the same kind
+    to avoid double-cleanup.
 
     `cleanup` is async (node-routed temp removal); its sync record
     deletion runs off-loop via `asyncio.to_thread` internally."""

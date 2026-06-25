@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +11,19 @@ from paths import ba_home
 
 
 SCHEMA_VERSION = 1
+_revision_lock = threading.Lock()
+_revision = 0
+
+
+def _bump_revision() -> None:
+    global _revision
+    with _revision_lock:
+        _revision += 1
+
+
+def revision() -> int:
+    with _revision_lock:
+        return _revision
 
 
 class TeamStoreError(ValueError):
@@ -55,6 +69,7 @@ def _blank(
         "created_at": now,
         "updated_at": now,
         "members": {},
+        "pending_members": {},
     }
 
 
@@ -92,6 +107,7 @@ def create(
         "updated_at": now,
     }
     write_json(_path(tid), record)
+    _bump_revision()
     return record
 
 
@@ -104,7 +120,19 @@ def get(team_id: str) -> dict[str, Any] | None:
         raise TeamStoreError("Unsupported team store schema; wipe teams/*.json to start fresh")
     if not isinstance(data.get("members"), dict):
         raise TeamStoreError("Malformed team store: members must be an object")
+    data.setdefault("pending_members", {})
     return data
+
+
+def list_all() -> list[dict[str, Any]]:
+    if not _root().exists():
+        return []
+    teams: list[dict[str, Any]] = []
+    for path in sorted(_root().glob("*.json")):
+        data = read_json(path, {})
+        if data.get("schema_version") == SCHEMA_VERSION and isinstance(data.get("members"), dict):
+            teams.append(data)
+    return teams
 
 
 def upsert_member(
@@ -154,7 +182,54 @@ def upsert_member(
     }
     team["updated_at"] = now
     write_json(_path(team_id), team)
+    _bump_revision()
     return team["members"][mid]
+
+
+def delete(team_id: str) -> bool:
+    path = _path(team_id)
+    if not path.exists():
+        return False
+    path.unlink()
+    _bump_revision()
+    return True
+
+
+def set_pending_members(team_id: str, specs: list[dict[str, Any]]) -> dict[str, Any]:
+    team = get(team_id)
+    if team is None:
+        raise TeamStoreError("team_id does not exist")
+    pending: dict[str, Any] = {}
+    for spec in specs or []:
+        if not isinstance(spec, dict):
+            continue
+        member_id = str(spec.get("member_id") or spec.get("role_key") or "").strip()
+        if not member_id:
+            continue
+        pending[member_id] = dict(spec)
+    team["pending_members"] = pending
+    team["updated_at"] = _now()
+    write_json(_path(team_id), team)
+    _bump_revision()
+    return team
+
+
+def pop_pending_member(team_id: str, member_id: str) -> dict[str, Any] | None:
+    team = get(team_id)
+    if team is None:
+        raise TeamStoreError("team_id does not exist")
+    pending = team.get("pending_members")
+    if not isinstance(pending, dict):
+        return None
+    mid = str(member_id or "").strip()
+    spec = pending.pop(mid, None)
+    if spec is None:
+        return None
+    team["pending_members"] = pending
+    team["updated_at"] = _now()
+    write_json(_path(team_id), team)
+    _bump_revision()
+    return spec
 
 
 def find_for_session(session_id: str) -> dict[str, Any] | None:

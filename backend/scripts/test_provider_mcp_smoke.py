@@ -45,9 +45,9 @@ def _prompt(provider: str) -> str:
     path = _panel_path(provider)
     return (
         "This is an integration smoke test for Better Agent tool injection. "
-        "You must call the available open-file-panel MCP tool named "
+        "You must call the available ui MCP tool named "
         "open_file_panel exactly once before answering. If you need to search "
-        "for the tool, search for open-file-panel. Use mode='panel', path="
+        "for the tool, search for ui. Use mode='panel', path="
         f"{path!r}, start_line=1, end_line=1. After the tool call, reply only "
         "with: done"
     )

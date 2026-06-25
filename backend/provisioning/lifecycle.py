@@ -8,6 +8,7 @@ worker plumbing.
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from provisioning.config import ProvisionedConfig
@@ -82,6 +83,29 @@ def dirty_reason(
     return ""
 
 
+def expired_reason(session: dict, spec: ProvisionedSessionSpec) -> str:
+    """Non-empty string ⇒ the base has outlived its `lifetime_seconds` and
+    must be recycled (deleted + re-provisioned). Empty ⇒ still fresh, or no
+    lifetime configured. A base without a `provisioned_at` stamp predates
+    lifetime tracking and is treated as expired so it gets stamped on the
+    next re-provision."""
+    lifetime = spec.lifetime_seconds
+    if not lifetime or lifetime <= 0:
+        return ""
+    meta = session.get("working_mode_meta") or {}
+    provisioned_at = meta.get("provisioned_at")
+    if not provisioned_at:
+        return "base has no provisioned_at timestamp"
+    age = time.time() - float(provisioned_at)
+    if age > lifetime:
+        return f"base is {age:.0f}s old (lifetime {lifetime:.0f}s)"
+    return ""
+
+
+def _storage_scope_matches(session: dict, spec: ProvisionedSessionSpec) -> bool:
+    return (session.get("storage_scope") or None) == (spec.storage_scope or None)
+
+
 def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
     """Return a clean provisioned base bc-session id for `spec`."""
     pinned = cfg.provisioned_session_id
@@ -90,7 +114,9 @@ def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         if session is None:
             raise RuntimeError(f"provisioned session not found: {pinned}")
         _validate_provider(session, cfg)
-        reason = dirty_reason(session, spec.dirty_policy, cfg.cwd)
+        if not _storage_scope_matches(session, spec):
+            raise RuntimeError(f"{spec.env_prefix} pinned session storage scope mismatch")
+        reason = dirty_reason(session, spec.dirty_policy, cfg.cwd) or expired_reason(session, spec)
         if reason:
             raise RuntimeError(f"{spec.env_prefix} pinned session is not clean: {reason}")
         _upsert_worker(cfg.cwd, session)
@@ -99,9 +125,14 @@ def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
     existing = _find(spec, cfg)
     if existing and existing.get("id"):
         _validate_provider(existing, cfg)
-        if not dirty_reason(existing, spec.dirty_policy, cfg.cwd):
+        reason = (
+            "" if _storage_scope_matches(existing, spec) else "storage scope mismatch"
+        ) or dirty_reason(existing, spec.dirty_policy, cfg.cwd) or expired_reason(existing, spec)
+        if not reason:
             _upsert_worker(cfg.cwd, existing)
             return str(existing["id"])
+        # Discard the stale base (polluted or expired) and mint a fresh one.
+        _delete_session(str(existing["id"]))
 
     return _create_session(spec, cfg)
 
@@ -120,7 +151,9 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         model=cfg.model, node_id=cfg.node_id,
     )
     if existing and existing.get("id"):
-        return str(existing["id"])
+        if _storage_scope_matches(existing, spec):
+            return str(existing["id"])
+        session_manager.delete(str(existing["id"]))
     sess = session_manager.create(
         name=spec.caller_name,
         orchestration_mode=spec.orchestration_mode,
@@ -132,6 +165,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
+        storage_scope=spec.storage_scope,
     )
     working_mode.mark_working_mode(
         sess["id"],
@@ -150,6 +184,16 @@ def _session(session_id: str) -> Optional[dict]:
     except Exception:
         return None
     return session_manager.get(session_id)
+
+
+def _delete_session(session_id: str) -> None:
+    """Drop a stale base. Cascades worker_store cleanup via the session
+    delete bus subscriber (`event_bus_subscribers`)."""
+    try:
+        from session_manager import manager as session_manager
+    except Exception:
+        return
+    session_manager.delete(session_id)
 
 
 def _find(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> Optional[dict]:
@@ -207,6 +251,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
+        storage_scope=spec.storage_scope,
     )
     working_mode.mark_working_mode(
         sess["id"],
@@ -218,6 +263,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
             "machine_completion": spec.machine_completion,
             "version": spec.version,
             "node_id": cfg.node_id,
+            "provisioned_at": time.time(),
         },
     )
     _upsert_worker(cfg.cwd, sess)

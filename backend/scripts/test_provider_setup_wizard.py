@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import asyncio
 from pathlib import Path
 from unittest import mock
 
@@ -26,7 +27,7 @@ def check(label: str, cond: bool) -> None:
 
 async def main() -> int:
     kinds = provider_setup.supported_provider_kinds()
-    check("supported subscription providers are installable", kinds == ["agy", "claude", "codex"])
+    check("supported subscription providers are installable", kinds == ["agy", "claude", "codex", "copilot"])
 
     for kind in kinds:
         installer = provider_setup.installer_for(kind)
@@ -46,11 +47,58 @@ async def main() -> int:
     else:
         check("unsupported provider kind rejected", False)
 
-    with mock.patch.object(shutil, "which", return_value=None):
-        status = await provider_setup.provider_setup_status("claude")
+    with mock.patch.object(provider_setup, "resolve_cli_binary", return_value=None):
+        status = await provider_setup.provider_setup_status("claude", wait_for_cold=True)
         check("missing CLI reports uninstalled", status["installed"] is False)
         check("missing prerequisite captured", status["prerequisite"]["returncode"] == 127)
         check("status exposes prerequisite command", status["prerequisite_command"] == "npm")
+        check("status exposes prerequisite installability", status["prerequisite_installable"] is (sys.platform == "win32"))
+        check("status exposes prerequisite install command", isinstance(status["prerequisite_install_command"], list))
+    provider_setup.clear_status_cache()
+
+    with (
+        mock.patch.object(provider_setup, "resolve_cli_binary", return_value=r"C:\Program Files\WindowsApps\codex.exe"),
+        mock.patch.object(
+            provider_setup.asyncio,
+            "create_subprocess_exec",
+            side_effect=PermissionError(5, "Access is denied"),
+        ),
+    ):
+        blocked = await provider_setup._check_argv(("codex", "--version"))  # type: ignore[attr-defined]
+        check("blocked Windows app alias is not treated as installed", blocked["ok"] is False)
+        check("blocked Windows app alias reports launch failure", "could not be launched" in blocked["stderr"])
+
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_check(argv: tuple[str, ...]) -> dict:
+        calls.append(argv)
+        return {"ok": True, "stdout": "ok", "stderr": "", "returncode": 0}
+
+    with mock.patch.object(provider_setup, "_check_argv", side_effect=fake_check):
+        first = await provider_setup.provider_setup_status("claude", wait_for_cold=True)
+        first["verify"]["stdout"] = "mutated"
+        second = await provider_setup.provider_setup_status("claude")
+        check("provider setup status reuses cached checks", len(calls) == 2)
+        check("provider setup status returns isolated copies", second["verify"]["stdout"] == "ok")
+    provider_setup.clear_status_cache()
+
+    slow_calls: list[tuple[str, ...]] = []
+
+    async def slow_check(argv: tuple[str, ...]) -> dict:
+        slow_calls.append(argv)
+        await asyncio.sleep(0.02)
+        return {"ok": True, "stdout": "ok", "stderr": "", "returncode": 0}
+
+    with mock.patch.object(provider_setup, "_check_argv", side_effect=slow_check):
+        first = await provider_setup.provider_setup_status("claude")
+        tasks = list(provider_setup._STATUS_INFLIGHT.values())  # type: ignore[attr-defined]
+        check("cold provider setup status returns checking projection", first["checking"] is True)
+        check("cold provider setup status does not await checks", first["verify"]["checking"] is True)
+        await asyncio.gather(*tasks)
+        second = await provider_setup.provider_setup_status("claude")
+        check("provider setup background refresh populates cache", second["installed"] is True)
+        check("provider setup background refresh probes once", len(slow_calls) == 2)
+    provider_setup.clear_status_cache()
 
     installer = provider_setup.ProviderInstaller(
         kind="test",
@@ -99,8 +147,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     try:
         raise SystemExit(asyncio.run(main()))
     finally:

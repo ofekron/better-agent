@@ -22,7 +22,32 @@ CLAUDE_INGESTION_VERSION = 2
 # timestamp, undoing the spurious bumps that mis-ordered the sidebar.
 # v6: recover Codex native subagent panels from parent wait/notification rows
 # when live ingestion missed persisting child rollout sources.
-CODEX_INGESTION_VERSION = 6
+# v7: require recovered successful/failed runs to carry assistant terminal
+# fields (`completed_at` / assistant error) before reconciling, so already-
+# ingested-but-not-finalized turns are re-digested and sealed.
+# v8: hide Codex native metadata events such as thread_settings_applied and
+# world_state from the derived render tree.
+# v9: normalize Codex inter-agent activity/final-answer events instead of
+# rendering raw response_item.agent_message JSON cards.
+# v10: derive Codex v2 subagent panels from sub_agent_activity identities.
+# v11: exclude inherited parent history from child panels and rebuild polluted
+# panels from the canonical child-task boundary during recovery.
+CODEX_INGESTION_VERSION = 11
+# Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
+# session_events.jsonl through the gemini-family reader instead of the Claude
+# parser, so runs reconciled under v1 (empty/partial render) re-digest on the
+# next startup.
+AGY_INGESTION_VERSION = 2
+# Same bug/fix as agy: copilot is a gemini-family provider whose runner writes
+# session_events.jsonl. v2: recovery now replays it through the gemini-family
+# reader instead of the Claude parser, so runs reconciled under v1 re-digest.
+COPILOT_INGESTION_VERSION = 2
+# openai is a gemini-family provider: BA's own runner writes
+# session_events.jsonl (Claude-shaped), recovered via the gemini-family replay
+# reader. v1: initial shape.
+# v2: require recovered successful/failed runs to carry assistant terminal
+# fields (`completed_at` / assistant error) before reconciling.
+OPENAI_INGESTION_VERSION = 2
 
 
 def current_ingestion_version(provider_kind: str | None) -> int:
@@ -30,6 +55,12 @@ def current_ingestion_version(provider_kind: str | None) -> int:
         return CODEX_INGESTION_VERSION
     if provider_kind == "claude":
         return CLAUDE_INGESTION_VERSION
+    if provider_kind == "agy":
+        return AGY_INGESTION_VERSION
+    if provider_kind == "copilot":
+        return COPILOT_INGESTION_VERSION
+    if provider_kind == "openai":
+        return OPENAI_INGESTION_VERSION
     return 1
 
 
@@ -40,6 +71,10 @@ def marker_matches_current(path: Path, provider_kind: str | None) -> bool:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    return marker_data_matches_current(data, provider_kind)
+
+
+def marker_data_matches_current(data: dict, provider_kind: str | None) -> bool:
     return (
         data.get("provider_kind") == provider_kind
         and data.get("ingestion_version") == current_ingestion_version(provider_kind)
@@ -47,8 +82,14 @@ def marker_matches_current(path: Path, provider_kind: str | None) -> bool:
 
 
 def write_marker(path: Path, provider_kind: str | None) -> None:
+    version = current_ingestion_version(provider_kind)
     data = {
         "provider_kind": provider_kind,
-        "ingestion_version": current_ingestion_version(provider_kind),
+        "ingestion_version": version,
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        from runs_dir import append_reconciled_marker_index
+        append_reconciled_marker_index(path, provider_kind, version)
+    except Exception:
+        pass

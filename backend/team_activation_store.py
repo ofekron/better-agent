@@ -53,6 +53,7 @@ def create(*, root_session_id: str, team_instance_id: str, source_id: str, profi
         "error": "",
         "steps": [],
         "result": {},
+        "rolled_back_worker_ids": [],
     }
     write_json(_path(activation_id), record)
     return record
@@ -67,6 +68,7 @@ def get(activation_id: str) -> dict[str, Any] | None:
         raise TeamActivationError("Unsupported team activation schema; wipe team-activations/*.json to start fresh")
     if not isinstance(data.get("steps"), list):
         raise TeamActivationError("Malformed team activation: steps must be a list")
+    data.setdefault("rolled_back_worker_ids", [])
     return data
 
 
@@ -99,7 +101,12 @@ def complete(activation_id: str, result: dict[str, Any]) -> None:
     write_json(_path(activation_id), record)
 
 
-def fail(activation_id: str, error: str) -> None:
+def fail(
+    activation_id: str,
+    error: str,
+    *,
+    rolled_back_worker_ids: list[str] | None = None,
+) -> None:
     record = get(activation_id)
     if record is None:
         raise TeamActivationError("activation_id does not exist")
@@ -108,4 +115,5 @@ def fail(activation_id: str, error: str) -> None:
     record["updated_at"] = now
     record["completed_at"] = now
     record["error"] = str(error or "").strip()
+    record["rolled_back_worker_ids"] = list(rolled_back_worker_ids or [])
     write_json(_path(activation_id), record)

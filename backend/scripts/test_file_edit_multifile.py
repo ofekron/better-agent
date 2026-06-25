@@ -1,24 +1,16 @@
-"""Backend regression test for the multi-file / one-session-per-project-
-cwd file-editing model.
+"""Backend regression test for the file-edit provisioned-fork model.
 
 Pins:
-  1. Join-by-cwd: start(A, cwd C) then start(B, cwd C) → SAME session,
-     file_paths grows to [A, B], 2nd call returns an add-file
-     meta_prompt (submitted on the same claude session) + resumed=True.
-  2. Same file twice → pure resume, meta_prompt is None.
-  3. Different cwd → different sessions (no cross-join).
-  4. original_contents holds the disk baseline per file.
-  5. Modal/persistent path: start(A, persistent=True, cwd C) then
-     temporal start(B, cwd C) → SAME session, stays persistent, set
-     grows. (The §2 cross-flavor concern: now an intended single join,
-     persistent is upgrade-only / never downgraded.)
+  1. Every start creates a fresh user-facing session, even for the same cwd.
+  2. Each fresh session has an independent file set/baseline.
+  3. All sessions for the same cwd/provider/model fork from one warmed base.
+  4. Different cwd → different warm base.
+  5. Persistent is a per-session flag, not an upgrade on a cwd singleton.
   6. Legacy single-file meta shape raises (no silent mount).
   7. WS: a working_mode_marked change is broadcast as
-     session_metadata_updated carrying working_mode_meta.file_paths
-     end-to-end through SessionWSBroadcaster.on_change (the
-     _METADATA_KINDS guard is exactly the regression).
-  8. Comment anchoring is path-agnostic for a 2nd-added file.
-  9. cleanup() tears down the whole set (one session = all files).
+     session_metadata_updated carrying working_mode_meta.file_paths.
+  8. Comment anchoring works for the session's selected file.
+  9. cleanup() tears down only that session.
  10. cwd is required (no silent fallback).
 
 Run with:
@@ -43,6 +35,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import file_editor  # noqa: E402
+import time
+import threading
+
 import working_mode  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
@@ -61,6 +56,53 @@ def _sync_start(*args, **kwargs):
 # Monkey-patch so test bodies don't need to change.
 file_editor.start = _sync_start  # type: ignore[assignment]
 
+_FAKE_BASES: dict[tuple[str, str, str, str], str] = {}
+_FAKE_BASES_LOCK = threading.Lock()
+
+
+async def _fake_ensure_file_edit_base(cfg):
+    key = (cfg.cwd, cfg.provider_id, cfg.model, cfg.node_id)
+    with _FAKE_BASES_LOCK:
+        sid = _FAKE_BASES.get(key)
+        if sid and session_manager.get(sid):
+            return sid
+        base = session_manager.create(
+            name="file-editing-base",
+            model=cfg.model,
+            cwd=cfg.cwd,
+            orchestration_mode="native",
+            source="internal",
+            provider_id=cfg.provider_id,
+            reasoning_effort=cfg.reasoning_effort or None,
+            node_id=cfg.node_id,
+            bare_config=False,
+            worker_creation_policy="deny",
+        )
+        fake_agent_sid = f"fake-multifile-base-sid-{len(_FAKE_BASES)}"
+        session_manager._run(
+            base["id"],
+            lambda s: s.__setitem__("agent_session_id", fake_agent_sid),
+            {"kind": "test_agent_sid_set"},
+        )
+        working_mode.mark_working_mode(
+            base["id"],
+            mode=file_editor.BASE_MODE,
+            meta={
+                "cwd": cfg.cwd,
+                "provider_id": cfg.provider_id,
+                "model": cfg.model,
+                "machine_completion": False,
+                "version": file_editor.FILE_EDIT_BASE_SPEC.version,
+                "node_id": cfg.node_id,
+                "provisioned_at": time.time(),
+            },
+        )
+        _FAKE_BASES[key] = base["id"]
+        return base["id"]
+
+
+file_editor._ensure_file_edit_base = _fake_ensure_file_edit_base  # type: ignore[assignment]
+
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -78,134 +120,144 @@ def _write(d: Path, name: str, content: str) -> Path:
     return p
 
 
-def test_join_by_cwd_grows_set() -> bool:
-    d = _project("join")
+def test_same_cwd_creates_distinct_sessions_and_shared_base() -> bool:
+    d = _project("same_cwd")
     a = _write(d, "a.txt", "AAA\n")
     b = _write(d, "b.txt", "BBB\n")
     r1 = file_editor.start(str(a), cwd=str(d))
     r2 = file_editor.start(str(b), cwd=str(d))
-    if r1["session_id"] != r2["session_id"]:
-        print("  expected join (same session id)")
+    if r1["session_id"] == r2["session_id"]:
+        print("  expected a fresh session per start")
         return False
-    if r2.get("resumed") is not True:
-        print(f"  expected resumed=True on join, got {r2.get('resumed')!r}")
+    if r1.get("resumed") or r2.get("resumed"):
+        print(f"  starts should not report resumed: {r1.get('resumed')!r}, {r2.get('resumed')!r}")
         return False
-    want = [str(a.resolve()), str(b.resolve())]
-    if r2["file_paths"] != want:
-        print(f"  expected file_paths={want}, got {r2['file_paths']}")
+    s1 = session_manager.get(r1["session_id"]) or {}
+    s2 = session_manager.get(r2["session_id"]) or {}
+    m1 = s1.get("working_mode_meta") or {}
+    m2 = s2.get("working_mode_meta") or {}
+    if m1.get("file_paths") != [str(a.resolve())]:
+        print(f"  first file set not isolated: {m1.get('file_paths')!r}")
         return False
-    mp = r2.get("meta_prompt")
-    if not mp or str(b.resolve()) not in mp:
-        print(f"  expected add-file meta_prompt mentioning {b.resolve()}, got {mp!r}")
+    if m2.get("file_paths") != [str(b.resolve())]:
+        print(f"  second file set not isolated: {m2.get('file_paths')!r}")
         return False
-    if str(a.resolve()) not in mp:
-        print("  add-file meta_prompt should list the full set (missing A)")
+    if not m1.get("base_session_id") or m1.get("base_session_id") != m2.get("base_session_id"):
+        print(f"  expected shared warm base, got {m1.get('base_session_id')!r} / {m2.get('base_session_id')!r}")
         return False
-    sess = session_manager.get(r1["session_id"]) or {}
-    meta = sess.get("working_mode_meta") or {}
-    if meta.get("file_paths") != want:
-        print(f"  persisted meta.file_paths={meta.get('file_paths')!r}")
+    if s1.get("forked_from_agent_sid") != s2.get("forked_from_agent_sid"):
+        print("  expected both sessions to fork from same base agent sid")
         return False
     return True
 
 
-def test_concurrent_adds_no_lost_file() -> bool:
-    """Two+ near-simultaneous opens for the SAME cwd must not drop a
-    file. Pins the atomic read-modify-write of working_mode_meta — the
-    old find→read→append→write across separate locks lost files under
-    last-writer-wins."""
+def test_concurrent_starts_no_cwd_join() -> bool:
     import threading
     d = _project("concurrent")
-    base = file_editor.start(str(_write(d, "base.txt", "B\n")), cwd=str(d))
-    sid = base["session_id"]
-    extra = [str(_write(d, f"f{i}.txt", f"{i}\n")) for i in range(8)]
+    files = [str(_write(d, f"f{i}.txt", f"{i}\n")) for i in range(8)]
+    results: list[dict] = []
+    lock = threading.Lock()
 
     def add(fp: str) -> None:
-        file_editor.start(fp, cwd=str(d))
+        result = file_editor.start(fp, cwd=str(d))
+        with lock:
+            results.append(result)
 
-    threads = [threading.Thread(target=add, args=(fp,)) for fp in extra]
+    threads = [threading.Thread(target=add, args=(fp,)) for fp in files]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    sess = session_manager.get(sid) or {}
-    got = set((sess.get("working_mode_meta") or {}).get("file_paths") or [])
-    want = {str(Path(p).resolve()) for p in extra} | {
-        str((d / "base.txt").resolve())
-    }
-    missing = want - got
-    if missing:
-        print(f"  lost {len(missing)} file(s) under concurrency: "
-              f"{sorted(p.split('/')[-1] for p in missing)}")
+    ids = [r["session_id"] for r in results]
+    if len(set(ids)) != len(files):
+        print(f"  expected {len(files)} distinct sessions, got {len(set(ids))}")
         return False
+    base_ids = {
+        (session_manager.get(sid) or {}).get("working_mode_meta", {}).get("base_session_id")
+        for sid in ids
+    }
+    if len(base_ids) != 1 or not next(iter(base_ids)):
+        print(f"  expected one shared base, got {base_ids!r}")
+        return False
+    for result in results:
+        if len(result.get("file_paths") or []) != 1:
+            print(f"  result should carry exactly one selected file: {result.get('file_paths')!r}")
+            return False
     return True
 
 
-def test_same_file_twice_pure_resume() -> bool:
+def test_same_file_twice_creates_fresh_sessions() -> bool:
     d = _project("dup")
     a = _write(d, "a.txt", "AAA\n")
     r1 = file_editor.start(str(a), cwd=str(d))
     r2 = file_editor.start(str(a), cwd=str(d))
-    if r1["session_id"] != r2["session_id"]:
-        print("  expected same session")
+    if r1["session_id"] == r2["session_id"]:
+        print("  expected fresh sessions for repeated opens")
         return False
-    if r2.get("meta_prompt") is not None:
-        print(f"  expected meta_prompt=None on pure resume, got {r2.get('meta_prompt')!r}")
+    if r2.get("meta_prompt") is None:
+        print("  fresh repeated open should get its own bootstrap prompt")
         return False
     if r2["file_paths"] != [str(a.resolve())]:
-        print(f"  set should be unchanged, got {r2['file_paths']}")
+        print(f"  set should contain only the selected file, got {r2['file_paths']}")
         return False
     return True
 
 
-def test_different_cwd_different_session() -> bool:
+def test_different_cwd_different_base() -> bool:
     d1 = _project("cwd1")
     d2 = _project("cwd2")
     a = _write(d1, "a.txt", "A\n")
     b = _write(d2, "b.txt", "B\n")
     r1 = file_editor.start(str(a), cwd=str(d1))
     r2 = file_editor.start(str(b), cwd=str(d2))
+    m1 = (session_manager.get(r1["session_id"]) or {}).get("working_mode_meta") or {}
+    m2 = (session_manager.get(r2["session_id"]) or {}).get("working_mode_meta") or {}
     if r1["session_id"] == r2["session_id"]:
-        print("  different cwds must not cross-join")
+        print("  different cwds must not share user sessions")
+        return False
+    if not m1.get("base_session_id") or m1.get("base_session_id") == m2.get("base_session_id"):
+        print(f"  different cwds should have different bases, got {m1.get('base_session_id')!r} / {m2.get('base_session_id')!r}")
         return False
     return True
 
 
-def test_original_contents_baseline_per_file() -> bool:
+def test_original_contents_baseline_per_session() -> bool:
     d = _project("baseline")
     a = _write(d, "a.txt", "ORIG-A\n")
     b = _write(d, "b.txt", "ORIG-B\n")
-    file_editor.start(str(a), cwd=str(d))
+    r1 = file_editor.start(str(a), cwd=str(d))
     r2 = file_editor.start(str(b), cwd=str(d))
-    oc = r2["original_contents"]
-    if oc.get(str(a.resolve())) != "ORIG-A\n":
-        print(f"  baseline A wrong: {oc.get(str(a.resolve()))!r}")
+    oc1 = r1["original_contents"]
+    oc2 = r2["original_contents"]
+    if oc1.get(str(a.resolve())) != "ORIG-A\n" or str(b.resolve()) in oc1:
+        print(f"  baseline/session A wrong: {oc1!r}")
         return False
-    if oc.get(str(b.resolve())) != "ORIG-B\n":
-        print(f"  baseline B wrong: {oc.get(str(b.resolve()))!r}")
+    if oc2.get(str(b.resolve())) != "ORIG-B\n" or str(a.resolve()) in oc2:
+        print(f"  baseline/session B wrong: {oc2!r}")
         return False
     return True
 
 
-def test_persistent_then_temporal_joins_stays_persistent() -> bool:
-    """Modal-persistent session created first; later temporal AI-Edit of
-    a 2nd file in the same cwd JOINS it and it stays persistent."""
-    d = _project("modal_join")
+def test_persistent_then_temporal_are_independent() -> bool:
+    d = _project("persistent_independent")
     a = _write(d, "a.txt", "A\n")
     b = _write(d, "b.txt", "B\n")
     r1 = file_editor.start(str(a), cwd=str(d), persistent=True)
-    r2 = file_editor.start(str(b), cwd=str(d))  # temporal AI-Edit
-    if r1["session_id"] != r2["session_id"]:
-        print("  expected join into the persistent session")
+    r2 = file_editor.start(str(b), cwd=str(d))
+    if r1["session_id"] == r2["session_id"]:
+        print("  persistent and temporal opens must not join")
         return False
-    sess = session_manager.get(r1["session_id"]) or {}
-    meta = sess.get("working_mode_meta") or {}
-    if meta.get("persistent") is not True:
-        print(f"  persistent must NOT be downgraded, got {meta.get('persistent')!r}")
+    meta1 = (session_manager.get(r1["session_id"]) or {}).get("working_mode_meta") or {}
+    meta2 = (session_manager.get(r2["session_id"]) or {}).get("working_mode_meta") or {}
+    if meta1.get("persistent") is not True:
+        print(f"  persistent session lost flag: {meta1.get('persistent')!r}")
         return False
-    if meta.get("file_paths") != [str(a.resolve()), str(b.resolve())]:
-        print(f"  set should be [A,B], got {meta.get('file_paths')!r}")
+    if meta2.get("persistent"):
+        print(f"  temporal session should remain temporal, got {meta2.get('persistent')!r}")
+        return False
+    if meta1.get("file_paths") != [str(a.resolve())] or meta2.get("file_paths") != [str(b.resolve())]:
+        print(f"  file sets not independent: {meta1.get('file_paths')!r} / {meta2.get('file_paths')!r}")
         return False
     return True
 
@@ -275,34 +327,34 @@ def test_ws_broadcasts_working_mode_meta() -> bool:
     return True
 
 
-def test_comment_format_path_agnostic_for_added_file() -> bool:
+def test_comment_format_for_selected_file() -> bool:
     d = _project("comment")
-    a = _write(d, "a.txt", "A\n")
     b = _write(d, "b.txt", "B\n")
-    file_editor.start(str(a), cwd=str(d))
     file_editor.start(str(b), cwd=str(d))
     msg = working_mode.format_file_comment(
         str(b.resolve()), 2, 2, 1, 5, "fix this"
     )
     if str(b.resolve()) not in msg or "fix this" not in msg:
-        print(f"  comment anchor wrong for added file: {msg!r}")
+        print(f"  comment anchor wrong for selected file: {msg!r}")
         return False
     return True
 
 
-def test_cleanup_tears_down_whole_set() -> bool:
+def test_cleanup_tears_down_only_one_session() -> bool:
     d = _project("teardown")
     a = _write(d, "a.txt", "A\n")
     b = _write(d, "b.txt", "B\n")
-    r = file_editor.start(str(a), cwd=str(d))
-    file_editor.start(str(b), cwd=str(d))
-    sid = r["session_id"]
-    ok = file_editor.cleanup(sid)
+    r1 = file_editor.start(str(a), cwd=str(d))
+    r2 = file_editor.start(str(b), cwd=str(d))
+    ok = file_editor.cleanup(r1["session_id"])
     if not ok:
         print("  cleanup returned False")
         return False
-    if session_manager.get(sid) is not None:
-        print("  session (whole set) should be gone after cleanup")
+    if session_manager.get(r1["session_id"]) is not None:
+        print("  cleaned session should be gone")
+        return False
+    if session_manager.get(r2["session_id"]) is None:
+        print("  independent sibling session should remain")
         return False
     return True
 
@@ -319,16 +371,16 @@ def test_cwd_required() -> bool:
 
 
 TESTS = [
-    ("join-by-cwd grows the set + add-file prompt", test_join_by_cwd_grows_set),
-    ("concurrent adds lose no file (atomic meta write)", test_concurrent_adds_no_lost_file),
-    ("same file twice → pure resume (no prompt)", test_same_file_twice_pure_resume),
-    ("different cwd → different session", test_different_cwd_different_session),
-    ("original_contents baseline per file", test_original_contents_baseline_per_file),
-    ("persistent then temporal join stays persistent", test_persistent_then_temporal_joins_stays_persistent),
+    ("same cwd creates distinct sessions + shared base", test_same_cwd_creates_distinct_sessions_and_shared_base),
+    ("concurrent starts create distinct sessions", test_concurrent_starts_no_cwd_join),
+    ("same file twice → fresh sessions", test_same_file_twice_creates_fresh_sessions),
+    ("different cwd → different warm base", test_different_cwd_different_base),
+    ("original_contents baseline per session", test_original_contents_baseline_per_session),
+    ("persistent then temporal are independent", test_persistent_then_temporal_are_independent),
     ("legacy single-file meta raises", test_legacy_single_file_meta_raises),
     ("WS broadcasts working_mode_meta.file_paths", test_ws_broadcasts_working_mode_meta),
-    ("comment anchor path-agnostic for added file", test_comment_format_path_agnostic_for_added_file),
-    ("cleanup tears down the whole set", test_cleanup_tears_down_whole_set),
+    ("comment anchor works for selected file", test_comment_format_for_selected_file),
+    ("cleanup tears down only one session", test_cleanup_tears_down_only_one_session),
     ("cwd is required", test_cwd_required),
 ]
 

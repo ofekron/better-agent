@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,10 @@ def write_status(delegation_id: str, **fields: Any) -> None:
     current.update(fields)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(path, current)
+
+
+async def write_status_async(delegation_id: str, **fields: Any) -> None:
+    await asyncio.to_thread(write_status, delegation_id, **fields)
 
 
 def read_status(delegation_id: str) -> dict[str, Any] | None:

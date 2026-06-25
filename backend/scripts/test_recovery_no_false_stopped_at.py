@@ -41,7 +41,7 @@ if _BACKEND not in sys.path:
 from session_manager import manager as session_manager  # noqa: E402
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
-from run_recovery import integrate_recovered_runs  # noqa: E402
+from run_recovery import _apply_completion_state, integrate_recovered_runs  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -168,11 +168,69 @@ async def test_real_user_stop_preserved_across_recovery() -> bool:
     return True
 
 
+async def test_recovered_success_gets_completed_at() -> bool:
+    """A recovered successful run must be terminal even when events were
+    already fully live-ingested before a backend restart. Without this, the
+    assistant bubble can remain blank/non-terminal forever after recovery marks
+    the run reconciled."""
+    app_sid, asst_id = _seed_streaming_assistant("native")
+    run_id = _seed_run(app_sid, asst_id, str(uuid.uuid4()), cancelled=False)
+    complete_path = _runs_root() / run_id / "complete.json"
+    complete_path.write_text(json.dumps({
+        "success": True,
+        "session_id": "agent-1",
+        "error": None,
+        "token_usage": None,
+        "finished_at": "2026-06-20T11:00:00.000000",
+    }), encoding="utf-8")
+
+    _apply_completion_state(app_sid, asst_id, run_id=run_id, cancelled=False)
+
+    asst = _asst(app_sid, asst_id)
+    if not asst.get("completed_at"):
+        print(f"  recovered success missing completed_at: {asst!r}")
+        return False
+    if asst.get("stopped_at"):
+        print(f"  recovered success got stopped_at: {asst.get('stopped_at')!r}")
+        return False
+    return True
+
+
+async def test_recovered_failure_gets_assistant_error() -> bool:
+    """A recovered failed run must be terminal on the assistant message,
+    not only represented by the sidebar dot."""
+    app_sid, asst_id = _seed_streaming_assistant("native")
+    run_id = _seed_run(app_sid, asst_id, str(uuid.uuid4()), cancelled=False)
+    complete_path = _runs_root() / run_id / "complete.json"
+    complete_path.write_text(json.dumps({
+        "success": False,
+        "session_id": "agent-1",
+        "error": "HTTP 500: upstream",
+        "token_usage": None,
+        "finished_at": "2026-06-20T11:00:00.000000",
+    }), encoding="utf-8")
+
+    _apply_completion_state(app_sid, asst_id, run_id=run_id, cancelled=False)
+
+    asst = _asst(app_sid, asst_id)
+    if not asst.get("error") or asst.get("errorText") != "HTTP 500: upstream":
+        print(f"  recovered failure missing assistant error: {asst!r}")
+        return False
+    if asst.get("completed_at"):
+        print(f"  recovered failure got completed_at: {asst.get('completed_at')!r}")
+        return False
+    return True
+
+
 TESTS = [
     ("shutdown-killed run (cancelled=True) is NOT marked Stopped",
         test_shutdown_killed_run_not_marked_stopped),
     ("real user-stop stopped_at is preserved across recovery",
         test_real_user_stop_preserved_across_recovery),
+    ("recovered successful run gets completed_at",
+        test_recovered_success_gets_completed_at),
+    ("recovered failed run gets assistant error",
+        test_recovered_failure_gets_assistant_error),
 ]
 
 
@@ -191,6 +249,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed else f"all {len(TESTS)} tests passed")

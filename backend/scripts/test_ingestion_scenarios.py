@@ -41,6 +41,7 @@ from event_ingester import event_ingester  # noqa: E402
 from event_bus import bus  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+from codex_native import CodexRolloutNormalizer  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -614,8 +615,8 @@ async def test_recovery_multiple_runs_latest_only() -> bool:
 
 
 async def test_recovery_sets_correct_completion_state() -> bool:
-    """Recovery: a completed run must have isStreaming=False and no
-    stopped_at (non-cancelled). A cancelled run must have stopped_at."""
+    """Recovery: completed and cancelled recovered runs must have
+    isStreaming=False without inventing stopped_at."""
     from provider import default_provider
     from run_recovery import integrate_recovered_runs
 
@@ -663,8 +664,8 @@ async def test_recovery_sets_correct_completion_state() -> bool:
     if asst2.get("isStreaming"):
         print("  cancelled run still streaming")
         return False
-    if not asst2.get("stopped_at"):
-        print("  cancelled run missing stopped_at")
+    if asst2.get("stopped_at"):
+        print(f"  cancelled run has stopped_at: {asst2['stopped_at']}")
         return False
     return True
 
@@ -1016,6 +1017,129 @@ def test_ingester_close_clears_caches() -> bool:
     return True
 
 
+def test_codex_rollout_replay_does_not_duplicate_render_events() -> bool:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    raw_events = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"type": "agent_message", "message": "Progress update"},
+        },
+        {
+            "type": "item.started",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "item": {
+                "id": "cmd_1",
+                "type": "command_execution",
+                "command": "pwd",
+            },
+        },
+        {
+            "type": "item.completed",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "item": {
+                "id": "cmd_1",
+                "type": "command_execution",
+                "aggregated_output": "/tmp/project",
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:03Z",
+            "payload": {
+                "type": "reasoning",
+                "id": "reasoning_1",
+                "summary": [{"type": "summary_text", "text": "checked parser"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:04Z",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "arguments": {"cmd": "pwd"},
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "/tmp/project",
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:06Z",
+            "payload": {
+                "type": "web_search_call",
+                "id": "search_1",
+                "action": {"query": "Better Agent"},
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:07Z",
+            "payload": {
+                "type": "future_shape",
+                "id": "future_1",
+                "value": {"ok": True},
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-01-01T00:00:08Z",
+            "payload": {
+                "type": "message",
+                "id": "msg_final",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Final answer"}],
+            },
+        },
+    ]
+
+    def replay_once() -> None:
+        normalizer = CodexRolloutNormalizer(namespace="codex-thread-1")
+        for raw in raw_events:
+            for data in normalizer.normalize_event(raw):
+                strategy.apply_event(
+                    app_session_id=sid,
+                    msg=msg,
+                    event={"type": "agent_message", "data": data},
+                    ctx=ApplyEventCtx(root_id=sid),
+                    source_is_provider_stream=True,
+                )
+        event_journal_writer.barrier_sync(sid)
+
+    replay_once()
+    first_events = _asst_msg_events(sid, msg["id"])
+    first_rows, _, _ = event_ingester.read_events(
+        sid, limit=1000, msg_id_filter=msg["id"],
+    )
+    replay_once()
+    second_events = _asst_msg_events(sid, msg["id"])
+    second_rows, _, _ = event_ingester.read_events(
+        sid, limit=1000, msg_id_filter=msg["id"],
+    )
+    if len(second_events) != len(first_events):
+        print(
+            "  render tree duplicated on replay: "
+            f"{len(first_events)} -> {len(second_events)}"
+        )
+        return False
+    if len(second_rows) != len(first_rows):
+        print(
+            "  events.jsonl duplicated on replay: "
+            f"{len(first_rows)} -> {len(second_rows)}"
+        )
+        return False
+    return True
+
+
 # ─── ORPHAN BRACKETING IN RECONCILE ────────────────────────────────
 
 def test_reconcile_brackets_orphan_to_correct_msg() -> bool:
@@ -1119,6 +1243,9 @@ def test_ai_title_ingested_but_not_rendered() -> bool:
     """ai-title events must trigger session rename (side-effect) and land
     in events.jsonl (for recovery replay), but NOT on msg.events."""
     sid, msg = _mk_session("native")
+    # This test locks the metadata/render-tree pipeline, not the
+    # agent-rename permission gate — opt in explicitly.
+    session_manager.set_agent_rename_allowed(sid, True)
     strategy = get_strategy("native")
     ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
                         user_msg=None, root_id=sid)
@@ -1261,6 +1388,8 @@ TESTS: list[tuple[str, object]] = [
         test_ingester_same_data_distinct_messages_appends_new_row),
     ("INGESTER: close clears caches and re-seeds from disk",
         test_ingester_close_clears_caches),
+    ("CODEX: rollout replay does not duplicate render events",
+        test_codex_rollout_replay_does_not_duplicate_render_events),
 
     # Orphan bracketing
     ("RECONCILE: orphan events bracket to correct msg",

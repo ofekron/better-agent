@@ -53,6 +53,9 @@ class _FakeTailer:
     def stop(self):
         self.stopped = True
 
+    async def drain_available(self):
+        return None
+
 
 async def _run_provider_case(provider_cls, run_state_cls, label: str) -> None:
     run_dir = Path(tempfile.mkdtemp(prefix=f"{label}-run-", dir=_TMP_HOME))

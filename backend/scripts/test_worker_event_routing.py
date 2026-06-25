@@ -45,6 +45,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 import config_store  # noqa: E402
+import render_stub  # noqa: E402
 import session_store  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
@@ -420,17 +421,8 @@ def test_h_multi_panel_routes_correctly() -> bool:
     return ok
 
 
-def test_i_snapshot_workers_preserves_appended_event() -> bool:
-    """Branch order: `apply_worker_panel_event` mutates panel.events
-    on the panel dict in `m["workers"]`, THEN `snapshot_workers` does
-    `m["workers"] = list(ctx.workers_list)`. In production the panel
-    dicts in `ctx.workers_list` (=`coordinator.current_turn_workers
-    [app_session_id]`) are the SAME refs as in `m["workers"]` (the
-    list is built up via `panels.append(panel)` in
-    `_delegation.py:288` and snapshot_workers stores those refs).
-    With shared refs the snapshot's list-rebuild is harmless. Locks
-    that invariant — if anyone breaks the shared-ref contract,
-    snapshot would wipe the mutation."""
+def test_i_worker_event_does_not_need_snapshot_workers() -> bool:
+    """Worker-event routing mutates the matching panel directly."""
     sess = session_manager.create(
         name="t", model="sonnet", cwd="/tmp",
         orchestration_mode="manager", source="cli",
@@ -475,8 +467,89 @@ def test_i_snapshot_workers_preserves_appended_event() -> bool:
     panel_evs = _panel_events(sid, msg_id, "del_I")
     mgr_evs = _mgr_events(sid, msg_id)
     ok = len(panel_evs) == 1 and len(mgr_evs) == 0
-    print(f"{PASS if ok else FAIL} I: snapshot_workers preserves append — "
+    print(f"{PASS if ok else FAIL} I: worker_event updates panel directly — "
           f"panel.events={len(panel_evs)} mgr={len(mgr_evs)}")
+    return ok
+
+
+def test_i2_worker_event_skips_cold_event_hydration() -> bool:
+    """Worker-panel routing must not hydrate full root event history."""
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_I2")
+    original = session_manager._hydrate_cached_root_events
+    calls = 0
+
+    def counted_hydrate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    session_manager._event_hydrated_roots.discard(root_id)
+    session_manager._hydrate_cached_root_events = counted_hydrate
+    try:
+        _apply(
+            sid,
+            msg_id,
+            root_id,
+            _worker_event("del_I2", "uuid-I2", "without-hydrate"),
+            source_is_provider_stream=True,
+        )
+    finally:
+        session_manager._hydrate_cached_root_events = original
+
+    panel_evs = _panel_events(sid, msg_id, "del_I2")
+    ok = calls == 0 and len(panel_evs) == 1
+    print(f"{PASS if ok else FAIL} I2: worker_event skips cold hydration — "
+          f"hydrate_calls={calls} panel.events={len(panel_evs)}")
+    return ok
+
+
+def test_i3_stale_panel_uid_idx_rebuilds() -> bool:
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_I3")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_I3", "uuid-I3", "old"),
+        source_is_provider_stream=True,
+    )
+
+    def _clear_events_only(s: dict) -> None:
+        m = next((mm for mm in s.get("messages") or []
+                  if mm.get("id") == msg_id), None)
+        if not m:
+            return
+        panel = next((p for p in m.get("workers") or []
+                      if p.get("delegation_id") == "del_I3"), None)
+        if panel is not None:
+            panel["events"] = []
+
+    session_manager._run(
+        sid,
+        _clear_events_only,
+        {"kind": "test_clear_panel_events_without_uid_idx_invalidation"},
+    )
+
+    crashed = False
+    try:
+        _apply(
+            sid,
+            msg_id,
+            root_id,
+            _worker_event("del_I3", "uuid-I3", "new"),
+            source_is_provider_stream=False,
+        )
+    except IndexError:
+        crashed = True
+
+    panel_evs = _panel_events(sid, msg_id, "del_I3")
+    last_content = (
+        ((panel_evs[-1].get("data") or {}).get("message") or {}).get("content")
+        if panel_evs else None
+    )
+    ok = not crashed and len(panel_evs) == 1 and last_content == "new"
+    print(f"{PASS if ok else FAIL} I3: stale panel uid_idx rebuilds — "
+          f"crashed={crashed} panel.events={len(panel_evs)} "
+          f"last_content={last_content!r}")
     return ok
 
 
@@ -534,6 +607,13 @@ def test_k_worker_start_creates_panel_before_worker_event() -> bool:
     session_manager.append_assistant_msg(sid, scaffold)
     msg_id = scaffold["id"]
 
+    session_manager.upsert_worker_panel(sid, msg_id, {
+        "delegation_id": "codex_subagent_child",
+        "worker_session_id": "child",
+        "events": [{"uuid": "polluted", "data": "parent history"}],
+        "_uid_idx": {"polluted": 0},
+    })
+
     _apply(sid, msg_id, root_id, {
         "type": "worker_start",
         "data": {
@@ -541,6 +621,7 @@ def test_k_worker_start_creates_panel_before_worker_event() -> bool:
             "worker_session_id": "child",
             "worker_description": "Codex subagent child",
             "run_mode": "codex_subagent",
+            "reset_events": True,
         },
     }, source_is_provider_stream=True)
     _apply(sid, msg_id, root_id, _worker_event(
@@ -663,6 +744,59 @@ def test_f_panel_stores_inner_not_outer_wrapper() -> bool:
     return ok
 
 
+def test_n_snapshot_routes_journal_worker_event_to_panel_once() -> bool:
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_N")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_N", "uuid-N", "partial"),
+        source_is_provider_stream=True,
+    )
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_N", "uuid-N", "final"),
+        source_is_provider_stream=True,
+    )
+
+    session_manager._since_cache.pop(sid, None)
+    replay = session_manager.get_messages_since(sid, since_seq=0, limit=50) or {}
+    msg = next(
+        (m for m in replay.get("messages") or [] if m.get("id") == msg_id),
+        {},
+    )
+    panel = next(
+        (
+            p for p in msg.get("workers") or []
+            if p.get("delegation_id") == "del_N"
+        ),
+        {},
+    )
+    parent_worker_events = [
+        e for e in msg.get("events") or [] if e.get("type") == "worker_event"
+    ]
+    panel_events = panel.get("events") or []
+    last_content = (
+        ((panel_events[-1].get("data") or {}).get("message") or {}).get("content")
+        if panel_events else None
+    )
+    ok = (
+        parent_worker_events == []
+        and len(panel_events) == 1
+        and last_content == "final"
+        and render_stub.renderable_count(msg) == 1
+    )
+    print(
+        f"{PASS if ok else FAIL} N: snapshot routes journal worker_event once — "
+        f"parent_worker_events={len(parent_worker_events)} "
+        f"panel_events={len(panel_events)} last_content={last_content!r} "
+        f"renderable={render_stub.renderable_count(msg)}",
+    )
+    return ok
+
+
 # ─── runner ───────────────────────────────────────────────────────
 
 def main() -> int:
@@ -677,11 +811,14 @@ def main() -> int:
             test_g_reconcile_roundtrip_rehydrates_panel_events(),
             test_g3_worker_event_updates_raw_session_content(),
             test_h_multi_panel_routes_correctly(),
-            test_i_snapshot_workers_preserves_appended_event(),
+            test_i_worker_event_does_not_need_snapshot_workers(),
+            test_i2_worker_event_skips_cold_event_hydration(),
+            test_i3_stale_panel_uid_idx_rebuilds(),
             test_j_malformed_inner_no_crash_no_pollute(),
             test_k_worker_start_creates_panel_before_worker_event(),
             test_l_post_trigger_insert_at_counts_after_current_event(),
             test_m_session_panel_emitters_stamp_after_pending_trigger(),
+            test_n_snapshot_routes_journal_worker_event_to_panel_once(),
         ]
     finally:
         session_manager.flush_pending_persists()

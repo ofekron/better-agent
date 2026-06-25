@@ -28,8 +28,6 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-recovery-render-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,11 +35,15 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-recovery-render-")
+
 from session_manager import manager as session_manager  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
+from render_tree_hydrate import _bracket_orphan_rows  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -223,6 +225,53 @@ def test_reconcile_reextracts_content_from_jsonl_only_events() -> bool:
         print(f"  reconcile didn't preserve final text batch: {content!r}")
         return False
     return True
+
+
+def test_reconcile_repairs_empty_content_when_event_counts_match() -> bool:
+    from main import _reconcile_msg_events_from_jsonl
+    from orchs import ApplyEventCtx, get_strategy
+
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant("native")
+    strategy = get_strategy("native")
+    sess = session_manager.get_ref(app_sid)
+    asst = next(m for m in sess["messages"] if m["id"] == asst_id)
+    strategy.apply_event(
+        app_session_id=app_sid,
+        msg=asst,
+        event={
+            "type": "agent_message",
+            "data": {
+                "uuid": "matched-count-content",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "matched text"}],
+                },
+            },
+        },
+        ctx=ApplyEventCtx(root_id=app_sid),
+        source_is_provider_stream=True,
+    )
+    session_manager.set_streaming(app_sid, asst_id, False)
+    event_ingester.close(app_sid)
+
+    live = next(
+        m for m in session_manager.get_ref(app_sid)["messages"]
+        if m["id"] == asst_id
+    )
+    live["content"] = ""
+    live["_content_dirty"] = True
+
+    tree = session_manager.get_root_tree(app_sid)
+    _reconcile_msg_events_from_jsonl(tree)
+    repaired = next(
+        m for m in session_manager.get(app_sid)["messages"]
+        if m["id"] == asst_id
+    )
+    if repaired.get("content") != "matched text":
+        print(f"  count-match reconcile skipped content repair: {repaired.get('content')!r}")
+        return False
+    return repaired.get("_content_dirty") is not True
 
 
 def test_reconcile_does_not_clobber_streaming_msg_content() -> bool:
@@ -503,6 +552,33 @@ def test_reingest_repairs_spurious_updated_at() -> bool:
     return True
 
 
+def test_bracket_orphan_rows_does_not_swallow_new_turn_into_old_one() -> bool:
+    """A message created mid-restart-race has zero named (msg_id-stamped)
+    rows yet. Without a creation-time floor, `_bracket_orphan_rows` used to
+    scan forward past it looking for the first message WITH named rows,
+    leaving the OLDER message's ceiling unbounded — so an orphan row that
+    actually belongs to the new (still-empty) message got swallowed into
+    the older message's window instead, rendering as a stale duplicate
+    there. `_events_seq_floor` (stamped at message creation by
+    `session_manager.append_assistant_msg`) closes that window even before
+    the new message has any named rows."""
+    msg_old = {"id": "m-old"}
+    msg_new = {"id": "m-new", "_events_seq_floor": 20}
+    assistant_msgs = [(0, msg_old), (1, msg_new)]
+    by_msg_id = {"m-old": [{"seq": 12}]}
+    orphan_raw = [{"seq": 25, "data": {"uuid": "u-belongs-to-new"}}]
+
+    out = _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
+
+    if "m-old" in out:
+        print(f"  orphan seq=25 swallowed into m-old (belongs to m-new): {out}")
+        return False
+    if out.get("m-new") != orphan_raw:
+        print(f"  expected orphan bracketed onto m-new, got {out}")
+        return False
+    return True
+
+
 TESTS = [
     ("native dead-orphan recovery does NOT add manager scope",
         test_native_recovery_does_not_add_manager_scope),
@@ -510,6 +586,8 @@ TESTS = [
         test_manager_recovery_still_pins_session_id),
     ("reconcile re-extracts content from events.jsonl-only assistant text",
         test_reconcile_reextracts_content_from_jsonl_only_events),
+    ("reconcile repairs empty content when event counts match",
+        test_reconcile_repairs_empty_content_when_event_counts_match),
     ("reconcile does NOT clobber streaming msg content",
         test_reconcile_does_not_clobber_streaming_msg_content),
     ("DIV-1: WS messages_replay carries orphan events (parity with REST)",
@@ -520,6 +598,8 @@ TESTS = [
         test_reconcile_does_not_bump_updated_at),
     ("re-ingestion repairs spurious updated_at to last-activity ts",
         test_reingest_repairs_spurious_updated_at),
+    ("bracket_orphan_rows does not swallow a new turn's orphan into the old turn",
+        test_bracket_orphan_rows_does_not_swallow_new_turn_into_old_one),
 ]
 
 
@@ -541,6 +621,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     if failed:

@@ -32,6 +32,25 @@ describe("open file reminder", () => {
     expect(prompt).not.toContain("Treat them as likely-relevant context");
   });
 
+  it("dedupes identical open-file state lines", () => {
+    const prompt = buildOpenFilesPreamble([
+      {
+        path: "/tmp/proj/src/app.ts",
+        visible: { startLine: 4, endLine: 12 },
+        caret: { line: 8, column: 17 },
+        selection: null,
+      },
+      {
+        path: "/tmp/proj/src/app.ts",
+        visible: { startLine: 4, endLine: 12 },
+        caret: { line: 8, column: 17 },
+        selection: null,
+      },
+    ]);
+
+    expect(prompt.match(/\/tmp\/proj\/src\/app\.ts/g)).toHaveLength(1);
+  });
+
   it("does not send the open-file reminder when the right panel is closed", async () => {
     const session = makeSession({
       open_file_panels: [{ id: "file-1", path: "/tmp/proj/src/app.ts" }],
@@ -60,6 +79,41 @@ describe("open file reminder", () => {
     expect(prompt).toContain("<system-reminder>");
     expect(prompt).toContain("/tmp/proj/src/app.ts");
     expect(prompt).toContain("look here");
+    h.unmount();
+  });
+
+  it("sends the open-file reminder once until the open-file state changes", async () => {
+    const session = makeSession({
+      open_file_panels: [{ id: "file-1", path: "/tmp/proj/src/app.ts" }],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    await h.click(".chat-toolbar-right-panel-toggle");
+
+    await h.typeAndSend("first");
+    expect(sentPrompt(h)).toContain("<system-reminder>");
+
+    await h.typeAndSend("second");
+    expect(sentPrompt(h)).toBe("second");
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: {
+          open_file_panels: [
+            { id: "file-1", path: "/tmp/proj/src/app.ts" },
+            { id: "file-2", path: "/tmp/proj/src/other.ts" },
+          ],
+        },
+        originated_by: "agent-tool",
+      },
+    });
+    await h.flush();
+
+    await h.typeAndSend("third");
+    expect(sentPrompt(h)).toContain("<system-reminder>");
+    expect(sentPrompt(h)).toContain("/tmp/proj/src/other.ts");
     h.unmount();
   });
 

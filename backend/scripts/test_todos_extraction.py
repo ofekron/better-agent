@@ -34,6 +34,7 @@ import copy
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,9 +45,6 @@ _TMP_HOME = _test_home.isolate("bc-test-todos-")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_BACKEND)
-_TODOS_EXTENSION = os.path.join(_REPO, "extensions", "todos")
-if _TODOS_EXTENSION not in sys.path:
-    sys.path.insert(0, _TODOS_EXTENSION)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
@@ -54,15 +52,68 @@ from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import extension_store  # noqa: E402
 import session_event_extensions  # noqa: E402
-from backend.extractor import (  # noqa: E402
+import session_store  # noqa: E402
+from todo_projection import (  # noqa: E402
     extract_todos_from_normalized,
     extract_tasks_from_normalized,
     derive_current_todos,
     derive_current_tasks,
 )
 
+# Seed the isolated test home's extension store the same way production does on
+# its first `GET /api/extensions`: `_load()` is a pure read and never installs
+# the bundled Todos extension, so without this the builtin-todos session-event
+# hook is absent and every apply_event-driven assertion below silently no-ops.
+# `list_extensions_with_reconciliation` runs `_ensure_public_extensions`, which
+# installs + enables `ofek-dev.todos` as a first-party bundled extension.
+extension_store.list_extensions_with_reconciliation(include_hidden=True)
+session_event_extensions.invalidate_hook_snapshot()
+
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def test_core_projection_imports_without_extensions_tree() -> bool:
+    """Core persisted TODO state must not depend on extension sources."""
+    isolated = Path(tempfile.mkdtemp(prefix="todo-core-boundary-"))
+    try:
+        for filename in ("perf.py", "session_local_projection.py", "todo_projection.py"):
+            shutil.copy2(Path(_BACKEND) / filename, isolated / filename)
+        script = """
+import json
+import session_local_projection
+
+event = {
+    "data": {
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "TodoWrite",
+                "id": "todo-core",
+                "input": {"todos": [{"content": "core", "status": "pending"}]},
+            }],
+        },
+    },
+}
+print(json.dumps(session_local_projection.project_event_fields(event, [], []), sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=isolated,
+            env={**os.environ, "PYTHONPATH": str(isolated)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        expected = {
+            "current_todos": [{"activeForm": None, "content": "core", "status": "pending"}],
+        }
+        if result.returncode != 0:
+            print(result.stderr)
+            return False
+        return json.loads(result.stdout.strip()) == expected
+    finally:
+        shutil.rmtree(isolated, ignore_errors=True)
 
 
 # ─── fixtures ────────────────────────────────────────────────────
@@ -141,7 +192,7 @@ def _codex_todo_list(item_id: str, items: list, thread: str = "thread-x") -> dic
     normalization, then wrapped as the agent_message the tailer feeds
     to apply_event. `event_uuid` is the SAME stable value runner_codex
     derives from (thread_id, item id), so re-emissions REPLACE in place."""
-    from runner_codex import _normalize_todo_list, _stable_uuid
+    from codex_normalize import _normalize_todo_list, _stable_uuid
     data = _normalize_todo_list(
         {"id": item_id, "type": "todo_list", "items": items},
         parent_uuid="p",
@@ -157,7 +208,7 @@ def _codex_update_plan(call_id: str, plan: list, explanation: str = "") -> dict:
     call carries a DISTINCT call_id (unlike todo_list's stable item id),
     so it behaves like a normal TodoWrite tool_use."""
     import json as _json
-    from runner_codex import _normalize_response_tool_call
+    from codex_normalize import _normalize_response_tool_call
     event, _ = _normalize_response_tool_call(
         {
             "type": "function_call",
@@ -1032,42 +1083,243 @@ def test_load_derives_current_todos_from_orphan_rows() -> bool:
     return True
 
 
-def test_cli_prompt_open_todos_only() -> bool:
-    """The helper injects only unfinished todos and otherwise no-ops."""
+def test_hydration_skips_irrelevant_rows_before_projection() -> bool:
+    from event_ingester import event_ingester
+    import session_local_projection
+
+    sid, _msg = _mk_session("native")
+    todos = [{"content": "Relevant", "status": "in_progress", "activeForm": "r"}]
+    for idx in range(20):
+        event_ingester.ingest(
+            sid, sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": f"noise-{idx}",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"plain text {idx}"}],
+                },
+            },
+            source="test_noise", run_id=None, msg_id=None,
+        )
+    event = _claude_todowrite_native("u-relevant", todos, tool_id="tu_relevant")
+    event_ingester.ingest(
+        sid, sid=sid,
+        event_type="agent_message", data=event["data"],
+        source="test_relevant", run_id=None, msg_id=None,
+    )
+
+    original_project = session_local_projection.project_event_fields
+    calls = {"n": 0}
+
+    def counting_project(*args, **kwargs):
+        calls["n"] += 1
+        return original_project(*args, **kwargs)
+
+    rid = session_manager._root_id_for(sid)
+    with session_manager._lock_for_root(rid):
+        session_manager._roots.pop(rid, None)
+        session_manager._event_hydrated_roots.discard(rid)
+
+    session_local_projection.project_event_fields = counting_project
+    try:
+        with session_manager._lock_for_root(rid):
+            sess = session_manager._load_root(sid) or {}
+            got = sess.get("current_todos") or []
+    finally:
+        session_local_projection.project_event_fields = original_project
+
+    if calls["n"] != 1:
+        print(f"  expected 1 projection call, got {calls['n']}")
+        return False
+    if got != todos:
+        print(f"  expected relevant todos after filtered hydration, got {got}")
+        return False
+    return True
+
+
+def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
+    from event_ingester import event_ingester
+
+    sid, _msg = _mk_session("native")
+    todos = [{"content": "Cached", "status": "in_progress", "activeForm": "c"}]
+    event = _claude_todowrite_native("u-cache", todos, tool_id="tu_cache")
+    event_ingester.ingest(
+        sid, sid=sid,
+        event_type="agent_message", data=event["data"],
+        source="test_cache", run_id=None, msg_id=None,
+    )
+    session_manager.flush_pending_persists()
+
+    rid = session_manager._root_id_for(sid)
+    original_apply_cached = session_manager._apply_cached_todo_projection
+    cache_hits = {"n": 0}
+
+    def counting_apply_cached(root, projected):
+        if root.get("id") == rid:
+            cache_hits["n"] += 1
+        return original_apply_cached(root, projected)
+
+    def evict() -> None:
+        with session_manager._lock_for_root(rid):
+            session_manager._roots.pop(rid, None)
+            session_manager._event_hydrated_roots.discard(rid)
+
+    session_manager._apply_cached_todo_projection = counting_apply_cached
+    try:
+        evict()
+        with session_manager._lock_for_root(rid):
+            first = session_manager._load_root(sid) or {}
+        cache_after_first = session_manager._todo_projection_cache.get(rid)
+        session_manager.flush_pending_persists()
+        cache_hits["n"] = 0
+        evict()
+        with session_manager._lock_for_root(rid):
+            second = session_manager._load_root(sid) or {}
+        second_hits = cache_hits["n"]
+    finally:
+        session_manager._apply_cached_todo_projection = original_apply_cached
+
+    if first.get("current_todos") != todos:
+        print(f"  expected first load todos, got {first.get('current_todos')}")
+        return False
+    if second.get("current_todos") != todos:
+        print(f"  expected cached second load todos, got {second.get('current_todos')}")
+        return False
+    if cache_after_first is None or cache_after_first[0] is None:
+        print(f"  expected first load to seed projection cache, got {cache_after_first}")
+        return False
+    if second_hits != 1:
+        print(f"  expected cached second load to apply cached projection once, got {second_hits}")
+        return False
+    return True
+
+
+def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
+    """The helper injects full todo/task state while anything is open."""
     from turn_helpers import _append_todo_reminder
 
     user_text = "do the thing"
 
-    if _append_todo_reminder(user_text, {"current_todos": []}) != user_text:
+    if _append_todo_reminder(user_text, {"current_todos": [], "current_tasks": []}) != user_text:
         print("  empty todo list changed prompt")
         return False
 
-    sess_with = {"current_todos": [
-        {"content": "X <unsafe>", "status": "in_progress"},
-        {"content": "Still pending", "status": "pending"},
-        {"content": "Already done", "status": "completed"},
-    ]}
+    sess_with = {
+        "current_todos": [
+            {"content": "X <unsafe>", "status": "in_progress"},
+            {"content": "Still pending", "status": "pending"},
+            {"content": "Already done", "status": "completed"},
+            {"content": "Duplicate shared", "status": "completed"},
+        ],
+        "current_tasks": [
+            {"content": "TaskCreate work", "status": "pending"},
+            {"content": "Duplicate shared", "status": "in_progress"},
+        ],
+    }
     out = _append_todo_reminder(user_text, sess_with)
     if not out.startswith(user_text):
         print(f"  user text not preserved: {out!r}")
         return False
     if "<bc-todo-reminder>" not in out or "</bc-todo-reminder>" not in out:
-        print(f"  unfinished todo tags missing: {out!r}")
+        print(f"  todo tags missing: {out!r}")
         return False
-    if "X &lt;unsafe&gt;" not in out or "Still pending" not in out:
-        print(f"  unfinished todo content missing or unescaped: {out!r}")
+    if "X &lt;unsafe&gt;" not in out or "Still pending" not in out or "TaskCreate work" not in out:
+        print(f"  open todo/task content missing or unescaped: {out!r}")
         return False
-    if "Already done" in out:
-        print(f"  completed todo leaked into reminder: {out!r}")
+    if "Already done" not in out:
+        print(f"  completed session work missing from reminder: {out!r}")
+        return False
+    if out.count("Duplicate shared") != 1 or "- [completed] Duplicate shared" not in out:
+        print(f"  duplicate todo/task content not deduped with completed status: {out!r}")
         return False
 
-    all_done = {"current_todos": [
-        {"content": "Already done", "status": "completed"},
-    ]}
+    all_done = {
+        "current_todos": [
+            {"content": "Already done", "status": "completed"},
+        ],
+        "current_tasks": [
+            {"content": "Task already done", "status": "completed"},
+        ],
+    }
     if _append_todo_reminder(user_text, all_done) != user_text:
-        print("  all-completed list changed prompt")
+        print("  all-completed todo/task list changed prompt")
         return False
 
+    return True
+
+
+def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool:
+    sid, msg = _mk_session("native")
+    session_manager.set_current_todos(sid, [
+        {"content": "Check project orientation", "status": "in_progress", "activeForm": None},
+        {"content": "Draft concise implementation plan", "status": "pending", "activeForm": None},
+    ])
+    session_manager.set_current_tasks(sid, [
+        {"content": "TaskCreate item", "status": "in_progress", "activeForm": None},
+    ])
+
+    import file_ref_resolver
+    file_ref_resolver.set_tag_rules([
+        {
+            "tag": "ALL_TASKS__DONE",
+            "strip_wrapper": True,
+            "_extension_id": "ofek-dev.user-attention",
+            "marker": {"color": "#2563eb", "tooltip": "All tasks done"},
+        }
+    ])
+
+    strategy = get_strategy("native")
+    done_event = {
+        "type": "agent_message",
+        "data": {
+            "uuid": "all_done_msg",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<ALL_TASKS__DONE>All requested work is done.</ALL_TASKS__DONE>",
+                    }
+                ],
+            },
+        },
+    }
+
+    import session_local_projection
+    projected = session_local_projection.project_event_fields(
+        done_event,
+        current_todos=[
+            {"content": "Cold-load stale", "status": "in_progress", "activeForm": None},
+        ],
+        current_tasks=[
+            {"content": "Cold-load task", "status": "pending", "activeForm": None},
+        ],
+    )
+    if [item.get("status") for item in projected.get("current_todos") or []] != ["completed"]:
+        print(f"  cold-load projection did not complete todos: {projected}")
+        return False
+    if [item.get("status") for item in projected.get("current_tasks") or []] != ["completed"]:
+        print(f"  cold-load projection did not complete tasks: {projected}")
+        return False
+
+    _apply(strategy, sid, msg, done_event, source_is_provider_stream=True)
+
+    got = session_manager.get(sid).get("current_todos") or []
+    if [item.get("status") for item in got] != ["completed", "completed"]:
+        print(f"  expected marker to complete todos, got {got}")
+        return False
+    got_tasks = session_manager.get(sid).get("current_tasks") or []
+    if [item.get("status") for item in got_tasks] != ["completed"]:
+        print(f"  expected marker to complete tasks, got {got_tasks}")
+        return False
+
+    from turn_helpers import _append_todo_reminder
+    if _append_todo_reminder("next prompt", session_manager.get(sid)) != "next prompt":
+        print("  completed marker did not suppress next todo reminder")
+        return False
     return True
 
 
@@ -1262,6 +1514,61 @@ def test_get_current_todos_snapshot_returns_copy() -> bool:
     fresh = session_manager.get(sid).get("current_todos") or []
     if len(fresh) != 1:
         print(f"  snapshot append leaked into session: {fresh}")
+        return False
+    return True
+
+
+def test_sidebar_summary_includes_current_todos_and_tasks() -> bool:
+    sid, _msg = _mk_session("native")
+    todos = [
+        {"content": "Trace marker source", "status": "in_progress", "activeForm": "trace"},
+        {"content": "Patch summary payload", "status": "pending", "activeForm": "patch"},
+    ]
+    tasks = [
+        {"task_id": "task-1", "content": "Verify sidebar payload", "status": "pending"},
+    ]
+    session_manager.set_current_todos(sid, todos)
+    session_manager.set_current_tasks(sid, tasks)
+
+    summary = next((item for item in session_manager.list() if item.get("id") == sid), None)
+    if not summary:
+        print("  session missing from sidebar summary list")
+        return False
+    if summary.get("current_todos") != todos:
+        print(f"  summary current_todos missing/stale: {summary.get('current_todos')}")
+        return False
+    if summary.get("current_tasks") != tasks:
+        print(f"  summary current_tasks missing/stale: {summary.get('current_tasks')}")
+        return False
+    return True
+
+
+def test_summary_by_ids_loads_requested_todos_before_warm_index() -> bool:
+    sid, _msg = _mk_session("native")
+    todos = [
+        {"content": "Keep restored tab badge accurate", "status": "in_progress", "activeForm": "badge"},
+    ]
+    session_manager.set_current_todos(sid, todos)
+    session_manager.flush_pending_persists()
+
+    acquired = session_store._summary_build_lock.acquire(blocking=False)
+    if not acquired:
+        print("  could not lock summary builder for cold-index simulation")
+        return False
+    try:
+        with session_store._summary_index_lock:
+            session_store._summary_index.clear()
+            session_store._summary_index_loaded = False
+        summaries = session_store.get_session_summaries_by_ids([sid])
+    finally:
+        session_store._summary_build_lock.release()
+
+    if not summaries:
+        print("  summary-by-ids returned no requested session before warm index")
+        return False
+    got = summaries[0].get("current_todos")
+    if got != todos:
+        print(f"  summary-by-ids returned stale todos: {got}")
         return False
     return True
 
@@ -2158,7 +2465,175 @@ def test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch() -> bool:
     )
 
 
+def _irrelevant_text_event(uuid: str = "irrelevant") -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "uuid": uuid,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ordinary assistant text"}],
+            },
+        },
+    }
+
+
+def test_builtin_todos_skips_irrelevant_agent_message() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = session_event_extensions.apply_event(
+            "sid",
+            _irrelevant_text_event(),
+            use_sdk=True,
+        )
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return changed is False and jobs == []
+
+
+def test_builtin_todos_skips_irrelevant_burst() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = [
+            session_event_extensions.apply_event(
+                "sid",
+                _irrelevant_text_event(f"irrelevant-{idx}"),
+                use_sdk=True,
+            )
+            for idx in range(1100)
+        ]
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return changed == [False] * 1100 and jobs == []
+
+
+def test_builtin_todos_enqueues_relevant_projection_events() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+    events = [
+        _claude_todowrite_native(
+            "todo-relevant",
+            [{"content": "todo", "status": "pending"}],
+        ),
+        _task_create("task-create-relevant", "Task create"),
+        _task_update("task-update-relevant", "1", status="completed"),
+        _task_create_result("task-result-relevant", "tc_1", "1"),
+        {
+            "type": "agent_message",
+            "data": {
+                "uuid": "all-done-relevant",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "<ALL_TASKS__DONE>"}],
+                },
+            },
+        },
+    ]
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = [
+            session_event_extensions.apply_event("sid", event, use_sdk=True)
+            for event in events
+        ]
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        changed == [True] * len(events)
+        and [job.spec.extension_id for job in jobs]
+        == [extension_store.BUILTIN_TODOS_EXTENSION_ID] * len(events)
+    )
+
+
+def test_builtin_todos_prefilter_preserves_external_hooks() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_allowlist = extension_store.session_field_allowlist
+    original_read_allowlist = extension_store.session_field_read_allowlist
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: [("ofek-dev.other", "/session-event")]
+    extension_store.session_field_allowlist = lambda extension_id: ["current_tasks"]
+    extension_store.session_field_read_allowlist = lambda extension_id: ["current_tasks"]
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = session_event_extensions.apply_event(
+            "sid",
+            _irrelevant_text_event(),
+            use_sdk=True,
+        )
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        extension_store.session_field_allowlist = original_allowlist
+        extension_store.session_field_read_allowlist = original_read_allowlist
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        changed is True
+        and len(jobs) == 1
+        and jobs[0].spec.extension_id == "ofek-dev.other"
+    )
+
+
+def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> bool:
+    import session_event_extensions
+
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        sid, msg = _mk_session("manager")
+        strategy = get_strategy("manager")
+        _apply(
+            strategy,
+            sid,
+            msg,
+            _claude_todowrite_manager(
+                "manager-builtin",
+                [{"content": "manager", "status": "pending"}],
+            ),
+            source_is_provider_stream=True,
+        )
+    finally:
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        len(jobs) == 1
+        and jobs[0].normalized.get("type") == "agent_message"
+        and jobs[0].normalized.get("data", {}).get("uuid") == "manager-builtin"
+    )
+
+
 TESTS = [
+    ("Core TODO projection imports without extensions tree", test_core_projection_imports_without_extensions_tree),
     ("Claude TodoWrite first call sets list", test_claude_todowrite_first_call_sets_list),
     ("Claude two sequential → union merge", test_claude_two_sequential_todowrites_union_merge),
     ("Claude TodoWrite UNION keeps completed across phases", test_claude_todowrite_union_keeps_completed_across_phases),
@@ -2183,12 +2658,17 @@ TESTS = [
     ("hydration loads current_todos from events.jsonl", test_hydration_loads_current_todos_from_events_jsonl),
     ("Gemini re-emission preserves completed", test_gemini_reemission_preserves_completed_status),
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
-    ("cli_prompt reminder: open todos only", test_cli_prompt_open_todos_only),
+    ("hydration skips irrelevant rows before projection", test_hydration_skips_irrelevant_rows_before_projection),
+    ("hydration reuses todo projection cache when events unchanged", test_hydration_reuses_todo_projection_cache_when_events_unchanged),
+    ("cli_prompt reminder: full open todo/task state", test_cli_prompt_includes_full_open_session_todo_state),
+    ("ALL_TASKS__DONE marker completes todos and suppresses reminder", test_all_tasks_done_marker_completes_todos_and_suppresses_reminder),
     ("dispatch supervisor branch passes user_initiated=True", test_dispatch_supervisor_branch_passes_user_initiated),
     ("run_turn actually calls _append_todo_reminder (AST)", test_run_turn_actually_calls_append_todo_reminder),
     ("run_turn gate covers every non-empty user prompt",
         test_run_turn_gate_covers_every_user_prompt),
     ("get_current_todos_snapshot returns copy", test_get_current_todos_snapshot_returns_copy),
+    ("sidebar summary includes current todos/tasks", test_sidebar_summary_includes_current_todos_and_tasks),
+    ("summary-by-ids loads requested todos before warm index", test_summary_by_ids_loads_requested_todos_before_warm_index),
     ("Codex todo_list: first incomplete → in_progress", test_codex_todo_list_first_incomplete_is_in_progress),
     ("Codex todo_list: completed then first incomplete", test_codex_todo_list_completed_then_first_incomplete),
     ("Codex todo_list: all completed → no in_progress", test_codex_todo_list_all_completed_no_in_progress),
@@ -2224,6 +2704,11 @@ TESTS = [
     ("Session-event hook discovery failure is nonfatal", test_session_event_hook_discovery_failure_is_nonfatal),
     ("Session-event hook dispatch failure is nonfatal", test_session_event_hook_dispatch_failure_is_nonfatal),
     ("apply_event enqueues non-Todos hooks without inline dispatch", test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch),
+    ("Builtin Todos skips irrelevant agent_message", test_builtin_todos_skips_irrelevant_agent_message),
+    ("Builtin Todos skips irrelevant burst", test_builtin_todos_skips_irrelevant_burst),
+    ("Builtin Todos enqueues relevant projection events", test_builtin_todos_enqueues_relevant_projection_events),
+    ("Builtin Todos prefilter preserves external hooks", test_builtin_todos_prefilter_preserves_external_hooks),
+    ("manager_event TodoWrite reaches builtin as agent_message", test_manager_event_todowrite_reaches_builtin_as_agent_message),
 ]
 
 

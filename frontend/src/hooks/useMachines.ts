@@ -1,9 +1,9 @@
 import { useEffect, useReducer } from "react";
 
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import type { NodeSnapshot, NodeStateChangedData } from "../types";
 
-const MACHINE_NODES_API = `${API}/api/extensions/ofek-dev.machine-nodes/backend`;
+const machineNodesApi = () => extBackendBase("machineNodes");
 
 interface MachinesState {
   /** Snapshot of all machines (primary + worker_nodes) from the
@@ -17,6 +17,24 @@ interface MachinesState {
    * (success or failure). Lets callers distinguish "loading" from
    * "no machines configured" — both render `machines.length === 0`. */
   loading: boolean;
+}
+
+export interface MachineSyncNodeResult {
+  node_id: string;
+  ok: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface MachineSyncResult {
+  ok: boolean;
+  results?: MachineSyncNodeResult[];
+  error?: string;
+}
+
+export interface ProviderSyncOptions {
+  includeSecrets?: boolean;
+  providerIds?: string[];
 }
 
 // Module-level shared state — every useMachines() consumer reads the
@@ -35,7 +53,7 @@ function _refetch(): Promise<void> {
   if (_inFlight) return _inFlight;
   _inFlight = (async () => {
     try {
-      const r = await fetch(`${MACHINE_NODES_API}/nodes`, { credentials: "include" });
+      const r = await fetch(`${machineNodesApi()}/nodes`, { credentials: "include" });
       const data = r.ok ? await r.json() : [];
       _state = {
         machines: Array.isArray(data) ? (data as NodeSnapshot[]) : [],
@@ -69,6 +87,11 @@ function _onNodeStateChanged(ev: Event): void {
   next[idx] = {
     ...next[idx],
     state: detail.state,
+    app_commit_sha: detail.app_commit_sha ?? next[idx].app_commit_sha,
+    app_dirty: detail.app_dirty ?? next[idx].app_dirty,
+    primary_commit_sha: detail.primary_commit_sha ?? next[idx].primary_commit_sha,
+    primary_dirty: detail.primary_dirty ?? next[idx].primary_dirty,
+    version_status: detail.version_status ?? next[idx].version_status,
     // INVARIANT: `last_seen` is the timestamp the backend last heard
     // from this node. On a `disconnected` transition the backend has
     // already wiped the live conn (so the payload carries `null`);
@@ -100,7 +123,7 @@ if (import.meta.hot) {
 /** Delete a node from the topology. Returns true on success. */
 export async function deleteNode(nodeId: string): Promise<boolean> {
   try {
-    const r = await fetch(`${MACHINE_NODES_API}/nodes/${encodeURIComponent(nodeId)}`, {
+    const r = await fetch(`${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}`, {
       method: "DELETE",
       credentials: "include",
     });
@@ -116,13 +139,90 @@ export async function deleteNode(nodeId: string): Promise<boolean> {
 export async function restartNode(nodeId: string): Promise<boolean> {
   try {
     const r = await fetch(
-      `${MACHINE_NODES_API}/nodes/${encodeURIComponent(nodeId)}/restart`,
+      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/restart`,
       { method: "POST", credentials: "include" },
     );
     return r.ok;
   } catch {
     return false;
   }
+}
+
+async function postMachineSync(url: string, body?: unknown): Promise<MachineSyncResult> {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data: unknown = null;
+    try {
+      data = await r.json();
+    } catch {
+      data = null;
+    }
+    if (data && typeof data === "object") {
+      const body = data as {
+        ok?: unknown;
+        results?: unknown;
+        detail?: unknown;
+        error?: unknown;
+      };
+      const results = Array.isArray(body.results)
+        ? (body.results as MachineSyncNodeResult[])
+        : undefined;
+      const bodyOk =
+        typeof body.ok === "boolean"
+          ? body.ok
+          : results
+            ? results.every((result) => result.ok === true)
+            : r.ok;
+      const message = body.detail || body.error;
+      return {
+        ok: r.ok && bodyOk,
+        results,
+        error: typeof message === "string" ? message : undefined,
+      };
+    }
+    return { ok: r.ok };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Copy the primary provider list/default provider to a connected worker node. */
+export async function syncProvidersToNode(
+  nodeId: string,
+  options: ProviderSyncOptions = {},
+): Promise<MachineSyncResult> {
+  const providerIds = Array.isArray(options.providerIds)
+    ? options.providerIds.map((id) => id.trim()).filter(Boolean)
+    : [];
+  const body = options.includeSecrets
+    ? { include_secrets: true, provider_ids: providerIds }
+    : undefined;
+  return postMachineSync(
+    `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-providers`,
+    body,
+  );
+}
+
+/** Copy the primary provider list/default provider to every connected worker node. */
+export async function syncProvidersToConnectedNodes(): Promise<MachineSyncResult> {
+  return postMachineSync(`${machineNodesApi()}/nodes/sync-providers`);
+}
+
+/** Copy primary extension config/artifacts to a connected worker node. */
+export async function syncExtensionsToNode(nodeId: string): Promise<MachineSyncResult> {
+  return postMachineSync(
+    `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-extensions`,
+  );
+}
+
+/** Copy primary extension config/artifacts to every connected worker node. */
+export async function syncExtensionsToConnectedNodes(): Promise<MachineSyncResult> {
+  return postMachineSync(`${machineNodesApi()}/nodes/sync-extensions`);
 }
 
 /** Reflects the backend's multi-machine topology + live connection

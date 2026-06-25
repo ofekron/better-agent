@@ -1,10 +1,12 @@
 import type {
   CredentialConsent,
+  FileDiscussion,
   PendingApproval,
   Project,
   Provider,
   Session,
   Trace,
+  UserInteractionRequest,
   WorkerInfo,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
@@ -15,6 +17,7 @@ export interface BackendState {
   workers: WorkerInfo[];
   approvals: PendingApproval[];
   credentials: CredentialConsent[];
+  userInputs: UserInteractionRequest[];
   traces: Record<string, Trace>;
   models: { id: string; name: string }[];
   providers: Provider[];
@@ -22,6 +25,14 @@ export interface BackendState {
   config: Record<string, unknown>;
   capabilitySources: unknown[];
   projectSuggestion: ProjectSuggestion | null;
+  summaryMissOnceIds: string[];
+  summaryMissingIds: string[];
+  uiSelection: {
+    selected_project: { path: string; node_id: string } | null;
+    remembered_session_by_project: Record<string, Record<string, string>>;
+    open_session_tab_ids: string[];
+    open_session_tab_joined_at: Record<string, string>;
+  };
   /** Mocked file content keyed by absolute path. FileEditor polls
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
@@ -73,6 +84,15 @@ function sessionMatchesListQuery(s: Session, query: Record<string, string>): boo
   return true;
 }
 
+function sessionSummary(s: Session): Partial<Session> {
+  const summary: Partial<Session> = { ...s };
+  delete summary.messages;
+  delete summary.forks;
+  delete summary.token_usage_total;
+  delete summary.token_usage_last;
+  return summary;
+}
+
 function emptyState(): BackendState {
   return {
     sessions: [],
@@ -80,6 +100,7 @@ function emptyState(): BackendState {
     workers: [],
     approvals: [],
     credentials: [],
+    userInputs: [],
     traces: {},
     models: [
       { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
@@ -110,6 +131,14 @@ function emptyState(): BackendState {
     config: { default_model: "claude-sonnet-4-6" },
     capabilitySources: [],
     projectSuggestion: null,
+    summaryMissOnceIds: [],
+    summaryMissingIds: [],
+    uiSelection: {
+      selected_project: null,
+      remembered_session_by_project: {},
+      open_session_tab_ids: [],
+      open_session_tab_joined_at: {},
+    },
     files: {},
   };
 }
@@ -127,6 +156,7 @@ export class MockBackend {
    * backend's stale-PATCH guard. Lives outside the Session type
    * because the frontend never reads the seq. */
   draftSeqs: Map<string, number> = new Map();
+  private routeHolds: Map<string, Promise<void>[]> = new Map();
   private originalFetch: typeof fetch | undefined;
 
   seed(partial: Partial<BackendState>): void {
@@ -143,6 +173,7 @@ export class MockBackend {
     this.transientStatus = null;
     this.transientStatusPath = null;
     this.transientOfflineAfter = false;
+    this.routeHolds = new Map();
   }
 
   setOffline(offline: boolean): void {
@@ -163,6 +194,16 @@ export class MockBackend {
     this.restartPostFailure = position;
   }
 
+  holdNext(method: string, path: string): () => void {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const key = `${method.toUpperCase()} ${path}`;
+    this.routeHolds.set(key, [...(this.routeHolds.get(key) ?? []), promise]);
+    return release;
+  }
+
   install(): void {
     this.originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
@@ -172,6 +213,16 @@ export class MockBackend {
   uninstall(): void {
     if (this.originalFetch) globalThis.fetch = this.originalFetch;
     this.originalFetch = undefined;
+  }
+
+  private findMessage(session: Session, messageId: string): unknown {
+    const found = session.messages?.find((message) => message.id === messageId);
+    if (found) return found;
+    for (const fork of session.forks ?? []) {
+      const nested = this.findMessage(fork, messageId);
+      if (nested) return nested;
+    }
+    return null;
   }
 
   private async handle(
@@ -215,6 +266,12 @@ export class MockBackend {
       }
       return jsonResponse({ detail: `HTTP ${status}` }, status);
     }
+
+    const holdKey = `${method} ${path}`;
+    const holds = this.routeHolds.get(holdKey);
+    const hold = holds?.shift();
+    if (holds && holds.length === 0) this.routeHolds.delete(holdKey);
+    if (hold) await hold;
 
     const out = this.route(method, path, query, body);
     return jsonResponse(out);
@@ -269,6 +326,100 @@ export class MockBackend {
           : null,
       };
     }
+    if (method === "GET" && path === "/api/extensions/frontend-entrypoints") {
+      return {
+        entrypoints: [{
+          extension_id: "ofek-dev.team-orchestration",
+          name: "Team Orchestration",
+          frontend_modules: [{
+            slot: "team-sidebar",
+            id: "workers-panel",
+            label: "Workers",
+            kind: "module",
+            module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
+          }],
+        }],
+      };
+    }
+    if (method === "GET" && path === "/api/extensions/builtin-ids") {
+      return { ids: {} };
+    }
+    if (method === "GET" && path === "/api/ui-selection") {
+      return this.state.uiSelection;
+    }
+    if (method === "GET" && path === "/api/user-input/pending") {
+      return {
+        requests: this.state.userInputs.filter(
+          (request) => request.app_session_id === query.app_session_id && request.status === "pending",
+        ),
+      };
+    }
+    const userInputResolveMatch = path.match(/^\/api\/user-input\/([^/]+)\/resolve$/);
+    if (method === "POST" && userInputResolveMatch) {
+      const requestId = decodeURIComponent(userInputResolveMatch[1]);
+      this.state.userInputs = this.state.userInputs.filter(
+        (request) => request.request_id !== requestId,
+      );
+      return { success: true, status: "resolved" };
+    }
+    const userInputCancelMatch = path.match(/^\/api\/user-input\/([^/]+)\/cancel$/);
+    if (method === "POST" && userInputCancelMatch) {
+      const requestId = decodeURIComponent(userInputCancelMatch[1]);
+      this.state.userInputs = this.state.userInputs.filter(
+        (request) => request.request_id !== requestId,
+      );
+      return { success: true, status: "cancelled" };
+    }
+    if (method === "PATCH" && path === "/api/ui-selection") {
+      const b = body as Partial<BackendState["uiSelection"]> & {
+        remembered_session?: {
+          path?: string;
+          node_id?: string;
+          session_id?: string;
+        };
+      };
+      if ("selected_project" in b) {
+        this.state.uiSelection.selected_project = b.selected_project ?? null;
+      }
+      if (b.remembered_session) {
+        const path = b.remembered_session.path ?? "";
+        const nodeId = b.remembered_session.node_id || "primary";
+        const sessionId = b.remembered_session.session_id ?? "";
+        if (path && sessionId) {
+          this.state.uiSelection.remembered_session_by_project[path] = {
+            ...(this.state.uiSelection.remembered_session_by_project[path] ?? {}),
+            [nodeId]: sessionId,
+          };
+        }
+      }
+      if (Array.isArray(b.open_session_tab_ids)) {
+        const seen = new Set<string>();
+        this.state.uiSelection.open_session_tab_ids = b.open_session_tab_ids.filter((id) => {
+          if (typeof id !== "string" || !id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+        this.state.uiSelection.open_session_tab_joined_at = Object.fromEntries(
+          this.state.uiSelection.open_session_tab_ids.map((id) => [
+            id,
+            this.state.uiSelection.open_session_tab_joined_at[id] ?? new Date().toISOString(),
+          ]),
+        );
+      }
+      if (
+        b.open_session_tab_joined_at &&
+        typeof b.open_session_tab_joined_at === "object" &&
+        !Array.isArray(b.open_session_tab_joined_at)
+      ) {
+        const joinedAt = b.open_session_tab_joined_at as Record<string, unknown>;
+        this.state.uiSelection.open_session_tab_joined_at = Object.fromEntries(
+          this.state.uiSelection.open_session_tab_ids
+            .map((id) => [id, joinedAt[id]])
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1])),
+        );
+      }
+      return this.state.uiSelection;
+    }
     // ---- Sessions ----
     if (method === "GET" && path === "/api/sessions") {
       // First pass: bucket every eng session by parent so non-eng rows
@@ -294,7 +445,7 @@ export class MockBackend {
           )
           .filter((s) => sessionMatchesListQuery(s, query))
           .map((s) => ({
-            ...s,
+            ...sessionSummary(s),
             pending_eng_session_id: engByParent.get(s.id) ?? null,
           }))
           .sort((a, b) => {
@@ -311,6 +462,37 @@ export class MockBackend {
         has_more: offset + limit < sessions.length,
       };
     }
+    if (method === "GET" && path === "/api/sessions/topbar-pinned") {
+      const sessions = this.state.sessions
+        .filter((s) => s.topbar_pinned)
+        .map((s) => sessionSummary(s))
+        .sort((a, b) =>
+          Date.parse((b.topbar_pinned_at as string | undefined) || "") -
+          Date.parse((a.topbar_pinned_at as string | undefined) || ""),
+        );
+      return { sessions };
+    }
+    if (method === "GET" && path === "/api/sessions/summaries") {
+      const ids = splitFilter(query.ids);
+      const missOnce = new Set(this.state.summaryMissOnceIds);
+      const missing = new Set(this.state.summaryMissingIds);
+      if (missOnce.size > 0) {
+        this.state.summaryMissOnceIds = this.state.summaryMissOnceIds.filter((id) => !ids.has(id));
+      }
+      const sessions = this.state.sessions
+        .filter((s) => ids.has(s.id) && !missOnce.has(s.id) && !missing.has(s.id))
+        .map((s) => sessionSummary(s));
+      return { sessions };
+    }
+    const messageEventsMatch = path.match(
+      /^\/api\/sessions\/([^/]+)\/messages\/([^/]+)\/events$/,
+    );
+    if (method === "GET" && messageEventsMatch) {
+      const sessionId = decodeURIComponent(messageEventsMatch[1]);
+      const messageId = decodeURIComponent(messageEventsMatch[2]);
+      const session = this.state.sessions.find((s) => s.id === sessionId);
+      return session ? this.findMessage(session, messageId) ?? notFound() : notFound();
+    }
     // ---- File (used by FileEditor's poll) ----
     if (method === "GET" && path === "/api/file") {
       const p = query.path;
@@ -322,6 +504,70 @@ export class MockBackend {
       if (!b.path) return notFound();
       this.state.files[b.path] = b.content ?? "";
       return { ok: true };
+    }
+    if (method === "POST" && path === "/api/file-editor") {
+      const b = body as {
+        file_path?: string;
+        cwd?: string;
+        model?: string;
+        provider_id?: string;
+        reasoning_effort?: string;
+      };
+      if (!b.file_path) return notFound();
+      const existing = this.state.sessions.find(
+        (s) =>
+          s.working_mode === "file_editing" &&
+          s.working_mode_meta?.file_paths?.[0] === b.file_path,
+      );
+      if (existing) return { session_id: existing.id };
+      const id = `file-edit-${this.state.sessions.length + 1}`;
+      const session: Session = {
+        id,
+        name: `Edit ${b.file_path.split("/").pop() || b.file_path}`,
+        model: b.model || "claude-sonnet-4-6",
+        provider_id: b.provider_id || this.state.default_provider_id || "codex",
+        reasoning_effort: b.reasoning_effort || "",
+        cwd: b.cwd || "",
+        orchestration_mode: "native",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        messages: [],
+        working_mode: "file_editing",
+        working_mode_meta: {
+          persistent: true,
+          project_cwd: b.cwd || "",
+          file_paths: [b.file_path],
+          original_contents: { [b.file_path]: this.state.files[b.file_path] ?? "" },
+          file_discussions: [],
+        },
+      };
+      this.state.sessions.unshift(session);
+      return { session_id: id };
+    }
+    const fileDiscussionMatch = path.match(/^\/api\/file-editor\/([^/]+)\/discussions$/);
+    if (method === "POST" && fileDiscussionMatch) {
+      const sessionId = decodeURIComponent(fileDiscussionMatch[1]);
+      const session = this.state.sessions.find((s) => s.id === sessionId);
+      if (!session || session.working_mode !== "file_editing") return notFound();
+      const b = body as { file_path?: string; line?: number; client_id?: string };
+      const discussion: FileDiscussion = {
+        id: `discussion-${(session.working_mode_meta?.file_discussions ?? []).length + 1}`,
+        file_path: b.file_path ?? "",
+        line: Number(b.line),
+        title: "",
+        collapsed: false,
+        opened_by: "user",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      session.working_mode_meta = {
+        ...(session.working_mode_meta ?? {}),
+        file_discussions: [
+          ...(session.working_mode_meta?.file_discussions ?? []),
+          discussion,
+        ],
+      };
+      return { discussion };
     }
     if (
       method === "GET" &&
@@ -336,10 +582,16 @@ export class MockBackend {
         ? this.state.sessions.find((s) => s.id === b.client_session_id)
         : undefined;
       if (existing) return existing;
+      const providerId = typeof b.provider_id === "string" && b.provider_id
+        ? b.provider_id
+        : this.state.default_provider_id || this.state.providers[0]?.id || "";
       const s: Session = {
         id: b.client_session_id || `sess-${this.state.sessions.length + 1}`,
         name: b.name || "New Session",
         model: b.model || "claude-sonnet-4-6",
+        provider_id: providerId,
+        reasoning_effort: b.reasoning_effort || "",
+        permission: b.permission || {},
         cwd: b.cwd || "",
         orchestration_mode: b.orchestration_mode || "manager",
         created_at: new Date().toISOString(),
@@ -362,6 +614,24 @@ export class MockBackend {
           if (findNodeInTree(r, id)) return r;
         }
         return session ?? notFound();
+      }
+      if (sub === "/stats" && method === "GET") {
+        if (!session) return notFound();
+        return {
+          token_usage_total: session.token_usage_total ?? null,
+          token_usage_last: session.token_usage_last ?? null,
+          context_window: session.context_window ?? null,
+        };
+      }
+      if (sub === "/opened" && method === "POST") {
+        if (!session) return notFound();
+        const at = new Date().toISOString();
+        session.last_opened_at = at;
+        return { id, last_opened_at: at };
+      }
+      if (sub === "/stop" && method === "POST") {
+        if (!session) return notFound();
+        return { stopped: true };
       }
       if (sub === "" && method === "DELETE") {
         // Cascade-delete: drop any prompt-engineering session whose
@@ -452,17 +722,78 @@ export class MockBackend {
       if (sub === "/selectors" && method === "PATCH") {
         if (session) {
           const b = body as Partial<Session>;
+          if (b.provider_id) session.provider_id = b.provider_id;
           if (b.model) session.model = b.model;
+          if (b.reasoning_effort !== undefined)
+            session.reasoning_effort = b.reasoning_effort;
+          if (b.permission !== undefined) session.permission = b.permission;
           if (b.cwd) session.cwd = b.cwd;
           if (b.orchestration_mode)
             session.orchestration_mode = b.orchestration_mode;
         }
-        return { ok: true };
+        return {
+          id,
+          updates: body,
+        };
+      }
+      if (sub === "/right-panel" && method === "PATCH") {
+        const target = this.state.sessions
+          .map((root) => findNodeInTree(root, id))
+          .find((node): node is Session => Boolean(node));
+        if (!target) return notFound();
+        const b = body as {
+          open?: boolean;
+          tab?: Session["right_panel_active_tab"];
+          width?: number;
+          mobile_height?: number;
+          todos_dismissed?: boolean;
+          auto_opened_by?: Session["right_panel_auto_opened_by"];
+          sidebar_minimized?: boolean;
+        };
+        if (b.open !== undefined) target.right_panel_open = b.open;
+        if (b.tab !== undefined) target.right_panel_active_tab = b.tab;
+        if (b.width !== undefined) target.right_panel_width = b.width;
+        if (b.mobile_height !== undefined) target.right_panel_mobile_height = b.mobile_height;
+        if (b.todos_dismissed !== undefined) target.right_panel_todos_dismissed = b.todos_dismissed;
+        if (b.auto_opened_by !== undefined) target.right_panel_auto_opened_by = b.auto_opened_by;
+        if (b.sidebar_minimized !== undefined) target.sidebar_minimized = b.sidebar_minimized;
+        return {
+          right_panel_open: target.right_panel_open,
+          right_panel_active_tab: target.right_panel_active_tab,
+          right_panel_width: target.right_panel_width,
+          right_panel_mobile_height: target.right_panel_mobile_height,
+          right_panel_todos_dismissed: target.right_panel_todos_dismissed,
+          right_panel_auto_opened_by: target.right_panel_auto_opened_by ?? [],
+          sidebar_minimized: target.sidebar_minimized,
+        };
       }
       if (sub === "/rewind" && method === "POST") return { ok: true };
-      if (sub === "/tags" && method === "POST") return { ok: true };
-      if (sub === "/tags" && method === "DELETE") return { ok: true };
-      if (sub.startsWith("/tags/") && method === "DELETE") return { ok: true };
+      if (sub === "/tags" && method === "POST") {
+        if (!session) return notFound();
+        const tag = body as NonNullable<Session["inline_tags"]>[number];
+        session.inline_tags = [...(session.inline_tags ?? []), tag];
+        return { ok: true };
+      }
+      if (sub === "/tags" && method === "DELETE") {
+        if (!session) return notFound();
+        session.inline_tags = [];
+        return { ok: true };
+      }
+      if (sub.startsWith("/tags/") && method === "DELETE") {
+        if (!session) return notFound();
+        const tagId = decodeURIComponent(sub.slice("/tags/".length));
+        session.inline_tags = (session.inline_tags ?? []).filter((tag) => tag.id !== tagId);
+        return { ok: true };
+      }
+      if (sub.startsWith("/tags/") && method === "PATCH") {
+        if (!session) return notFound();
+        const tagId = decodeURIComponent(sub.slice("/tags/".length));
+        const updates = body as Partial<NonNullable<Session["inline_tags"]>[number]>;
+        session.inline_tags = (session.inline_tags ?? []).map((tag) =>
+          tag.id === tagId ? { ...tag, ...updates } : tag,
+        );
+        return { ok: true };
+      }
       if (sub === "/notes" && method === "POST") {
         if (!session) return notFound();
         const b = body as { text?: string };
@@ -669,8 +1000,20 @@ export class MockBackend {
     }
     // ---- Workers ----
     if (method === "GET" && path === "/api/workers") {
+      const pools = new Map<string, WorkerInfo[]>();
+      for (const worker of this.state.workers) {
+        for (const tag of worker.tags ?? []) {
+          pools.set(tag, [...(pools.get(tag) ?? []), worker]);
+        }
+      }
       return {
         workers: this.state.workers.filter(() => true),
+        pools: Array.from(pools.entries()).map(([tag, workers]) => ({
+          tag,
+          workers,
+          queued_count: 0,
+        })),
+        teams: [],
       };
     }
     if (method === "POST" && path === "/api/workers") return { ok: true };
@@ -729,6 +1072,19 @@ export class MockBackend {
     }
     if (method === "GET" && path === "/api/models") {
       return { models: this.state.models };
+    }
+    const providerModelsMatch = path.match(/^\/api\/providers\/([^/]+)\/models$/);
+    if (method === "GET" && providerModelsMatch) {
+      const providerId = decodeURIComponent(providerModelsMatch[1]);
+      const provider = this.state.providers.find((p) => p.id === providerId);
+      if (!provider) return { models: [] };
+      const models = [
+        provider.last_model,
+        provider.default_model,
+        ...(provider.custom_models ?? []),
+        ...this.state.models.map((model) => model.id),
+      ].filter((model): model is string => typeof model === "string" && model.length > 0);
+      return { models: Array.from(new Set(models)) };
     }
     if (method === "GET" && path === "/api/providers") {
       return {

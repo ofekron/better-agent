@@ -5,6 +5,7 @@ import importlib.util
 import importlib
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,8 @@ def _venv_site_packages(venv_dir: Path) -> Path | None:
     return None
 
 
-async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
+async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> tuple[dict[str, Any], int, int, int]:
+    build_started_ns = time.monotonic_ns()
     body = base64.b64decode(str(payload.get("body") or ""))
     query_string = base64.b64decode(str(payload.get("query_string") or ""))
     sent_body = False
@@ -120,7 +122,11 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
         "root_path": "",
         "app": app,
     }
+    build_ns = time.monotonic_ns() - build_started_ns
+    asgi_started_ns = time.monotonic_ns()
     await app(scope, receive, send)
+    asgi_ns = time.monotonic_ns() - asgi_started_ns
+    collect_started_ns = time.monotonic_ns()
     start = next((message for message in messages if message["type"] == "http.response.start"), None)
     if start is None:
         raise RuntimeError("extension backend did not respond")
@@ -129,7 +135,7 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
         for message in messages
         if message["type"] == "http.response.body"
     )
-    return {
+    result = {
         "status": int(start["status"]),
         "headers": [
             [key.decode("latin-1"), value.decode("latin-1")]
@@ -137,6 +143,7 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "body": base64.b64encode(content).decode("ascii"),
     }
+    return result, build_ns, asgi_ns, time.monotonic_ns() - collect_started_ns
 
 
 async def _main_async() -> int:
@@ -149,7 +156,7 @@ async def _main_async() -> int:
     app.include_router(
         _load_router(str(payload["extension_id"]), install_path, entrypoint, entrypoint_kind, source)
     )
-    result = await _run_asgi(app, payload)
+    result, _, _, _ = await _run_asgi(app, payload)
     sys.stdout.write(json.dumps(result, separators=(",", ":")))
     return 0
 
@@ -158,9 +165,15 @@ async def _serve_persistent() -> int:
     """Long-lived mode: read the extension spec on the first stdin line, load
     the router once, then serve newline-delimited JSON requests until stdin
     EOF. One load amortizes many requests — the precondition for moving hot
-    substrate into extensions without a per-request subprocess spawn."""
+    substrate into extensions without a per-request subprocess spawn.
+
+    Requests are multiplexed: each is handled in its own task so a slow route
+    does not block others, and each response echoes the request ``id`` so the
+    core demuxes them back to the right caller. Responses arrive in completion
+    order, not request order."""
     import asyncio
 
+    process_epoch_ns = time.monotonic_ns()
     loop = asyncio.get_running_loop()
     spec_line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
     if not spec_line:
@@ -176,21 +189,58 @@ async def _serve_persistent() -> int:
             {str(key): str(value) for key, value in dict(spec.get("source") or {}).items()},
         )
     )
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
-        if not line:
-            break  # stdin closed — host exits cleanly
+
+    async def _handle(line: bytes, accepted_ns: int) -> None:
+        request_id = None
+        dispatch_ns = time.monotonic_ns()
+        decode_started_ns = dispatch_ns
         try:
             payload = json.loads(line)
-            result = await _run_asgi(app, payload)
+            request_id = payload.get("id")
+            decoded_ns = time.monotonic_ns()
+            result, build_ns, asgi_ns, response_collect_ns = await _run_asgi(app, payload)
         except Exception:
+            decoded_ns = time.monotonic_ns()
+            build_ns = 0
+            asgi_ns = 0
+            response_collect_ns = 0
             result = {
                 "status": 500,
                 "headers": [["content-type", "text/plain"]],
                 "body": base64.b64encode(b"Extension backend failed").decode("ascii"),
             }
-        sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+        result["id"] = request_id
+        encode_started_ns = time.monotonic_ns()
+        timing = {
+            "version": 1,
+            "request_id": request_id,
+            "process_epoch_ns": process_epoch_ns,
+            "queue_dispatch_ns": max(0, dispatch_ns - accepted_ns),
+            "decode_ns": max(0, decoded_ns - decode_started_ns),
+            "build_ns": max(0, build_ns),
+            "asgi_ns": max(0, asgi_ns),
+            "response_collect_ns": max(0, response_collect_ns),
+        }
+        result["timing"] = timing
+        # No await between write and flush: the event loop will not interleave
+        # another task's write mid-line, so each response is emitted whole.
+        json.dumps(result, separators=(",", ":"))
+        timing["response_encode_ns"] = max(0, time.monotonic_ns() - encode_started_ns)
+        encoded = json.dumps(result, separators=(",", ":")) + "\n"
+        sys.stdout.write(encoded)
         sys.stdout.flush()
+
+    tasks: set[asyncio.Task] = set()
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+        if not line:
+            break  # stdin closed — host exits cleanly
+        accepted_ns = time.monotonic_ns()
+        task = asyncio.create_task(_handle(line, accepted_ns))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     return 0
 
 

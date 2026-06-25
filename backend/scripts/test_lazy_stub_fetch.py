@@ -7,8 +7,8 @@ Pins the read-side stubbing contract:
      ({complete, session_discovered, worker_prep_*}); `last_events` is
      the renderable tail.
   2. `latest_assistant_id` picks the most-recent assistant msg (max seq).
-  3. `get_root_tree_stubbed` STUBS every completed non-latest assistant
-     msg (empty events + `msg.stub`) and keeps the latest turn FULL.
+  3. `get_root_tree_stubbed` STUBS every completed assistant msg
+     (empty events + `msg.stub`) and keeps streaming turns FULL.
   4. `get_message_full` returns the message WITH full events, and
      `stub.event_count` == the renderable count of those full events
      (single-source guarantee).
@@ -25,17 +25,20 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from unittest.mock import patch
-
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-lazy-stub-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-lazy-stub-")
+
 import render_stub  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
+from event_journal import event_journal_reader  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -60,6 +63,20 @@ def _manager_event(uuid: str, text: str = "x") -> dict:
     }
 
 
+def _agent_event(uuid: str, text: str = "x") -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "uuid": uuid,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        },
+    }
+
+
 def _worker_event(delegation_id: str, uuid: str, text: str = "x") -> dict:
     return {
         "type": "worker_event",
@@ -75,6 +92,17 @@ def _worker_event(delegation_id: str, uuid: str, text: str = "x") -> dict:
             },
         },
     }
+
+
+def _wait_for_summaries(sid: str, msg_ids: list[str], timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        summaries = event_journal_reader.message_event_summaries(sid)
+        if all((summaries.get(msg_id) or {}).get("event_count", 0) > 0 for msg_id in msg_ids):
+            return
+        time.sleep(0.02)
+    summaries = event_journal_reader.message_event_summaries(sid)
+    raise AssertionError(f"journal summaries not ready for {msg_ids}: {summaries}")
 
 
 def _mk_two_turn_session() -> tuple[str, str, str]:
@@ -105,6 +133,7 @@ def _mk_two_turn_session() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"])
     asst2_id = _turn("q2", ["b1", "b2"])
+    _wait_for_summaries(sid, [asst1_id, asst2_id])
     return sid, asst1_id, asst2_id
 
 
@@ -151,6 +180,7 @@ def _mk_two_turn_session_with_worker() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"], with_worker=True)
     asst2_id = _turn("q2", ["b1", "b2"])
+    _wait_for_summaries(sid, [asst1_id, asst2_id])
     return sid, asst1_id, asst2_id
 
 
@@ -277,9 +307,42 @@ def test_stub_tail_truncates() -> bool:
     return len(stub["last_events"]) == render_stub.STUB_TAIL
 
 
+def test_stub_tail_keeps_steer_prompts() -> bool:
+    steer = {
+        "type": "steer_prompt",
+        "data": {"uuid": "steer-1", "prompt": "keep visible while collapsed"},
+    }
+    events = [steer] + [
+        {"type": "agent_message", "data": {"uuid": str(i)}} for i in range(40)
+    ]
+    msg = {"role": "assistant", "events": events}
+    stub = render_stub.build_stub(msg, tail=render_stub.STUB_TAIL)
+    prompts = [
+        e.get("data", {}).get("prompt")
+        for e in stub["last_events"]
+        if e.get("type") == "steer_prompt"
+    ]
+    if prompts != ["keep visible while collapsed"]:
+        print(f"  steer prompt missing from collapsed stub tail: {stub['last_events']}")
+        return False
+    if len(stub["last_events"]) != render_stub.STUB_TAIL + 1:
+        print(f"  tail should keep steer plus normal tail, got {len(stub['last_events'])}")
+        return False
+    explicit_stub = render_stub.build_stub_from_events(events, tail=render_stub.STUB_TAIL)
+    explicit_prompts = [
+        e.get("data", {}).get("prompt")
+        for e in explicit_stub["last_events"]
+        if e.get("type") == "steer_prompt"
+    ]
+    if explicit_prompts != prompts:
+        print(f"  explicit-events stub dropped steer prompt: {explicit_stub['last_events']}")
+        return False
+    return stub["event_count"] == 41 and explicit_stub["event_count"] == 41
+
+
 # ─── integration ──────────────────────────────────────────────────
 
-def test_stubbed_load_stubs_non_latest_keeps_latest_full() -> bool:
+def test_stubbed_load_stubs_completed_latest() -> bool:
     sid, asst1_id, asst2_id = _mk_two_turn_session()
     tree = session_manager.get_root_tree_stubbed(sid)
     msgs = {m["id"]: m for m in tree["messages"]}
@@ -293,11 +356,52 @@ def test_stubbed_load_stubs_non_latest_keeps_latest_full() -> bool:
     if a1["stub"]["event_count"] != 3 or len(a1["stub"]["last_events"]) != 3:
         print(f"  asst1 stub wrong: {a1['stub']}")
         return False
-    if a2.get("stub") is not None:
-        print("  latest asst2 must NOT be stubbed")
+    if a2.get("events"):
+        print(f"  completed latest asst2 events should be empty, got {a2.get('events')}")
         return False
-    if len(a2.get("events") or []) != 2:
-        print(f"  asst2 should keep 2 full events, got {a2.get('events')}")
+    if a2.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest asst2 should be stubbed, got {a2.get('stub')}")
+        return False
+    if not a2.get("event_ref"):
+        print("  completed latest asst2 missing event_ref")
+        return False
+    return True
+
+
+def test_stubbed_load_keeps_streaming_latest_full() -> bool:
+    sid, _, asst2_id = _mk_two_turn_session()
+    live = session_manager.get_ref(sid)
+    latest = next(m for m in live["messages"] if m["id"] == asst2_id)
+    latest["isStreaming"] = True
+    session_manager._tree_stub_cache.clear()
+    session_manager._tree_stub_attached_cache.clear()
+
+    tree = session_manager.get_root_tree_stubbed(sid)
+    msg = {m["id"]: m for m in tree["messages"]}[asst2_id]
+    if msg.get("stub") is not None:
+        print(f"  streaming latest must stay full, got stub={msg.get('stub')}")
+        return False
+    if len(msg.get("events") or []) != 2:
+        print(f"  streaming latest should keep full events, got {msg.get('events')}")
+        return False
+    return True
+
+
+def test_message_window_stubs_completed_latest() -> bool:
+    sid, _asst1_id, asst2_id = _mk_two_turn_session()
+    delta = session_manager.get_messages_since(sid, since_seq=0, limit=50)
+    if not delta:
+        print("  get_messages_since returned no delta")
+        return False
+    msg = {m["id"]: m for m in delta["messages"]}[asst2_id]
+    if msg.get("events"):
+        print(f"  completed latest delta events should be empty, got {msg.get('events')}")
+        return False
+    if msg.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest delta should be stubbed, got {msg.get('stub')}")
+        return False
+    if not msg.get("event_ref"):
+        print("  completed latest delta missing event_ref")
         return False
     return True
 
@@ -337,8 +441,8 @@ def test_manager_stubbed_cold_load_skips_hydrate_without_workers() -> bool:
     if a1.get("stub", {}).get("event_count") != 3 or a1_uuids != ["a1", "a2", "a3"]:
         print(f"  manager journal stub wrong: {a1.get('stub')}")
         return False
-    if a2.get("stub") is not None or a2_uuids != ["b1", "b2"]:
-        print(f"  manager latest events wrong: stub={a2.get('stub')} uuids={a2_uuids}")
+    if a2.get("stub", {}).get("event_count") != 2 or a2.get("events"):
+        print(f"  manager completed latest stub wrong: stub={a2.get('stub')} uuids={a2_uuids}")
         return False
     return True
 
@@ -393,6 +497,236 @@ def test_get_message_full_count_matches_stub() -> bool:
     return True
 
 
+def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
+    sess = session_manager.create(
+        name="streaming-summary", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("manager")
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-streaming-1", "role": "user",
+        "content": "q1", "events": [], "isStreaming": False,
+    })
+    asst = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst)
+    msg = session_manager.get_ref(sid)["messages"][-1]
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
+                        user_msg=None, root_id=sid)
+    strategy.apply_event(app_session_id=sid, msg=msg,
+                         event=_agent_event("same", "partial"), ctx=ctx,
+                         source_is_provider_stream=True)
+    strategy.apply_event(app_session_id=sid, msg=msg,
+                         event=_agent_event("same", "final"), ctx=ctx,
+                         source_is_provider_stream=True)
+    msg["isStreaming"] = False
+    asst1_id = msg["id"]
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-streaming-2", "role": "user",
+        "content": "q2", "events": [], "isStreaming": False,
+    })
+    asst2 = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst2)
+    latest = session_manager.get_ref(sid)["messages"][-1]
+    strategy.apply_event(app_session_id=sid, msg=latest,
+                         event=_agent_event("latest", "latest"), ctx=ctx,
+                         source_is_provider_stream=True)
+    latest["isStreaming"] = False
+
+    _wait_for_summaries(sid, [asst1_id, latest["id"]])
+    tree = session_manager.get_root_tree_stubbed(sid)
+    stub = {m["id"]: m for m in tree["messages"]}[asst1_id]["stub"]
+    full = session_manager.get_message_full(sid, asst1_id)
+    if full is None:
+        print("  get_message_full returned None")
+        return False
+    if render_stub.renderable_count(full) != 1:
+        print(f"  full renderable count wrong: {full.get('events')}")
+        return False
+    if stub["event_count"] != 1:
+        print(f"  stub should dedupe same uuid to 1, got {stub}")
+        return False
+    tail = stub["last_events"]
+    text = (((tail[-1].get("data") or {}).get("message") or {})
+            .get("content") or [{}])[0].get("text")
+    if text != "final":
+        print(f"  stub tail should carry latest mutation, got {tail}")
+        return False
+    return True
+
+
+def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
+    sess = session_manager.create(
+        name="journal-steer-summary", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("manager")
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-journal-steer-1", "role": "user",
+        "content": "q1", "events": [], "isStreaming": False,
+    })
+    asst = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst)
+    first = session_manager.get_ref(sid)["messages"][-1]
+    first["isStreaming"] = False
+    first_id = first["id"]
+
+    event_ingester.ingest(
+        sid, sid, "steer_prompt",
+        {"uuid": "steer-journal-1", "prompt": "visible from journal summary"},
+        source="test", msg_id=first_id, cwd_override="/tmp",
+    )
+    for idx in range(40):
+        event_ingester.ingest(
+            sid, sid, "agent_message",
+            {
+                "uuid": f"journal-tail-{idx}",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"tail {idx}"}],
+                },
+            },
+            source="test", msg_id=first_id, cwd_override="/tmp",
+        )
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-journal-steer-2", "role": "user",
+        "content": "q2", "events": [], "isStreaming": False,
+    })
+    latest = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, latest)
+    latest_msg = session_manager.get_ref(sid)["messages"][-1]
+    latest_msg["isStreaming"] = False
+    event_ingester.ingest(
+        sid, sid, "agent_message",
+        {
+            "uuid": "journal-latest",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "latest"}],
+            },
+        },
+        source="test", msg_id=latest_msg["id"], cwd_override="/tmp",
+    )
+
+    _wait_for_summaries(sid, [first_id, latest_msg["id"]])
+    tree = session_manager.get_root_tree_stubbed(sid)
+    stub = {m["id"]: m for m in tree["messages"]}[first_id]["stub"]
+    prompts = [
+        e.get("data", {}).get("prompt")
+        for e in stub.get("last_events") or []
+        if e.get("type") == "steer_prompt"
+    ]
+    if prompts != ["visible from journal summary"]:
+        print(f"  journal-backed collapsed stub dropped steer prompt: {stub}")
+        return False
+    if stub.get("event_count") != 41:
+        print(f"  journal-backed stub count wrong: {stub}")
+        return False
+    return True
+
+
+def test_journal_summary_matches_render_tree_event_gate() -> bool:
+    root_id = "summary-render-gate"
+    msg_id = "assistant-summary-render-gate"
+
+    event_ingester.ingest(
+        root_id, root_id, "manager_event",
+        {
+            "event": {
+                "type": "agent_message",
+                "uuid": "top-level",
+                "data": {
+                    "type": "assistant",
+                    "message": {"content": "old top"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "manager_event",
+        {
+            "event": {
+                "type": "agent_message",
+                "uuid": "top-level",
+                "data": {
+                    "type": "assistant",
+                    "message": {"content": "new top"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "worker_event",
+        {
+            "delegation_id": "worker-1",
+            "event": {
+                "type": "agent_message",
+                "data": {
+                    "uuid": "wrapped",
+                    "type": "assistant",
+                    "message": {"content": "old wrapped"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "worker_event",
+        {
+            "delegation_id": "worker-1",
+            "event": {
+                "type": "agent_message",
+                "data": {
+                    "uuid": "wrapped",
+                    "type": "assistant",
+                    "message": {"content": "new wrapped"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "not in render tree",
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+
+    summary = event_ingester.message_event_summaries(
+        root_id, sid_filter=root_id, msg_ids={msg_id}, tail=25,
+    ).get(msg_id)
+    if not summary:
+        print("  missing message summary")
+        return False
+    if summary.get("event_count") != 2:
+        print(f"  summary should count two render-tree events, got {summary}")
+        return False
+    tail = summary.get("last_events") or []
+    serialized = repr(tail)
+    if "old top" in serialized or "old wrapped" in serialized:
+        print(f"  summary tail kept stale uuid snapshots: {tail}")
+        return False
+    if "new top" not in serialized or "new wrapped" not in serialized:
+        print(f"  summary tail missing latest uuid snapshots: {tail}")
+        return False
+    if "not in render tree" in serialized:
+        print(f"  summary tail included uuid-less provider bookkeeping: {tail}")
+        return False
+    return True
+
+
 def test_stubbed_load_does_not_corrupt_cache() -> bool:
     sid, asst1_id, _ = _mk_two_turn_session()
     session_manager.get_root_tree_stubbed(sid)  # strips + restores
@@ -421,8 +755,11 @@ def test_native_stubbed_load_keeps_cache_thin() -> bool:
     if not a1.get("event_ref"):
         print("  native stub missing event_ref")
         return False
-    if len(a2.get("events") or []) != 2:
-        print(f"  latest native message should be hydrated in response, got {a2}")
+    if a2.get("events"):
+        print(f"  completed latest native message should be stubbed, got {a2}")
+        return False
+    if a2.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest native stub wrong, got {a2.get('stub')}")
         return False
     live_root = session_manager._roots.get(sid)
     live_a1 = next(m for m in live_root["messages"] if m["id"] == asst1_id)
@@ -471,7 +808,7 @@ def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
     if latest != asst2_id:
         return False
     latest_msg = {m["id"]: m for m in tree["messages"]}[latest]
-    return len(latest_msg.get("events") or []) == render_stub.STUB_TAIL + 12
+    return latest_msg.get("events") == [] and latest_msg.get("stub", {}).get("event_count") == render_stub.STUB_TAIL + 12
 
 
 TESTS = [
@@ -480,14 +817,25 @@ TESTS = [
         test_build_stub_includes_worker_timeline_tail),
     ("latest_assistant_id picks max-seq assistant", test_latest_assistant_id),
     ("stub tail truncates to STUB_TAIL, count is full", test_stub_tail_truncates),
-    ("stubbed load stubs non-latest, keeps latest full",
-        test_stubbed_load_stubs_non_latest_keeps_latest_full),
+    ("stub tail keeps steer prompts", test_stub_tail_keeps_steer_prompts),
+    ("stubbed load stubs completed latest",
+        test_stubbed_load_stubs_completed_latest),
+    ("stubbed load keeps streaming latest full",
+        test_stubbed_load_keeps_streaming_latest_full),
+    ("message window stubs completed latest",
+        test_message_window_stubs_completed_latest),
     ("manager stubbed cold load skips hydrate without workers",
         test_manager_stubbed_cold_load_skips_hydrate_without_workers),
     ("manager stubbed cold load skips hydrate with workers",
         test_manager_stubbed_cold_load_skips_hydrate_with_workers),
     ("get_message_full count matches stub.event_count",
         test_get_message_full_count_matches_stub),
+    ("stub summary dedupes streaming uuid updates",
+        test_stub_summary_dedupes_streaming_uuid_updates),
+    ("journal-backed stubbed load keeps steer prompts",
+        test_journal_stubbed_load_keeps_steer_prompts),
+    ("journal summary matches render-tree event gate",
+        test_journal_summary_matches_render_tree_event_gate),
     ("strip-before-deepcopy does not corrupt live cache",
         test_stubbed_load_does_not_corrupt_cache),
     ("native stubbed load keeps cache thin, expand reads jsonl",

@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from better_agent_sdk.client import Client  # noqa: E402
 from scripts.auth_test_helpers import authenticate_client  # noqa: E402
+import extension_token_registry  # noqa: E402
 import main  # noqa: E402
 import session_store  # noqa: E402
 
@@ -41,6 +42,11 @@ def _session(
         orchestration_mode=orchestration_mode,
         provider_id=provider_id,
     )["id"]
+
+
+def _auto_tagging_headers() -> dict[str, str]:
+    main.extension_store.runtime_not_ready_message = lambda extension_id: None
+    return {"X-Internal-Token": extension_token_registry.mint("ofek-dev.auto-tagging")}
 
 
 def test_folder_tag_assignment_and_query(client: TestClient) -> bool:
@@ -288,6 +294,8 @@ def test_sdk_session_organization_methods_build_internal_requests(client: TestCl
         tag_ids=[],
         add_tag_ids=["tag"],
         remove_tag_ids=["old"],
+        tag_source="auto_tagging",
+        sync_tag_source="auto_tagging",
     )
     expected = [
         ("/api/internal/session-organization/snapshot", {"project_id": "/tmp/project"}),
@@ -322,11 +330,245 @@ def test_sdk_session_organization_methods_build_internal_requests(client: TestCl
                 "tag_ids": [],
                 "add_tag_ids": ["tag"],
                 "remove_tag_ids": ["old"],
+                "tag_source": "auto_tagging",
+                "sync_tag_source": "auto_tagging",
             },
         ),
     ]
     if sdk.calls != expected:
         print(f"  sdk calls mismatch: {sdk.calls}")
+        return False
+    return True
+
+
+def test_source_sync_preserves_manual_tags(client: TestClient) -> bool:
+    sid = _session("source sync")
+    headers = _auto_tagging_headers()
+    manual = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "manual"},
+    ).json()["tag"]
+    auto_a = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "auto a"},
+    ).json()["tag"]
+    auto_b = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "auto b"},
+    ).json()["tag"]
+    first = client.patch(
+        f"/api/sessions/{sid}/organization",
+        json={"tag_ids": [manual["id"]]},
+    )
+    if first.status_code != 200:
+        print(f"  manual assign failed: {first.status_code} {first.text}")
+        return False
+    sync = client.post(
+        "/api/internal/session-organization/update-session",
+        headers=headers,
+        json={"session_id": sid, "tag_ids": [auto_a["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    if sync.status_code != 200:
+        print(f"  auto sync failed: {sync.status_code} {sync.text}")
+        return False
+    sync = client.post(
+        "/api/internal/session-organization/update-session",
+        headers=headers,
+        json={"session_id": sid, "tag_ids": [auto_b["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    org = sync.json()["organization"]
+    tag_ids = set(org.get("tag_ids") or [])
+    sources = org.get("tag_sources") or {}
+    if tag_ids != {manual["id"], auto_b["id"]}:
+        print(f"  source sync tag mismatch: {org}")
+        return False
+    if sources.get(manual["id"]) != "manual" or sources.get(auto_b["id"]) != "auto_tagging":
+        print(f"  source sync source mismatch: {org}")
+        return False
+    return True
+
+
+def test_source_sync_deletes_orphaned_dropped_tags(client: TestClient) -> bool:
+    sid = _session("orphan gc")
+    other_sid = _session("orphan gc keeper")
+    headers = _auto_tagging_headers()
+    stale = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "stale auto"},
+    ).json()["tag"]
+    shared = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "shared auto"},
+    ).json()["tag"]
+    fresh = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "fresh auto"},
+    ).json()["tag"]
+    kept_manual = client.patch(
+        f"/api/sessions/{other_sid}/organization",
+        json={"tag_ids": [shared["id"]]},
+    )
+    if kept_manual.status_code != 200:
+        print(f"  keeper assign failed: {kept_manual.status_code} {kept_manual.text}")
+        return False
+    for tag_ids in ([stale["id"], shared["id"]], [fresh["id"]]):
+        sync = client.post(
+            "/api/internal/session-organization/update-session",
+            headers=headers,
+            json={"session_id": sid, "tag_ids": tag_ids, "sync_tag_source": "auto_tagging"},
+        )
+        if sync.status_code != 200:
+            print(f"  auto sync failed: {sync.status_code} {sync.text}")
+            return False
+    names = {t["name"] for t in client.get("/api/session-organization").json()["tags"]}
+    if "stale auto" in names:
+        print(f"  orphaned dropped tag not deleted: {sorted(names)}")
+        return False
+    if "shared auto" not in names or "fresh auto" not in names:
+        print(f"  referenced tags were deleted: {sorted(names)}")
+        return False
+    return True
+
+
+def test_auto_tagging_merge_sync_accumulates_deduped(client: TestClient) -> bool:
+    sid = _session("merge accumulate")
+    headers = _auto_tagging_headers()
+    tag_a = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "merge a"},
+    ).json()["tag"]
+    tag_b = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "merge b"},
+    ).json()["tag"]
+    for tag_ids in ([tag_a["id"]], [tag_b["id"]], [tag_b["id"], tag_a["id"]]):
+        sync = client.post(
+            "/api/internal/auto-tagging",
+            headers=headers,
+            json={
+                "action": "sync-session-tags",
+                "session_id": sid,
+                "tag_ids": tag_ids,
+                "source": "auto_tagging",
+                "merge": True,
+            },
+        )
+        if sync.status_code != 200:
+            print(f"  merge sync failed: {sync.status_code} {sync.text}")
+            return False
+    org = sync.json()["organization"]
+    if org.get("tag_ids") != [tag_a["id"], tag_b["id"]]:
+        print(f"  merge did not accumulate deduped: {org}")
+        return False
+    names = {t["name"] for t in client.get("/api/session-organization").json()["tags"]}
+    if "merge a" not in names or "merge b" not in names:
+        print(f"  merged tags missing from vocabulary: {sorted(names)}")
+        return False
+    return True
+
+
+def test_tags_get_distinct_palette_colors(client: TestClient) -> bool:
+    import session_organization_store
+
+    created = [
+        client.post(
+            "/api/session-tags",
+            json={"project_id": "/tmp/color-proj", "name": f"color tag {index}"},
+        ).json()["tag"]
+        for index in range(4)
+    ]
+    colors = [tag["color"] for tag in created]
+    if any(color not in session_organization_store.TAG_COLOR_PALETTE for color in colors):
+        print(f"  colors not from palette: {colors}")
+        return False
+    if len(set(colors)) != len(colors):
+        print(f"  colors not distinct: {colors}")
+        return False
+    explicit = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/color-proj", "name": "explicit color", "color": "#123456"},
+    ).json()["tag"]
+    if explicit["color"] != "#123456":
+        print(f"  explicit color overridden: {explicit}")
+        return False
+    return True
+
+
+def test_public_session_organization_rejects_tag_source(client: TestClient) -> bool:
+    sid = _session("public source rejected")
+    r = client.patch(
+        f"/api/sessions/{sid}/organization",
+        json={"tag_ids": [], "sync_tag_source": "auto_tagging"},
+    )
+    if r.status_code != 400:
+        print(f"  expected public tag source rejection, got {r.status_code}: {r.text}")
+        return False
+    return True
+
+
+def test_internal_session_organization_requires_auth_and_source_owner(client: TestClient) -> bool:
+    sid = _session("internal source owner")
+    tag = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "owned-source"},
+    ).json()["tag"]
+    missing = client.post(
+        "/api/internal/session-organization/update-session",
+        json={"session_id": sid, "tag_ids": [tag["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    if missing.status_code != 403:
+        print(f"  expected missing token rejection, got {missing.status_code}: {missing.text}")
+        return False
+    wrong_owner = client.post(
+        "/api/internal/session-organization/update-session",
+        headers={"X-Internal-Token": extension_token_registry.mint("ofek-dev.ask")},
+        json={"session_id": sid, "tag_ids": [tag["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    if wrong_owner.status_code != 403:
+        print(f"  expected wrong source owner rejection, got {wrong_owner.status_code}: {wrong_owner.text}")
+        return False
+    return True
+
+
+def test_internal_auto_tagging_tags_sql_is_read_only(client: TestClient) -> bool:
+    headers = _auto_tagging_headers()
+    tag = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "ensure-tag", "name": "sql tag", "project_id": "/tmp/project"},
+    )
+    if tag.status_code != 200:
+        print(f"  ensure tag failed: {tag.status_code} {tag.text}")
+        return False
+    selected = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "tags-sql", "sql": "SELECT name FROM tags WHERE name = 'sql tag'"},
+    )
+    if selected.status_code != 200 or selected.json().get("rows") != [["sql tag"]]:
+        print(f"  tags sql select mismatch: {selected.status_code} {selected.text}")
+        return False
+    denied = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "tags-sql", "sql": "DELETE FROM tags"},
+    )
+    if denied.status_code != 200 or denied.json().get("success") is not False:
+        print(f"  tags sql write not denied: {denied.status_code} {denied.text}")
+        return False
+    sid = _session("auto tagging source pin")
+    source_attempt = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={
+            "action": "sync-session-tags",
+            "session_id": sid,
+            "tag_ids": [tag.json()["tag"]["id"]],
+            "source": "requirement_analysis",
+        },
+    )
+    if source_attempt.status_code != 400:
+        print(f"  expected auto-tagging source pin rejection, got {source_attempt.status_code}: {source_attempt.text}")
         return False
     return True
 
@@ -348,6 +590,13 @@ def main_test() -> int:
         ("folder/tag assignment and query", test_folder_tag_assignment_and_query),
         ("query filters provider/model/mode/tags", test_query_filters_provider_model_mode_and_tags),
         ("internal session organization routes", test_internal_session_organization_routes),
+        ("source sync preserves manual tags", test_source_sync_preserves_manual_tags),
+        ("source sync deletes orphaned dropped tags", test_source_sync_deletes_orphaned_dropped_tags),
+        ("tags get distinct palette colors", test_tags_get_distinct_palette_colors),
+        ("auto tagging merge sync accumulates deduped", test_auto_tagging_merge_sync_accumulates_deduped),
+        ("public session organization rejects tag source", test_public_session_organization_rejects_tag_source),
+        ("internal session organization requires auth and source owner", test_internal_session_organization_requires_auth_and_source_owner),
+        ("internal auto-tagging tags sql is read only", test_internal_auto_tagging_tags_sql_is_read_only),
         ("sdk session organization request shapes", test_sdk_session_organization_methods_build_internal_requests),
         ("delete folder requires mode when sessions inside", test_delete_folder_requires_mode_when_sessions_inside),
         ("delete folder unfiles sessions", test_delete_folder_unfiles_sessions),

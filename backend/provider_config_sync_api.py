@@ -15,9 +15,6 @@ import extension_store
 import project_store
 from paths import ba_home, encode_cwd
 
-import pcs_paths
-
-PACKAGE_SRC = pcs_paths.ensure_on_path()
 from provider_config_sync_backend import api as _standalone_api
 
 from provider_config_sync_backend.api import *  # noqa: F403
@@ -70,7 +67,7 @@ def _review_provider_config_sync_hunks_with_zai(context: dict) -> list[str]:
     import extension_package_loader
 
     extension_package_loader.ensure_package_importable(
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+        extension_store.extension_id_for_role('requirements'),
         "requirement_analysis",
     )
     from requirement_analysis.llm import complete
@@ -156,12 +153,13 @@ write_better_agent_config()
 def provider_config_sync_mcp_env(*, backend_url: str, internal_token: str) -> dict[str, str]:
     write_better_agent_config()
     return {
-        "PROVIDER_CONFIG_SYNC_PACKAGE_SRC": str(PACKAGE_SRC),
         "PROVIDER_CONFIG_SYNC_CONFIG": str(better_agent_config_path()),
         "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_URL": (
-            backend_url.rstrip("/") + "/api/internal/provider-config-sync/broadcast"
+            backend_url.rstrip("/") + "/api/internal/capabilities/invoke"
         ),
         "PROVIDER_CONFIG_SYNC_BROADCAST_TOKEN": internal_token,
+        "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_CAPABILITY": "provider-config-sync",
+        "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_ACTION": "change.broadcast",
     }
 
 

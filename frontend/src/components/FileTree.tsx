@@ -3,6 +3,7 @@ import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type { FileNode, FileSearchResult, SearchMethod } from "../types";
 import { SearchMethods } from "./SearchMethods";
+import { SearchInput } from "./SearchInput";
 import { API } from "../api";
 import { fetchWithRetry } from "../utils/fetchRetry";
 import { joinPickerPath } from "src/utils/pathJoin";
@@ -25,17 +26,20 @@ function TreeNode({
   onFileClick,
   onEngineerFile,
   forceExpanded,
+  onLoadChildren,
 }: {
   node: FileNode;
   depth: number;
   onFileClick: (path: string) => void;
   onEngineerFile?: (path: string) => void;
   forceExpanded?: boolean;
+  onLoadChildren?: (node: FileNode) => Promise<void>;
 }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(depth < 1);
+  const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const isOpen = forceExpanded || expanded;
+  const canLazyLoad = node.children_loaded === false && node.has_more_children;
 
   if (node.type === "file") {
     return (
@@ -68,7 +72,17 @@ function TreeNode({
       <div
         className="tree-node tree-dir"
         style={{ paddingInlineStart: depth * 16 }}
-        onClick={() => !forceExpanded && setExpanded(!expanded)}
+        onClick={async () => {
+          if (forceExpanded) return;
+          if (!expanded && canLazyLoad && onLoadChildren) {
+            try {
+              await onLoadChildren(node);
+            } catch {
+              return;
+            }
+          }
+          setExpanded(!expanded);
+        }}
       >
         <span className="tree-arrow">{isOpen ? "v" : ">"}</span> {node.name}
       </div>
@@ -81,10 +95,27 @@ function TreeNode({
             onFileClick={onFileClick}
             onEngineerFile={onEngineerFile}
             forceExpanded={forceExpanded}
+            onLoadChildren={onLoadChildren}
           />
         ))}
     </div>
   );
+}
+
+function updateTreeNode(
+  node: FileNode,
+  path: string,
+  update: (node: FileNode) => FileNode,
+): FileNode {
+  if (node.path === path) return update(node);
+  if (!node.children?.length) return node;
+  let changed = false;
+  const children = node.children.map((child) => {
+    const next = updateTreeNode(child, path, update);
+    if (next !== child) changed = true;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
 }
 
 export function FileTree({
@@ -106,20 +137,48 @@ export function FileTree({
   const [createKind, setCreateKind] = useState<"file" | "directory">("file");
   const [createError, setCreateError] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const treeRequestVersion = useRef(0);
+  const loadingPaths = useRef(new Set<string>());
   const methodsParam = methods.join(",");
 
   const refresh = useCallback(async () => {
     if (!cwd) return;
+    const requestVersion = ++treeRequestVersion.current;
     try {
       const res = await fetchWithRetry(
-        `${API}/api/files?path=${encodeURIComponent(cwd)}&node_id=${encodeURIComponent(nodeId)}`
+        `${API}/api/files?path=${encodeURIComponent(cwd)}&node_id=${encodeURIComponent(nodeId)}&max_depth=1`
       );
       const data = await res.json();
+      if (requestVersion !== treeRequestVersion.current) return;
       setTree(data);
     } catch {
       // retried 3x, still failed
     }
   }, [cwd, nodeId]);
+
+  const loadChildren = useCallback(async (node: FileNode) => {
+    const key = `${nodeId}\0${node.path}`;
+    if (loadingPaths.current.has(key)) return;
+    loadingPaths.current.add(key);
+    const requestVersion = treeRequestVersion.current;
+    try {
+      const res = await fetchWithRetry(
+        `${API}/api/files?path=${encodeURIComponent(node.path)}&node_id=${encodeURIComponent(nodeId)}&max_depth=1`
+      );
+      const data: FileNode = await res.json();
+      if (requestVersion !== treeRequestVersion.current) return;
+      setTree((current) => current
+        ? updateTreeNode(current, node.path, (existing) => ({
+          ...existing,
+          children: data.children ?? [],
+          children_loaded: true,
+          has_more_children: false,
+        }))
+        : current);
+    } finally {
+      loadingPaths.current.delete(key);
+    }
+  }, [nodeId]);
 
   useEffect(() => {
     if (!collapsed) refresh();
@@ -237,6 +296,7 @@ export function FileTree({
               onFileClick={onFileClick}
               onEngineerFile={onEngineerFile}
               forceExpanded
+              onLoadChildren={loadChildren}
             />
           ))}
         </>
@@ -251,6 +311,7 @@ export function FileTree({
         depth={0}
         onFileClick={onFileClick}
         onEngineerFile={onEngineerFile}
+        onLoadChildren={loadChildren}
       />
     ));
   };
@@ -259,7 +320,7 @@ export function FileTree({
     <div className="file-tree">
       {header}
       <div className="file-tree-search">
-        <input
+        <SearchInput
           ref={searchRef}
           type="text"
           className="file-tree-search-input"

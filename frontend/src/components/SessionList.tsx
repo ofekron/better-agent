@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type UIEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
-import type { OrchestrationMode, Provider, RequirementTag, Session, SessionFolder, SessionTag } from "../types";
+import type { OrchestrationMode, Provider, RequirementTag, Session, SessionFolder, SessionTag, WorkerCreationPolicy, WorkerInfo } from "../types";
 import {
   API,
   createSessionFolder,
@@ -16,13 +17,24 @@ import type { ActionItem } from "./MobileActionSheet";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import { NewFolderDropPopover } from "./NewFolderDropPopover";
 import { SessionTagPopover, type PopoverAnchor } from "./SessionTagPopover";
+import { SessionTagSummary } from "./SessionTagSummary";
+import { SessionStatsPopover } from "./SessionStatsPopover";
 import Icon from "./Icon";
+import { SearchInput } from "./SearchInput";
+import { TagFilterAutocomplete, type TagFilterOption } from "./TagFilterAutocomplete";
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
+import { markSessionUnread } from "../lib/sessionRegistry";
+import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
+import { todoProgress } from "./TodosPanel";
+import { sessionLinkMarker } from "../utils/linkifyFilePaths";
+import { copyToClipboard } from "../utils/clipboard";
+import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 
+const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
   sessions: Session[];
   /** Optional full session list, unfiltered by the parent's project
@@ -31,13 +43,26 @@ interface Props {
    * can surface. If omitted, falls back to `sessions`. */
   allSessions?: Session[];
   currentSessionId?: string;
+  /** The currently-focused session object. Used as the authoritative
+   * fallback for the pinned anchor so an active search filter cannot
+   * hide it (the backend-filtered `sessions`/`allSessions` may exclude
+   * a non-matching selected session). */
+  selectedSession?: Session | null;
+  /** DOM node (above the sidebar tabs) where the pinned selected-session
+   * anchor is portaled. When null, the anchor renders inline at the top
+   * of the list as a fallback. */
+  selectedAnchorContainer?: HTMLElement | null;
   providers: Provider[];
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
+  teamWorkersBySession?: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   /** Opens the session-level Details panel (monitoring state, provenance,
    * process tree). */
   onDetails: (id: string) => void;
@@ -52,7 +77,10 @@ interface Props {
     query: string,
     signal?: AbortSignal,
   ) => Promise<{
-    session_ids: string[];
+    /** Backend-built sidebar rows in relevance-ranked order.
+     * The loaded `sessions`/`allSessions` pool is paginated, so matched
+     * sessions are routinely absent from it — these rows fill the gap. */
+    results: Session[];
     reasoning: string;
     error: string | null;
   } | null>;
@@ -71,16 +99,11 @@ interface Props {
   onLoadMore?: () => void;
 }
 
+type SessionSelectHandler = (id: string, session?: Session) => void;
+
 // Empty children map for the pinned selected-session anchor, which
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
-
-function projectName(cwd?: string): string {
-  if (!cwd) return "~";
-  const trimmed = cwd.replace(/\/+$/, "");
-  const base = trimmed.split("/").pop() || trimmed;
-  return base || "~";
-}
 
 function orchestrationLabel(t: (key: string) => string, mode?: string): string {
   if (mode === "virtual") return "Virtual";
@@ -115,8 +138,115 @@ const SESSION_SEARCH_FIELDS_ALL: SessionSearchField[] = ["content", "title", "fi
 const SESSION_SEARCH_FIELDS: SessionSearchField[] = ["title", "first_prompt"];
 type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
-type SessionSource = "web" | "cli" | "import";
-const SESSION_SOURCES: SessionSource[] = ["web", "cli", "import"];
+type SessionSource = "user" | "system" | "web" | "cli" | "import" | "extension" | "internal";
+const SESSION_SOURCES: SessionSource[] = ["user", "system", "web", "cli", "import", "extension", "internal"];
+
+type PersistedSessionFilters = {
+  search: string;
+  showArchived: boolean;
+  selectedFolderIds: string[];
+  selectedTagIds: string[];
+  selectedProviderIds: string[];
+  selectedModelIds: string[];
+  selectedModes: OrchestrationMode[];
+  selectedSources: SessionSource[];
+  fileEditModeFilter: SessionFileEditModeFilter;
+  selectedSearchFields: SessionSearchField[];
+};
+
+const SESSION_FILTERS_BY_PROJECT_LS_KEY = "better-agent-session-filters-by-project";
+/** Bucket key for filters when no project is selected. */
+const SESSION_FILTERS_NO_PROJECT_KEY = "__none__";
+
+function readSessionFiltersByProject(): Record<string, PersistedSessionFilters> {
+  try {
+    const raw = localStorage.getItem(SESSION_FILTERS_BY_PROJECT_LS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, PersistedSessionFilters>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionFiltersForProject(projectPath: string, filters: PersistedSessionFilters): void {
+  try {
+    const all = readSessionFiltersByProject();
+    all[projectPath || SESSION_FILTERS_NO_PROJECT_KEY] = filters;
+    localStorage.setItem(SESSION_FILTERS_BY_PROJECT_LS_KEY, JSON.stringify(all));
+  } catch {
+    // localStorage unavailable (private mode, quota) — filters just won't persist.
+  }
+}
+
+/** Persisted history of committed session-filter search queries, most
+ *  recent first. Backs the completion suggestions shown in the filter
+ *  field. Capped so localStorage can't grow without bound; the UI only
+ *  ever surfaces the top few matches anyway. */
+const SESSION_SEARCH_HISTORY_LS_KEY = "better-agent-session-search-history";
+/** How many committed queries we retain on disk. */
+const SESSION_SEARCH_HISTORY_MAX = 50;
+/** How many completion options the filter field surfaces at once. */
+const SESSION_SEARCH_HISTORY_SUGGESTIONS = 5;
+
+function readSessionSearchHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(SESSION_SEARCH_HISTORY_LS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of parsed) {
+      if (typeof entry !== "string") continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const lower = trimmed.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      out.push(trimmed);
+      if (out.length >= SESSION_SEARCH_HISTORY_MAX) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Record a committed query at the front of history. Blank queries are
+ *  ignored; an existing (case-insensitive) match is moved to the front
+ *  rather than duplicated, so re-running a query bumps its recency. The
+ *  original casing of the newest submission is what we keep. */
+function pushSessionSearchHistory(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return readSessionSearchHistory();
+  const existing = readSessionSearchHistory();
+  const lower = trimmed.toLowerCase();
+  const deduped = existing.filter((entry) => entry.toLowerCase() !== lower);
+  const next = [trimmed, ...deduped].slice(0, SESSION_SEARCH_HISTORY_MAX);
+  try {
+    localStorage.setItem(SESSION_SEARCH_HISTORY_LS_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage unavailable — history just won't persist this run.
+  }
+  return next;
+}
+
+/** The completion options for the current filter text: up to
+ *  {@link SESSION_SEARCH_HISTORY_SUGGESTIONS} most-recent history
+ *  entries that "fit" the typed text (case-insensitive substring).
+ *  Empty text fits every entry. The exact current text is excluded —
+ *  completing to what's already typed is a no-op. */
+function matchingSessionSearchHistory(history: string[], query: string): string[] {
+  const trimmed = query.trim();
+  const lower = trimmed.toLowerCase();
+  const out: string[] = [];
+  for (const entry of history) {
+    if (entry.toLowerCase() === lower) continue;
+    if (lower && !entry.toLowerCase().includes(lower)) continue;
+    out.push(entry);
+    if (out.length >= SESSION_SEARCH_HISTORY_SUGGESTIONS) break;
+  }
+  return out;
+}
 
 type FolderRenderNode = {
   folder: SessionFolder;
@@ -181,7 +311,7 @@ function flattenFolderSessions(
 
 /** dataTransfer MIME carrying the dragged session id when reassigning
  * folders by drag. Custom type so it can't be confused with plain text. */
-const SESSION_DRAG_MIME = "application/x-better-agent-session-id";
+export const SESSION_DRAG_MIME = "application/x-better-agent-session-id";
 
 /** True when a drag carries a session id (a folder-reassign drag). */
 function isSessionDrag(e: React.DragEvent): boolean {
@@ -191,6 +321,10 @@ function isSessionDrag(e: React.DragEvent): boolean {
 interface NodeProps {
   session: Session;
   depth: number;
+  /** Bumped every 30s by the parent's ticker so memoized rows re-render and
+   * their relative "X ago" timestamps advance. Not read directly — its only
+   * job is to be a changing prop the memo comparator can see. */
+  nowTick: number;
   /** Folder view on → rows are draggable onto folder headings. */
   dragEnabled?: boolean;
   currentSessionId?: string;
@@ -205,7 +339,7 @@ interface NodeProps {
   /** Content-search match score (substring occurrence count in session
    * file). Null when this session matched via metadata filter only. */
   contentScore?: number | null;
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -214,7 +348,11 @@ interface NodeProps {
   /** Desktop right-click → open the floating context menu with these items. */
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
+  teamWorkersBySession: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
   onResumeEng?: (parentSessionId: string) => void;
   folders: SessionFolder[];
@@ -229,11 +367,16 @@ interface NodeProps {
   onToggleReqTag: (key: string) => void;
   /** Active sidebar sort field — its timestamp is shown on each row. */
   sortField: string;
+  selected: boolean;
+  bulkSelectMode: boolean;
+  onToggleSelected: (id: string) => void;
+  onStartBulkSelect: (id: string) => void;
 }
 
-function SessionNode({
+function SessionNodeImpl({
   session,
   depth,
+  nowTick,
   dragEnabled,
   currentSessionId,
   highlightedSessionId,
@@ -250,7 +393,11 @@ function SessionNode({
   onUnpinOthers,
   onContextMenuOpen,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
+  onAgentRenameAllowed,
+  teamWorkersBySession,
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   folders,
@@ -262,16 +409,23 @@ function SessionNode({
   selectedReqTagKeys,
   onToggleReqTag,
   sortField,
+  selected,
+  bulkSelectMode,
+  onToggleSelected,
+  onStartBulkSelect,
 }: NodeProps) {
   const { t } = useTranslation();
   const { show: showSheet } = useMobileActionSheet();
   const mode = session.orchestration_mode ?? "team";
   const isManager = mode === "team";
-  const msgs = session.message_count ?? session.messages?.length ?? 0;
+  const teamWorkers = isManager ? (teamWorkersBySession[session.id] ?? []) : [];
+  const msgs = sessionMessageCount(session);
   const kids = childrenByParent.get(session.id) ?? [];
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(session.name);
+  const [teamWorkersOpen, setTeamWorkersOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const rowDragRef = useRef<HTMLDivElement | null>(null);
   // Drop highlight when another session is dragged onto this row. A row
   // only accepts drops while in folder view and when it belongs to a
   // folder — dropping moves the dragged session into this row's folder.
@@ -290,14 +444,160 @@ function SessionNode({
   // the popover's click-away listener doesn't immediately close it.
   const [tagPopover, setTagPopover] = useState<PopoverAnchor | null>(null);
   const [folderPopover, setFolderPopover] = useState<PopoverAnchor | null>(null);
+  const [statsPopover, setStatsPopover] = useState<PopoverAnchor | null>(null);
   const menuAnchorRef = useRef<PopoverAnchor | null>(null);
   const folderPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tagPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statsPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bulkSelectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressSelectedRef = useRef(false);
+  const sessionDragStartPointRef = useRef<SessionDragPoint | null>(null);
+  const sessionDragLastPointRef = useRef<SessionDragPoint | null>(null);
+  const agentBoardDragStartedRef = useRef(false);
+  const sessionDragDocumentCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => {
     if (renameTimerRef.current) clearTimeout(renameTimerRef.current);
     if (folderPopoverTimerRef.current) clearTimeout(folderPopoverTimerRef.current);
     if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
+    if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
+    if (bulkSelectTimerRef.current) clearTimeout(bulkSelectTimerRef.current);
+    if (sessionDragDocumentCleanupRef.current) sessionDragDocumentCleanupRef.current();
   }, []);
+
+  const clearBulkSelectTimer = () => {
+    if (!bulkSelectTimerRef.current) return;
+    clearTimeout(bulkSelectTimerRef.current);
+    bulkSelectTimerRef.current = null;
+  };
+
+  const isBulkSelectBlockedTarget = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false;
+    return Boolean(target.closest("button, input, textarea, select, a, [role='button']"));
+  };
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || isBulkSelectBlockedTarget(e.target)) {
+      sessionDragStartPointRef.current = null;
+      return;
+    }
+    const rowEl = e.currentTarget as HTMLElement;
+    sessionDragStartPointRef.current = { clientX: e.clientX, clientY: e.clientY };
+    agentBoardDragStartedRef.current = false;
+    longPressSelectedRef.current = false;
+    clearBulkSelectTimer();
+    bulkSelectTimerRef.current = setTimeout(() => {
+      longPressSelectedRef.current = true;
+      if (isMobileViewport()) {
+        menuAnchorRef.current = rowEl.getBoundingClientRect();
+        showSheet(buildSessionActions(true, true), session.name);
+        return;
+      }
+      onStartBulkSelect(session.id);
+    }, SESSION_BULK_SELECT_LONG_PRESS_MS);
+  };
+
+  const handleRowClick = () => {
+    clearBulkSelectTimer();
+    if (longPressSelectedRef.current) {
+      longPressSelectedRef.current = false;
+      return;
+    }
+    if (bulkSelectMode) {
+      onToggleSelected(session.id);
+      return;
+    }
+    onSelect(session.id, session);
+  };
+  // Latest handleRowClick for the native dragend listener, which is
+  // registered once in an effect and must not go stale.
+  const rowClickRef = useRef(handleRowClick);
+  rowClickRef.current = handleRowClick;
+
+  const publishAgentBoardDragStart = useCallback((point: SessionDragPoint) => {
+    if (agentBoardDragStartedRef.current) return;
+    if (!shouldStartAgentBoardSessionDrag(sessionDragStartPointRef.current, point)) return;
+    agentBoardDragStartedRef.current = true;
+    eventBus.publish("session_drag_start", { session_id: session.id, name: session.name });
+  }, [session.id, session.name]);
+
+  const stopSessionDragDocumentTracking = useCallback(() => {
+    if (!sessionDragDocumentCleanupRef.current) return;
+    sessionDragDocumentCleanupRef.current();
+    sessionDragDocumentCleanupRef.current = null;
+  }, []);
+
+  const cleanupSessionDragTracking = useCallback(() => {
+    stopSessionDragDocumentTracking();
+    sessionDragStartPointRef.current = null;
+    agentBoardDragStartedRef.current = false;
+  }, [stopSessionDragDocumentTracking]);
+
+  const startSessionDragDocumentTracking = useCallback(() => {
+    stopSessionDragDocumentTracking();
+    const handleDocumentDragOver = (event: DragEvent) => {
+      sessionDragLastPointRef.current = { clientX: event.clientX, clientY: event.clientY };
+      publishAgentBoardDragStart({ clientX: event.clientX, clientY: event.clientY });
+    };
+    const handleDocumentDragDone = () => {
+      stopSessionDragDocumentTracking();
+      sessionDragStartPointRef.current = null;
+      agentBoardDragStartedRef.current = false;
+    };
+    document.addEventListener("dragover", handleDocumentDragOver);
+    document.addEventListener("drop", handleDocumentDragDone);
+    document.addEventListener("dragend", handleDocumentDragDone);
+    sessionDragDocumentCleanupRef.current = () => {
+      document.removeEventListener("dragover", handleDocumentDragOver);
+      document.removeEventListener("drop", handleDocumentDragDone);
+      document.removeEventListener("dragend", handleDocumentDragDone);
+    };
+  }, [publishAgentBoardDragStart, stopSessionDragDocumentTracking]);
+
+  useEffect(() => {
+    const row = rowDragRef.current;
+    if (!row) return;
+    const handleDragStart = (event: DragEvent) => {
+      clearBulkSelectTimer();
+      if (!sessionDragStartPointRef.current) {
+        sessionDragStartPointRef.current = { clientX: event.clientX, clientY: event.clientY };
+      }
+      sessionDragLastPointRef.current = null;
+      agentBoardDragStartedRef.current = false;
+      event.dataTransfer?.setData(SESSION_DRAG_MIME, session.id);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      startSessionDragDocumentTracking();
+    };
+    // The browser suppresses the click event once a native drag starts,
+    // and Chromium starts one after only a few px of pointer movement —
+    // far below the 48px "meaningful drag" threshold. A press that
+    // micro-moves would otherwise select nothing. Treat a dragend that
+    // never crossed the threshold, never started an agent-board drag,
+    // and was consumed by no drop target as the click it really was.
+    // Runs on the row (drag source) BEFORE the document-level cleanup
+    // listeners bubble-reset the drag refs.
+    const handleDragEnd = (event: DragEvent) => {
+      const crossedThreshold = sessionDragLastPointRef.current
+        ? shouldStartAgentBoardSessionDrag(
+            sessionDragStartPointRef.current,
+            sessionDragLastPointRef.current,
+          )
+        : false;
+      const dropConsumed = event.dataTransfer
+        ? event.dataTransfer.dropEffect !== "none"
+        : false;
+      const treatAsClick =
+        !agentBoardDragStartedRef.current && !crossedThreshold && !dropConsumed;
+      cleanupSessionDragTracking();
+      sessionDragLastPointRef.current = null;
+      if (treatAsClick) rowClickRef.current();
+    };
+    row.addEventListener("dragstart", handleDragStart);
+    row.addEventListener("dragend", handleDragEnd);
+    return () => {
+      row.removeEventListener("dragstart", handleDragStart);
+      row.removeEventListener("dragend", handleDragEnd);
+    };
+  }, [session.id, session.name, cleanupSessionDragTracking, startSessionDragDocumentTracking]);
 
   const toggleSessionTag = (tagId: string) => {
     const current = new Set(sessionTagIds(session));
@@ -306,15 +606,29 @@ function SessionNode({
     onSetTags(session.id, Array.from(current));
   };
 
-  const buildSessionActions = (): ActionItem[] => {
-    const copyTarget = session.file_path || session.id;
+  const buildSessionActions = (includePin = false, includeSelect = false): ActionItem[] => {
+    const copyTarget = sessionLinkMarker(session.id, session.name || "Untitled");
     return [
-      {
-        id: "pin",
-        label: session.pinned ? t("session.unpinTitle") : t("session.pinTitle"),
-        icon: <Icon name="pin" size={14} />,
-        onClick: () => onPin(session.id, !session.pinned),
-      },
+      ...(includeSelect
+        ? [
+            {
+              id: "select",
+              label: t("session.selectSession"),
+              icon: <Icon name="check-circle" size={14} />,
+              onClick: () => onStartBulkSelect(session.id),
+            },
+          ]
+        : []),
+      ...(includePin
+        ? [
+            {
+              id: "pin",
+              label: session.pinned ? t("session.unpinTitle") : t("session.pinTitle"),
+              icon: <Icon name="pin" size={14} />,
+              onClick: () => onPin(session.id, !session.pinned),
+            },
+          ]
+        : []),
       ...(session.pinned
         ? [
             {
@@ -338,12 +652,35 @@ function SessionNode({
         },
       },
       {
+        id: "stats",
+        label: t("tokens.stats"),
+        icon: <Icon name="info" size={14} />,
+        onClick: () => {
+          // Match the folder/tags timer: wait for the action sheet's
+          // fade-out so the popover mounts after the backdrop is gone.
+          if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
+          statsPopoverTimerRef.current = setTimeout(
+            () => setStatsPopover(menuAnchorRef.current),
+            220,
+          );
+        },
+      },
+      {
         id: "worker-eligible",
         label: session.worker_eligible
           ? t("session.workerEligibleOff")
           : t("session.workerEligibleOn"),
         icon: <Icon name="check-circle" size={14} />,
         onClick: () => onWorkerEligible(session.id, !session.worker_eligible),
+      },
+      {
+        id: "agent-rename-allowed",
+        label: session.agent_rename_allowed
+          ? t("session.agentRenameAllowedOff")
+          : t("session.agentRenameAllowedOn"),
+        icon: <Icon name="edit" size={14} />,
+        onClick: () =>
+          onAgentRenameAllowed(session.id, !session.agent_rename_allowed),
       },
       ...(tags.length > 0
         ? [
@@ -393,6 +730,22 @@ function SessionNode({
         onClick: () => onDetails(session.id),
       },
       {
+        id: "mark-unread",
+        label: t("session.markUnreadTitle"),
+        icon: <Icon name="circle" size={14} />,
+        onClick: () => void markSessionUnread(session.id),
+      },
+      ...(!session.moved_to_session_id
+        ? [
+            {
+              id: "move-to-project",
+              label: t("session.moveToProject"),
+              icon: <Icon name="folder" size={14} />,
+              onClick: () => onMoveToProject(session.id),
+            },
+          ]
+        : []),
+      {
         id: "archive",
         label: session.archived
           ? t("session.unarchiveTitle")
@@ -437,12 +790,17 @@ function SessionNode({
 
   const provider = providers.find(p => p.id === session.provider_id);
   const providerName = provider?.name ?? session.provider_id?.split('/')[0] ?? 'unknown';
+  const additionalModelCount = (session.model_history || [])
+    .filter((model) => model && model !== session.model).length;
+  const modelLabel = additionalModelCount > 0
+    ? `${session.model} ${t("session.additionalModels", { count: additionalModelCount })}`
+    : session.model;
 
   const todos = session.current_todos ?? [];
+  const tasks = session.current_tasks ?? [];
   const requirementTags = session.requirement_tags ?? [];
   const manualTags = session.session_tags ?? [];
-  const todoTotal = todos.length;
-  const todoDone = todos.filter((td) => td.status === "completed").length;
+  const { total: todoTotal, done: todoDone } = todoProgress(todos, tasks);
   const todoBadge: { text: string; className: string; label: string; state: string } =
     todoTotal === 0
       ? {
@@ -468,28 +826,21 @@ function SessionNode({
   return (
     <>
       <motion.div
+        ref={rowDragRef}
         layout
+        layoutId={`session-row-${session.id}`}
         transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
         className={`session-item ${
           session.id === currentSessionId ? "active" : ""
         } ${
           session.id === highlightedSessionId ? "highlighted" : ""
         } ${depth > 0 ? "session-item-child" : ""} ${
+          selected ? "session-item-selected" : ""
+        } ${
           folderDropOver ? "folder-drop-over" : ""
         }`}
         style={{ marginInlineStart: depth * 16 }}
-        draggable={dragEnabled}
-        onDragStart={(e) => {
-          if (!dragEnabled) return;
-          // framer-motion forwards onDrag* handlers to the DOM when
-          // `draggable` is set (filterProps special-case), so `e` is in
-          // practice a native React.DragEvent even though motion's types
-          // still label it as a motion pointer-drag event. Cast through
-          // unknown to access dataTransfer without widening the prop type.
-          const ev = e as unknown as ReactDragEvent<HTMLDivElement>;
-          ev.dataTransfer.setData(SESSION_DRAG_MIME, session.id);
-          ev.dataTransfer.effectAllowed = "move";
-        }}
+        draggable
         onDragOver={(e) => {
           if (!isFolderDropTarget || !isSessionDrag(e)) return;
           e.preventDefault();
@@ -505,7 +856,18 @@ function SessionNode({
           const id = e.dataTransfer.getData(SESSION_DRAG_MIME);
           if (id && id !== session.id) onMoveToFolder(id, session.folder_id ?? null);
         }}
-        onClick={() => onSelect(session.id)}
+        onPointerDown={handlePointerDown}
+        onPointerUp={() => {
+          cleanupSessionDragTracking();
+          clearBulkSelectTimer();
+        }}
+        onPointerLeave={clearBulkSelectTimer}
+        onPointerCancel={() => {
+          cleanupSessionDragTracking();
+          clearBulkSelectTimer();
+        }}
+        onClick={handleRowClick}
+        data-mobile-context-owner="session-row"
         onContextMenu={(e) => {
           // Desktop-only: mobile uses the ⋯ button + long-press. Keep
           // the native menu (don't preventDefault) and add our floating
@@ -515,7 +877,7 @@ function SessionNode({
           if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
             return;
           }
-          const items = buildSessionActions();
+          const items = buildSessionActions(true);
           if (items.length === 0) return;
           menuAnchorRef.current = (e.currentTarget as HTMLElement).getBoundingClientRect();
           onContextMenuOpen(e, items);
@@ -523,7 +885,22 @@ function SessionNode({
         data-testid="session-item"
         data-session-id={session.id}
         data-active={session.id === currentSessionId ? "true" : "false"}
+        data-selected={selected ? "true" : "false"}
       >
+        {bulkSelectMode && (
+          <label
+            className="session-item-select"
+            title={t("session.selectSession")}
+            aria-label={t("session.selectSession")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelected(session.id)}
+            />
+          </label>
+        )}
         <div className="session-item-name">
           {session.source === "cli" && (
             <span
@@ -542,6 +919,32 @@ function SessionNode({
             <span className="role-chip source-badge-cli" title={t("session.forkBadgeTitle")}>
               FORK
             </span>
+          )}
+          {session.moved_to_session_id && (
+            <button
+              type="button"
+              className="role-chip source-badge-cli session-moved-chip"
+              title={t("session.movedToTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(session.moved_to_session_id!);
+              }}
+            >
+              {t("session.movedToChip")}
+            </button>
+          )}
+          {session.moved_from_session_id && (
+            <button
+              type="button"
+              className="role-chip source-badge-cli session-moved-chip"
+              title={t("session.movedFromTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(session.moved_from_session_id!);
+              }}
+            >
+              {t("session.movedFromChip")}
+            </button>
           )}
           {session.pending_eng_session_id && onResumeEng && (
             <button
@@ -578,10 +981,65 @@ function SessionNode({
           )}
         </div>
         <div className="session-item-meta">
-          {projectName(session.cwd)} | {orchestrationLabel(t, mode)}
-          {isManager && ` | ${session.worker_count ?? 0} ${t("session.workers")}`}
-          {session.rearranger_enabled && " | rearranger"}
+          {orchestrationLabel(t, mode)}
+          {isManager && ` | ${teamWorkers.length} ${t("session.workers")}`}
         </div>
+        {isManager && (
+          <div className="session-team-summary" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="session-team-toggle"
+              aria-expanded={teamWorkersOpen}
+              aria-label={teamWorkersOpen ? t("session.collapseTeamWorkers") : t("session.expandTeamWorkers")}
+              onClick={() => setTeamWorkersOpen((value) => !value)}
+            >
+              <Icon name={teamWorkersOpen ? "chevron-down" : "chevron-right"} size={12} />
+              <span>{t("session.teamWorkers")}</span>
+              <span className="session-team-count">{teamWorkers.length}</span>
+            </button>
+            {teamWorkersOpen && (
+              <div className="session-team-details">
+                <label className="session-team-policy">
+                  <span>{t("session.workerCreationPolicy")}</span>
+                  <select
+                    value={session.worker_creation_policy ?? "ask"}
+                    onChange={(event) =>
+                      onWorkerCreationPolicyChange?.(
+                        session.id,
+                        event.target.value as WorkerCreationPolicy,
+                      )
+                    }
+                    disabled={!onWorkerCreationPolicyChange}
+                  >
+                    <option value="ask">{t("session.workerPolicyAsk")}</option>
+                    <option value="approve">{t("session.workerPolicyApprove")}</option>
+                    <option value="deny">{t("session.workerPolicyDeny")}</option>
+                  </select>
+                </label>
+                {teamWorkers.length ? (
+                  <div className="session-team-workers">
+                    {teamWorkers.map((worker) => (
+                      <div
+                        key={worker.agent_session_id}
+                        className="session-team-worker-row"
+                      >
+                        <span className="session-team-worker-name">{worker.name}</span>
+                        {worker.team_role && (
+                          <span className="session-team-worker-role">{worker.team_role}</span>
+                        )}
+                        <span className={`worker-mode-badge worker-mode-${worker.orchestration_mode}`}>
+                          {worker.orchestration_mode}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="session-team-workers-empty">{t("session.noTeamWorkers")}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {requirementTags.length > 0 && (
           <div
             className="session-requirement-tags"
@@ -605,26 +1063,10 @@ function SessionNode({
             })}
           </div>
         )}
-        {manualTags.length > 0 && (
-          <div className="session-tags" onClick={(e) => e.stopPropagation()}>
-            {manualTags.slice(0, 5).map((tag) => (
-              <span key={tag.id} className="session-tag-chip" title={tag.name}>
-                {tag.name}
-              </span>
-            ))}
-            {manualTags.length > 5 && (
-              <span
-                className="session-tag-count"
-                title={manualTags.slice(5).map((tg) => tg.name).join(", ")}
-              >
-                {t("session.tagsMore", { count: manualTags.length - 5 })}
-              </span>
-            )}
-          </div>
-        )}
+        {manualTags.length > 0 && <SessionTagSummary tags={manualTags} />}
         <div className="session-item-meta session-item-meta-row">
           <span className="session-item-meta-text">
-            {providerName} | {session.model?.split("-").slice(-2).join("-")} | {msgs} {t("session.msgs")}
+            {providerName} | {modelLabel} | {msgs} {t("session.msgs")}
           </span>
           <span
             className={todoBadge.className}
@@ -673,6 +1115,17 @@ function SessionNode({
         <div className="session-item-actions">
           <button
             className="session-item-tag-control"
+            title={t("tokens.stats")}
+            aria-label={t("tokens.stats")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setStatsPopover(e.currentTarget.getBoundingClientRect());
+            }}
+          >
+            <Icon name="info" size={12} />
+          </button>
+          <button
+            className="session-item-tag-control"
             title={t("session.folder")}
             aria-label={t("session.folder")}
             onClick={(e) => {
@@ -705,14 +1158,14 @@ function SessionNode({
           </button>
           <button
             className="session-item-copy"
-            title={copiedId === (session.file_path || session.id) ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
+            title={copiedId === sessionLinkMarker(session.id, session.name || "Untitled") ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
             aria-label="Copy session id"
             onClick={(e) => {
               e.stopPropagation();
-              onCopy(session.file_path || session.id);
+              onCopy(sessionLinkMarker(session.id, session.name || "Untitled"));
             }}
           >
-            {copiedId === (session.file_path || session.id) ? "\u2713" : "\u29C9"}
+            {copiedId === sessionLinkMarker(session.id, session.name || "Untitled") ? "\u2713" : "\u29C9"}
           </button>
           <button
             className="session-item-archive"
@@ -772,11 +1225,19 @@ function SessionNode({
           onClose={() => setTagPopover(null)}
         />
       )}
+      {statsPopover && (
+        <SessionStatsPopover
+          anchor={statsPopover}
+          session={session}
+          onClose={() => setStatsPopover(null)}
+        />
+      )}
       {kids.map((child) => (
         <SessionNode
           key={child.id}
           session={child}
           depth={depth + 1}
+          nowTick={nowTick}
           dragEnabled={dragEnabled}
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
@@ -793,7 +1254,11 @@ function SessionNode({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -805,15 +1270,123 @@ function SessionNode({
           selectedReqTagKeys={selectedReqTagKeys}
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
+          selected={selected}
+          bulkSelectMode={bulkSelectMode}
+          onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
     </>
   );
 }
 
+/** Shallow-equal by identity for a node's own child slice. */
+function sameChildSlice(a?: Session[], b?: Session[]): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** True when NOTHING changed anywhere in the subtree rooted at `id`: the
+ * direct child slice is identity-equal AND every descendant slice is too.
+ *
+ * A node renders its children recursively, and React.memo bails the ENTIRE
+ * subtree when a node's comparator returns true — so it is not enough to
+ * check only the direct child slice. If a grandchild's session object was
+ * replaced (rename, new message, tag/pin change) without a selection change,
+ * the intervening ancestor's own slice is still identity-stable; only a full
+ * subtree walk catches it and forces the ancestor (hence the whole path down
+ * to the changed node) to re-render. */
+function subtreeSessionsEqual(
+  prevMap: Map<string, Session[]>,
+  nextMap: Map<string, Session[]>,
+  id: string,
+): boolean {
+  const prevKids = prevMap.get(id);
+  const nextKids = nextMap.get(id);
+  if (!sameChildSlice(prevKids, nextKids)) return false;
+  if (nextKids) {
+    for (const child of nextKids) {
+      if (!subtreeSessionsEqual(prevMap, nextMap, child.id)) return false;
+    }
+  }
+  return true;
+}
+
+/** Custom memo comparator for SessionNode.
+ *
+ * Selecting a session re-renders SessionList with a new `currentSessionId`
+ * and a freshly-rebuilt `childrenByParent` map (its useMemo keys on
+ * currentSessionId), so a plain shallow memo would re-render every row. But
+ * only the patched (selected) session object changes identity, and only the
+ * two rows whose active/highlight state flips actually need to re-render. So:
+ *
+ *  - Compare the node's whole subtree by session identity (via
+ *    `subtreeSessionsEqual`), never the churning map reference — a memo bail
+ *    skips the entire subtree, so a deep descendant change must re-render its
+ *    ancestors.
+ *  - Treat `currentSessionId`/`highlightedSessionId` as relevant only when
+ *    this node's own active/highlight bit flips — EXCEPT a node with
+ *    descendants must re-render when they change, since it forwards those ids
+ *    to child rows whose highlight may have moved.
+ *  - Everything else (session object, handlers — now useCallback-stable —
+ *    providers/tags/folders/etc.) is compared by identity/value.
+ *
+ * This leaves framer-motion's layout props untouched, so the pinned-anchor
+ * shared-element animation is unchanged; it just stops N unrelated rows from
+ * re-rendering (and re-scheduling their layout projection) on every select. */
+function nodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
+  if (
+    (prev.session.id === prev.currentSessionId) !==
+    (next.session.id === next.currentSessionId)
+  ) {
+    return false;
+  }
+  if (
+    (prev.session.id === prev.highlightedSessionId) !==
+    (next.session.id === next.highlightedSessionId)
+  ) {
+    return false;
+  }
+  // Any change anywhere in this node's subtree (a descendant session object
+  // replaced, or membership changed) must re-render it — React.memo bails the
+  // whole subtree, so a stale grandchild would otherwise never reconcile.
+  if (
+    !subtreeSessionsEqual(
+      prev.childrenByParent,
+      next.childrenByParent,
+      next.session.id,
+    )
+  ) {
+    return false;
+  }
+  const nextKids = next.childrenByParent.get(next.session.id);
+  if (nextKids && nextKids.length > 0) {
+    if (prev.currentSessionId !== next.currentSessionId) return false;
+    if (prev.highlightedSessionId !== next.highlightedSessionId) return false;
+  }
+  const keys = Object.keys(next) as (keyof NodeProps)[];
+  if (keys.length !== Object.keys(prev).length) return false;
+  for (const key of keys) {
+    if (
+      key === "currentSessionId" ||
+      key === "highlightedSessionId" ||
+      key === "childrenByParent"
+    ) {
+      continue;
+    }
+    if (prev[key] !== next[key]) return false;
+  }
+  return true;
+}
+
+const SessionNode = memo(SessionNodeImpl, nodePropsEqual);
+
 interface FolderSectionProps {
   node: FolderRenderNode;
   depth: number;
+  nowTick: number;
   currentSessionId?: string;
   highlightedSessionId?: string | null;
   childrenByParent: Map<string, Session[]>;
@@ -821,7 +1394,7 @@ interface FolderSectionProps {
   providers: Provider[];
   showArchived: boolean;
   scoreMap: Map<string, number>;
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -829,7 +1402,11 @@ interface FolderSectionProps {
   onUnpinOthers: (keepId: string) => void;
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
+  teamWorkersBySession: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
   onResumeEng?: (parentSessionId: string) => void;
   folders: SessionFolder[];
@@ -843,11 +1420,16 @@ interface FolderSectionProps {
   collapsedFolderIds: Set<string>;
   onToggleFolder: (folderId: string) => void;
   sortField: string;
+  selectedSessionIds: Set<string>;
+  bulkSelectMode: boolean;
+  onToggleSelected: (id: string) => void;
+  onStartBulkSelect: (id: string) => void;
 }
 
 function FolderSection({
   node,
   depth,
+  nowTick,
   currentSessionId,
   highlightedSessionId,
   childrenByParent,
@@ -863,7 +1445,11 @@ function FolderSection({
   onUnpinOthers,
   onContextMenuOpen,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
+  onAgentRenameAllowed,
+  teamWorkersBySession,
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   folders,
@@ -877,6 +1463,10 @@ function FolderSection({
   collapsedFolderIds,
   onToggleFolder,
   sortField,
+  selectedSessionIds,
+  bulkSelectMode,
+  onToggleSelected,
+  onStartBulkSelect,
 }: FolderSectionProps) {
   const collapsed = collapsedFolderIds.has(node.folder.id);
   const [dragOver, setDragOver] = useState(false);
@@ -916,6 +1506,7 @@ function FolderSection({
           key={s.id}
           session={s}
           depth={depth}
+          nowTick={nowTick}
           dragEnabled
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
@@ -932,7 +1523,11 @@ function FolderSection({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -944,6 +1539,10 @@ function FolderSection({
           selectedReqTagKeys={selectedReqTagKeys}
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
+          selected={selectedSessionIds.has(s.id)}
+          bulkSelectMode={bulkSelectMode}
+          onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
       {!collapsed && node.children.map((child) => (
@@ -951,6 +1550,7 @@ function FolderSection({
           key={child.folder.id}
           node={child}
           depth={depth + 1}
+          nowTick={nowTick}
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
           childrenByParent={childrenByParent}
@@ -966,7 +1566,11 @@ function FolderSection({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -980,6 +1584,10 @@ function FolderSection({
           collapsedFolderIds={collapsedFolderIds}
           onToggleFolder={onToggleFolder}
           sortField={sortField}
+          selectedSessionIds={selectedSessionIds}
+          bulkSelectMode={bulkSelectMode}
+          onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
     </div>
@@ -990,13 +1598,19 @@ export function SessionList({
   sessions,
   allSessions,
   currentSessionId,
+  selectedSession: selectedSessionProp,
+  selectedAnchorContainer,
   providers,
   onSelect,
   onDelete,
   onRename,
   onPin,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
+  onAgentRenameAllowed,
+  teamWorkersBySession = {},
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   onAiSearch,
@@ -1015,18 +1629,47 @@ export function SessionList({
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
-  const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
-  const [, setNowTick] = useState(0);
-  const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
-  const handleItemsScroll = useCallback(
-    (event: UIEvent<HTMLDivElement>) => {
-      if (!hasMore || loadingMore || !onLoadMore) return;
-      const el = event.currentTarget;
-      if (el.scrollHeight - el.scrollTop - el.clientHeight > 160) return;
-      onLoadMore();
-    },
-    [hasMore, loadingMore, onLoadMore],
+  // Committed session-filter queries (most recent first) surfaced as
+  // completion options in the filter field. Seeded from localStorage so
+  // history survives reloads; kept in state so the dropdown re-renders
+  // the moment a new query is committed.
+  const [searchHistory, setSearchHistory] = useState<string[]>(() =>
+    readSessionSearchHistory(),
   );
+  // Which completion option is keyboard-highlighted (-1 = none). The
+  // history dropdown owns arrow-key navigation while it's open so it
+  // doesn't fight the session-list highlight.
+  const [historyHighlight, setHistoryHighlight] = useState(-1);
+  // Set to briefly suppress the dropdown right after a commit/pick so
+  // it doesn't immediately reopen over the field the user just acted on.
+  const [historyDismissed, setHistoryDismissed] = useState(false);
+  const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+  const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
+  // Pagination via a bottom sentinel observed against the scroll
+  // container. The sidebar — not .session-list-items — is the scroll
+  // element (the whole menu scrolls as one column), so an Intersection
+  // Observer rooted on the sidebar fires regardless of which ancestor
+  // actually scrolls. rootMargin prefetches the next page ~160px early.
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!hasMore || loadingMore || !onLoadMore) return;
+    const node = loadMoreSentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore();
+      },
+      { root: node.closest(".sidebar"), rootMargin: "160px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
+  const handleItemsScroll = useCallback((e: ReactUIEvent<HTMLDivElement>) => {
+    if (!hasMore || loadingMore || !onLoadMore) return;
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= 160) onLoadMore();
+  }, [hasMore, loadingMore, onLoadMore]);
 
   // Desktop right-click context menu for session rows. State is lifted
   // here (one open menu for the whole list) so right-clicking a second
@@ -1080,6 +1723,56 @@ export function SessionList({
   const [fileEditModeFilter, setFileEditModeFilter] = useState<SessionFileEditModeFilter>("any");
   const [selectedSearchFields, setSelectedSearchFields] = useState<SessionSearchField[]>(SESSION_SEARCH_FIELDS);
   const [orgError, setOrgError] = useState<string | null>(null);
+
+  // Search text + advanced filters are stored per project so switching
+  // projects restores that project's own filter state instead of
+  // leaking the previous project's filters. `null` sentinel forces the
+  // load to run on mount (an empty-string project path is itself a
+  // valid bucket key for "no project selected").
+  const filtersProjectKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = backendProjectPath || SESSION_FILTERS_NO_PROJECT_KEY;
+    if (filtersProjectKeyRef.current === key) return;
+    filtersProjectKeyRef.current = key;
+    const stored = readSessionFiltersByProject()[key];
+    setSearch(stored?.search ?? "");
+    setShowArchived(stored?.showArchived ?? false);
+    setSelectedFolderIds(stored?.selectedFolderIds ?? []);
+    setSelectedTagIds(stored?.selectedTagIds ?? []);
+    setSelectedProviderIds(stored?.selectedProviderIds ?? []);
+    setSelectedModelIds(stored?.selectedModelIds ?? []);
+    setSelectedModes(stored?.selectedModes ?? []);
+    setSelectedSources(stored?.selectedSources ?? []);
+    setFileEditModeFilter(stored?.fileEditModeFilter ?? "any");
+    setSelectedSearchFields(stored?.selectedSearchFields ?? SESSION_SEARCH_FIELDS);
+  }, [backendProjectPath]);
+  useEffect(() => {
+    const key = filtersProjectKeyRef.current;
+    if (key === null) return;
+    writeSessionFiltersForProject(key, {
+      search,
+      showArchived,
+      selectedFolderIds,
+      selectedTagIds,
+      selectedProviderIds,
+      selectedModelIds,
+      selectedModes,
+      selectedSources,
+      fileEditModeFilter,
+      selectedSearchFields,
+    });
+  }, [
+    search,
+    showArchived,
+    selectedFolderIds,
+    selectedTagIds,
+    selectedProviderIds,
+    selectedModelIds,
+    selectedModes,
+    selectedSources,
+    fileEditModeFilter,
+    selectedSearchFields,
+  ]);
   // Folder view: group sessions into folders (on) vs flat list (off).
   // Persistent backend pref (`folder_view_enabled`) is the source of truth;
   // this state is its reflection. `undefined` until the pref loads — until
@@ -1144,6 +1837,47 @@ export function SessionList({
     });
   }, []);
 
+  // Status-bucket sort toggle — orthogonal to the timestamp sort above.
+  // Backend pref `session_status_sort` is the source of truth.
+  const [sessionStatusSort, setSessionStatusSort] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (v: unknown) => {
+      if (!cancelled && typeof v === "boolean") setSessionStatusSort(v);
+    };
+    fetch(`${API}/api/user-prefs`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((data: { session_status_sort?: unknown }) => apply(data.session_status_sort))
+      .catch(() => {});
+    const off = eventBus.subscribe(
+      "user_prefs_changed",
+      (p) => apply((p as { session_status_sort?: unknown }).session_status_sort),
+    );
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+  const toggleSessionStatusSort = useCallback(() => {
+    setSessionStatusSort((prev) => {
+      const next = !prev;
+      void (async () => {
+        try {
+          const res = await fetch(`${API}/api/user-prefs`, {
+            method: "PATCH",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_status_sort: next }),
+          });
+          if (!res.ok) throw new Error("session_status_sort patch failed");
+        } catch {
+          setSessionStatusSort(prev); // revert — pref is the authority
+        }
+      })();
+      return next; // optimistic → backendFilters change → refetch
+    });
+  }, []);
+
   const toggleFolderView = useCallback(async () => {
     const next = !folderViewEnabled;
     setFolderViewEnabled(next); // optimistic → backendFilters change → refetch
@@ -1162,14 +1896,15 @@ export function SessionList({
 
   // ── AI search state (transient UI per CLAUDE.md rule 3). No
   // localStorage, no backend persistence — discarded on unmount and
-  // on Clear. `aiResult.session_ids` is the relevance-ranked id list
-  // returned by the backend; `filtered` intersects with it to drive
+  // on Clear. `aiResult.rows` is the relevance-ranked result list
+  // returned by the backend; `filtered` reconciles it to drive
   // the sidebar list. There is NO separate AI-mode input: the ✨ button
   // runs an AI search over whatever is already typed in the single
   // filter box (`search`).
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<{
     ids: string[];
+    rows: Session[];
     reasoning: string;
   } | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -1201,6 +1936,10 @@ export function SessionList({
     sessionId: string;
     anchor: PopoverAnchor;
   } | null>(null);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [bulkSelectMode, setBulkSelectMode] = useState(false);
+  const [bulkFolderPopover, setBulkFolderPopover] = useState<PopoverAnchor | null>(null);
+  const [bulkTagPopover, setBulkTagPopover] = useState<PopoverAnchor | null>(null);
 
   const refreshOrganization = useCallback(async () => {
     if (!projectId) {
@@ -1227,6 +1966,7 @@ export function SessionList({
   }, [refreshOrganization]);
 
   useEffect(() => {
+    if (Object.keys(ackedOrganizationBySession).length === 0) return;
     setAckedOrganizationBySession((current) => {
       let changed = false;
       const next = { ...current };
@@ -1247,7 +1987,7 @@ export function SessionList({
       }
       return changed ? next : current;
     });
-  }, [sessions]);
+  }, [ackedOrganizationBySession, sessions]);
 
   // Distinct requirement tags across all sessions, for the tag filter panel.
   const requirementTagOptions = useMemo(() => {
@@ -1263,6 +2003,21 @@ export function SessionList({
   const selectedReqTagKeys = useMemo(
     () => new Set(selectedTagIds.filter((id) => id.startsWith(REQ_TAG_PREFIX))),
     [selectedTagIds],
+  );
+  // Unified option list for the tag-filter autocomplete: manual tags and
+  // requirement tags share one `selectedTagIds` set, so both are keyed the
+  // same way they're matched during selection.
+  const tagFilterOptions = useMemo<TagFilterOption[]>(
+    () => [
+      ...tags.map((tag) => ({ key: tag.id, label: tag.name, kind: "manual" as const })),
+      ...requirementTagOptions.map((tag) => ({
+        key: reqTagKey(tag),
+        label: tag.label,
+        kind: tag.kind,
+        title: `${tag.kind}: ${tag.label}`,
+      })),
+    ],
+    [tags, requirementTagOptions],
   );
   const toggleTagFilter = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
@@ -1313,13 +2068,19 @@ export function SessionList({
 
   useEffect(() => {
     const validFolders = new Set(folders.map((folder) => folder.id));
-    setSelectedFolderIds((prev) => prev.filter((id) => validFolders.has(id)));
+    const nextFolderIds = selectedFolderIds.filter((id) => validFolders.has(id));
+    if (nextFolderIds.length !== selectedFolderIds.length) {
+      setSelectedFolderIds(nextFolderIds);
+    }
     const validTagIds = new Set<string>([
       ...tags.map((tag) => tag.id),
       ...requirementTagOptions.map(reqTagKey),
     ]);
-    setSelectedTagIds((prev) => prev.filter((id) => validTagIds.has(id)));
-  }, [folders, tags, requirementTagOptions]);
+    const nextTagIds = selectedTagIds.filter((id) => validTagIds.has(id));
+    if (nextTagIds.length !== selectedTagIds.length) {
+      setSelectedTagIds(nextTagIds);
+    }
+  }, [folders, tags, requirementTagOptions, selectedFolderIds, selectedTagIds]);
 
   // Filter option universes are the FULL set of choices, independent of the
   // currently-loaded (filtered) sessions — so applying one filter never makes
@@ -1327,13 +2088,30 @@ export function SessionList({
   // sources are closed sets known client-side; models come from the backend
   // facet (distinct models across all the project's sessions).
   const providerOptions = useMemo(
-    () =>
-      providers
-        .map((provider) => ({ id: provider.id, name: provider.name }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    [providers],
+    () => {
+      const names = new Map(providers.map((provider) => [provider.id, provider.name]));
+      for (const session of sessions) {
+        const id = session.provider_id?.trim();
+        if (id && !names.has(id)) names.set(id, id);
+      }
+      return Array.from(names, ([id, name]) => ({ id, name }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+    [providers, sessions],
   );
-  const modelOptions = modelFacet;
+  const modelOptions = useMemo(() => {
+    const models = new Set(modelFacet);
+    for (const provider of providers) {
+      if (provider.default_model) models.add(provider.default_model);
+      for (const model of provider.custom_models ?? []) {
+        if (model) models.add(model);
+      }
+    }
+    for (const session of sessions) {
+      if (session.model) models.add(session.model);
+    }
+    return Array.from(models).sort((a, b) => a.localeCompare(b));
+  }, [modelFacet, providers, sessions]);
   const modeOptions = useMemo(
     () => ["team", "native", "virtual"] as OrchestrationMode[],
     [],
@@ -1372,6 +2150,20 @@ export function SessionList({
   const searchStatusLoading = searching && searchQueryActive;
   const searchExpanded = Boolean(search || searchFocused);
 
+  // Completion options for the filter field: up to 5 most-recent history
+  // entries that fit the typed text. Only surfaced while the field is
+  // focused and not just-dismissed.
+  const searchHistorySuggestions = useMemo(
+    () => matchingSessionSearchHistory(searchHistory, search),
+    [searchHistory, search],
+  );
+  const showSearchHistory =
+    searchFocused &&
+    !historyDismissed &&
+    searchHistorySuggestions.length > 0 &&
+    !aiResult &&
+    !aiLoading;
+
   const backendFilters = useMemo<SessionListFilters>(
     () => ({
       projectPath: aiResult ? "" : backendProjectPath || "",
@@ -1381,6 +2173,7 @@ export function SessionList({
       folderIds: selectedFolderIds,
       folderView: folderViewEnabled,
       sortBy: sessionSort,
+      statusSort: sessionStatusSort,
       tagIds: selectedTagIds,
       providerIds: activeProviderIds,
       modelIds: activeModelIds,
@@ -1398,6 +2191,7 @@ export function SessionList({
       fileEditModeFilter,
       folderViewEnabled,
       sessionSort,
+      sessionStatusSort,
       search,
       selectedSearchFields,
       selectedFolderIds,
@@ -1406,11 +2200,18 @@ export function SessionList({
     ],
   );
 
+  const backendFiltersKey = useMemo(
+    () => JSON.stringify(backendFilters),
+    [backendFilters],
+  );
+  const lastBackendFiltersKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (lastBackendFiltersKeyRef.current === backendFiltersKey) return;
+    lastBackendFiltersKeyRef.current = backendFiltersKey;
     onBackendFiltersChange?.(backendFilters);
-  }, [backendFilters, onBackendFiltersChange]);
+  }, [backendFilters, backendFiltersKey, onBackendFiltersChange]);
 
-  const applyAckedOrganization = (
+  const applyAckedOrganization = useCallback((
     sessionId: string,
     organization: SessionOrganizationAck,
   ) => {
@@ -1426,18 +2227,22 @@ export function SessionList({
           : {}),
       },
     }));
-  };
+  }, [setAckedOrganizationBySession]);
 
-  const moveToFolder = async (sessionId: string, folderId: string | null) => {
+  const moveToFolder = useCallback(async (sessionId: string, folderId: string | null) => {
     try {
       const result = await updateSessionOrganization(sessionId, { folder_id: folderId });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to move session");
     }
+  }, [applyAckedOrganization]);
+  const moveSelectedToFolder = async (folderId: string | null) => {
+    await Promise.all(selectedSessions.map((session) => moveToFolder(session.id, folderId)));
+    setBulkFolderPopover(null);
   };
 
-  const createAndAssignFolder = async (sessionId: string, name: string) => {
+  const createAndAssignFolder = useCallback(async (sessionId: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
@@ -1448,28 +2253,56 @@ export function SessionList({
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create folder");
     }
-  };
+  }, [projectId, applyAckedOrganization, refreshOrganization]);
 
-  const setSessionTags = async (sessionId: string, tagIds: string[]) => {
+  const setSessionTags = useCallback(async (sessionId: string, tagIds: string[]) => {
     try {
       const result = await updateSessionOrganization(sessionId, { tag_ids: tagIds });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to update tags");
     }
+  }, [applyAckedOrganization]);
+  const toggleSelectedTag = async (tagId: string) => {
+    const remove = selectedTagIdsForBulk.has(tagId);
+    await Promise.all(
+      selectedSessions.map((session) => {
+        const ids = new Set(sessionTagIds(session));
+        if (remove) ids.delete(tagId);
+        else ids.add(tagId);
+        return setSessionTags(session.id, Array.from(ids));
+      }),
+    );
   };
 
   // Create a project tag and assign it to the session in one step (the
   // inline "Create" affordance in the tag popover). The WS broadcast +
   // refreshOrganization bring both the tag pool and the session's tags
   // back in sync; nothing is held as frontend state.
-  const createAndAssignTag = async (sessionId: string, name: string) => {
+  const createAndAssignTag = useCallback(async (sessionId: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
       const tag = await createSessionTag(trimmed, projectId);
       const result = await updateSessionOrganization(sessionId, { add_tag_ids: [tag.id] });
       applyAckedOrganization(sessionId, result.organization);
+      await refreshOrganization();
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Failed to create tag");
+    }
+  }, [projectId, applyAckedOrganization, refreshOrganization]);
+  const createAndAssignSelectedTag = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || !projectId || selectedSessions.length === 0) return;
+    try {
+      const tag = await createSessionTag(trimmed, projectId);
+      await Promise.all(
+        selectedSessions.map((session) => {
+          const ids = new Set(sessionTagIds(session));
+          ids.add(tag.id);
+          return setSessionTags(session.id, Array.from(ids));
+        }),
+      );
       await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
@@ -1492,10 +2325,14 @@ export function SessionList({
     setAiLoading(false);
     if (result.error) {
       setAiError(result.error);
-      setAiResult({ ids: [], reasoning: result.reasoning });
+      setAiResult({ ids: [], rows: [], reasoning: result.reasoning });
       return;
     }
-    setAiResult({ ids: result.session_ids, reasoning: result.reasoning });
+    setAiResult({
+      ids: result.results.map((session) => session.id),
+      rows: result.results,
+      reasoning: result.reasoning,
+    });
   };
 
   // Drop the AI result and revert to live substring filtering on the
@@ -1509,6 +2346,28 @@ export function SessionList({
     setAiLoading(false);
     setAiDetailsOpen(false);
   };
+
+  // Record the current filter text into search history. Called when the
+  // user commits a query — leaving the field or acting on the list —
+  // not on every keystroke, so history holds intentional searches only.
+  const commitSearchHistory = useCallback((raw: string) => {
+    if (!raw.trim()) return;
+    setSearchHistory(pushSessionSearchHistory(raw));
+  }, []);
+
+  // Fill the filter field from a picked completion, commit it to history
+  // (bumping recency), and close the dropdown. Reverts any stale AI
+  // result since the query text changed.
+  const applySearchHistory = useCallback(
+    (entry: string) => {
+      setSearch(entry);
+      commitSearchHistory(entry);
+      setHistoryHighlight(-1);
+      setHistoryDismissed(true);
+      if (aiResult || aiError) clearAiSearch();
+    },
+    [aiResult, aiError, commitSearchHistory],
+  );
 
   // Close the details modal on ESC. Bind only while it's open so the
   // listener doesn't leak across renders.
@@ -1539,11 +2398,21 @@ export function SessionList({
     });
     const pool = base;
     if (aiResult) {
-      const order = new Map<string, number>();
-      aiResult.ids.forEach((id, i) => order.set(id, i));
-      const aiFiltered = pool
-        .filter((s) => order.has(s.id))
-        .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+      // Resolve each ranked id against the live loaded pool first (kept
+      // fresh by WS deltas), falling back to the backend-built row for
+      // matches outside the paginated pool. Never intersect with the
+      // pool alone — it's a partial projection of the full corpus.
+      const byId = new Map<string, Session>();
+      aiResult.rows.forEach((row) => {
+        const acked = ackedOrganizationBySession[row.id];
+        byId.set(row.id, acked ? { ...row, ...acked } : row);
+      });
+      pool.forEach((s) => {
+        if (byId.has(s.id)) byId.set(s.id, s);
+      });
+      const aiFiltered = aiResult.ids
+        .map((id) => byId.get(id))
+        .filter((s): s is Session => !!s);
       return { filtered: aiFiltered, scoreMap: new Map<string, number>() };
     }
     return {
@@ -1568,11 +2437,17 @@ export function SessionList({
   }, [aiResult, onAiActiveChange]);
 
   const { roots, childrenByParent } = useMemo(() => {
+    // The selected session is shown only in the pinned anchor above the
+    // toolbar, so drop it from the list pool. Its sub-sessions reparent
+    // to root via the orphan branch below.
+    const pool = currentSessionId
+      ? filtered.filter((s) => s.id !== currentSessionId)
+      : filtered;
     const byId = new Map<string, Session>();
-    for (const s of filtered) byId.set(s.id, s);
+    for (const s of pool) byId.set(s.id, s);
     const childMap = new Map<string, Session[]>();
     const rootList: Session[] = [];
-    for (const s of filtered) {
+    for (const s of pool) {
       const pid = s.parent_session_id;
       if (pid && byId.has(pid)) {
         const arr = childMap.get(pid) ?? [];
@@ -1583,7 +2458,21 @@ export function SessionList({
       }
     }
     return { roots: rootList, childrenByParent: childMap };
-  }, [filtered]);
+  }, [filtered, currentSessionId]);
+  const selectableSessionIds = useMemo(
+    () => new Set(filtered.map((session) => session.id)),
+    [filtered],
+  );
+  useEffect(() => {
+    if (selectedSessionIds.size === 0) return;
+    const next = new Set<string>();
+    for (const id of selectedSessionIds) {
+      if (selectableSessionIds.has(id)) next.add(id);
+    }
+    if (next.size !== selectedSessionIds.size) {
+      setSelectedSessionIds(next);
+    }
+  }, [selectableSessionIds, selectedSessionIds]);
 
   const [collapsedFolders, setCollapsedFolders] = useLocalStorage<string[]>(
     "better-agent-collapsed-folders",
@@ -1617,13 +2506,75 @@ export function SessionList({
     ],
     [folderRoots, collapsedFolderIds, unfiledSessions],
   );
+  const visibleSelectionIds = useMemo(
+    () => (folderViewEnabled !== false ? sortedRoots : roots).map((session) => session.id),
+    [folderViewEnabled, sortedRoots, roots],
+  );
+  const selectedSessions = useMemo(() => {
+    const byId = new Map(filtered.map((session) => [session.id, session]));
+    return Array.from(selectedSessionIds)
+      .map((id) => byId.get(id))
+      .filter((session): session is Session => Boolean(session));
+  }, [filtered, selectedSessionIds]);
+  const selectedCount = selectedSessions.length;
+  const selectedTagIdsForBulk = useMemo(() => {
+    if (selectedSessions.length === 0) return new Set<string>();
+    const [first, ...rest] = selectedSessions;
+    const common = new Set(sessionTagIds(first));
+    for (const session of rest) {
+      const ids = new Set(sessionTagIds(session));
+      for (const id of Array.from(common)) {
+        if (!ids.has(id)) common.delete(id);
+      }
+    }
+    return common;
+  }, [selectedSessions]);
+  const selectedFolderIdForBulk = useMemo(() => {
+    if (selectedSessions.length === 0) return null;
+    const first = selectedSessions[0].folder_id ?? null;
+    return selectedSessions.every((session) => (session.folder_id ?? null) === first)
+      ? first
+      : null;
+  }, [selectedSessions]);
+  const toggleSelectedSession = useCallback((id: string) => {
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      if (next.size === 0) setBulkSelectMode(false);
+      return next;
+    });
+  }, []);
+  const startBulkSelect = useCallback((id: string) => {
+    setBulkSelectMode(true);
+    setSelectedSessionIds((current) => {
+      if (current.has(id)) return current;
+      const next = new Set(current);
+      next.add(id);
+      return next;
+    });
+  }, []);
+  const selectVisibleSessions = useCallback(() => {
+    setBulkSelectMode(true);
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      for (const id of visibleSelectionIds) next.add(id);
+      return next;
+    });
+  }, [visibleSelectionIds]);
+  const clearSelectedSessions = useCallback(() => {
+    setBulkSelectMode(false);
+    setSelectedSessionIds(new Set());
+    setBulkFolderPopover(null);
+    setBulkTagPopover(null);
+  }, []);
 
   // Keep the highlight valid: clear it if its row got filtered out, but
   // do NOT auto-set it — the highlight only appears after the first
   // ArrowDown/Up key press.
   useEffect(() => {
     if (sortedRoots.length === 0) {
-      setHighlightedSessionId(null);
+      if (highlightedSessionId !== null) setHighlightedSessionId(null);
       return;
     }
     if (
@@ -1674,34 +2625,22 @@ export function SessionList({
       // AI search is run explicitly via the ✨ button, not Enter.
       if (!highlightedSessionId) return;
       e.preventDefault();
-      onSelect(highlightedSessionId);
+      const highlighted = sortedRoots.find((s) => s.id === highlightedSessionId);
+      onSelect(highlightedSessionId, highlighted);
       return;
     }
   };
 
-  const copyId = async (id: string) => {
-    try {
-      await navigator.clipboard.writeText(id);
-    } catch {
-      // Fallback for insecure contexts / older browsers.
-      const ta = document.createElement("textarea");
-      ta.value = id;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        // ignore
-      }
-      document.body.removeChild(ta);
-    }
-    setCopiedId(id);
-    window.setTimeout(() => {
-      setCopiedId((prev) => (prev === id ? null : prev));
-    }, 1200);
-  };
+  const copyId = useCallback(
+    async (id: string) => {
+      await copyToClipboard(id);
+      setCopiedId(id);
+      window.setTimeout(() => {
+        setCopiedId((prev) => (prev === id ? null : prev));
+      }, 1200);
+    },
+    [setCopiedId],
+  );
 
   // Folders render unless explicitly disabled. `undefined` (pref not yet
   // loaded) defaults to showing folders, matching the backend pref default.
@@ -1722,7 +2661,7 @@ export function SessionList({
     prevIdsRef.current = new Set(renderedOrder.map((s) => s.id));
     if (!firstId || firstId === prevFirst) return;
     if (prevIds.has(firstId)) return;
-    itemsScrollRef.current?.scrollTo({ top: 0 });
+    (itemsScrollRef.current?.closest(".sidebar") as HTMLElement | null)?.scrollTo({ top: 0 });
   }, [renderedOrder]);
 
   // Single SessionNode factory so the in-list rows and the pinned
@@ -1737,6 +2676,7 @@ export function SessionList({
       key={s.id}
       session={s}
       depth={depth}
+      nowTick={nowTick}
       dragEnabled={dragEnabled}
       currentSessionId={currentSessionId}
       highlightedSessionId={highlightedSessionId}
@@ -1753,7 +2693,11 @@ export function SessionList({
       onUnpinOthers={onUnpinOthers}
       onContextMenuOpen={openSessionContextMenu}
       onArchive={onArchive}
+      onMoveToProject={onMoveToProject}
       onWorkerEligible={onWorkerEligible}
+      onAgentRenameAllowed={onAgentRenameAllowed}
+      teamWorkersBySession={teamWorkersBySession}
+      onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
       onDetails={onDetails}
       onResumeEng={onResumeEng}
       folders={folders}
@@ -1765,54 +2709,155 @@ export function SessionList({
       selectedReqTagKeys={selectedReqTagKeys}
       onToggleReqTag={toggleTagFilter}
       sortField={sessionSort ?? "updated_at"}
+      selected={selectedSessionIds.has(s.id)}
+      bulkSelectMode={bulkSelectMode}
+      onToggleSelected={toggleSelectedSession}
+      onStartBulkSelect={startBulkSelect}
     />
   );
 
   // Pinned anchor: the currently-selected session, shown above the
-  // toolbar so it stays visible regardless of search/scroll. Looked up
-  // from the full prop list (not `filtered`) so an active search filter
-  // never hides it.
+  // toolbar when it belongs to the current backend-filtered result set.
   const selectedSession =
     (currentSessionId &&
-      (sessions.find((s) => s.id === currentSessionId) ??
-        allSessions?.find((s) => s.id === currentSessionId))) ||
+      (filtered.find((s) => s.id === currentSessionId) ??
+        (!searchQueryActive &&
+        selectedSessionProp?.id === currentSessionId &&
+        (!selectedSessionProp.working_mode ||
+          (selectedSessionProp.working_mode === "file_editing" &&
+            selectedSessionProp.working_mode_meta?.persistent === true))
+          ? selectedSessionProp
+          : null))) ||
     null;
 
   return (
     <div className="session-list" data-testid="session-list">
-      {selectedSession && (
-        <div className="session-list-selected" data-testid="session-list-selected">
-          {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
-        </div>
-      )}
+      {selectedSession &&
+        (selectedAnchorContainer
+          ? createPortal(
+              <div className="session-list-selected" data-testid="session-list-selected">
+                {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+              </div>,
+              selectedAnchorContainer,
+            )
+          : (
+            <div className="session-list-selected" data-testid="session-list-selected">
+              {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+            </div>
+          ))}
       <div className="session-list-header">
         <div className="session-list-toolbar">
           <div className={`session-search${searchExpanded ? " expanded" : ""}`}>
             <div className="session-search-input-wrap">
               <Icon name="search" size={13} className="session-search-icon" />
-              <input
+              <SearchInput
                 type="text"
                 placeholder={search || searchFocused ? t("session.searchPlaceholder") : ""}
                 value={search}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
+                aria-expanded={showSearchHistory}
+                aria-controls="session-search-history-list"
+                aria-autocomplete="list"
+                onFocus={() => {
+                  setSearchFocused(true);
+                  // Reopen the completion dropdown on refocus.
+                  setHistoryDismissed(false);
+                }}
+                onBlur={() => {
+                  setSearchFocused(false);
+                  setHistoryHighlight(-1);
+                  // Leaving the field is a commit: record what was typed
+                  // so it becomes a future completion option.
+                  commitSearchHistory(search);
+                }}
                 onChange={(e) => {
                   setSearch(e.target.value);
+                  // Typing reopens the dropdown and resets any highlight.
+                  setHistoryDismissed(false);
+                  setHistoryHighlight(-1);
                   // Editing the box reverts to live substring filtering —
                   // the AI result is stale the moment the query changes.
                   if (aiResult || aiError) clearAiSearch();
                 }}
                 onKeyDown={(e) => {
+                  // While the completion dropdown is open it owns the
+                  // arrow keys and Enter so it doesn't fight the session
+                  // list's own highlight navigation.
+                  if (showSearchHistory) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setHistoryHighlight((i) =>
+                        i + 1 >= searchHistorySuggestions.length ? 0 : i + 1,
+                      );
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setHistoryHighlight((i) =>
+                        i <= 0 ? searchHistorySuggestions.length - 1 : i - 1,
+                      );
+                      return;
+                    }
+                    if (e.key === "Enter" && historyHighlight >= 0) {
+                      e.preventDefault();
+                      applySearchHistory(searchHistorySuggestions[historyHighlight]);
+                      return;
+                    }
+                    if (e.key === "Escape" && !search) {
+                      // With an empty field, Escape just dismisses the
+                      // history dropdown. When text is present, fall
+                      // through to the existing Escape-to-clear behavior
+                      // below so search history doesn't regress it.
+                      e.preventDefault();
+                      setHistoryDismissed(true);
+                      setHistoryHighlight(-1);
+                      return;
+                    }
+                  }
                   if (e.key === "Escape" && search) {
                     e.preventDefault();
                     setSearch("");
+                    setHistoryDismissed(true);
+                    setHistoryHighlight(-1);
                     clearAiSearch();
                     return;
+                  }
+                  if (e.key === "Enter") {
+                    // Committing via Enter records the query too.
+                    commitSearchHistory(search);
                   }
                   handleSearchKeyDown(e);
                 }}
                 aria-label={t("session.searchPlaceholder")}
               />
+              {showSearchHistory && (
+                <ul
+                  id="session-search-history-list"
+                  className="session-search-history"
+                  role="listbox"
+                  aria-label={t("session.searchHistoryLabel")}
+                >
+                  {searchHistorySuggestions.map((entry, idx) => (
+                    <li key={entry} role="presentation">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={idx === historyHighlight}
+                        className={`session-search-history-item${idx === historyHighlight ? " highlighted" : ""}`}
+                        // preventDefault keeps the input focused so the
+                        // pick fires before the blur-commit tears down.
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applySearchHistory(entry);
+                        }}
+                        onMouseEnter={() => setHistoryHighlight(idx)}
+                      >
+                        <Icon name="search" size={12} className="session-search-history-icon" />
+                        <span className="session-search-history-text">{entry}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {search && (
                 <button
                   type="button"
@@ -1840,7 +2885,7 @@ export function SessionList({
                   <span className="ai-search-toggle-spinner">…</span>
                 ) : (
                   <>
-                    <span className="ai-search-toggle-icon"><Icon name="sparkles" size={12} /></span>
+                    <span className="ai-search-toggle-icon"><Icon name="assistant-start" size={14} /></span>
                     <span className="ai-search-toggle-label">AI</span>
                   </>
                 )}
@@ -1886,7 +2931,7 @@ export function SessionList({
             <>
               <span className="ai-search-reasoning" title={aiResult.reasoning}>
                 {aiResult.reasoning ||
-                  t("session.aiSearchMatches", { count: aiResult.ids.length })}
+                  t("session.aiSearchMatches", { count: aiResult.rows.length })}
               </span>
               {aiResult.reasoning && (
                 <button
@@ -1948,7 +2993,7 @@ export function SessionList({
             </div>
             <div className="ai-search-modal-section">
               <div className="ai-search-modal-label">
-                {t("session.aiSearchMatches", { count: aiResult.ids.length })}
+                {t("session.aiSearchMatches", { count: aiResult.rows.length })}
               </div>
             </div>
           </div>
@@ -1965,244 +3010,242 @@ export function SessionList({
         onDragEnd={() => {
           setIsDraggingSession(false);
           setNewFolderDragOver(false);
+          eventBus.publish("session_drag_end", {});
         }}
       >
         {orgPanel === "advanced" && (
           <div className="session-org-bar session-advanced-filter-bar">
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.sortBy")}</div>
-              <div className="session-tag-filter">
-                <button
-                  type="button"
-                  className={`session-tag-toggle ${(sessionSort ?? "updated_at") === "updated_at" ? "active" : ""}`}
-                  aria-pressed={(sessionSort ?? "updated_at") === "updated_at"}
-                  onClick={() => void changeSessionSort("updated_at")}
-                >
-                  {t("session.sortByModified")}
-                </button>
-                <button
-                  type="button"
-                  className={`session-tag-toggle ${sessionSort === "last_user_prompt_at" ? "active" : ""}`}
-                  aria-pressed={sessionSort === "last_user_prompt_at"}
-                  onClick={() => void changeSessionSort("last_user_prompt_at")}
-                >
-                  {t("session.sortByUserPrompt")}
-                </button>
-                <button
-                  type="button"
-                  className={`session-tag-toggle ${sessionSort === "last_opened_at" ? "active" : ""}`}
-                  aria-pressed={sessionSort === "last_opened_at"}
-                  onClick={() => void changeSessionSort("last_opened_at")}
-                >
-                  {t("session.sortByOpened")}
-                </button>
-              </div>
-            </div>
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.showArchived")}</div>
-              <div className="session-tag-filter">
-                <button
-                  type="button"
-                  className={`session-tag-toggle ${showArchived ? "active" : ""}`}
-                  aria-pressed={showArchived}
-                  onClick={() => setShowArchived((v) => !v)}
-                >
-                  {showArchived ? t("session.hideArchived") : t("session.showArchived")}
-                </button>
-              </div>
-            </div>
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.searchIn")}</div>
-              <div className="session-tag-filter session-search-field-filter">
-                {SESSION_SEARCH_FIELDS_ALL.map((field) => {
-                  const active = selectedSearchFields.includes(field);
-                  return (
-                    <label key={field} className={`session-search-field-toggle ${active ? "active" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={active}
-                        onChange={() => toggleSearchField(field)}
-                      />
-                      <span>{t(`session.searchField.${field}`)}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-            {folders.length > 0 && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.folder")}</div>
-                <div className="session-tag-filter">
-                  <button
-                    type="button"
-                    className={`session-tag-toggle ${selectedFolderIds.length === 0 ? "active" : ""}`}
-                    aria-pressed={selectedFolderIds.length === 0}
-                    onClick={() => setSelectedFolderIds([])}
-                  >
-                    {t("session.allFolders")}
-                  </button>
-                  {folders.map((folder) => {
-                    const active = selectedFolderIds.includes(folder.id);
-                    return (
+            <div className="session-filter-sections">
+              <section className="session-filter-section">
+                <div className="session-filter-section-title">{t("session.globalFilters")}</div>
+                <div className="session-filter-section-body">
+                  <div className="session-filter-group">
+                    <div className="session-filter-label">{t("session.sortBy")}</div>
+                    <div className="session-tag-filter">
                       <button
-                        key={folder.id}
                         type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleFolderFilter(folder.id)}
+                        className={`session-tag-toggle ${(sessionSort ?? "updated_at") === "updated_at" ? "active" : ""}`}
+                        aria-pressed={(sessionSort ?? "updated_at") === "updated_at"}
+                        onClick={() => void changeSessionSort("updated_at")}
                       >
-                        {folderPathById.get(folder.id) ?? folder.name}
+                        {t("session.sortByModified")}
                       </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            {(tags.length > 0 || requirementTagOptions.length > 0) && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.tags")}</div>
-                {tags.length > 0 && (
-                  <div className="session-tag-filter">
-                    {tags.map((tag) => {
-                      const active = selectedTagIds.includes(tag.id);
-                      return (
-                        <button
-                          key={tag.id}
-                          type="button"
-                          className={`session-tag-toggle ${active ? "active" : ""}`}
-                          aria-pressed={active}
-                          onClick={() => toggleTagFilter(tag.id)}
-                        >
-                          {tag.name}
-                        </button>
-                      );
-                    })}
+                      <button
+                        type="button"
+                        className={`session-tag-toggle ${sessionSort === "last_user_prompt_at" ? "active" : ""}`}
+                        aria-pressed={sessionSort === "last_user_prompt_at"}
+                        onClick={() => void changeSessionSort("last_user_prompt_at")}
+                      >
+                        {t("session.sortByUserPrompt")}
+                      </button>
+                      <button
+                        type="button"
+                        className={`session-tag-toggle ${sessionSort === "last_opened_at" ? "active" : ""}`}
+                        aria-pressed={sessionSort === "last_opened_at"}
+                        onClick={() => void changeSessionSort("last_opened_at")}
+                      >
+                        {t("session.sortByOpened")}
+                      </button>
+                    </div>
                   </div>
-                )}
-                {requirementTagOptions.length > 0 && (
-                  <div className="session-tag-filter session-requirement-filter">
-                    {requirementTagOptions.map((tag) => {
-                      const key = reqTagKey(tag);
-                      const active = selectedReqTagKeys.has(key);
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          className={`role-chip session-requirement-tag session-requirement-tag-${tag.kind} ${active ? "session-requirement-tag-active" : ""}`}
-                          title={`${tag.kind}: ${tag.label}`}
-                          aria-pressed={active}
-                          onClick={() => toggleTagFilter(key)}
-                        >
-                          {tag.label}
-                        </button>
-                      );
-                    })}
+                  <div className="session-filter-group">
+                    <div className="session-filter-label" title={t("session.groupByStatusHint")}>
+                      {t("session.groupByStatus")}
+                    </div>
+                    <div className="session-tag-filter">
+                      <button
+                        type="button"
+                        className={`session-tag-toggle ${sessionStatusSort ? "active" : ""}`}
+                        aria-pressed={sessionStatusSort}
+                        title={t("session.groupByStatusHint")}
+                        onClick={toggleSessionStatusSort}
+                      >
+                        {t("session.groupByStatusOn")}
+                      </button>
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
-            {providerOptions.length > 0 && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.providerFilter")}</div>
-                <div className="session-tag-filter">
-                  {providerOptions.map((provider) => {
-                    const active = selectedProviderIds.includes(provider.id);
-                    return (
+                  <div className="session-filter-group">
+                    <div className="session-filter-label">{t("session.showArchived")}</div>
+                    <div className="session-tag-filter">
                       <button
-                        key={provider.id}
                         type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleProviderFilter(provider.id)}
+                        className={`session-tag-toggle ${showArchived ? "active" : ""}`}
+                        aria-pressed={showArchived}
+                        onClick={() => setShowArchived((v) => !v)}
                       >
-                        {provider.name}
+                        {showArchived ? t("session.hideArchived") : t("session.showArchived")}
                       </button>
-                    );
-                  })}
+                    </div>
+                  </div>
+                  <div className="session-filter-group">
+                    <div className="session-filter-label">{t("session.searchIn")}</div>
+                    <div className="session-tag-filter session-search-field-filter">
+                      {SESSION_SEARCH_FIELDS_ALL.map((field) => {
+                        const active = selectedSearchFields.includes(field);
+                        return (
+                          <label key={field} className={`session-search-field-toggle ${active ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={active}
+                              onChange={() => toggleSearchField(field)}
+                            />
+                            <span>{t(`session.searchField.${field}`)}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {providerOptions.length > 0 && (
+                    <div className="session-filter-group">
+                      <div className="session-filter-label">{t("session.providerFilter")}</div>
+                      <div className="session-tag-filter">
+                        {providerOptions.map((provider) => {
+                          const active = selectedProviderIds.includes(provider.id);
+                          return (
+                            <button
+                              key={provider.id}
+                              type="button"
+                              className={`session-tag-toggle ${active ? "active" : ""}`}
+                              aria-pressed={active}
+                              onClick={() => toggleProviderFilter(provider.id)}
+                            >
+                              {provider.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  {modelOptions.length > 0 && (
+                    <div className="session-filter-group">
+                      <div className="session-filter-label">{t("session.modelFilter")}</div>
+                      <div className="session-tag-filter">
+                        {modelOptions.map((model) => {
+                          const active = selectedModelIds.includes(model);
+                          return (
+                            <button
+                              key={model}
+                              type="button"
+                              className={`session-tag-toggle ${active ? "active" : ""}`}
+                              aria-pressed={active}
+                              onClick={() => toggleModelFilter(model)}
+                            >
+                              {model}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  {modeOptions.length > 0 && (
+                    <div className="session-filter-group">
+                      <div className="session-filter-label">{t("session.modeFilter")}</div>
+                      <div className="session-tag-filter">
+                        {modeOptions.map((mode) => {
+                          const active = selectedModes.includes(mode);
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              className={`session-tag-toggle ${active ? "active" : ""}`}
+                              aria-pressed={active}
+                              onClick={() => toggleModeFilter(mode)}
+                            >
+                              {orchestrationLabel(t, mode)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  {sourceOptions.length > 0 && (
+                    <div className="session-filter-group">
+                      <div className="session-filter-label">{t("session.sourceFilter")}</div>
+                      <div className="session-tag-filter">
+                        {sourceOptions.map((src) => {
+                          const active = selectedSources.includes(src);
+                          return (
+                            <button
+                              key={src}
+                              type="button"
+                              className={`session-tag-toggle ${active ? "active" : ""}`}
+                              aria-pressed={active}
+                              onClick={() => toggleSourceFilter(src)}
+                            >
+                              {t(`session.source.${src}`, src)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  <div className="session-filter-group">
+                    <div className="session-filter-label">{t("session.fileEditModeFilter")}</div>
+                    <div className="session-tag-filter">
+                      {SESSION_FILE_EDIT_MODE_FILTERS.map((value) => {
+                        const active = fileEditModeFilter === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            className={`session-tag-toggle ${active ? "active" : ""}`}
+                            aria-pressed={active}
+                            onClick={() => setFileEditModeFilter(value)}
+                          >
+                            {t(`session.fileEditMode.${value}`)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )}
-            {modelOptions.length > 0 && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.modelFilter")}</div>
-                <div className="session-tag-filter">
-                  {modelOptions.map((model) => {
-                    const active = selectedModelIds.includes(model);
-                    return (
-                      <button
-                        key={model}
-                        type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleModelFilter(model)}
-                      >
-                        {model}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            {modeOptions.length > 0 && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.modeFilter")}</div>
-                <div className="session-tag-filter">
-                  {modeOptions.map((mode) => {
-                    const active = selectedModes.includes(mode);
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleModeFilter(mode)}
-                      >
-                        {orchestrationLabel(t, mode)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            {sourceOptions.length > 0 && (
-              <div className="session-filter-group">
-                <div className="session-filter-label">{t("session.sourceFilter")}</div>
-                <div className="session-tag-filter">
-                  {sourceOptions.map((src) => {
-                    const active = selectedSources.includes(src);
-                    return (
-                      <button
-                        key={src}
-                        type="button"
-                        className={`session-tag-toggle ${active ? "active" : ""}`}
-                        aria-pressed={active}
-                        onClick={() => toggleSourceFilter(src)}
-                      >
-                        {t(`session.source.${src}`, src)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            <div className="session-filter-group">
-              <div className="session-filter-label">{t("session.fileEditModeFilter")}</div>
-              <div className="session-tag-filter">
-                {SESSION_FILE_EDIT_MODE_FILTERS.map((value) => {
-                  const active = fileEditModeFilter === value;
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`session-tag-toggle ${active ? "active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => setFileEditModeFilter(value)}
-                    >
-                      {t(`session.fileEditMode.${value}`)}
-                    </button>
-                  );
-                })}
-              </div>
+              </section>
+              {(folders.length > 0 || tags.length > 0 || requirementTagOptions.length > 0) && (
+                <section className="session-filter-section">
+                  <div className="session-filter-section-title">{t("session.projectFilters")}</div>
+                  <div className="session-filter-section-body">
+                    {folders.length > 0 && (
+                      <div className="session-filter-group">
+                        <div className="session-filter-label">{t("session.folder")}</div>
+                        <div className="session-tag-filter">
+                          <button
+                            type="button"
+                            className={`session-tag-toggle ${selectedFolderIds.length === 0 ? "active" : ""}`}
+                            aria-pressed={selectedFolderIds.length === 0}
+                            onClick={() => setSelectedFolderIds([])}
+                          >
+                            {t("session.allFolders")}
+                          </button>
+                          {folders.map((folder) => {
+                            const active = selectedFolderIds.includes(folder.id);
+                            return (
+                              <button
+                                key={folder.id}
+                                type="button"
+                                className={`session-tag-toggle ${active ? "active" : ""}`}
+                                aria-pressed={active}
+                                onClick={() => toggleFolderFilter(folder.id)}
+                              >
+                                {folderPathById.get(folder.id) ?? folder.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {(tags.length > 0 || requirementTagOptions.length > 0) && (
+                      <div className="session-filter-group">
+                        <div className="session-filter-label">{t("session.tags")}</div>
+                        <TagFilterAutocomplete
+                          options={tagFilterOptions}
+                          selectedTagIds={selectedTagIds}
+                          onToggle={toggleTagFilter}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
             </div>
             {advancedFilterActive && (
               <button type="button" className="btn-small session-filter-clear" onClick={clearAdvancedFilters}>
@@ -2210,6 +3253,46 @@ export function SessionList({
               </button>
             )}
             {orgError && <div className="session-org-error">{orgError}</div>}
+          </div>
+        )}
+        {selectedCount > 0 && (
+          <div className="session-bulk-bar" data-testid="session-bulk-bar">
+            <span className="session-bulk-count">
+              {t("session.selectedCount", { count: selectedCount })}
+            </span>
+            <button type="button" className="btn-small" onClick={selectVisibleSessions}>
+              {t("session.selectVisible")}
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-action"
+              onClick={(e) => setBulkFolderPopover(e.currentTarget.getBoundingClientRect())}
+            >
+              <Icon name="folder" size={12} />
+              <span>{t("session.folder")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-action"
+              onClick={(e) => setBulkTagPopover(e.currentTarget.getBoundingClientRect())}
+            >
+              <Icon name="tag" size={12} />
+              <span>{t("session.tags")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-delete"
+              onClick={() => {
+                for (const id of selectedSessionIds) onDelete(id);
+                clearSelectedSessions();
+              }}
+            >
+              <Icon name="trash" size={12} />
+              <span>{t("session.deleteSelected")}</span>
+            </button>
+            <button type="button" className="btn-small" onClick={clearSelectedSessions}>
+              {t("session.clearSelection")}
+            </button>
           </div>
         )}
         {searching && sessions.length > 0 && (
@@ -2251,6 +3334,7 @@ export function SessionList({
             key={node.folder.id}
             node={node}
             depth={0}
+            nowTick={nowTick}
             currentSessionId={currentSessionId}
             highlightedSessionId={highlightedSessionId}
             childrenByParent={childrenByParent}
@@ -2266,7 +3350,11 @@ export function SessionList({
             onUnpinOthers={onUnpinOthers}
             onContextMenuOpen={openSessionContextMenu}
             onArchive={onArchive}
+            onMoveToProject={onMoveToProject}
             onWorkerEligible={onWorkerEligible}
+            onAgentRenameAllowed={onAgentRenameAllowed}
+            teamWorkersBySession={teamWorkersBySession}
+            onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
             onDetails={onDetails}
             onResumeEng={onResumeEng}
             folders={folders}
@@ -2280,6 +3368,10 @@ export function SessionList({
             collapsedFolderIds={collapsedFolderIds}
             onToggleFolder={toggleFolder}
             sortField={sessionSort ?? "updated_at"}
+            selectedSessionIds={selectedSessionIds}
+            bulkSelectMode={bulkSelectMode}
+            onToggleSelected={toggleSelectedSession}
+            onStartBulkSelect={startBulkSelect}
           />
         ))}
         {showFolders && unfiledSessions.length > 0 && folderRoots.length > 0 && (
@@ -2329,7 +3421,11 @@ export function SessionList({
           </div>
         )}
         {hasMore && !loadingMore && (
-          <div className="session-list-more" aria-hidden="true" />
+          <div
+            ref={loadMoreSentinelRef}
+            className="session-list-more"
+            aria-hidden="true"
+          />
         )}
       </div>
       </LayoutGroup>
@@ -2338,6 +3434,25 @@ export function SessionList({
           anchor={newFolderDrop.anchor}
           onCreate={(name) => createAndAssignFolder(newFolderDrop.sessionId, name)}
           onClose={() => setNewFolderDrop(null)}
+        />
+      )}
+      {bulkFolderPopover && (
+        <SessionFolderPopover
+          anchor={bulkFolderPopover}
+          folders={folders}
+          assignedFolderId={selectedFolderIdForBulk}
+          onSelect={(folderId) => void moveSelectedToFolder(folderId)}
+          onClose={() => setBulkFolderPopover(null)}
+        />
+      )}
+      {bulkTagPopover && (
+        <SessionTagPopover
+          anchor={bulkTagPopover}
+          tags={tags}
+          assignedTagIds={selectedTagIdsForBulk}
+          onToggle={(tagId) => void toggleSelectedTag(tagId)}
+          onCreateTag={(name) => void createAndAssignSelectedTag(name)}
+          onClose={() => setBulkTagPopover(null)}
         />
       )}
       {ctxMenu && (

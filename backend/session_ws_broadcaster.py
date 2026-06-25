@@ -18,6 +18,8 @@ import asyncio
 import logging
 from typing import Optional
 
+from messages_delta_compaction import compact_message_delta_payload
+
 logger = logging.getLogger(__name__)
 
 # Per-process set of unknown change kinds we've already warned about.
@@ -46,10 +48,14 @@ _METADATA_KINDS = {
     "pending_supervisor_verdict_set",
     "pending_supervisor_verdict_cleared",
     "pinned_set",
+    "topbar_pinned_set",
     "archived_set",
+    "all_projects_set",
     "worker_eligible_set",
     "worker_creation_policy_set",
     "capability_contexts_set",
+    "active_capability_added",
+    "active_capability_removed",
     "working_mode_marked",
     "adv_sync_updated",
     "msg_ask_result_set",
@@ -60,6 +66,7 @@ _METADATA_KINDS = {
     "todos_snapshot",
     "tasks_updated",
     "queued_prompts_updated",
+    "last_opened_set",
 }
 
 # Change kinds that are internal-only — they don't need WS frames because
@@ -67,30 +74,50 @@ _METADATA_KINDS = {
 # events, event stream, REST snapshot on reconnect).
 _INTERNAL_KINDS = {
     "agent_sid_set",
+    "parent_deleted",
+    "worker_fanout_required",
     "workers_snapshot",
+    "worker_panel_event",
     "worker_panel_upserted",
     "worker_panel_updated",
+    "delegate_fork_created",
     "native_event_appended",
     "native_event_replaced",
     "native_events_set",
-    "running_content_updated",
     "streaming_set",
     "stopped_at_set",
     "processed_lines_advanced",
-    "user_msg_appended",
-    "assistant_msg_appended",
     "assistant_msg_removed",
-    "user_msg_marked_error",
     "trace_id_set",
     "session_token_usage_added",
     "user_claude_uuid_set",
     "context_window_set",
+    "context_tokens_set",
+    "agent_rename_allowed_set",
+    "backend_url_set",
+    "bare_config_set",
+    "disabled_builtin_extensions_set",
+    "disallowed_tools_set",
+    "forked_from_cleared",
+    "forked_from_set",
+    "forked_from_supervisor_cleared",
+    "forked_from_supervisor_set",
+    "migrated_fields_applied",
+    "moved_from_set",
+    "moved_to_set",
+    "name_locked",
+    "origin_set",
+    "recovered_flag_cleared",
+    "sub_session_created",
     "interrupted_by_set",
     "assistant_error_set",
     "supervisor_bootstrap_received_set",
     "messages_truncated",
     "agent_sid_on_msg_set",
     "msg_transient_attempt_set",
+    "continuation_requested_set",
+    "continuation_requested_cleared",
+    "continuation_chain_set",
 }
 
 
@@ -189,6 +216,21 @@ class SessionWSBroadcaster:
                 },
             })
             return
+        if kind == "error_changed":
+            # A turn ended in an unrecoverable error (set) or the dot was
+            # retired by a view-ack / subsequent successful turn (clear).
+            # Carries `cwd` + `node_id` like the other session-state frames.
+            cwd, node_id = self._project_key_for(sid)
+            self._dispatch({
+                "type": "session_error_changed",
+                "data": {
+                    "session_id": sid,
+                    "has_error": bool(change.get("has_error")),
+                    "cwd": cwd,
+                    "node_id": node_id,
+                },
+            })
+            return
         if kind in ("marker_set", "marker_cleared"):
             # Extension attention marker on a session. Mirror unread/pinned:
             # carry `cwd` + `node_id` so the frontend can key the delta to
@@ -228,6 +270,69 @@ class SessionWSBroadcaster:
                 },
             })
             return
+        if kind == "journal_event_projected":
+            delta = change.get("delta")
+            if delta is None and change.get("msg") is not None:
+                delta = compact_message_delta_payload(change["msg"])
+            if delta is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [delta],
+                    },
+                })
+            return
+        if kind == "completed_at_set":
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [compact_message_delta_payload(msg)],
+                    },
+                })
+            return
+        if kind == "running_content_updated":
+            self._dispatch({
+                "type": "message_content_updated",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "content": change.get("content") or "",
+                },
+            })
+            return
+        if kind == "user_msg_marked_error":
+            # The user prompt's persist-ack (`user_message_persisted`) is
+            # broadcast at append time, before the turn runs. If the turn
+            # later errors and stamps status=error on the user message,
+            # the persisted frame on the client has stale status. Push
+            # the updated snapshot so the canonical user message reflects
+            # the failure — otherwise the brief error flash from the
+            # `error` WS event is overwritten by the stale persisted msg.
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [compact_message_delta_payload(msg)],
+                    },
+                })
+            return
+        if kind in ("user_msg_appended", "assistant_msg_appended"):
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [compact_message_delta_payload(msg)],
+                    },
+                })
+            return
         if kind == "msg_retrying_set":
             # Per-message marker the orchestrator stamps while it sleeps
             # between a 429 rate-limit response and the next retry. The
@@ -253,6 +358,29 @@ class SessionWSBroadcaster:
                     "session_id": sid,
                     "msg_id": change.get("msg_id"),
                     "auto_retry": change.get("auto_retry"),
+                },
+            })
+            return
+        if kind == "msg_continuation_set":
+            self._dispatch({
+                "type": "message_continuation_changed",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "chain_depth": change.get("chain_depth"),
+                },
+            })
+            return
+        if kind == "msg_run_meta_set":
+            # Per-turn provider/model/effort actually used. Re-stamped on
+            # each retry iteration so a mid-message selector switch updates
+            # the badge to the provider that ran the succeeding attempt.
+            self._dispatch({
+                "type": "message_run_meta_changed",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "run_meta": change.get("run_meta"),
                 },
             })
             return
@@ -405,8 +533,17 @@ class SessionWSBroadcaster:
             }
         elif kind == "pinned_set":
             patch = {"pinned": bool(change.get("value"))}
+        elif kind == "topbar_pinned_set":
+            patch = {
+                "topbar_pinned": bool(change.get("value")),
+                "topbar_pinned_at": change.get("topbar_pinned_at"),
+            }
         elif kind == "archived_set":
             patch = {"archived": bool(change.get("value"))}
+        elif kind == "all_projects_set":
+            # Cross-project visibility flag (e.g. the assistant singleton,
+            # whose cwd is the user home but must appear in every project).
+            patch = {"all_projects": bool(change.get("all_projects"))}
         elif kind == "worker_eligible_set":
             patch = {"worker_eligible": bool(change.get("value"))}
         elif kind == "worker_creation_policy_set":
@@ -415,6 +552,13 @@ class SessionWSBroadcaster:
             patch = {
                 "capability_contexts": list(
                     change.get("capability_contexts") or []
+                )
+            }
+        elif kind in ("active_capability_added", "active_capability_removed"):
+            from session_manager import manager as _sm
+            patch = {
+                "active_capability_ids": list(
+                    _sm.get_field(sid, "active_capability_ids") or []
                 )
             }
         elif kind == "open_panels_set":
@@ -479,17 +623,29 @@ class SessionWSBroadcaster:
             }
         elif kind == "right_panel_set":
             # Right-panel UI state. Patch carries only the keys that
-            # were actually mutated (open and/or tab); other tabs
+            # were actually mutated; other tabs
             # apply them via applySessionMetadata.
             patch = {}
             if "right_panel_open" in change:
                 patch["right_panel_open"] = bool(change["right_panel_open"])
             if "right_panel_active_tab" in change:
                 patch["right_panel_active_tab"] = change["right_panel_active_tab"]
+            if "right_panel_width" in change:
+                patch["right_panel_width"] = change["right_panel_width"]
+            if "right_panel_mobile_height" in change:
+                patch["right_panel_mobile_height"] = change["right_panel_mobile_height"]
+            if "right_panel_todos_dismissed" in change:
+                patch["right_panel_todos_dismissed"] = bool(change["right_panel_todos_dismissed"])
+            if "right_panel_auto_opened_by" in change:
+                patch["right_panel_auto_opened_by"] = list(change.get("right_panel_auto_opened_by") or [])
+            if "sidebar_minimized" in change:
+                patch["sidebar_minimized"] = bool(change["sidebar_minimized"])
         elif kind == "queued_prompts_updated":
             patch = {
                 "queued_prompts": list(change.get("queued_prompts") or [])
             }
+        elif kind == "last_opened_set":
+            patch = {"last_opened_at": change.get("at")}
         else:
             # Tag changes. Enriched payload carries the full
             # post-mutation inline_tags list.
@@ -536,22 +692,22 @@ class SessionWSBroadcaster:
         # — an invalidation ping; authoritative state lives in
         # session_store / session_manager transient sets, frontend
         # refetches or reads the payload directly per event-type.
-        coro = self._coordinator.broadcast_global(
-            payload["type"], payload["data"],
-        )
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(coro)
+            self._coordinator.schedule_global(
+                payload["type"], payload["data"], loop=loop,
+            )
             return
         except RuntimeError:
             pass
         if self._loop is not None and not self._loop.is_closed():
             try:
-                asyncio.run_coroutine_threadsafe(coro, self._loop)
+                self._coordinator.schedule_global(
+                    payload["type"], payload["data"], loop=self._loop,
+                )
                 return
             except Exception:
                 logger.exception("WS broadcast schedule failed")
         # No loop available — drop. Caller (typically a sync test
         # helper) won't see the WS frame, but that's the price of
         # firing from a non-async context with no bound loop.
-        coro.close()

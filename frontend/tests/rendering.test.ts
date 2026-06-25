@@ -1,14 +1,45 @@
-import { describe, it, expect } from "vitest";
-import { render } from "@testing-library/react";
+import { afterEach, describe, it, expect } from "vitest";
+import { render, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { MessageBubble } from "../src/components/MessageBubble";
-import { buildInlineTagsPreamble } from "../src/utils/inlineTagsPrompt";
+import {
+  buildInlineTagsPreamble,
+  mergeTagsIntoPrompt,
+} from "../src/utils/inlineTagsPrompt";
 import type { InlineTag } from "../src/types/inlineTag";
 import { ASK_SINGLETON_ID } from "../src/askSession";
+import { SIDEBAR_MINIMIZED_WIDTH } from "../src/sidebarLayout";
 
 describe("message rendering", () => {
+  const defaultViewport = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+  const fileEditMeta = (filePath: string, content = "", persistent = true) => ({
+    file_paths: [filePath],
+    original_contents: { [filePath]: content },
+    persistent,
+  });
+  const setViewport = (width: number, height: number) => {
+    Object.defineProperty(window, "innerWidth", {
+      value: width,
+      configurable: true,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      value: height,
+      configurable: true,
+    });
+    window.dispatchEvent(new Event("resize"));
+  };
+  const setDesktopViewport = () => {
+    setViewport(1400, 900);
+  };
+  afterEach(() => {
+    setViewport(defaultViewport.width, defaultViewport.height);
+  });
+
   it("Ask description lives above the prompt and follows picker resolution", async () => {
     const askEmpty = makeSession({
       id: ASK_SINGLETON_ID,
@@ -23,7 +54,7 @@ describe("message rendering", () => {
     hEmpty.unmount();
 
     const askResult = {
-      session_ids: ["target"],
+      results: [{ id: "target", name: "Target", cwd: "/tmp", first_user_prompt: "" }],
       reasoning: "matching work",
     };
     const askPending = makeSession({
@@ -173,6 +204,113 @@ describe("message rendering", () => {
     unmount();
   });
 
+
+  it("fetches full events for compacted non-stub assistant messages", async () => {
+    const fullEvent = {
+      type: "agent_message" as const,
+      data: {
+        type: "assistant",
+        uuid: "ev-full",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Fetched event text" }],
+        },
+      },
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      json: async () => makeAssistantMsg({
+        id: "a-omitted",
+        content: "Fetched event text",
+        events: [fullEvent],
+      }),
+    })) as typeof fetch;
+    try {
+      const message = makeAssistantMsg({
+        id: "a-omitted",
+        content: "",
+        events: undefined,
+        omitted_payloads: { events: { revision: "rev-1" } },
+      });
+      const { container, unmount } = render(
+        React.createElement(MessageBubble, {
+          message,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("Fetched event text");
+      });
+      unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("refetches compacted non-stub events when the omitted payload revision changes", async () => {
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCount += 1;
+      const text = fetchCount === 1 ? "First event text" : "Updated event text";
+      return {
+        json: async () => makeAssistantMsg({
+          id: "a-omitted",
+          content: text,
+          events: [{
+            type: "agent_message" as const,
+            data: {
+              type: "assistant",
+              uuid: "ev-full",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text }],
+              },
+            },
+          }],
+        }),
+      };
+    }) as typeof fetch;
+    try {
+      const first = makeAssistantMsg({
+        id: "a-omitted",
+        content: "",
+        events: undefined,
+        omitted_payloads: { events: { revision: "rev-1" } },
+      });
+      const { container, rerender, unmount } = render(
+        React.createElement(MessageBubble, {
+          message: first,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("First event text");
+      });
+
+      const second = makeAssistantMsg({
+        ...first,
+        omitted_payloads: { events: { revision: "rev-2" } },
+      });
+      rerender(
+        React.createElement(MessageBubble, {
+          message: second,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("Updated event text");
+      });
+      expect(fetchCount).toBe(2);
+      unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("renders a TodoWrite followed by its backend snapshot once", () => {
     const todos = [
       { content: "Review changes", status: "completed" as const },
@@ -240,6 +378,33 @@ describe("message rendering", () => {
 
     expect(container.querySelectorAll("[data-testid='auto-action-group']")).toHaveLength(0);
     expect(container.querySelector(".todos-snapshot")?.textContent).toContain("Check grouping");
+    unmount();
+  });
+
+  it("renders model switch events", () => {
+    const message = makeAssistantMsg({
+      events: [
+        {
+          type: "model_switched",
+          data: {
+            previous_provider_id: "claude",
+            previous_model: "sonnet",
+            provider_id: "codex",
+            model: "gpt-5-codex",
+            changed: ["provider_id", "model"],
+          },
+        },
+      ],
+    });
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message,
+        orchestrationMode: "native",
+      }),
+    );
+
+    expect(container.querySelector(".event-model-switched")?.textContent).toContain("Model switched");
+    expect(container.textContent).toContain("claude / sonnet to codex / gpt-5-codex");
     unmount();
   });
 
@@ -417,6 +582,7 @@ describe("message rendering", () => {
       }),
     );
 
+    await waitFor(() => expect(container.querySelector(".tool-call")).not.toBeNull());
     const tool = container.querySelector(".tool-call");
     expect(tool).not.toBeNull();
     expect(tool!.textContent ?? "").toContain("WebSearch");
@@ -493,7 +659,8 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("renders an explicit WebSearch tool_result when present", async () => {
+  it("renders an explicit Bash tool_result once when present", async () => {
+    const marker = "BASH_RESULT_VISIBLE_ONCE";
     const message = makeAssistantMsg({
       id: "a",
       content: "",
@@ -506,9 +673,9 @@ describe("message rendering", () => {
               content: [
                 {
                   type: "tool_use",
-                  id: "ws_1",
-                  name: "WebSearch",
-                  input: { query: "embedding models" },
+                  id: "bash_1",
+                  name: "Bash",
+                  input: { command: "echo visible" },
                 },
               ],
             },
@@ -522,8 +689,8 @@ describe("message rendering", () => {
               content: [
                 {
                   type: "tool_result",
-                  tool_use_id: "ws_1",
-                  content: "Search results for embedding models returned.",
+                  tool_use_id: "bash_1",
+                  content: marker,
                 },
               ],
             },
@@ -538,11 +705,49 @@ describe("message rendering", () => {
       }),
     );
 
+    await waitFor(() => expect(container.querySelector(".tool-call")).not.toBeNull());
     const tool = container.querySelector(".tool-call");
     expect(tool).not.toBeNull();
-    expect(tool!.textContent ?? "").toContain("WebSearch");
-    expect(tool!.querySelector(".tool-result-inline, .tool-result-block")).not.toBeNull();
-    expect(tool!.textContent ?? "").toContain("Search results for embedding models returned.");
+    expect(tool!.textContent ?? "").toContain("echo visible");
+    expect(tool!.querySelector(".bash-result-content")).not.toBeNull();
+    expect(tool!.textContent ?? "").toContain(marker);
+    const boxes = Array.from(container.querySelectorAll(".message-box"));
+    expect(boxes.some((box) => (box.textContent ?? "").includes(marker))).toBe(false);
+    unmount();
+  });
+
+  it("renders an orphaned tool_result as chat output", async () => {
+    const marker = "ORPHAN_CODEX_RESULT_VISIBLE";
+    const message = makeAssistantMsg({
+      id: "a",
+      content: "",
+      events: [
+        {
+          type: "agent_message",
+          data: {
+            type: "user",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "missing_tool",
+                  content: marker,
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message,
+        orchestrationMode: "native",
+      }),
+    );
+
+    expect(container.querySelector(".message-box")?.textContent ?? "").toContain(marker);
+    expect(container.querySelector(".tool-call")).toBeNull();
     unmount();
   });
 
@@ -599,14 +804,14 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Trace and Raw JSON toggle buttons are present in the toolbar", async () => {
+  it("Raw JSON toggle button is present in the toolbar", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
+    await h.click(".chat-toolbar-overflow-trigger");
     const labels = Array.from(h.$$(".raw-toggle")).map((b) => b.textContent);
-    expect(labels).toContain("Trace");
-    expect(labels).toContain("Raw JSON");
+    expect(labels).toContain("chat.rawJsonButton");
     h.unmount();
   });
 
@@ -648,6 +853,65 @@ describe("message rendering", () => {
     h.unmount();
   });
 
+  it("inline-tag preamble is expanded by default", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    const content = buildInlineTagsPreamble(tags) + "\nPlease address.";
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message: makeUserMsg({ id: "u-inline-tags", content }),
+        orchestrationMode: "native",
+      }),
+    );
+
+    const chip = container.querySelector(".artificial-section-inline-tags");
+    expect(chip?.classList.contains("expanded")).toBe(true);
+    expect(
+      chip?.querySelector(".artificial-section-header")?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(chip?.textContent).toContain("ephemeral");
+    expect(chip?.textContent).toContain("yes");
+    unmount();
+  });
+
+  it("mergeTagsIntoPrompt sends only the preamble when prompt is empty (no review fallback text)", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    const merged = mergeTagsIntoPrompt("   ", tags);
+    expect(merged).toBe(buildInlineTagsPreamble(tags));
+    expect(merged).not.toMatch(/address the user's comments/i);
+    expect(merged).not.toMatch(/please review/i);
+  });
+
+  it("mergeTagsIntoPrompt appends the typed prompt after the preamble", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    expect(mergeTagsIntoPrompt("do the thing", tags)).toBe(
+      buildInlineTagsPreamble(tags) + "\ndo the thing",
+    );
+  });
+
   // ── FR-FILE.0.1 enforcement ────────────────────────────────────
   // Pin that the file viewer auto-mounts when the user enters a
   // File-Mode session — the overlay state is DERIVED from
@@ -658,11 +922,7 @@ describe("message rendering", () => {
       id: "fe-persistent",
       name: "✏️ Edit — foo.txt",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/proj/foo.txt",
-        original_content: "hello",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/proj/foo.txt", "hello"),
     });
     const h = await renderApp({
       seed: {
@@ -678,18 +938,40 @@ describe("message rendering", () => {
     h.unmount();
   });
 
+  it("File-edit overlay does not mount for legacy single-file metadata", async () => {
+    const session = makeSession({
+      id: "fe-legacy",
+      working_mode: "file_editing",
+      working_mode_meta: {
+        file_path: "/tmp/legacy.txt",
+        original_content: "legacy",
+        persistent: true,
+      },
+    });
+    const h = await renderApp({
+      seed: {
+        sessions: [session],
+        files: { "/tmp/legacy.txt": "legacy" },
+      },
+    });
+    await h.selectSession(session.id);
+
+    expect(h.$('[data-testid="file-editor-overlay"]')).toBeNull();
+    h.unmount();
+  });
+
   it("FR-FILE.0.1: sidebar filter includes persistent file-edit session, excludes temporal + prompt_engineering", async () => {
     const persistentFE = makeSession({
       id: "fe-p",
       name: "✏️ persistent",
       working_mode: "file_editing",
-      working_mode_meta: { file_path: "/p.txt", persistent: true },
+      working_mode_meta: fileEditMeta("/p.txt"),
     });
     const temporalFE = makeSession({
       id: "fe-t",
       name: "✏️ temporal",
       working_mode: "file_editing",
-      working_mode_meta: { file_path: "/t.txt" },
+      working_mode_meta: fileEditMeta("/t.txt", "", false),
     });
     const eng = makeSession({
       id: "eng-1",
@@ -789,11 +1071,7 @@ describe("message rendering", () => {
     const session = makeSession({
       id: "fe-default-file",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/z.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/z.md"),
     });
     const h = await renderApp({
       seed: { sessions: [session], files: { "/tmp/z.md": "" } },
@@ -807,46 +1085,65 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Layout: sidebar trims to 200px and resizer hides while file-edit overlay is active", async () => {
+  it("Layout: sidebar auto-collapses and resizer hides while file-edit overlay is active", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-trim",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/w.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/w.md"),
     });
     const h = await renderApp({
-      seed: { sessions: [fe], files: { "/tmp/w.md": "" } },
+      seed: {
+        sessions: [fe],
+        files: { "/tmp/w.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id],
+        },
+      },
     });
-    await h.selectSession(fe.id);
 
     const sidebar = h.$(".sidebar") as HTMLElement | null;
-    expect(sidebar?.style.width).toBe("200px");
+    expect(sidebar?.className).toContain("sidebar-minimized");
+    expect(sidebar?.style.width).toBe(`${SIDEBAR_MINIMIZED_WIDTH}px`);
     expect(h.$(".sidebar-resizer")).toBeNull();
+    expect(h.$(".session-list-wrapper")).toBeNull();
+    expect(h.$('[aria-label="sidebar.expand"]')).toBeNull();
     h.unmount();
   });
 
-  it("Layout: sidebar restored to its persisted width after leaving file-edit overlay", async () => {
+  it("Layout: sidebar expands back after leaving file-edit overlay", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-back",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/back.md",
-        original_content: "",
-        persistent: true,
+      working_mode_meta: fileEditMeta("/tmp/back.md"),
+    });
+    const regular = makeSession({
+      id: "regular-back",
+      name: "regular",
+      topbar_pinned: true,
+      topbar_pinned_at: new Date().toISOString(),
+    });
+    const h = await renderApp({
+      seed: {
+        sessions: [fe, regular],
+        files: { "/tmp/back.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id, regular.id],
+        },
       },
     });
-    const regular = makeSession({ id: "regular-back", name: "regular" });
-    const h = await renderApp({
-      seed: { sessions: [fe, regular], files: { "/tmp/back.md": "" } },
-    });
-    await h.selectSession(fe.id);
-    expect((h.$(".sidebar") as HTMLElement).style.width).toBe("200px");
+    expect((h.$(".sidebar") as HTMLElement).style.width).toBe(`${SIDEBAR_MINIMIZED_WIDTH}px`);
 
-    await h.selectSession(regular.id);
-    expect((h.$(".sidebar") as HTMLElement).style.width).not.toBe("200px");
+    await h.click(`[data-tab-movement-key="${regular.id}"] .session-tab`);
+    expect((h.$(".sidebar") as HTMLElement).className).not.toContain("sidebar-minimized");
+    expect((h.$(".sidebar") as HTMLElement).style.width).toBe("280px");
     expect(h.$(".sidebar-resizer")).not.toBeNull();
     h.unmount();
   });
@@ -880,27 +1177,30 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Layout: inner chat-vs-file divider defaults to ~50% of (innerWidth - 200) on first open", async () => {
-    // Pin window.innerWidth deterministically; happy-dom defaults to 1024.
-    Object.defineProperty(window, "innerWidth", {
-      value: 1400,
-      configurable: true,
-    });
+  it("Layout: inner chat-vs-file divider defaults to ~50% of (innerWidth - collapsed sidebar) on first open", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-divider",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/div.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/div.md"),
     });
     const h = await renderApp({
-      seed: { sessions: [fe], files: { "/tmp/div.md": "" } },
+      seed: {
+        sessions: [fe],
+        files: { "/tmp/div.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id],
+        },
+      },
     });
-    await h.selectSession(fe.id);
 
-    const expected = Math.max(500, Math.floor((1400 - 200) / 2)); // 600
+    const expected = Math.max(
+      500,
+      Math.floor((1400 - SIDEBAR_MINIMIZED_WIDTH) / 2),
+    );
     const fv = h.$(".prompt-eng-fileviewer") as HTMLElement | null;
     expect(fv).not.toBeNull();
     expect(fv!.style.width).toBe(`${expected}px`);

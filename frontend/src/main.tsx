@@ -6,19 +6,31 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { cleanupRestoredModalSentinel, getModalStackSize } from './hooks/useBackButtonDismiss'
 import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
-import { installFrontendLogger } from './lib/frontendLogger'
+import { installFrontendLogger, logFailure, logTiming } from './lib/frontendLogger'
+import { runMobileOtaCheck } from './lib/mobileUpdater'
+import { applyNativeServerConfigUrl } from './mobileServerHandoff'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
+import { loadBuiltinExtensionIds } from './extensionIds'
 import './i18n'
 import './styles/globals.css'
 import App from './App'
 
-// On Capacitor native, the WebView origin (http://localhost/) is
-// cross-site to the backend, so SameSite=Lax drops the bc_session
-// cookie on every fetch after login. Bearer-token auth via a request
-// header sidesteps the cookie entirely. Installs BEFORE any module
+// Bearer-token auth via a request header sidesteps the SameSite=Lax
+// session cookie wherever the cookie can't travel: Capacitor native
+// (WebView origin http://localhost/ is cross-site to the backend) and
+// cross-site embeds (e.g. the TestApe Control Panel iframe, where the
+// cookie is third-party and dropped). The interceptor is a no-op until
+// a token is stored (QR redeem / login). Installs BEFORE any module
 // fires a request.
+installBearerAuthInterceptor()
 if (Capacitor.isNativePlatform()) {
-  installBearerAuthInterceptor()
+  const applyServerUrl = (url?: string | null) => {
+    if (!url || !applyNativeServerConfigUrl(url)) return
+    window.history.replaceState(null, '', '/')
+    window.location.reload()
+  }
+  CapApp.getLaunchUrl().then((launch) => applyServerUrl(launch?.url)).catch(() => {})
+  CapApp.addListener('appUrlOpen', (event) => applyServerUrl(event.url))
 }
 installFrontendLogger()
 
@@ -29,14 +41,30 @@ installFrontendLogger()
 cleanupRestoredModalSentinel()
 clearHardRefreshMarker()
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary>
-      <ScreenWakeLock />
-      <App />
-    </ErrorBoundary>
-  </StrictMode>,
-)
+// Private/commercial extension ids are fetched from the backend (never
+// hardcoded in this repo) and must be available before any runtime call
+// site that builds an extension API URL.
+const bootStartedAt = performance.now()
+loadBuiltinExtensionIds().catch((error) => {
+  logFailure('boot', 'builtin_extension_ids_failed', error)
+}).finally(() => {
+  logTiming('boot', 'pre_render_ready', bootStartedAt, {}, 100)
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <ScreenWakeLock />
+        <App />
+      </ErrorBoundary>
+    </StrictMode>,
+  )
+})
+
+// Capacitor OTA: after boot, check the backend for a newer web bundle and
+// apply it. No-op on web; self-guards on login state. Deferred so it never
+// blocks first paint or login.
+if (Capacitor.isNativePlatform()) {
+  setTimeout(() => { void runMobileOtaCheck() }, 3000)
+}
 
 // The workbox service worker is intentionally NOT registered. On a
 // localhost/LAN deployment the app always talks to a backend that is

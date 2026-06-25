@@ -24,10 +24,12 @@ from pathlib import Path
 from typing import ClassVar, Optional
 
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from provider import build_better_agent_run_env, create_loop_task, runner_argv
+from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
+import provider_runtime
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
 from proc_control import process_control as _process_control
@@ -37,57 +39,136 @@ logger = logging.getLogger(__name__)
 
 _RUNNER_PATH = Path(__file__).parent / "runner_copilot.py"
 
-# Models the `copilot` CLI accepts for `--model`, taken verbatim from the
-# CLI's `--help` choices list (copilot-cli 0.0.395, 2026-03). The CLI
-# rejects anything outside this set, so the static seed doubles as the
-# `start_run` validator. `fetch_copilot_models` re-parses `--help` so the
-# catalog tracks CLI upgrades without a code change.
+# Cold-start models for the GitHub Copilot CLI. `auto` is a first-class
+# `--model` value; the remaining IDs mirror the current built-in model catalog
+# exposed by `copilot help config` (Copilot CLI 1.0.65, 2026-06). Some IDs may
+# still be rejected by a user's subscription tier; the CLI is the final
+# entitlement authority. `fetch_copilot_models` re-parses the installed CLI's
+# help text so the catalog tracks CLI upgrades without a code change.
 COPILOT_MODELS = [
-    "gpt-5.2-codex",
-    "gpt-5.2",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex",
-    "gpt-5.1",
-    "gpt-5.1-codex-mini",
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-4.1",
+    "auto",
+    "claude-sonnet-4.6",
     "claude-sonnet-4.5",
-    "claude-opus-4.5",
     "claude-haiku-4.5",
-    "claude-sonnet-4",
-    "gemini-3-pro-preview",
+    "claude-fable-5",
+    "claude-opus-4.8",
+    "claude-opus-4.7",
+    "claude-opus-4.6",
+    "claude-opus-4.6-fast",
+    "claude-opus-4.5",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5-mini",
+    "mai-code-1-flash-picker",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
 ]
 
+# Current Copilot config help omits this available picker-only model, but the
+# interactive picker persists this id and `--model` accepts it. Keep it near its
+# displayed position in the picker (after GPT minis, before Gemini).
+_COPILOT_PICKER_EXTRA_MODELS_AFTER = {
+    "gpt-5-mini": ["mai-code-1-flash-picker"],
+}
 
-def fetch_copilot_models() -> list[str]:
-    """Parse the installed `copilot` CLI's `--model` choices out of
-    `--help`. Returns [] on any failure (CLI missing, choices block not
-    located, post-filter list too small) so the caller keeps the prior
-    cache and falls back to the static COPILOT_MODELS seed."""
+# Model ids from the old Copilot CLI catalog that are now rejected by current
+# CLI releases. Existing provider records/sessions may still carry these (e.g.
+# as default_model), so remap them to Copilot's supported automatic routing
+# rather than spawning a CLI process guaranteed to fail.
+_COPILOT_RETIRED_MODEL_FALLBACKS = {
+    "gpt-5.2-codex": "auto",
+    "gpt-5.2": "auto",
+    "gpt-5.1-codex-max": "auto",
+    "gpt-5.1-codex": "auto",
+    "gpt-5.1": "auto",
+    "gpt-5.1-codex-mini": "auto",
+    "gpt-5": "auto",
+    "gpt-4.1": "auto",
+    "claude-sonnet-4": "auto",
+    "gemini-3-pro-preview": "auto",
+}
+
+
+def _dedupe_preserve_order(seq: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _filter_copilot_model_ids(models: list[str]) -> list[str]:
+    """Keep chat/agent model ids and drop obvious non-chat families the CLI may
+    mix into generic help in the future."""
+    filtered = [
+        m.strip()
+        for m in models
+        if m.strip() and not m.startswith(("gemma-", "o1-", "text-"))
+    ]
+    return _dedupe_preserve_order(filtered)
+
+
+def _copilot_config_model_slug(label: str) -> str:
+    """Convert `copilot help config` display labels to `--model` ids."""
+    if label == "MAI-Code-1-Flash":
+        # The interactive picker stores/uses this internal id; the display
+        # label itself is rejected by `--model`.
+        return "mai-code-1-flash-picker"
+    return label
+
+
+def _insert_copilot_picker_extras(models: list[str]) -> list[str]:
+    out: list[str] = []
+    inserted: set[str] = set()
+    for model in models:
+        out.append(model)
+        for extra in _COPILOT_PICKER_EXTRA_MODELS_AFTER.get(model, []):
+            out.append(extra)
+            inserted.add(extra)
+    for extras in _COPILOT_PICKER_EXTRA_MODELS_AFTER.values():
+        for extra in extras:
+            if extra not in inserted:
+                out.append(extra)
+    return out
+
+
+def _parse_copilot_config_models(text: str) -> list[str]:
+    """Parse the model bullet list from `copilot help config`.
+
+    Copilot CLI 1.x removed `(choices: ...)` from `--help`; the maintained
+    built-in catalog now appears in the config help under the `model` setting:
+        `model`: AI model to use ...
+          - "claude-sonnet-4.6"
+          - "gpt-5.4"
+    """
     import re
 
-    copilot_bin = resolve_cli_binary("copilot")
-    if not copilot_bin:
-        return []
-    try:
-        proc = subprocess.run(
-            [copilot_bin, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
+    models: list[str] = []
+    in_model_section = False
+    for line in text.splitlines():
+        if re.match(r"\s*`model`:\s", line):
+            in_model_section = True
+            continue
+        if in_model_section and re.match(r"\s*`[^`]+`:\s", line):
+            break
+        if not in_model_section:
+            continue
+        m = re.match(r'\s*-\s+"([^"]+)"\s*$', line)
+        if m:
+            models.append(_copilot_config_model_slug(m.group(1)))
+    return _filter_copilot_model_ids(
+        _insert_copilot_picker_extras(["auto", *models])
+    ) if models else []
 
-    # The --model help line looks like:
-    #   --model <model>  Set the AI model ... (choices: "a", "b", "c-3")
-    # Parse the parenthesized choices list with a bracket counter so a
-    # future choice containing a stray ')' inside a quoted string can't
-    # truncate the match.
-    text = proc.stdout
+
+def _parse_copilot_help_choices(text: str) -> list[str]:
+    """Parse the legacy `(choices: ...)` list from `copilot --help`."""
+    import re
+
     head = re.search(r"--model\s+<[^>]+>[\s\S]*?\(choices:\s*", text)
     if not head:
         return []
@@ -109,13 +190,39 @@ def fetch_copilot_models() -> list[str]:
                 break
     if end < 0:
         return []
-    body = text[start:end]
-    models = re.findall(r'"([^"]+)"', body)
-    # Drop obvious non-chat families the CLI may mix in later.
-    filtered = [m for m in models if not m.startswith(("gemma-", "o1-", "text-"))]
-    if len(filtered) < 3:
+    models = re.findall(r'"([^"]+)"', text[start:end])
+    return _filter_copilot_model_ids(["auto", *models]) if models else []
+
+
+def _normalize_copilot_model(model: Optional[str]) -> str:
+    value = str(model or "").strip()
+    return _COPILOT_RETIRED_MODEL_FALLBACKS.get(value, value)
+
+
+def fetch_copilot_models() -> list[str]:
+    """Parse the installed `copilot` CLI's model catalog from help output.
+
+    Returns [] on any failure (CLI missing, help shape changed, post-filter list
+    too small) so the caller keeps the prior cache and falls back to the static
+    COPILOT_MODELS seed.
+    """
+    copilot_bin = resolve_cli_binary("copilot")
+    if not copilot_bin:
         return []
-    return filtered
+
+    commands = ([copilot_bin, "help", "config"], [copilot_bin, "--help"])
+    parsers = (_parse_copilot_config_models, _parse_copilot_help_choices)
+    for cmd, parser in zip(commands, parsers):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        parsed = parser(proc.stdout)
+        if len(parsed) >= 3:
+            return parsed
+    return []
 
 
 class CopilotProvider(GeminiProvider):
@@ -165,6 +272,7 @@ class CopilotProvider(GeminiProvider):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,
@@ -185,6 +293,7 @@ class CopilotProvider(GeminiProvider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         del disallowed_tools, setting_sources
         del supervised, supervisor_agent_session_id, mssg_sender_session_id, is_worker
@@ -195,6 +304,7 @@ class CopilotProvider(GeminiProvider):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
         if self.defunct:
             raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
+        self.assert_not_suspended(action="start new runs")
         if reasoning_effort:
             raise NotImplementedError("copilot provider does not support reasoning effort.")
         if mode == "team":
@@ -202,7 +312,8 @@ class CopilotProvider(GeminiProvider):
         if fork:
             raise NotImplementedError("copilot provider does not support fork.")
 
-        available = self.available_models()
+        model = _normalize_copilot_model(model)
+        available = _dedupe_preserve_order(self.available_models() + COPILOT_MODELS)
         if model and model not in available:
             raise ValueError(
                 f"model {model!r} is not available for the Copilot provider. "
@@ -222,6 +333,7 @@ class CopilotProvider(GeminiProvider):
             "model": model,
             "session_id": session_id,
             "mode": mode,
+            "source": source or "",
             "app_session_id": app_session_id,
             "backend_url": backend_url or "",
             "internal_token": internal_token or "",
@@ -237,11 +349,14 @@ class CopilotProvider(GeminiProvider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=session_record,
+                    worker_record=worker_record,
+                )
             ),
             "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
@@ -267,8 +382,10 @@ class CopilotProvider(GeminiProvider):
                 user_facing=bool(open_file_panel_enabled) and not bool(session_record.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = subprocess.Popen(
+            popen = provider_runtime.popen_runner(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="copilot"),
+                run_dir=run_dir,
+                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
@@ -301,7 +418,7 @@ class CopilotProvider(GeminiProvider):
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"copilot-bootstrap-{run_id[:8]}",
@@ -316,7 +433,14 @@ class CopilotProvider(GeminiProvider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
+        if no_tools:
+            # Copilot runs with --allow-all-tools; no proven disable path —
+            # fail closed when the caller demanded a text-only run.
+            logger.error("CopilotProvider.run_headless: no_tools requested but unsupported")
+            return None
         if fork:
             logger.warning("Copilot provider ignores fork flag in run_headless")
         copilot_bin = resolve_cli_binary("copilot")

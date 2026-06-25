@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import React from "react";
-import { MessageGroup } from "../src/components/MessageBubble";
+import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 
 afterEach(cleanup);
@@ -15,9 +15,9 @@ function toggleLabels(container: HTMLElement): (string | null)[] {
 describe("primary-entity toggle label by orchestration mode", () => {
   it("native turn never renders a manager scope chip", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "hi" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "hi" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "",
           events: [{ type: "output", data: { output: "ok" } }],
@@ -33,9 +33,9 @@ describe("primary-entity toggle label by orchestration mode", () => {
 
   it("team turn is labeled 'Team'", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "hi" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "hi" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "",
           events: [{ type: "output", data: { output: "ok" } }],
@@ -49,9 +49,9 @@ describe("primary-entity toggle label by orchestration mode", () => {
 
   it("native turn with sub-session panels keeps primary output unlabeled", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "hi" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "hi" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "",
           manager: undefined,

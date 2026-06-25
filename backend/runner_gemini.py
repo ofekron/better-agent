@@ -31,12 +31,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
+from runner_guard import (
+    GHOST_RETRY_BACKOFF_S,
+    GHOST_RETRY_MAX,
+    apply_ghost_completion_guard,
+    should_retry_ghost,
+)
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
+from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
-from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
+from runtime_skills import has_runtime_skills, materialize_runtime_skills
 from proc_control import process_control as _process_control
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +59,17 @@ def _gemini_terminal_error(raw_event: dict) -> Optional[str]:
     return None
 
 
-def _materialize_gemini_run_home(run_dir: Path, provider_run_config: dict) -> Optional[dict[str, str]]:
+def _materialize_gemini_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    cwd: str,
+    bare_config: bool = False,
+) -> Optional[dict[str, str]]:
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
-    if not mcp_servers and not skills:
+    has_ext_skills = has_runtime_skills(cwd, bare_config=bare_config)
+    if not mcp_servers and not skills and not has_ext_skills:
         return None
 
     real_home = Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()).expanduser()
@@ -62,10 +78,17 @@ def _materialize_gemini_run_home(run_dir: Path, provider_run_config: dict) -> Op
     symlink_home_overlay(real_home / ".gemini", overlay_home / ".gemini", skip={"settings.json", "skills"})
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
+    ext_count = materialize_runtime_skills(
+        overlay_home / ".gemini" / "skills", cwd, bare_config=bare_config
+    )
+    materialize_runtime_skills(
+        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config
+    )
+
     settings = _load_json_object(real_home / ".gemini" / "settings.json")
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
-    if skills:
+    if skills or ext_count:
         settings["skills"] = {"enabled": True}
 
     if settings:
@@ -111,7 +134,13 @@ def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
     disabled_tools = [
         str(item).strip()
         for item in (inputs.get("disabled_builtin_tools") or [])
-        if str(item or "").strip() in {"ask", "create_session", "create_sub_session", "delegate_task", "mssg"}
+        if str(item or "").strip() in {
+            "ask",
+            "create_session",
+            "create_sub_session",
+            "delegate_task",
+            "mssg",
+        }
     ]
 
     config = {
@@ -149,12 +178,6 @@ def _resolve_gemini_cli() -> Optional[str]:
     from cli_paths import resolve_cli_binary
 
     return resolve_cli_binary("gemini")
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _new_uuid() -> str:
@@ -558,23 +581,7 @@ def _apply_image_attachments(
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 # ============================================================================
@@ -633,7 +640,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     run_env = os.environ.copy()
     run_env.update(native_mcp_runtime_env(inputs))
-    scoped_env = _materialize_gemini_run_home(run_dir, provider_run_config)
+    scoped_env = _materialize_gemini_run_home(
+        run_dir,
+        provider_run_config,
+        cwd=cwd,
+        bare_config=bool(inputs.get("bare_config")),
+    )
     if scoped_env:
         run_env.update(scoped_env)
 
@@ -642,7 +654,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         _fail(run_dir, "gemini CLI not found on PATH")
         return 1
 
-    cmd: list[str] = [gemini_bin, "--yolo", "--skip-trust", "-p", "-", "-o", "stream-json"]
+    _permission = inputs.get("permission") or {}
+    # Gemini has NO headless interactive-approval channel: in `-p` mode the
+    # CLI throws ("requires user confirmation, which is not supported in
+    # non-interactive mode") before emitting any answerable event. So unlike
+    # Claude/Codex there is no tool_approval round-trip here — only the
+    # headless-safe modes (yolo / auto_edit / plan) are exposed (see
+    # permission.GEMINI_APPROVAL_MODES). "default" is intentionally absent.
+    _approval_mode = (
+        _permission.get("mode") if isinstance(_permission, dict) else None
+    ) or "yolo"
+    cmd: list[str] = [gemini_bin, "--approval-mode", _approval_mode, "--skip-trust", "-p", "-", "-o", "stream-json"]
     cmd += ["--include-directories", "/"]
     if attachment_dir:
         cmd += ["--include-directories", str(attachment_dir)]
@@ -667,6 +689,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     # Network retry: infinite retry on transient failures.
     _retry_backoff = 2.0
+    _ghost_attempts = 0
     _accumulated_usage: dict = {}
     _cancel_path = run_dir / "cancel"
 
@@ -688,6 +711,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         error: Optional[str] = None
         cancelled = False
         result_seen = False
+        assistant_seen = False
 
         current_content: dict[str, str] = {}
         current_uuids: dict[str, str] = {}
@@ -725,7 +749,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 cwd=cwd,
                 env=run_env,
                 **_process_control().detach_spawn_kwargs(),
-                limit=16 * 1024 * 1024,
+                limit=SUBPROCESS_LINE_LIMIT_BYTES,
             )
 
             proc.stdin.write(prompt.encode("utf-8"))
@@ -802,7 +826,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 discovered_sid = sid
                                 state["session_id"] = sid
                                 state["jsonl_path"] = str(events_path)
-                                _atomic_write_json(state_path, state)
+                                atomic_write_json(state_path, state)
                             init_model = raw_event.get("model")
                             if init_model:
                                 _resolved_model = init_model
@@ -840,6 +864,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 current_content[role] = ""
 
                             current_content[role] += raw_event.get("content", "")
+                            if current_content[role].strip():
+                                assistant_seen = True
 
                             mod_event = dict(raw_event)
                             mod_event["content"] = current_content[role]
@@ -964,6 +990,33 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             log.exception("Gemini runner failed")
             error = f"{type(e).__name__}: {e}"
 
+        # Gemini CLI can report status: "success" while the actual content
+        # is an API error (e.g. quota exhaustion with no 4xx code). Scan the
+        # accumulated assistant content and flip success when this happens.
+        # Runs per-attempt so a retry starts from a clean classification.
+        if success and not error and not cancelled:
+            all_text = " ".join(current_content.get(k, "") for k in ("assistant", "assistant_text"))
+            if re.search(r"API Error:", all_text):
+                error = normalize_context_overflow_error(all_text.strip()) or all_text.strip()
+                success = False
+
+        # Ghost-completion guard (parity with Claude + Codex runners): a
+        # zero-usage success with no assistant output for a non-empty prompt
+        # is a provider ghost completion, not a real success. Applied inside
+        # the loop so a prompt_not_executed result can be retried — the
+        # provider intermittently swallows an empty/failed upstream response
+        # as a successful zero-usage turn, and a fresh attempt usually
+        # succeeds.
+        success, error = apply_ghost_completion_guard(
+            success=success,
+            cancelled=cancelled,
+            error=error,
+            prompt=prompt,
+            assistant_seen=assistant_seen,
+            total_usage=total_usage,
+            result_seen=result_seen,
+        )
+
         # Network retry check: if the error looks transient, retry
         if error and not cancelled and _is_network_error_message(error):
             # Accumulate usage from failed attempt before resetting
@@ -976,6 +1029,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             _retry_backoff = min(_retry_backoff * 2, 60.0)
             continue
 
+        # Ghost-completion retry (bounded): prompt_not_executed is
+        # transient — retry a few times before failing the turn.
+        if should_retry_ghost(error, cancelled=cancelled, attempts=_ghost_attempts):
+            _ghost_attempts += 1
+            log.warning(
+                "gemini ghost completion (prompt_not_executed); "
+                "retry %d/%d after %.1fs",
+                _ghost_attempts, GHOST_RETRY_MAX, GHOST_RETRY_BACKOFF_S,
+            )
+            await _retry_sleep(GHOST_RETRY_BACKOFF_S)
+            continue
+
         # Accumulate usage across all attempts
         total_usage = _sum_usage(_accumulated_usage, total_usage)
         _retry_backoff = 2.0
@@ -983,15 +1048,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     if cancelled and not error:
         error = "cancelled"
-
-    # Gemini CLI can report status: "success" while the actual content
-    # is an API error (e.g. quota exhaustion with no 4xx code). Scan the
-    # accumulated assistant content and flip success when this happens.
-    if success and not error and not cancelled:
-        all_text = " ".join(current_content.get(k, "") for k in ("assistant", "assistant_text"))
-        if re.search(r"API Error:", all_text):
-            error = normalize_context_overflow_error(all_text.strip()) or all_text.strip()
-            success = False
 
     final_success = success and not cancelled and not error
 
@@ -1037,7 +1093,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if discovered_sid and not state.get("session_id"):
         state["session_id"] = discovered_sid
     try:
-        _atomic_write_json(state_path, state)
+        atomic_write_json(state_path, state)
     except Exception:
         log.exception("failed to finalize state.json")
 

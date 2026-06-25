@@ -18,13 +18,13 @@ import sys
 import tempfile
 import asyncio
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-event-journal-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-event-journal-")
 
 from event_bus import BusEvent, EventBus  # noqa: E402
 from event_journal import (  # noqa: E402
@@ -36,8 +36,12 @@ from event_journal import (  # noqa: E402
     RENDER_EVENT_TYPES,
     EventJournalWriter,
     event_journal_reader,
+    publish_event,
 )
-from event_bus_subscribers import _refresh_session_content_projection  # noqa: E402
+from event_bus_subscribers import (  # noqa: E402
+    _SESSION_PROJECTION_DISPATCHER,
+    _refresh_session_content_projection,
+)
 from session_manager import manager as session_manager  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
@@ -56,6 +60,80 @@ def _agent_data(uid: str, text: str) -> dict:
         "type": "assistant",
         "message": {"content": [{"type": "text", "text": text}]},
     }
+
+
+async def _duplicate_ack_is_not_projected_twice() -> None:
+    import session_search_projection
+
+    bus = EventBus()
+    writer = EventJournalWriter()
+    writer.register(bus)
+    bus.subscribe(
+        EVENT_JOURNAL_WRITTEN,
+        _refresh_session_content_projection,
+        name="duplicate-content-projection",
+    )
+    acks: list[BusEvent] = []
+    subscriber_failures: list[BusEvent] = []
+
+    async def record_ack(event: BusEvent) -> None:
+        acks.append(event)
+
+    async def record_subscriber_failure(event: BusEvent) -> None:
+        subscriber_failures.append(event)
+
+    bus.subscribe(EVENT_JOURNAL_WRITTEN, record_ack, name="duplicate-ack-recorder")
+    bus.subscribe("subscriber_failed", record_subscriber_failure, name="duplicate-failure-recorder")
+    session = session_manager.create(
+        name="duplicate-ack", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    session_manager.append_assistant_msg(
+        sid, {"id": "msg-dup", "role": "assistant", "content": "", "events": []},
+    )
+    indexed: list[dict] = []
+    dirty: list[str] = []
+    original_index = session_search_projection.note_event_written
+    original_dirty = session_manager.mark_reconcile_dirty
+    session_search_projection.note_event_written = lambda _root_id, entry: indexed.append(entry)
+    session_manager.mark_reconcile_dirty = lambda root_id: dirty.append(root_id)
+    try:
+        data = _agent_data("same-uid", "one durable event")
+        first = await publish_event(
+            session_id=sid,
+            event_type="agent_message",
+            data=data,
+            source="test",
+            message_id="msg-dup",
+            bus_instance=bus,
+        )
+        duplicate = await publish_event(
+            session_id=sid,
+            event_type="agent_message",
+            data=data,
+            source="test",
+            message_id="msg-dup",
+            bus_instance=bus,
+        )
+        await _SESSION_PROJECTION_DISPATCHER.barrier(sid)
+        rows = event_journal_reader.read_message_events(sid, "msg-dup")
+        msg = session_manager.get_message_full(sid, "msg-dup") or {}
+        assert first.seq > 0
+        assert duplicate.seq == -1
+        assert [event.payload.get("appended") for event in acks] == [True, False]
+        assert len(rows) == 1
+        assert len(msg.get("events") or []) == 1
+        assert len(indexed) == 1
+        assert dirty == []
+        assert subscriber_failures == []
+    finally:
+        session_search_projection.note_event_written = original_index
+        session_manager.mark_reconcile_dirty = original_dirty
+        writer.close()
+
+
+def test_duplicate_ack_is_not_projected_twice() -> None:
+    asyncio.run(_duplicate_ack_is_not_projected_twice())
 
 
 def _agent_blocks(uid: str, blocks: list[dict]) -> dict:
@@ -501,6 +579,78 @@ async def _run() -> bool:
         total_after_failure == 7 and len(rows_after_failure) == 7,
         "failed journal event does not append a row",
         str(rows_after_failure),
+    ) and ok
+    from event_ingester import event_ingester  # noqa: E402
+
+    page_start_seq = total_after_failure
+    await _publish(
+        bus,
+        sid,
+        event_type="agent_message",
+        data={
+            **_agent_data("late-child", "late child"),
+            "parentUuid": "late-parent",
+            "isSidechain": True,
+        },
+        event_id="e-late-child",
+    )
+    for i in range(12):
+        await _publish(
+            bus,
+            sid,
+            event_type="agent_message",
+            data=_agent_data(f"pad-{i}", f"pad {i}"),
+            message_id="msg-pad",
+            event_id=f"e-pad-{i}",
+        )
+    await _publish(
+        bus,
+        sid,
+        event_type="agent_message",
+        data=_agent_data("late-parent", "late parent"),
+        message_id="msg-late",
+        event_id="e-late-parent",
+    )
+    late_reader = type(event_journal_reader)(message_cache_size=20)
+    paged_calls: list[dict] = []
+    original_read_events = event_ingester.read_events
+
+    def spy_read_events(root_id, *args, **kwargs):
+        paged_calls.append(dict(kwargs))
+        return original_read_events(root_id, *args, **kwargs)
+
+    event_ingester.read_events = spy_read_events
+    try:
+        paged_rows, paged_total, paged_more = late_reader.read_events(
+            sid,
+            after_seq=page_start_seq,
+            limit=5,
+            sid_filter=sid,
+        )
+    finally:
+        event_ingester.read_events = original_read_events
+    ok = _check(
+        paged_calls
+        and paged_calls[-1].get("limit") == 6
+        and paged_calls[-1].get("after_seq") == page_start_seq
+        and paged_calls[-1].get("sid_filter") == sid,
+        "resolved reader keeps non-message reads paged",
+        str(paged_calls),
+    ) and ok
+    ok = _check(
+        len(paged_rows) == 5 and paged_total == 6 and paged_more,
+        "resolved reader returns one capped page",
+        f"len={len(paged_rows)} total={paged_total} more={paged_more}",
+    ) and ok
+    ok = _check(
+        any(
+            (row.get("data") or {}).get("uuid") == "late-child"
+            and row.get("msg_id") == "msg-late"
+            for row in paged_rows
+        ),
+        "paged resolved reader stamps late-owned rows",
+        str([(row.get("data") or {}).get("uuid") + ":" + str(row.get("msg_id"))
+             for row in paged_rows]),
     ) and ok
     return ok
 

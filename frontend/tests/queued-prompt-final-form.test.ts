@@ -56,7 +56,7 @@ describe("queued prompt — previous assistant reaches final form", () => {
 
     // Dump the full chat DOM text per group to see what the collapsed
     // previous-turn group actually displays.
-    const groups = h.$$(".message-group, [data-testid='chat-messages'] > *");
+    const groups = h.$$(".turn-group, [data-testid='chat-messages'] > *");
     for (const g of groups) {
       console.log(
         "GROUP:",

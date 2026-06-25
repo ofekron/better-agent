@@ -16,6 +16,7 @@ import os
 import tempfile
 
 import _test_home
+from live_llm_test_guard import live_llm_skip_message, live_llm_tests_enabled
 
 # Engage at import time — before any backend import in collected test modules.
 # Layers 1+2 (ba_home guard + deletion guard) are always on. Layer 3 (FS lock
@@ -25,6 +26,22 @@ _SESSION_ROOT = tempfile.mkdtemp(prefix="ba-pytest-root-")
 _test_home.engage(_SESSION_ROOT, lock=bool(os.environ.get("BA_LOCK_PROD_HOME")))
 
 import pytest  # noqa: E402
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live_llm: test requires an explicitly enabled live LLM/provider",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if live_llm_tests_enabled():
+        return
+
+    for item in items:
+        if item.get_closest_marker("live_llm"):
+            item.add_marker(pytest.mark.skip(reason=live_llm_skip_message(item.name)))
 
 
 @pytest.fixture(autouse=True)

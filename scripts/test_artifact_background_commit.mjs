@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   cleanGeneratedArtifacts,
   commitGeneratedArtifacts,
@@ -28,9 +29,25 @@ function write(path, contents) {
   writeFileSync(path, contents);
 }
 
+const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = mkdtempSync(join(tmpdir(), "bc-artifact-commit-"));
 
 try {
+  const ignoredHook = spawnSync("git", ["check-ignore", "-q", ".githooks/pre-commit"], {
+    cwd: projectRoot,
+  });
+  if (ignoredHook.status === 0) {
+    fail("expected pre-commit hook to be tracked by git, not ignored");
+  }
+
+  const hookSource = readFileSync(new URL("../.githooks/pre-commit", import.meta.url), "utf8");
+  if (!hookSource.includes("rebuild-artifacts-background.mjs")) {
+    fail("expected pre-commit hook to schedule background artifact rebuilds");
+  }
+  if (!hookSource.includes("BA_SKIP_ARTIFACT_BACKGROUND")) {
+    fail("expected pre-commit hook to expose the current artifact skip env var");
+  }
+
   const workerSource = readFileSync(new URL("./rebuild-artifacts-worker.mjs", import.meta.url), "utf8");
   const waitIndex = workerSource.indexOf("waitForSourceCommit();");
   const apkRunIndex = workerSource.indexOf('run("rebuild-android-apk.mjs")');
@@ -47,6 +64,7 @@ try {
   write(join(repo, "marketing", "better-agent", "downloads", "BetterAgent-macOS-arm64.dmg"), "dmg-v1");
   write(join(repo, "marketing", "better-agent", "downloads", "SHA256SUMS.txt"), "sha-v1  BetterAgent-macOS-arm64.dmg\n");
   write(join(repo, "marketing", "better-agent", "index.html"), '<a href="./downloads/BetterAgent-macOS-arm64.dmg?v=0.1.1">Download</a>');
+  write(join(repo, "marketing", "better-agent", "styles.css"), "body { color: black; }\n");
   write(join(repo, "unrelated.txt"), "base");
   git(repo, ["add", "."]);
   git(repo, ["commit", "-m", "initial"]);
@@ -59,6 +77,7 @@ try {
   write(join(repo, "marketing", "better-agent", "downloads", "BetterAgent-macOS-arm64.dmg"), "dmg-v2");
   write(join(repo, "marketing", "better-agent", "downloads", "SHA256SUMS.txt"), "sha-v2  BetterAgent-macOS-arm64.dmg\n");
   write(join(repo, "marketing", "better-agent", "index.html"), '<a href="./downloads/BetterAgent-macOS-arm64.dmg?v=0.1.2">Download</a>');
+  write(join(repo, "marketing", "better-agent", "styles.css"), "body { color: blue; }\n");
   write(join(repo, "unrelated.txt"), "second staged unrelated");
   git(repo, ["add", "unrelated.txt"]);
   git(repo, ["commit", "-m", "source"]);
@@ -80,6 +99,7 @@ try {
     "marketing/better-agent/downloads/BetterAgent-macOS-arm64.dmg",
     "marketing/better-agent/downloads/SHA256SUMS.txt",
     "marketing/better-agent/index.html",
+    "marketing/better-agent/styles.css",
   ];
   if (JSON.stringify(committedFiles) !== JSON.stringify(expectedFiles)) {
     fail(`expected only generated artifacts in commit, got ${committedFiles.join(", ")}`);

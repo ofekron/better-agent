@@ -38,6 +38,8 @@ def test_kill_runner_removed():
     print("T1 dead-code _kill_runner is gone (would be a backend auto-kill)")
     src = open(os.path.join(BACKEND, "provider_claude.py"), encoding="utf-8").read()
     _check("_kill_runner" not in src, "provider_claude.py has no _kill_runner")
+    watch = _func_source("provider_claude.py", "_watch_process_exit") or ""
+    _check("force_kill" not in watch, "Claude wind-down never force-kills a completed runner")
 
 
 def test_exception_cleanup_does_not_kill():
@@ -59,64 +61,22 @@ def test_exception_cleanup_does_not_kill():
         _check(not bad, f"{path}: no except-handler both kills and re-raises ({bad})")
 
 
-def test_babysitter_linger_kill_free():
-    print("T3 babysitter linger has no kill outside the cancel-sentinel path")
-    src = _func_source("runner.py", "_linger_for_background_work")
-    _check(src is not None, "runner.py defines _linger_for_background_work")
-    if src is None:
-        return
-    # The ONLY kill in the linger loop is the sweep gated on the
-    # run-level cancel sentinel (the user's explicit stop). The signal
-    # poll itself must never signal a process.
+def test_turn_cancel_sweep_is_sentinel_gated():
+    print("T3 the runner has no kill outside the cancel-sentinel sweep path")
+    src = open(os.path.join(BACKEND, "runner.py"), encoding="utf-8").read()
+    _check("_linger_for_background_work" not in src,
+           "runner.py has no babysitter linger (per-turn process)")
+    # The only detached-group sweep left is the mid-turn cancel path,
+    # gated on the run-level cancel sentinel (the user's explicit stop).
     tree = ast.parse(src)
-    kill_calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = ast.unparse(node.func)
-            if "kill" in name.lower() or "terminate" in name.lower():
-                kill_calls.append(name)
-    _check(kill_calls == ["pc.kill_detached_descendant_groups"],
-           f"linger's only kill is the cancel-path sweep ({kill_calls})")
-    _check("cancel_path.exists()" in src,
-           "the sweep is gated on the run-level cancel sentinel")
-    assigned = {
-        target.id
+    sweep_lines = [
+        node.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
-    assigned |= {
-        node.arg
-        for node in ast.walk(tree)
-        if isinstance(node, ast.arg)
-    }
-    assigned |= {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    loaded = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
-    allowed_globals = {
-        "Exception",
-        "OSError",
-        "Path",
-        "asyncio",
-        "float",
-        "frozenset",
-        "logger",
-        "logging",
-        "log",
-        "os",
-        "process_control",
-    }
-    undefined = loaded - assigned - allowed_globals
-    _check("ignore" not in undefined and not undefined,
-           f"linger loop has no undefined locals ({sorted(undefined)})")
+        if isinstance(node, ast.Call)
+        and "kill_detached_descendant_groups" in ast.unparse(node.func)
+    ]
+    _check(len(sweep_lines) <= 2,
+           f"detached sweeps limited to the cancel path ({sweep_lines})")
 
 
 def test_non_tty_shutdown_leaves_runners_alive():
@@ -175,7 +135,7 @@ def test_supervisor_kill_flag_is_explicit_only():
 def main():
     test_kill_runner_removed()
     test_exception_cleanup_does_not_kill()
-    test_babysitter_linger_kill_free()
+    test_turn_cancel_sweep_is_sentinel_gated()
     test_non_tty_shutdown_leaves_runners_alive()
     test_interactive_shutdown_requires_explicit_yes()
     test_supervisor_kill_flag_is_explicit_only()

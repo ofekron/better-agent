@@ -1,38 +1,38 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DEFAULT_BACKEND_PORT, normalizeServerUrl, writeNativeServerUrl } from "../nativeServerConfig";
 import { SERVER_CANDIDATES } from "../serverCandidates.generated";
 
 interface Props {
   onConfigured: () => void;
+  /** Pre-fill the input with this URL instead of the top detected
+   * candidate. Used by the "change server" flow so the user starts from
+   * the server they are currently connected to. */
+  initialUrl?: string;
 }
 
-export function ServerSetup({ onConfigured }: Props) {
+export function ServerSetup({ onConfigured, initialUrl }: Props) {
   const { t } = useTranslation();
-  // Pre-fill with the highest-ranked candidate the build script detected
-  // on the desktop (Tailscale → LAN → other). The user can edit or pick a
-  // different chip below.
-  const [url, setUrl] = useState(SERVER_CANDIDATES[0] ?? "");
+  // First run: pre-fill with the highest-ranked candidate the build
+  // script detected on the desktop (Tailscale → LAN → other). Change
+  // flow: pre-fill the currently connected server so the user edits
+  // from a known value.
+  const [url, setUrl] = useState(initialUrl ?? SERVER_CANDIDATES[0] ?? "");
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
 
   function handleSave(value?: string) {
-    const raw = (value ?? url).trim().replace(/\/+$/, "");
-    if (!raw) {
-      setError(t("serverSetup.urlRequired"));
-      return;
-    }
-    // Accept bare host/IP — prepend http://, default to :8000 if no port.
-    // Also accepts full URLs (http(s)://host[:port]).
-    const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
-    let parsed: URL;
+    let cleaned = "";
     try {
-      parsed = new URL(withScheme);
-    } catch {
+      cleaned = normalizeServerUrl(value ?? url);
+    } catch (e) {
+      if (e instanceof Error && e.message === "required") {
+        setError(t("serverSetup.urlRequired"));
+        return;
+      }
       setError(t("serverSetup.urlInvalid"));
       return;
     }
-    if (!parsed.port && parsed.protocol === "http:") parsed.port = "8000";
-    const cleaned = `${parsed.protocol}//${parsed.host}`;
     setError("");
     setTesting(true);
 
@@ -42,7 +42,7 @@ export function ServerSetup({ onConfigured }: Props) {
     fetch(`${cleaned}/api/auth/needs_setup`, { signal: AbortSignal.timeout(5000) })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        localStorage.setItem("better_agent_server_url", cleaned);
+        writeNativeServerUrl(cleaned);
         onConfigured();
       })
       .catch((e) => {
@@ -60,7 +60,9 @@ export function ServerSetup({ onConfigured }: Props) {
     <div className="login-page">
       <div className="login-card">
         <h1 className="login-title">{t("serverSetup.title")}</h1>
-        <p className="login-subtitle">{t("serverSetup.subtitle")}</p>
+        <p className="login-subtitle">
+          {t("serverSetup.subtitle", { port: DEFAULT_BACKEND_PORT })}
+        </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
