@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import atexit
-import fcntl
 import os
 import socket
 from pathlib import Path
 
 from paths import ba_home
+from portable_lock import try_lock_ex, unlock
 
 _LOCK_FD: int | None = None
 _LOCK_PATH: Path | None = None
@@ -26,17 +26,17 @@ def acquire_backend_instance_lock() -> None:
 
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
+        acquired = try_lock_ex(fd)
+    except Exception:
+        os.close(fd)
+        raise
+    if not acquired:
         holder = _read_lock_holder(path)
         os.close(fd)
         detail = f" Current holder: {holder}" if holder else ""
         raise RuntimeError(
             f"another Better Agent backend is already using {ba_home()}.{detail}"
-        ) from exc
-    except Exception:
-        os.close(fd)
-        raise
+        )
 
     os.ftruncate(fd, 0)
     os.write(
@@ -61,7 +61,7 @@ def release_backend_instance_lock() -> None:
     _LOCK_FD = None
     _LOCK_PATH = None
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock(fd)
     finally:
         os.close(fd)
 

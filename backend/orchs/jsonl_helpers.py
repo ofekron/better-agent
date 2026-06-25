@@ -12,8 +12,11 @@ from __future__ import annotations
 import os
 import time
 import json
+import logging
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 _JSONL_PATH_CACHE: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
 _JSONL_PATH_NEGATIVE_TTL_S = 5.0
@@ -186,7 +189,8 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
     encoded_path = _encoded_cwd_path(cwd, agent_sid)
     if encoded_path is not None and encoded_path.exists():
         return _cache_existing_path(agent_sid, encoded_path)
-    claude_path = _claude_path_index().get(agent_sid)
+    claude_index = _claude_path_index()
+    claude_path = claude_index.get(agent_sid)
     if claude_path is not None and claude_path.exists():
         return _cache_existing_path(agent_sid, claude_path)
     # Gemini path — scan run dirs for one whose state.json discovered
@@ -195,9 +199,27 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
     # multiple run dirs, so we collect ALL matches and return the
     # newest (by state.json mtime) — that's the most-recent turn whose
     # events.jsonl the supervisor / replay actually wants.
-    run_path = _run_state_index().get(agent_sid)
+    run_index = _run_state_index()
+    run_path = run_index.get(agent_sid)
     if run_path is not None and run_path.exists():
         return _cache_existing_path(agent_sid, run_path)
+    # Silent ingestion failure made visible: no provider's jsonl could be
+    # located for this sid, so the tailer/strategy will read nothing and
+    # events for this turn never ingest. Surface it so encoded-cwd mismatches
+    # (common on Windows) and missing run-state are findable in the log. The
+    # negative cache (5s TTL) keeps this to ~once per sid per window, not spam.
+    log.warning(
+        "ingestion: no jsonl located for agent_sid=%s cwd=%r — tried "
+        "encoded_cwd=%s (exists=%s); claude index=%d entries, run-state index=%d "
+        "entries under projects=%s. Events for this sid will NOT ingest.",
+        agent_sid,
+        cwd,
+        encoded_path,
+        bool(encoded_path is not None and encoded_path.exists()),
+        len(claude_index),
+        len(run_index),
+        _claude_projects_dir(),
+    )
     _cache_missing_path(agent_sid)
     return None
 

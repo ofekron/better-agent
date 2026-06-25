@@ -142,11 +142,25 @@ async def _check_argv(argv: tuple[str, ...]) -> dict[str, Any]:
 
 
 async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    # Resolve argv[0] to its full path so Windows picks up `.exe`/`.cmd`
+    # shims that a bare-name exec misses. A missing or unlaunchable binary
+    # must degrade to "not available", never raise and 500 the caller
+    # (e.g. provider-setup/status) — that was a Windows-only crash because
+    # create_subprocess_exec can't launch a bare CLI name there.
+    resolved = shutil.which(argv[0]) or argv[0]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            resolved, *argv[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError) as e:
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": f"{argv[0]} could not be launched: {e}",
+            "returncode": 127,
+        }
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:

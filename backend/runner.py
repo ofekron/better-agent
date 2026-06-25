@@ -2142,7 +2142,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 # children spawned later do NOT inherit this read FD
                 # to the user's jsonl (contains conversation history).
                 _fd = os.open(
-                    str(resume_jsonl), os.O_RDONLY | os.O_CLOEXEC,
+                    # O_CLOEXEC is POSIX-only and missing on Windows, where
+                    # os.open already returns a non-inheritable FD by default
+                    # (PEP 446); fall back to 0 so this doesn't AttributeError.
+                    str(resume_jsonl), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
                 )
                 with os.fdopen(_fd, "rb") as rf:
                     rf.seek(0, os.SEEK_END)
@@ -2253,7 +2256,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 )
                 try:
                     if _rj.exists():
-                        _fd = os.open(str(_rj), os.O_RDONLY | os.O_CLOEXEC)
+                        _fd = os.open(str(_rj), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
                         with os.fdopen(_fd, "rb") as _rf:
                             _rf.seek(0, os.SEEK_END)
                             pre_query_byte_offset = _rf.tell()
