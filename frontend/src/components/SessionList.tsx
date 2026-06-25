@@ -75,13 +75,6 @@ interface Props {
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
 
-function projectName(cwd?: string): string {
-  if (!cwd) return "~";
-  const trimmed = cwd.replace(/\/+$/, "");
-  const base = trimmed.split("/").pop() || trimmed;
-  return base || "~";
-}
-
 function orchestrationLabel(t: (key: string) => string, mode?: string): string {
   if (mode === "virtual") return "Virtual";
   if (mode === "native") return t("session.native");
@@ -578,7 +571,7 @@ function SessionNode({
           )}
         </div>
         <div className="session-item-meta">
-          {projectName(session.cwd)} | {orchestrationLabel(t, mode)}
+          {orchestrationLabel(t, mode)}
           {isManager && ` | ${session.worker_count ?? 0} ${t("session.workers")}`}
           {session.rearranger_enabled && " | rearranger"}
         </div>
