@@ -450,7 +450,7 @@ def bind_post_turn_hooks() -> None:
     async def _on_turn_complete(event: BusEvent) -> None:
         try:
             import extension_store
-            hooks = extension_store.post_turn_hooks()
+            hooks = await asyncio.to_thread(extension_store.post_turn_hooks)
             if not hooks:
                 return
             from env_compat import get_env

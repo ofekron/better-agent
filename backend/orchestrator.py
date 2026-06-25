@@ -3568,8 +3568,9 @@ class Coordinator:
         # routes it to the supervisor panel.
         if send_target == "supervisor" and session.get("supervisor_enabled"):
             import extension_store
-            not_ready = extension_store.runtime_not_ready_message(
-                extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+            not_ready = await asyncio.to_thread(
+                extension_store.runtime_not_ready_message,
+                extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID,
             )
             if not_ready is not None:
                 raise RuntimeError(not_ready)

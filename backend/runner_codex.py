@@ -2194,8 +2194,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     ).strip()
     continuation_chain = inputs.get("continuation_chain") or []
     disabled_builtin_tools = _disabled_builtin_tools(inputs)
-    team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    team_orchestration_enabled = await asyncio.to_thread(
+        extension_store.is_extension_runtime_ready,
+        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
     )
     dynamic_tools: list[dict] = []
     tool_handlers: dict[str, Any] = {}

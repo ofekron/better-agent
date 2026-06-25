@@ -1893,8 +1893,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         inputs.get("mssg_sender_session_id") or app_session_id
     )
 
-    team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    team_orchestration_enabled = await asyncio.to_thread(
+        extension_store.is_extension_runtime_ready,
+        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
     )
 
     if mssg_sender_session_id and backend_url and internal_token:
@@ -2035,17 +2036,23 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # `session_search.search()` (which spawns an ephemeral search worker).
     # So it gets no ask MCP tools here.
 
-    for _extension_mcp_name, _extension_mcp_config in extension_store.runtime_mcp_server_configs(
+    # Building MCP server configs reads the extension store off-loop; only
+    # the trivial pure `is_reserved_mcp_server_name` set-check stays inline.
+    _runtime_mcp_configs = await asyncio.to_thread(
+        extension_store.runtime_mcp_server_configs,
         inputs,
         user_facing=bool(_user_facing_extras and app_session_id),
         bare=_bare,
-    ).items():
+    )
+    for _extension_mcp_name, _extension_mcp_config in _runtime_mcp_configs.items():
         mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
-    for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
+    _native_mcp_configs = await asyncio.to_thread(
+        extension_store.native_mcp_server_configs,
         inputs,
         user_facing=bool(_user_facing_extras and app_session_id),
         bare=_bare,
-    ).items():
+    )
+    for _extension_mcp_name, _extension_mcp_config in _native_mcp_configs.items():
         if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
             mcp_servers[_extension_mcp_name] = _extension_mcp_config
             continue

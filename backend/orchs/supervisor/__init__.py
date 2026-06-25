@@ -30,6 +30,7 @@ Pending verdict persistence:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
@@ -59,8 +60,9 @@ async def maybe_supervise(
     handle_turn: replay any interrupted CONTINUE/FIX verdict, then run
     the verdict loop. Both are no-ops unless ``supervisor_enabled`` is
     set on the session."""
-    if not extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+    if not await asyncio.to_thread(
+        extension_store.is_extension_runtime_ready,
+        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID,
     ):
         return
     await replay_pending_verdict(
@@ -93,8 +95,9 @@ async def replay_pending_verdict(
     pending = (session or {}).get("pending_supervisor_verdict") if session else None
     if not pending:
         return
-    if not extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+    if not await asyncio.to_thread(
+        extension_store.is_extension_runtime_ready,
+        extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID,
     ):
         session_manager.clear_pending_supervisor_verdict(app_session_id)
         return
@@ -156,8 +159,9 @@ async def maybe_run_verdict_loop(
         hitting the cap.
     """
     for verdict_num in range(MAX_VERDICTS_PER_TURN):
-        if not extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+        if not await asyncio.to_thread(
+            extension_store.is_extension_runtime_ready,
+            extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID,
         ):
             return
         if coordinator.is_session_cancelled(app_session_id):

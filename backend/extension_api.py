@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -70,7 +71,13 @@ async def _broadcast_extensions_changed() -> None:
 
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
-    extensions, changed = extension_store.list_extensions_with_reconciliation(include_hidden=include_hidden)
+    # Reconciliation can reinstall bundled extensions and run a blocking
+    # subprocess smoke test (up to 15s each). Never run that on the event
+    # loop — it freezes every other request, including session loading.
+    extensions, changed = await asyncio.to_thread(
+        extension_store.list_extensions_with_reconciliation,
+        include_hidden=include_hidden,
+    )
     if changed:
         await _broadcast_extensions_changed()
     return {"extensions": extensions}
@@ -78,18 +85,20 @@ async def list_extensions(include_hidden: bool = Query(default=False)):
 
 @router.get("/frontend-entrypoints")
 async def get_frontend_entrypoints():
-    return {"entrypoints": extension_store.frontend_entrypoints()}
+    return {"entrypoints": await asyncio.to_thread(extension_store.frontend_entrypoints)}
 
 
 @router.get("/ui-hooks")
 async def get_ui_hooks():
-    return {"hooks": extension_store.ui_hooks()}
+    return {"hooks": await asyncio.to_thread(extension_store.ui_hooks)}
 
 
 @router.get("/{extension_id}/frontend/{asset_path:path}")
 async def get_frontend_asset(extension_id: str, asset_path: str):
     try:
-        path = extension_store.resolve_frontend_asset(extension_id, asset_path)
+        path = await asyncio.to_thread(
+            extension_store.resolve_frontend_asset, extension_id, asset_path
+        )
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(path)
@@ -100,7 +109,9 @@ async def get_frontend_asset(extension_id: str, asset_path: str):
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def dispatch_backend_extension(extension_id: str, path: str, request: Request):
-    backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
+    backend_spec = await asyncio.to_thread(
+        extension_backend_loader.backend_entrypoint_spec_cached, extension_id
+    )
     core_response = await _dispatch_core_builtin_backend(
         extension_id,
         path,
@@ -127,7 +138,7 @@ async def _dispatch_core_builtin_backend(
     clean_path = path.strip("/")
     if backend_spec is not None:
         return None
-    record = extension_store.get_extension(extension_id)
+    record = await asyncio.to_thread(extension_store.get_extension, extension_id)
     if not record or record.get("enabled") is not True:
         return None
     if extension_id == extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
@@ -187,21 +198,26 @@ async def _dispatch_machine_nodes_core_backend(
 @router.post("/install")
 async def install_extension(req: InstallExtensionRequest):
     try:
+        # Install does network I/O (git clone / artifact fetch) and a
+        # blocking subprocess smoke test — keep it off the event loop.
         if req.marketplace_metadata_url or req.marketplace_metadata:
-            record = extension_store.install_from_marketplace_metadata(
+            record = await asyncio.to_thread(
+                extension_store.install_from_marketplace_metadata,
                 metadata=req.marketplace_metadata or None,
                 metadata_url=req.marketplace_metadata_url,
                 entitlement_token=req.entitlement_token,
             )
         elif req.artifact_url:
-            record = extension_store.install_from_artifact(
+            record = await asyncio.to_thread(
+                extension_store.install_from_artifact,
                 artifact_url=req.artifact_url,
                 artifact_sha256=req.artifact_sha256,
                 artifact_signature=req.artifact_signature,
                 entitlement_token=req.entitlement_token,
             )
         else:
-            record = extension_store.install_from_repo(
+            record = await asyncio.to_thread(
+                extension_store.install_from_repo,
                 repo_url=req.repo_url,
                 extension_path=req.extension_path,
                 ref=req.ref,
@@ -216,7 +232,8 @@ async def install_extension(req: InstallExtensionRequest):
 @router.post("/update")
 async def update_extensions():
     try:
-        result = extension_store.update_installed_extensions()
+        # Reinstall + smoke test per updated extension — off the loop.
+        result = await asyncio.to_thread(extension_store.update_installed_extensions)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     if result.get("updated"):
@@ -227,16 +244,20 @@ async def update_extensions():
 @router.patch("/{extension_id}/enabled")
 async def set_extension_enabled(extension_id: str, req: SetEnabledRequest):
     try:
-        record = extension_store.set_enabled(extension_id, req.enabled)
+        record = await asyncio.to_thread(extension_store.set_enabled, extension_id, req.enabled)
     except extension_store.ExtensionConsentRequired as exc:
-        record = extension_store.get_extension(extension_id)
+        record = await asyncio.to_thread(extension_store.get_extension, extension_id)
+        permissions = (
+            await asyncio.to_thread(extension_store.declared_permissions, record)
+            if record else {}
+        )
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "consent_required",
                 "extension_id": extension_id,
                 "message": str(exc),
-                "permissions": extension_store.declared_permissions(record) if record else {},
+                "permissions": permissions,
             },
         ) from exc
     except extension_store.ExtensionError as exc:
@@ -250,7 +271,7 @@ async def grant_extension_consent(extension_id: str):
     """Record the user's consent to the extension's declared permission set so
     it can be enabled (trusted-by-install model)."""
     try:
-        record = extension_store.grant_consent(extension_id)
+        record = await asyncio.to_thread(extension_store.grant_consent, extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
@@ -260,8 +281,9 @@ async def grant_extension_consent(extension_id: str):
 @router.patch("/{extension_id}/instructions/enabled")
 async def set_extension_instruction_enabled(extension_id: str, req: SetInstructionEnabledRequest):
     try:
-        record = extension_store.set_instruction_enabled(
-            extension_id, level=req.level, enabled=req.enabled, project_path=req.project_path
+        record = await asyncio.to_thread(
+            extension_store.set_instruction_enabled,
+            extension_id, level=req.level, enabled=req.enabled, project_path=req.project_path,
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
@@ -272,7 +294,7 @@ async def set_extension_instruction_enabled(extension_id: str, req: SetInstructi
 @router.get("/{extension_id}/ui-settings")
 async def get_extension_ui_settings(extension_id: str):
     try:
-        return extension_store.get_ui_settings(extension_id)
+        return await asyncio.to_thread(extension_store.get_ui_settings, extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
 
@@ -280,7 +302,8 @@ async def get_extension_ui_settings(extension_id: str):
 @router.patch("/{extension_id}/ui-settings")
 async def set_extension_ui_settings(extension_id: str, req: SetUiSettingsRequest):
     try:
-        settings = extension_store.set_ui_settings(
+        settings = await asyncio.to_thread(
+            extension_store.set_ui_settings,
             extension_id,
             quick_button_enabled=req.quick_button_enabled,
             page_enabled=req.page_enabled,
@@ -294,7 +317,7 @@ async def set_extension_ui_settings(extension_id: str, req: SetUiSettingsRequest
 @router.get("/{extension_id}/config")
 async def get_extension_config(extension_id: str):
     try:
-        return extension_store.extension_config(extension_id)
+        return await asyncio.to_thread(extension_store.extension_config, extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
 
@@ -302,7 +325,7 @@ async def get_extension_config(extension_id: str):
 @router.get("/{extension_id}/settings")
 async def get_extension_settings(extension_id: str):
     try:
-        return extension_store.get_extension_settings(extension_id)
+        return await asyncio.to_thread(extension_store.get_extension_settings, extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
 
@@ -310,7 +333,9 @@ async def get_extension_settings(extension_id: str):
 @router.patch("/{extension_id}/settings")
 async def set_extension_setting(extension_id: str, req: SetExtensionSettingRequest):
     try:
-        result = extension_store.set_extension_setting(extension_id, req.key, req.value)
+        result = await asyncio.to_thread(
+            extension_store.set_extension_setting, extension_id, req.key, req.value
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
@@ -320,7 +345,7 @@ async def set_extension_setting(extension_id: str, req: SetExtensionSettingReque
 @router.get("/{extension_id}/mcp")
 async def get_extension_mcp(extension_id: str):
     try:
-        return {"servers": extension_store.extension_mcp_servers(extension_id)}
+        return {"servers": await asyncio.to_thread(extension_store.extension_mcp_servers, extension_id)}
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
 
@@ -328,7 +353,9 @@ async def get_extension_mcp(extension_id: str):
 @router.patch("/{extension_id}/mcp/{server_name}/enabled")
 async def set_extension_mcp_enabled(extension_id: str, server_name: str, req: SetMcpEnabledRequest):
     try:
-        enabled = extension_store.set_mcp_server_enabled(extension_id, server_name, req.enabled)
+        enabled = await asyncio.to_thread(
+            extension_store.set_mcp_server_enabled, extension_id, server_name, req.enabled
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
@@ -338,7 +365,9 @@ async def set_extension_mcp_enabled(extension_id: str, server_name: str, req: Se
 @router.patch("/{extension_id}/harness-delivery")
 async def set_extension_harness_delivery(extension_id: str, req: SetHarnessDeliveryRequest):
     try:
-        mode = extension_store.set_harness_delivery_mode(extension_id, req.mode)
+        mode = await asyncio.to_thread(
+            extension_store.set_harness_delivery_mode, extension_id, req.mode
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
@@ -348,7 +377,9 @@ async def set_extension_harness_delivery(extension_id: str, req: SetHarnessDeliv
 @router.patch("/{extension_id}/permissions/{permission}/granted")
 async def set_extension_permission_grant(extension_id: str, permission: str, req: SetPermissionGrantRequest):
     try:
-        record = extension_store.set_permission_grant(extension_id, permission, req.granted)
+        record = await asyncio.to_thread(
+            extension_store.set_permission_grant, extension_id, permission, req.granted
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
@@ -358,7 +389,7 @@ async def set_extension_permission_grant(extension_id: str, permission: str, req
 @router.delete("/{extension_id}")
 async def uninstall_extension(extension_id: str):
     try:
-        extension_store.uninstall(extension_id)
+        await asyncio.to_thread(extension_store.uninstall, extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()

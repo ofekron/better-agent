@@ -270,7 +270,9 @@ async def handle_virtual_prompt(
 ) -> bool:
     if session_id != EDIT_SINGLETON_ID:
         return False
-    not_ready = extension_store.runtime_not_ready_message(EDIT_EXTENSION_ID)
+    not_ready = await asyncio.to_thread(
+        extension_store.runtime_not_ready_message, EDIT_EXTENSION_ID
+    )
     if not_ready is not None:
         await _dispatch_prompt_error(
             dispatch_ws,
