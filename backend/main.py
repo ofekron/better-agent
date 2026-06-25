@@ -563,6 +563,11 @@ _AUTH_PUBLIC_ROUTES = frozenset({
     "/api/auth/login",
     "/api/auth/setup",
     "/api/auth/needs_setup",
+    # QR / refresh-token external access. qr_grant self-gates to
+    # loopback-or-authed inside the handler (see auth_routes.py).
+    "/api/auth/qr_grant",
+    "/api/auth/qr_redeem",
+    "/api/auth/refresh",
 })
 _AUTH_PUBLIC_PREFIXES = (
     "/api/desktop/updates/",
