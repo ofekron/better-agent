@@ -1067,10 +1067,11 @@ export function SessionList({
   }, [ctxMenu]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   const [tags, setTags] = useState<SessionTag[]>([]);
+  const [modelFacet, setModelFacet] = useState<string[]>([]);
   const [ackedOrganizationBySession, setAckedOrganizationBySession] = useState<
     Record<string, AckedSessionOrganization>
   >({});
-  const [selectedFolderId, setSelectedFolderId] = useState("");
+  const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [selectedProviderIds, setSelectedProviderIds] = useState<string[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
@@ -1205,6 +1206,7 @@ export function SessionList({
     if (!projectId) {
       setFolders([]);
       setTags([]);
+      setModelFacet([]);
       return;
     }
     try {
@@ -1213,6 +1215,7 @@ export function SessionList({
         [...snapshot.folders].sort(sortFolders),
       );
       setTags([...snapshot.tags].sort((a, b) => a.name.localeCompare(b.name)));
+      setModelFacet([...(snapshot.models ?? [])].sort((a, b) => a.localeCompare(b)));
       setOrgError(null);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to load organization");
@@ -1266,6 +1269,11 @@ export function SessionList({
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }, []);
+  const toggleFolderFilter = useCallback((id: string) => {
+    setSelectedFolderIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }, []);
   const toggleProviderFilter = useCallback((id: string) => {
     setSelectedProviderIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -1293,7 +1301,7 @@ export function SessionList({
   }, []);
   const clearAdvancedFilters = useCallback(() => {
     setShowArchived(false);
-    setSelectedFolderId("");
+    setSelectedFolderIds([]);
     setSelectedTagIds([]);
     setSelectedProviderIds([]);
     setSelectedModelIds([]);
@@ -1305,47 +1313,32 @@ export function SessionList({
 
   useEffect(() => {
     const validFolders = new Set(folders.map((folder) => folder.id));
-    if (selectedFolderId && !validFolders.has(selectedFolderId)) {
-      setSelectedFolderId("");
-    }
+    setSelectedFolderIds((prev) => prev.filter((id) => validFolders.has(id)));
     const validTagIds = new Set<string>([
       ...tags.map((tag) => tag.id),
       ...requirementTagOptions.map(reqTagKey),
     ]);
     setSelectedTagIds((prev) => prev.filter((id) => validTagIds.has(id)));
-  }, [folders, tags, selectedFolderId, requirementTagOptions]);
+  }, [folders, tags, requirementTagOptions]);
 
+  // Filter option universes are the FULL set of choices, independent of the
+  // currently-loaded (filtered) sessions — so applying one filter never makes
+  // the other filters' options collapse and the panel jump. Providers/modes/
+  // sources are closed sets known client-side; models come from the backend
+  // facet (distinct models across all the project's sessions).
   const providerOptions = useMemo(
-    () => {
-      const providerById = new Map(providers.map((provider) => [provider.id, provider]));
-      return Array.from(
-        new Set(sessions.map((session) => session.provider_id).filter((id): id is string => !!id)),
-      )
-        .map((id) => ({
-          id,
-          name: providerById.get(id)?.name ?? id.split("/")[0] ?? id,
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-    },
-    [providers, sessions],
-  );
-  const modelOptions = useMemo(
     () =>
-      Array.from(
-        new Set(sessions.map((session) => session.model).filter((model): model is string => !!model)),
-      ).sort((a, b) => a.localeCompare(b)),
-    [sessions],
+      providers
+        .map((provider) => ({ id: provider.id, name: provider.name }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [providers],
   );
-  const modeOptions = useMemo(() => {
-    const present = new Set(sessions.map((session) => session.orchestration_mode ?? "team"));
-    return (["team", "native", "virtual"] as OrchestrationMode[]).filter((mode) => present.has(mode));
-  }, [sessions]);
-  const sourceOptions = useMemo(() => {
-    const present = new Set(
-      sessions.map((session) => (session.source ?? "web") as SessionSource),
-    );
-    return SESSION_SOURCES.filter((src) => present.has(src));
-  }, [sessions]);
+  const modelOptions = modelFacet;
+  const modeOptions = useMemo(
+    () => ["team", "native", "virtual"] as OrchestrationMode[],
+    [],
+  );
+  const sourceOptions = SESSION_SOURCES;
   const activeSources = useMemo(() => {
     const valid = new Set(sourceOptions);
     return selectedSources.filter((id) => valid.has(id));
@@ -1368,7 +1361,7 @@ export function SessionList({
     showArchived ||
     selectedSearchFields.length !== SESSION_SEARCH_FIELDS.length ||
     !SESSION_SEARCH_FIELDS.every((f) => selectedSearchFields.includes(f)) ||
-    selectedFolderId !== "" ||
+    selectedFolderIds.length > 0 ||
     selectedTagIds.length > 0 ||
     activeProviderIds.length > 0 ||
     activeModelIds.length > 0 ||
@@ -1385,7 +1378,7 @@ export function SessionList({
       search,
       searchFields: selectedSearchFields,
       showArchived,
-      folderId: selectedFolderId,
+      folderIds: selectedFolderIds,
       folderView: folderViewEnabled,
       sortBy: sessionSort,
       tagIds: selectedTagIds,
@@ -1407,7 +1400,7 @@ export function SessionList({
       sessionSort,
       search,
       selectedSearchFields,
-      selectedFolderId,
+      selectedFolderIds,
       selectedTagIds,
       showArchived,
     ],
@@ -2042,21 +2035,21 @@ export function SessionList({
                 <div className="session-tag-filter">
                   <button
                     type="button"
-                    className={`session-tag-toggle ${selectedFolderId === "" ? "active" : ""}`}
-                    aria-pressed={selectedFolderId === ""}
-                    onClick={() => setSelectedFolderId("")}
+                    className={`session-tag-toggle ${selectedFolderIds.length === 0 ? "active" : ""}`}
+                    aria-pressed={selectedFolderIds.length === 0}
+                    onClick={() => setSelectedFolderIds([])}
                   >
                     {t("session.allFolders")}
                   </button>
                   {folders.map((folder) => {
-                    const active = selectedFolderId === folder.id;
+                    const active = selectedFolderIds.includes(folder.id);
                     return (
                       <button
                         key={folder.id}
                         type="button"
                         className={`session-tag-toggle ${active ? "active" : ""}`}
                         aria-pressed={active}
-                        onClick={() => setSelectedFolderId(active ? "" : folder.id)}
+                        onClick={() => toggleFolderFilter(folder.id)}
                       >
                         {folderPathById.get(folder.id) ?? folder.name}
                       </button>

@@ -69,7 +69,7 @@ export type SessionListFilters = {
   searchFields?: string[];
   showArchived?: boolean;
   fileEditMode?: "any" | "yes" | "no";
-  folderId?: string;
+  folderIds?: string[];
   folderView?: boolean;
   tagIds?: string[];
   providerIds?: string[];
@@ -96,7 +96,7 @@ function sameSessionListFilters(
     sameStringList(a.searchFields, b.searchFields) &&
     Boolean(a.showArchived) === Boolean(b.showArchived) &&
     (a.fileEditMode ?? "any") === (b.fileEditMode ?? "any") &&
-    (a.folderId ?? "") === (b.folderId ?? "") &&
+    sameStringList(a.folderIds, b.folderIds) &&
     Boolean(a.folderView) === Boolean(b.folderView) &&
     sameStringList(a.tagIds, b.tagIds) &&
     sameStringList(a.providerIds, b.providerIds) &&
@@ -661,7 +661,7 @@ export function useSession(authStatus?: string) {
         if (filters.showArchived) params.set("show_archived", "true");
         if (filters.fileEditMode === "yes") params.set("file_edit_mode", "true");
         if (filters.fileEditMode === "no") params.set("file_edit_mode", "false");
-        if (filters.folderId) params.set("folder_id", filters.folderId);
+        if (filters.folderIds?.length) params.set("folder_ids", filters.folderIds.join(","));
         if (filters.folderView !== undefined) params.set("folder_view", String(filters.folderView));
         if (filters.tagIds?.length) params.set("tag_ids", filters.tagIds.join(","));
         if (filters.providerIds?.length) params.set("provider_ids", filters.providerIds.join(","));

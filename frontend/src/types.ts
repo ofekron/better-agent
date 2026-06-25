@@ -377,6 +377,9 @@ export interface SessionOrganizationSnapshot {
   schema_version: number;
   folders: SessionFolder[];
   tags: SessionTag[];
+  /** Distinct models across ALL of the project's sessions, regardless of
+   * the active filter — the stable universe for the model filter. */
+  models?: string[];
   assignments: Record<string, {
     folder_id?: string | null;
     tag_ids?: string[];

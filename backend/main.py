@@ -707,13 +707,11 @@ rearranger = Rearranger(session_manager)
 from event_bus_subscribers import (
     bind_post_turn_hooks,
     bind_rearranger,
-    bind_tag_marker_watch,
     bind_worker_fanout_cleanup,
 )
 bind_rearranger(rearranger)
 bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
 bind_post_turn_hooks()
-bind_tag_marker_watch()
 
 # Rebuild the declarative tag-rule registry from every enabled extension
 # so styling/markers apply from boot, not only after the periodic
@@ -1145,11 +1143,7 @@ async def start_native_import(body: dict):
 @app.get("/api/native-import/status")
 async def native_import_status():
     import native_import
-    status = native_import.get_status()
-    status["unsupported_providers"] = await asyncio.to_thread(
-        native_import.unsupported_providers, None,
-    )
-    return status
+    return native_import.get_status()
 
 
 @app.get("/api/native-import/sessions")
@@ -1173,9 +1167,6 @@ async def native_import_preview(provider_ids: Optional[str] = None):
             }
             for s in sessions
         ],
-        "unsupported_providers": await asyncio.to_thread(
-            native_import.unsupported_providers, ids,
-        ),
     }
 
 
@@ -2609,7 +2600,7 @@ def _session_matches_list_filters(
     search: str | None,
     show_archived: bool,
     file_edit_mode: bool | None,
-    folder_id: str | None,
+    folder_ids: set[str],
     tag_ids: set[str],
     provider_ids: set[str],
     model_ids: set[str],
@@ -2625,7 +2616,7 @@ def _session_matches_list_filters(
             return False
     if project_path and session.get("cwd") != project_path:
         return False
-    if folder_id and (session.get("folder_id") or "") != folder_id:
+    if folder_ids and (session.get("folder_id") or "") not in folder_ids:
         return False
     if provider_ids and (session.get("provider_id") or "") not in provider_ids:
         return False
@@ -2683,7 +2674,7 @@ def _filter_sort_sessions_for_list(
     search: str | None,
     show_archived: bool,
     file_edit_mode: bool | None,
-    folder_id: str | None,
+    folder_ids: set[str],
     folder_view: bool,
     tag_ids: set[str],
     provider_ids: set[str],
@@ -2701,7 +2692,7 @@ def _filter_sort_sessions_for_list(
             search=search,
             show_archived=show_archived,
             file_edit_mode=file_edit_mode,
-            folder_id=folder_id,
+            folder_ids=folder_ids,
             tag_ids=tag_ids,
             provider_ids=provider_ids,
             model_ids=model_ids,
@@ -2735,7 +2726,7 @@ def _build_local_sessions_page_for_list(
     search: str | None,
     show_archived: bool,
     file_edit_mode: bool | None,
-    folder_id: str | None,
+    folder_ids: set[str],
     folder_view: bool,
     tag_ids: set[str],
     provider_ids: set[str],
@@ -2773,7 +2764,7 @@ def _build_local_sessions_page_for_list(
             search=search,
             show_archived=show_archived,
             file_edit_mode=file_edit_mode,
-            folder_id=folder_id,
+            folder_ids=folder_ids,
             folder_view=folder_view,
             tag_ids=tag_ids,
             provider_ids=provider_ids,
@@ -2803,7 +2794,7 @@ async def get_sessions(
     search: str | None = Query(None),
     show_archived: bool = Query(False),
     file_edit_mode: bool | None = Query(None),
-    folder_id: str | None = Query(None),
+    folder_ids: str | None = Query(None),
     folder_view: bool | None = Query(None),
     tag_ids: str | None = Query(None),
     provider_ids: str | None = Query(None),
@@ -2846,7 +2837,7 @@ async def get_sessions(
             "search": search,
             "show_archived": show_archived,
             "file_edit_mode": file_edit_mode,
-            "folder_id": folder_id,
+            "folder_ids": _split_session_filter(folder_ids),
             "folder_view": effective_folder_view,
             "tag_ids": _split_session_filter(tag_ids),
             "provider_ids": _split_session_filter(provider_ids),
@@ -2943,7 +2934,7 @@ async def get_sessions(
             search=search,
             show_archived=show_archived,
             file_edit_mode=file_edit_mode,
-            folder_id=folder_id,
+            folder_ids=_split_session_filter(folder_ids),
             folder_view=effective_folder_view,
             tag_ids=_split_session_filter(tag_ids),
             provider_ids=_split_session_filter(provider_ids),
@@ -3003,11 +2994,32 @@ async def search_session_content(body: dict = Body(default={})):
     return {"results": results}
 
 
+def _session_organization_snapshot_with_facets(project_id: str | None) -> dict:
+    """Org snapshot plus the model filter universe for the project.
+
+    Folder/provider/mode/source universes are known client-side (org
+    folders, configured providers, static enums); models are open-ended,
+    so the backend supplies the distinct models across ALL the project's
+    sessions regardless of the active filter, keeping the filter options
+    stable instead of collapsing to whatever the current page contains.
+    """
+    snapshot = session_organization_store.snapshot(project_id)
+    models: set[str] = set()
+    for session in _local_session_summaries_for_sidebar():
+        if project_id and session.get("cwd") != project_id:
+            continue
+        model = (session.get("model") or "").strip()
+        if model:
+            models.add(model)
+    snapshot["models"] = sorted(models)
+    return snapshot
+
+
 @app.get("/api/session-organization")
 async def get_session_organization(project_id: str | None = Query(default=None)):
     try:
         return await asyncio.to_thread(
-            session_organization_store.snapshot,
+            _session_organization_snapshot_with_facets,
             project_id,
         )
     except ValueError as e:
