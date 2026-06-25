@@ -825,6 +825,10 @@ body {
   overflow: hidden;
 }
 
+.sidebar-selected-anchor {
+  flex-shrink: 0;
+}
+
 .session-list-selected {
   flex-shrink: 0;
   padding: 6px 8px;

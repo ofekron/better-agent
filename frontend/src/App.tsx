@@ -3087,6 +3087,10 @@ function AppMain({
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers">(
     "sessions",
   );
+  // DOM slot above the sidebar tabs where SessionList portals the pinned
+  // selected-session anchor. Lives above the tabs and only has content
+  // while SessionList is mounted (i.e. not on the Workers tab).
+  const [selectedAnchorEl, setSelectedAnchorEl] = useState<HTMLDivElement | null>(null);
   const SIDEBAR_MINIMIZED_WIDTH = 52;
   const sidebarWidthForSizing = !isMobile && sidebarMinimized
     ? SIDEBAR_MINIMIZED_WIDTH
@@ -3193,6 +3197,43 @@ function AppMain({
     clearCurrentSession,
     navigate,
     selectSession,
+  ]);
+
+  // Auto-select a session instead of sitting on the empty Ask "home".
+  // When the route resolves to the Ask singleton (the default no-session
+  // state) and the current project has sessions, redirect to the
+  // remembered session (or the first non-archived one). `handleAsk` sets
+  // `intentionalAskRef` so a deliberate Ask navigation is preserved; the
+  // flag is held until the route leaves Ask, then cleared so a later
+  // default landing on Ask auto-redirects again.
+  const intentionalAskRef = useRef(false);
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    if (route.kind !== "session" || route.sessionId !== ASK_SINGLETON_ID) {
+      intentionalAskRef.current = false;
+      return;
+    }
+    if (intentionalAskRef.current) return;
+    const remembered = selectedProjectPath
+      ? getRememberedSessionId(selectedProjectPath, selectedProjectNodeId)
+      : null;
+    let target = selectedProjectPath
+      ? pickSessionForProject(
+          sessions,
+          selectedProjectPath,
+          selectedProjectNodeId,
+          remembered,
+        )
+      : null;
+    if (!target) target = sessions.find((s) => !s.archived) ?? null;
+    if (target) navigate(sessionPath(target.id));
+  }, [
+    route,
+    sessionsLoaded,
+    sessions,
+    selectedProjectPath,
+    selectedProjectNodeId,
+    navigate,
   ]);
 
   // Force-open-on-navigate: every transition into a session with
@@ -4489,6 +4530,9 @@ function AppMain({
    * to its session view. The view auto-detects the singleton id and
    * mounts Ask extension slots. */
   const handleAsk = useCallback(async () => {
+    // Mark this Ask navigation as intentional so the auto-select effect
+    // doesn't immediately redirect away from the Ask view.
+    intentionalAskRef.current = true;
     try {
       await fetch(`${API}/api/extensions/ofek-dev.ask/backend/ask/ensure`, { method: "POST" });
     } catch (e) {
@@ -5351,6 +5395,8 @@ function AppMain({
           </div>
         )}
 
+        <div ref={setSelectedAnchorEl} className="sidebar-selected-anchor" />
+
         {workersTabAvailable ? (
           <div className="sidebar-tabs" role="tablist">
             <button
@@ -5393,6 +5439,7 @@ function AppMain({
               sessions={sessionsForProject}
               allSessions={sessions}
               currentSessionId={currentSession?.id}
+              selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
               onSelect={(id) => {
                 const s = sessions.find((s) => s.id === id);
