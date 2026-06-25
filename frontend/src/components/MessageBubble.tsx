@@ -2643,7 +2643,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  per-frame WS streaming updates — those mutate only the in-flight
  *  assistant message (last in the list), leaving every earlier
  *  group's props referentially stable. */
-function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
+function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLastGroup = false }: {
   userMessage: ChatMessage;
   assistantMessage?: ChatMessage;
   /** Worker output nested under the supervisor/main message. */
@@ -2680,6 +2680,12 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
+  /** True only for the last group in the chat. When the group auto-collapses
+   * (turn complete), the user-prompt body folds away but the assistant
+   * response stays fully expanded — so the latest answer remains in view
+   * even after the user prompt is collapsed. Historical groups keep the
+   * original behavior (user body visible, assistant summarized). */
+  isLastGroup?: boolean;
 }) {
   const { t } = useTranslation();
   const assistantContainerRef = useRef<HTMLDivElement>(null);
@@ -2706,6 +2712,13 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   useEffect(() => {
     if (!userToggledRef.current) setCollapsed(defaultCollapsed);
   }, [defaultCollapsed]);
+  // For the last group we split the single `collapsed` boolean across two
+  // surfaces: the user-prompt body folds away, but the assistant response
+  // stays fully expanded so the latest answer remains visible. Historical
+  // groups keep the original behavior (user body visible, assistant
+  // summarized) so old turns still compress in the scrollback.
+  const userBodyCollapsed = isLastGroup ? collapsed : false;
+  const assistantCollapsed = isLastGroup ? false : collapsed;
   const toggleCollapsed = () => {
     userToggledRef.current = true;
     const groupEl = groupRef.current;
@@ -2781,7 +2794,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   // Only build the summary when we're actually going to render it.
   // On expanded groups this saves a full events walk per render.
   const summary = useMemo(() => {
-    if (!collapsed || !hasResponse) return null;
+    if (!assistantCollapsed || !hasResponse) return null;
     const src = effectiveAssistant;
     // Ask-flow turns with no text are represented entirely by their picker
     // footer (error notice / Create-new / Never-mind). Don't render the
@@ -2790,11 +2803,11 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
-  }, [collapsed, hasResponse, effectiveAssistant, orchestrationMode]);
+  }, [assistantCollapsed, hasResponse, effectiveAssistant, orchestrationMode]);
 
   // Render the last event fully for collapsed display
   const collapsedLastEvent = useMemo(() => {
-    if (!collapsed || !hasResponse) return null;
+    if (!assistantCollapsed || !hasResponse) return null;
     const src = effectiveAssistant;
     const content = src?.content;
     const events = previewEventsForMessage(src, orchestrationMode);
@@ -2815,10 +2828,10 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     return preview ?? (() => {
       return null;
     })();
-  }, [collapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+  }, [assistantCollapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const collapsedSteerPrompts = useMemo(() => {
-    if (!collapsed || !hasResponse) return [];
+    if (!assistantCollapsed || !hasResponse) return [];
     const src = effectiveAssistant;
     const events = previewEventsForMessage(src, orchestrationMode);
     return events
@@ -2831,7 +2844,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
         )
       )
       .filter(Boolean);
-  }, [collapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+  }, [assistantCollapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const assistantTags = useMemo(
     () => (assistantMessage ? tags?.filter((t) => t.messageId === assistantMessage.id) ?? [] : []),
@@ -2869,7 +2882,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     ? runsByTargetId.get(assistantMessage.id) ?? EMPTY_RUNS
     : EMPTY_RUNS;
   const collapsedAssistantErrorText =
-    collapsed && effectiveAssistant?.error
+    assistantCollapsed && effectiveAssistant?.error
       ? effectiveAssistant.errorText ?? effectiveAssistant.content
       : undefined;
   // Apply overlays directly to the user-message-box body. The
@@ -2982,7 +2995,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             </button>
           )}
         </div>
-        {(() => {
+        {!userBodyCollapsed && (() => {
           const hasArtificial = hasArtificialSections(rawUserContent);
           return (
             <div className="message-box-body">
@@ -3074,7 +3087,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
         })()}
       </div>
       )}
-      {collapsed && (collapsedAssistantErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveAssistant?.stopped_at) && (
+      {assistantCollapsed && (collapsedAssistantErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveAssistant?.stopped_at) && (
         <div
           className="message-group-children"
           data-message-id={effectiveAssistant?.id ?? userMessage.id}
@@ -3123,7 +3136,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           )}
         </div>
       )}
-      {!collapsed && (assistantMessage || (workerSubGroups && workerSubGroups.length > 0)) && (
+      {!assistantCollapsed && (assistantMessage || (workerSubGroups && workerSubGroups.length > 0)) && (
         <div className="message-group-children">
           {assistantMessage && (
             <AssistantMessage
