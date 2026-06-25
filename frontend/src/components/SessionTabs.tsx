@@ -29,6 +29,8 @@ export function SessionTabs({
     sessions.map((session) => session.id),
   );
   const activeRef = useRef<HTMLButtonElement>(null);
+  const prevFirstIdRef = useRef<string | null>(null);
+  const prevIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({
@@ -36,6 +38,21 @@ export function SessionTabs({
       inline: "nearest",
     });
   }, [currentSessionId]);
+
+  // Scroll the tabs strip back to the start when a NEW session becomes
+  // the first (leftmost) tab. Fires only when the first tab changed to
+  // one that wasn't open before, so reordering existing tabs never
+  // yanks the scroll position.
+  useEffect(() => {
+    const firstId = sessions[0]?.id ?? null;
+    const prevFirst = prevFirstIdRef.current;
+    const prevIds = prevIdsRef.current;
+    prevFirstIdRef.current = firstId;
+    prevIdsRef.current = new Set(sessions.map((s) => s.id));
+    if (!firstId || firstId === prevFirst) return;
+    if (prevIds.has(firstId)) return;
+    scrollRef.current?.scrollTo({ left: 0 });
+  }, [sessions]);
 
   if (sessions.length === 0) return null;
 
