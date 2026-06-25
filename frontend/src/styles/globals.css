@@ -4303,6 +4303,44 @@ button.run-badge-clickable:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.event-pr-link {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
+  padding: 6px 12px;
+  margin: 6px 0;
+  background: rgba(163, 113, 247, 0.1);
+  border: 1px solid rgba(163, 113, 247, 0.35);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  line-height: 1.4;
+  text-decoration: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  min-width: 0;
+}
+
+.event-pr-link:hover {
+  background: rgba(163, 113, 247, 0.18);
+  border-color: rgba(163, 113, 247, 0.55);
+}
+
+.event-pr-link-label {
+  font-weight: 600;
+  color: #d2a8ff;
+}
+
+.event-pr-link-repo {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+  font-size: 0.92em;
+}
+
 .event-success {
   padding: 6px 0;
   font-size: calc(13px * var(--app-font-scale));
@@ -9381,6 +9419,22 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(14px * var(--app-font-scale));
   line-height: 1.6;
   color: var(--text-primary);
+}
+
+/* Styled callout emitted by the bcstyle sentinel (font scale + highlight).
+   Block box so the inline `background`/`fontSize` set on it paint reliably
+   around block-level markdown, rendered as a rounded highlight panel. */
+.bc-font-scaled {
+  display: block;
+  margin: 8px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+}
+.bc-font-scaled > .wmde-markdown > :first-child {
+  margin-top: 0;
+}
+.bc-font-scaled > .wmde-markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .alter-user-message-editor {
