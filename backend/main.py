@@ -4575,11 +4575,6 @@ async def update_session_selectors(session_id: str, body: dict):
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if "provider_id" in body and isinstance(body["provider_id"], str) and body["provider_id"].strip():
-        if coordinator.turn_manager.has_active_runs(session_id):
-            raise HTTPException(
-                status_code=409,
-                detail=t("error.provider_change_during_active_run"),
-            )
         updates["provider_id"] = body["provider_id"].strip()
         if "reasoning_effort" not in updates:
             provider_record = await asyncio.to_thread(
@@ -8443,6 +8438,39 @@ async def internal_session_bridge_delegate(
         client_id=str(body.get("client_id") or "") or None,
     )
     return result
+
+
+@app.post("/api/internal/agent-board/run-prompt")
+async def internal_agent_board_run_prompt(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Deliver a prompt lane action from the Agent Board extension. Only the
+    agent-board builtin (identified by its minted per-extension token) may
+    call this; the privileged cross-session turn stays inside core. Runs the
+    turn in the background so the drop request returns immediately."""
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    if (
+        coordinator.principal_extension_id(x_internal_token)
+        != extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID
+    ):
+        raise HTTPException(status_code=403, detail="caller is not the agent-board extension")
+    session_id = str((body or {}).get("session_id") or "").strip()
+    prompt = str((body or {}).get("prompt") or "").strip()
+    if not session_id or not prompt:
+        raise HTTPException(status_code=400, detail="session_id and prompt are required")
+
+    async def _deliver() -> None:
+        try:
+            await session_bridge._run(session_id, prompt, "continue", source="agent-board")
+        except Exception:
+            logger.warning(
+                "agent-board run-prompt failed for %s", session_id[:8], exc_info=True
+            )
+
+    asyncio.create_task(_deliver())
+    return {"scheduled": True}
 
 
 @app.post("/api/internal/provider-config-sync/broadcast")

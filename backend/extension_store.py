@@ -80,6 +80,7 @@ BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = "ofek-dev.trace-inspector"
 BUILTIN_REARRANGER_EXTENSION_ID = "ofek-dev.rearranger"
 BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = "ofek-dev.prompt-engineer"
 BUILTIN_BROWSER_HARNESS_EXTENSION_ID = "ofek-dev.browser-harness"
+BUILTIN_AGENT_BOARD_EXTENSION_ID = "ofek-dev.agent-board"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
@@ -109,6 +110,7 @@ _PRIVATE_EXTENSION_PATHS = {
     BUILTIN_REARRANGER_EXTENSION_ID: "extensions/rearranger",
     BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "extensions/prompt-engineer",
     BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "extensions/browser-harness",
+    BUILTIN_AGENT_BOARD_EXTENSION_ID: "extensions/agent-board",
     MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
 _PUBLIC_EXTENSION_PATHS = {
@@ -136,6 +138,7 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_REARRANGER_EXTENSION_ID: "Rearranger",
     BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "Prompt engineer",
     BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "Browser harness",
+    BUILTIN_AGENT_BOARD_EXTENSION_ID: "Agent Board",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",

@@ -20,7 +20,7 @@ import { Chat } from "./components/Chat";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { EDIT_SINGLETON_ID } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
-import { SessionList } from "./components/SessionList";
+import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
 import type { FileEditorHandle } from "./components/FileViewer";
 import { ConfigPanelContext } from "./components/configPanelContext";
@@ -599,8 +599,26 @@ function AppMain({
   const askSessionPickerModules = useExtensionFrontendModules("ask-session-picker");
   const sessionActionModalModules = useExtensionFrontendModules("session-action-modal");
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
+  const sessionDragOverlayModules = useExtensionFrontendModules("session-drag-overlay");
   const builtinExtensions = useBuiltinExtensionFlags(authStatus);
   useAttentionSound();
+
+  // The session id currently being dragged in the sidebar, or null. Pure
+  // transient UI state bridged from the `session_drag_start/end` facts so
+  // the agent-board extension's drop overlay can reveal itself via context.
+  const [draggingSession, setDraggingSession] = useState<{ id: string; name: string } | null>(null);
+  useEffect(() => {
+    const offStart = eventBus.subscribe("session_drag_start", (p) =>
+      setDraggingSession({ id: p.session_id, name: p.name ?? "" }),
+    );
+    const offEnd = eventBus.subscribe("session_drag_end", () =>
+      setDraggingSession(null),
+    );
+    return () => {
+      offStart();
+      offEnd();
+    };
+  }, []);
 
   // Responsive layout mode. Width-only (see useViewport docs).
   // When mode !== 'desktop' the sidebar and right-panel become
@@ -3491,7 +3509,10 @@ function AppMain({
   // state update). This flag tells it to skip one cycle.
   const skipDriftRef = useRef(false);
   useEffect(() => {
-    if (!currentSession) return;
+    if (!currentSession) {
+      lastSyncedSessionIdRef.current = null;
+      return;
+    }
     setSessionTokenUsage(currentSession.token_usage_total || null);
     setSessionTokenUsageLast(currentSession.token_usage_last || null);
     if (currentSession.id !== lastSyncedSessionIdRef.current) {
@@ -5103,6 +5124,19 @@ function AppMain({
         </div>
       )}
       <StartupTasksBanner />
+      {authStatus === "authed" &&
+        sessionDragOverlayModules.map((module) => (
+          <ExtensionModuleSlot
+            key={`${module.extension_id}:${module.id}`}
+            module={module}
+            className="extension-module-slot--overlay"
+            context={{
+              draggingSessionId: draggingSession?.id ?? null,
+              draggingSessionName: draggingSession?.name ?? null,
+              sessionDragMime: SESSION_DRAG_MIME,
+            }}
+          />
+        ))}
       {builtinExtensions.machineNodes &&
         globalApprovalModules.map((module) => (
           <ExtensionModuleSlot
@@ -5834,6 +5868,7 @@ function AppMain({
               onAdvSync={handleAdvSync}
               onAdvSyncClick={handleAdvSyncClick}
               onRemoveTag={handleRemoveTag}
+              onRename={renameSession}
               draft={currentSession?.draft_input ?? ""}
               onDraftChange={(value) => {
                 if (!currentSession) return;

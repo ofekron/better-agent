@@ -179,7 +179,7 @@ function flattenFolderSessions(
 
 /** dataTransfer MIME carrying the dragged session id when reassigning
  * folders by drag. Custom type so it can't be confused with plain text. */
-const SESSION_DRAG_MIME = "application/x-better-agent-session-id";
+export const SESSION_DRAG_MIME = "application/x-better-agent-session-id";
 
 /** True when a drag carries a session id (a folder-reassign drag). */
 function isSessionDrag(e: React.DragEvent): boolean {
@@ -476,9 +476,8 @@ function SessionNode({
           folderDropOver ? "folder-drop-over" : ""
         }`}
         style={{ marginInlineStart: depth * 16 }}
-        draggable={dragEnabled}
+        draggable
         onDragStart={(e) => {
-          if (!dragEnabled) return;
           // framer-motion forwards onDrag* handlers to the DOM when
           // `draggable` is set (filterProps special-case), so `e` is in
           // practice a native React.DragEvent even though motion's types
@@ -487,6 +486,11 @@ function SessionNode({
           const ev = e as unknown as ReactDragEvent<HTMLDivElement>;
           ev.dataTransfer.setData(SESSION_DRAG_MIME, session.id);
           ev.dataTransfer.effectAllowed = "move";
+          // Publish the fact that a session drag began. Folder-reassign
+          // drop targets stay gated by `dragEnabled`; this fact is what
+          // lets extensions (agent board) reveal a drop surface even
+          // outside folder view.
+          eventBus.publish("session_drag_start", { session_id: session.id, name: session.name });
         }}
         onDragOver={(e) => {
           if (!isFolderDropTarget || !isSessionDrag(e)) return;
@@ -1978,6 +1982,7 @@ export function SessionList({
         onDragEnd={() => {
           setIsDraggingSession(false);
           setNewFolderDragOver(false);
+          eventBus.publish("session_drag_end", {});
         }}
       >
         {orgPanel === "advanced" && (
