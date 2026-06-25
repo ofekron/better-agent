@@ -6,6 +6,7 @@ import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
 import { ContextStrategySetting } from "./ContextStrategySetting";
 import { SessionTabsSettings } from "./SessionTabsSettings";
+import { VoiceSettings } from "./VoiceSettings";
 import { SessionAutoDeleteSetting } from "./SessionAutoDeleteSetting";
 import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
@@ -78,6 +79,7 @@ type SettingsSection =
   | "context"
   | "internalLlm"
   | "sessions"
+  | "voice"
   | "extensions"
   | "passwords"
   | `extension:${string}`;
@@ -1358,6 +1360,7 @@ function ProvidersList({
     { id: "context", label: t("settings.contextTitle") },
     { id: "internalLlm", label: t("settings.internalLlmTitle") },
     { id: "sessions", label: t("settings.sessionsTitle") },
+    { id: "voice", label: t("settings.voiceTitle") },
     { id: "extensions", label: t("settings.extensionsTitle") },
     ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager") }] : []),
     ...extensionSettingsModules.map((item) => ({
@@ -1427,6 +1430,7 @@ function ProvidersList({
           <NativeImportSetting />
         </>
       )}
+      {section === "voice" && <VoiceSettings />}
       {section === "extensions" && <ExtensionUiSettingsSection />}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {extensionSettingsSection && <ExtensionModuleSlot module={extensionSettingsSection} />}

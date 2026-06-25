@@ -298,6 +298,8 @@
   "settings.contextTitle": "הקשר",
   "settings.internalLlmTitle": "LLM פנימי",
   "settings.sessionsTitle": "סשנים",
+  "settings.voiceTitle": "קול",
+  "settings.voiceCloseOnBackground": "כבה מצב קולי כשהאפליקציה עוברת לרקע",
   "settings.extensionsTitle": "תוספים",
   "settings.extensionsHarnessDelivery": "מסירת Harness",
   "settings.extensionsHarnessDeliveryHelp": "איך Better Agent חושף קבצי harness של תוספים להרצות ספקים.",
