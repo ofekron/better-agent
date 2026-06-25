@@ -255,7 +255,8 @@ function BackendUnavailable({ error, onRetry }: { error: string; onRetry: () => 
 }
 
 function LazySurfaceFallback() {
-  return <div className="app-surface-loading">Loading...</div>;
+  const { t } = useTranslation();
+  return <div className="app-surface-loading">{t("app.loading", "Loading...")}</div>;
 }
 
 function BetterAgentBrandMark({ className = "" }: { className?: string }) {
@@ -2329,7 +2330,7 @@ function AppMain({
           }),
         },
       ).catch((e) => {
-        alert("Adversarial sync failed to start: " + (e?.message ?? String(e)));
+        alert(t("app.adversarialSyncFailed", "Adversarial sync failed to start: ") + (e?.message ?? String(e)));
       });
     },
     [currentTree]
@@ -4233,7 +4234,7 @@ function AppMain({
       pendingStatus: ChatMessage["status"] = "offline",
     ) => {
       if (config.fileEditEnabled) {
-        window.alert("File-editing sessions cannot be queued offline.");
+        window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
         return;
       }
       const id = crypto.randomUUID();

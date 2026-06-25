@@ -29,7 +29,7 @@ export function LanguageSelector() {
           { silent: true },
         ).catch(() => {});
       }}
-      aria-label="Language"
+      aria-label={t("language.label", "Language")}
     >
       {LANGUAGES.map((lang) => (
         <option key={lang.code} value={lang.code}>
