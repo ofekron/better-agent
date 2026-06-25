@@ -76,7 +76,25 @@ How do you want to *use* Better Agent? Install only the matching module.
 Already done by Part 1. Open the printed URL on this machine, or from another
 trusted LAN device if you chose LAN mode. Stop here if the browser is enough.
 
-### Option B — Native desktop app — **build only the one for YOUR OS**
+### Option B — Install as a PWA — **app-like, zero build, any OS**
+
+Better Agent is a Progressive Web App, so you can get an installed, standalone
+app icon on **desktop, iPhone, and Android without building anything** — no
+PyInstaller, no Xcode, no Android Studio. This is the recommended way to get an
+"app" on most devices; only fall through to Options C/D if you specifically need
+a native binary.
+
+Just open the server URL in a browser and install it:
+
+- **Desktop (Chrome/Edge):** the install icon in the address bar → *Install*.
+- **iPhone/iPad (Safari):** Share → *Add to Home Screen*.
+- **Android (Chrome):** menu → *Install app* / *Add to Home Screen*.
+
+It launches full-screen, points at your existing backend, and updates itself
+when you redeploy the frontend. For phones, this needs **LAN mode** (Part 4) so
+the device can reach your backend.
+
+### Option C — Native desktop app — **build only the one for YOUR OS**
 
 The desktop app is a packaged shell around the same local backend. Each OS has
 its own build script; build the one matching the machine you're on. Do **not**
@@ -99,10 +117,12 @@ Needs: a Windows host, [Inno Setup](https://jrsoftware.org/isinfo.php) (`ISCC`
 on PATH) for the installer, and optionally an Authenticode cert
 (`BA_SIGN_THUMBPRINT`) to sign. Skip this entirely if you're on macOS.
 
-### Option C — Mobile app — **install only Android OR iOS, matching your phone**
+### Option D — Native mobile app — **install only Android OR iOS, matching your phone**
 
-The mobile clients are Capacitor wrappers that point at your Better Agent server
-URL. Build for the platform your phone runs — there is no reason to install the
+Only needed if the PWA (Option B) isn't enough — e.g. you need native speech
+recognition or deeper OS integration. The mobile clients are Capacitor wrappers
+that point at your Better Agent server URL. Build for the platform your phone
+runs — there is no reason to install the
 Android toolchain for an iPhone or Xcode for an Android phone.
 
 **iPhone/iPad → iOS (requires macOS):**
