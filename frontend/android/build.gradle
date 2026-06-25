@@ -24,6 +24,20 @@ allprojects {
     }
 }
 
+// Some Capacitor plugins (e.g. send-intent) hardcode an older compileSdk that
+// is incompatible with androidx libraries (activity 1.11.0 requires API 36+).
+// Force every Android subproject up to the project compileSdk so AAR metadata
+// checks pass regardless of what each plugin pins.
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                compileSdkVersion rootProject.ext.compileSdkVersion
+            }
+        }
+    }
+}
+
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
