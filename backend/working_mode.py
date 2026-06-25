@@ -59,8 +59,21 @@ def find_working_session(
 ) -> Optional[dict]:
     """Return the first live working session whose mode matches and whose
     ``working_mode_meta`` contains all ``**match`` key-value pairs, or
-    ``None``."""
+    ``None``.
+
+    Pre-filters on the in-memory session summary (which already carries
+    ``working_mode`` + ``working_mode_meta``) so a full disk-backed
+    ``session_manager.get`` runs only for candidates that already match —
+    not once per session. This keeps the lookup off the per-session
+    root-tree load path that otherwise blocks the caller (and, when the
+    caller runs on the event loop, the whole loop). The full-load re-check
+    is retained so a stale summary can never produce a false positive."""
     for summary in session_manager.list():
+        if summary.get("working_mode") != mode:
+            continue
+        sm = summary.get("working_mode_meta") or {}
+        if not all(sm.get(k) == v for k, v in match.items()):
+            continue
         s = session_manager.get(summary["id"]) or {}
         if s.get("working_mode") != mode:
             continue

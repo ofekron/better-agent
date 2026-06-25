@@ -23,6 +23,7 @@ persistent if a persistent open later targets the same cwd, never
 downgraded.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -202,7 +203,9 @@ async def start_empty(
     project = await _project_cwd(node_id, cwd)
     project_cwd = project["cwd_resolved"]
 
-    existing = working_mode.find_working_session(MODE, project_cwd=project_cwd)
+    existing = await asyncio.to_thread(
+        working_mode.find_working_session, MODE, project_cwd=project_cwd
+    )
     if existing:
         if persistent:
             def _upgrade(s: dict) -> None:
@@ -297,7 +300,9 @@ async def start(
     project_cwd = baseline["cwd_resolved"]
     orig = baseline["original_content"]
 
-    existing = working_mode.find_working_session(MODE, project_cwd=project_cwd)
+    existing = await asyncio.to_thread(
+        working_mode.find_working_session, MODE, project_cwd=project_cwd
+    )
     if existing:
         added, sess = await _join_file_set_atomic(
             existing["id"], node_id, resolved, persistent,

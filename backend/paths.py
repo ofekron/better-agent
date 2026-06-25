@@ -34,6 +34,15 @@ except ImportError:  # pragma: no cover - non-POSIX
 _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_UMASK = 0o077
 _SECURED_ROOTS: set[str] = set()
+# Memoized resolved roots keyed by the exact env inputs the resolution
+# depends on (primary home, legacy home, test mode). ba_home() sits in the
+# hot path (every `_sessions_dir()` → every root-tree load), and the full
+# resolution does real FS syscalls (`mkdir`, `Path.resolve()`). Caching by
+# env value keeps test isolation intact — a test that sets a fresh
+# BETTER_AGENT_HOME before import gets a distinct key and a fresh, fully
+# re-validated resolution; module-import-time caching (which the docstring
+# forbids) is still avoided. See ba_home().
+_HOME_CACHE: dict[tuple[str, str, str], Path] = {}
 _WINDOWS_CURRENT_USER_SID: str | None = None
 _PRIMARY_HOME_ENV = "BETTER_AGENT_HOME"
 _LEGACY_HOME_ENV = "BETTER_CLAUDE_HOME"
@@ -192,6 +201,14 @@ def ba_home() -> Path:
     defaults to `~/.better-claude`; when that path is used, creates
     `~/.better-agent` as a local alias if possible.
     """
+    cache_key = (
+        os.environ.get(_PRIMARY_HOME_ENV, "").strip(),
+        os.environ.get(_LEGACY_HOME_ENV, "").strip(),
+        os.environ.get(_TEST_MODE_ENV, ""),
+    )
+    cached = _HOME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     configured = _env_home(_PRIMARY_HOME_ENV) or _env_home(_LEGACY_HOME_ENV)
     root = configured or _default_home()
     assert_state_root_safe(root)
@@ -202,6 +219,7 @@ def ba_home() -> Path:
     if secured_key not in _SECURED_ROOTS:
         _make_private(root)
         _SECURED_ROOTS.add(secured_key)
+    _HOME_CACHE[cache_key] = root
     return root
 
 
