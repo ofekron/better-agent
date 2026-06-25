@@ -6575,7 +6575,7 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   margin-block: 8px;
   margin-inline-start: 12px;
-  padding-inline-start: 16px;
+  padding-inline-start: 14px;
   border-inline-start: 2px solid var(--accent-dim);
 }
 
@@ -6649,7 +6649,7 @@ button.run-badge-clickable:focus-visible {
   padding: 0;
   background: var(--bg-secondary);
   border: 1px solid var(--bg-hover);
-  border-inline-start: 3px solid color-mix(in srgb, var(--agent) 45%, transparent);
+  border-inline-start: 2px solid color-mix(in srgb, var(--agent) 45%, transparent);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -9001,9 +9001,13 @@ button.run-badge-clickable:focus-visible {
 }
 
 /* When a sub-agent contains another sub-agent, the inner line inherits a
-   dimmer color so depth levels read clearly. */
+   dimmer color so depth levels read clearly. Each further level steps dimmer
+   so the rail grid stays readable past two levels. */
 .sub-agent-block .sub-agent-block {
   border-inline-start-color: color-mix(in srgb, var(--agent) 35%, transparent);
+}
+.sub-agent-block .sub-agent-block .sub-agent-block {
+  border-inline-start-color: color-mix(in srgb, var(--agent) 22%, transparent);
 }
 
 /* Clickable header row — chevron + ToolCall + collapsed count.
@@ -9055,7 +9059,7 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   margin: 6px 0;
   border: 1px solid var(--border);
-  border-inline-start: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-inline-start: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-secondary) 86%, transparent);
   overflow: hidden;
@@ -13475,7 +13479,7 @@ button.progress-inflight {
   }
   .message-group-children {
     margin-inline-start: 4px;
-    padding-inline-start: 10px;
+    padding-inline-start: 14px;
   }
   .message-box-body {
     padding: 10px 8px;
