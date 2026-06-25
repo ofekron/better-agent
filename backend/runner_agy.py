@@ -554,24 +554,24 @@ def _tool_signature(tool_name: str, payload: dict[str, Any]) -> str:
 def _strip_protobuf_artifacts(text: str) -> str:
     """Clean the protobuf-ish wrappers agy puts around model prose.
 
-    A type-15 assistant string carries a trailing "2(bot-<uuid>)" bot-identifier
-    suffix that _meaningful_text rejects (its "bot-" guard). The blob is often
-    truncated before the closing ")" and the uuid may be partial, so the suffix
-    match is tolerant. _strings_from_blob's printable-ASCII filter leaves a
-    single leading protobuf field-marker char on prose (e.g. "II am waiting" ->
-    the first "I" is a marker); strip one leading duplicate when the rest reads
-    as a sentence."""
+    agy stores several noisy variants of the same prose in a step blob:
+      - a trailing bot-identifier "2(bot-<uuid>:)" (uuid may be partial,
+        suffix may be ':' or ')')
+      - a leading snake_case tool name + field-type/marker bytes
+        (e.g. "grep_searchB^I am searching...")
+      - a stray leading field marker ("^I am...", "II am...", "UI am...")
+    The real prose reliably begins at a sentence boundary — "I ", "I'",
+    or a Capitalized word + space. Strip a short marker prefix (<=20 chars)
+    up to that boundary so the rendered text is clean."""
     text = text.strip()
-    # Strip the bot-identifier wherever it appears (the blob often continues
-    # past the uuid, so anchoring to end-of-string misses it).
-    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]+\)?", "", text)
+    # Trailing bot-identifier (tolerant of ':', ')', or truncated uuid).
+    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]+[:)]?", "", text)
     text = re.sub(r"\d*\(bot-[0-9a-fA-F-]*$", "", text)
-    text = re.sub(r"^\d", "", text, count=1)
-    # Drop a single leading field-marker char duplicated onto sentence start
-    # ("II am" -> "I am", "## He" -> "# He" is left alone — only collapse an
-    # immediate repeat of the first char).
-    if len(text) >= 3 and text[0] == text[1] and text[2] == " ":
-        text = text[1:]
+    text = text.strip(":`,")
+    # Leading marker prefix up to the first sentence boundary.
+    m = re.search(r"(I\s|I'|[A-Z][a-z]+\s)", text[:40])
+    if m and 0 < m.start() <= 20:
+        text = text[m.start():]
     return text.strip()
 
 
