@@ -825,9 +825,15 @@ body {
   overflow: hidden;
 }
 
+.session-list-selected {
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
 .session-list-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
   padding: 6px 16px;
@@ -835,10 +841,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.session-list-header > span {
   flex-shrink: 0;
 }
 
@@ -981,6 +983,10 @@ body {
   overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
+  /* Don't let the browser anchor scroll to a top-inserted row: a newly
+     created session prepends at the top, and the auto-scroll-to-top
+     effect owns the scroll position in that case. */
+  overflow-anchor: none;
 }
 
 .session-list-more {

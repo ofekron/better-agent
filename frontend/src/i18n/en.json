@@ -331,7 +331,6 @@
   "workers.initializing": "Initializing…",
   "workers.markAsWorkerTitle": "Mark \"{{name}}\" as a worker",
 
-  "session.header": "Sessions",
   "session.newButton": "+ New",
   "settings.crossSessionDelegateAuto": "Auto-approve cross-session delegation (fork only)",
   "settings.crossSessionDelegateAutoHint": "When on, delegate_to_session can fork another session and run without the confirmation picker. Continue-mode always asks. Off by default.",

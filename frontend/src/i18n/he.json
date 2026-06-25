@@ -331,7 +331,6 @@
   "workers.initializing": "מאתחל…",
   "workers.markAsWorkerTitle": "סמן \"{{name}}\" כעובד",
 
-  "session.header": "סשנים",
   "session.newButton": "+ חדש",
   "settings.crossSessionDelegateAuto": "אישור אוטומטי להאצלה בין-סשנים (fork בלבד)",
   "settings.crossSessionDelegateAutoHint": "כשמופעל, delegate_to_session יכול לפצל סשן אחר ולהריץ ללא בורר אישור. מצב continue תמיד שואל. כבוי כברירת מחדל.",

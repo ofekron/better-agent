@@ -71,6 +71,10 @@ interface Props {
   onLoadMore?: () => void;
 }
 
+// Empty children map for the pinned selected-session anchor, which
+// renders as a single row without its sub-session sub-tree.
+const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
+
 function projectName(cwd?: string): string {
   if (!cwd) return "~";
   const trimmed = cwd.replace(/\/+$/, "");
@@ -1175,6 +1179,9 @@ export function SessionList({
   // Latest-wins on the frontend too — a new submit aborts the prior
   // fetch so its stale response can't overwrite the new state.
   const aiAbortRef = useRef<AbortController | null>(null);
+  const itemsScrollRef = useRef<HTMLDivElement | null>(null);
+  const prevFirstIdRef = useRef<string | null>(null);
+  const prevIdsRef = useRef<Set<string>>(new Set());
 
   // Keyboard navigation: which session id is currently highlighted in
   // the rendered list. Driven by ArrowUp/ArrowDown when either search
@@ -1707,10 +1714,85 @@ export function SessionList({
   // loaded) defaults to showing folders, matching the backend pref default.
   const showFolders = folderViewEnabled !== false;
 
+  // Scroll the list back to the top when a NEW session becomes the
+  // first row (e.g. a freshly created session prepended to the list).
+  // Keyed off the actually-rendered order — `roots` in flat view, the
+  // flattened folder tree in folder view — so it matches what the user
+  // sees. Only fires when the topmost id changed to one that wasn't
+  // present before, so reordering existing sessions never yanks scroll.
+  const renderedOrder = showFolders ? sortedRoots : roots;
+  useEffect(() => {
+    const firstId = renderedOrder[0]?.id ?? null;
+    const prevFirst = prevFirstIdRef.current;
+    const prevIds = prevIdsRef.current;
+    prevFirstIdRef.current = firstId;
+    prevIdsRef.current = new Set(renderedOrder.map((s) => s.id));
+    if (!firstId || firstId === prevFirst) return;
+    if (prevIds.has(firstId)) return;
+    itemsScrollRef.current?.scrollTo({ top: 0 });
+  }, [renderedOrder]);
+
+  // Single SessionNode factory so the in-list rows and the pinned
+  // selected-session anchor share one prop set.
+  const renderNode = (
+    s: Session,
+    depth: number,
+    dragEnabled: boolean,
+    childrenMap: Map<string, Session[]> = childrenByParent,
+  ) => (
+    <SessionNode
+      key={s.id}
+      session={s}
+      depth={depth}
+      dragEnabled={dragEnabled}
+      currentSessionId={currentSessionId}
+      highlightedSessionId={highlightedSessionId}
+      childrenByParent={childrenMap}
+      copiedId={copiedId}
+      providers={providers}
+      showArchived={showArchived}
+      contentScore={scoreMap.get(s.id) ?? null}
+      onSelect={onSelect}
+      onDelete={onDelete}
+      onCopy={copyId}
+      onRename={onRename}
+      onPin={onPin}
+      onUnpinOthers={onUnpinOthers}
+      onContextMenuOpen={openSessionContextMenu}
+      onArchive={onArchive}
+      onWorkerEligible={onWorkerEligible}
+      onDetails={onDetails}
+      onResumeEng={onResumeEng}
+      folders={folders}
+      tags={tags}
+      onMoveToFolder={moveToFolder}
+      onCreateFolder={createAndAssignFolder}
+      onSetTags={setSessionTags}
+      onCreateTag={createAndAssignTag}
+      selectedReqTagKeys={selectedReqTagKeys}
+      onToggleReqTag={toggleTagFilter}
+      sortField={sessionSort ?? "updated_at"}
+    />
+  );
+
+  // Pinned anchor: the currently-selected session, shown above the
+  // toolbar so it stays visible regardless of search/scroll. Looked up
+  // from the full prop list (not `filtered`) so an active search filter
+  // never hides it.
+  const selectedSession =
+    (currentSessionId &&
+      (sessions.find((s) => s.id === currentSessionId) ??
+        allSessions?.find((s) => s.id === currentSessionId))) ||
+    null;
+
   return (
     <div className="session-list" data-testid="session-list">
+      {selectedSession && (
+        <div className="session-list-selected" data-testid="session-list-selected">
+          {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+        </div>
+      )}
       <div className="session-list-header">
-        <span>{t("session.header")}</span>
         <div className="session-list-toolbar">
           <div className={`session-search${searchExpanded ? " expanded" : ""}`}>
             <div className="session-search-input-wrap">
@@ -1881,6 +1963,7 @@ export function SessionList({
       )}
       <LayoutGroup>
       <div
+        ref={itemsScrollRef}
         className="session-list-items"
         onScroll={handleItemsScroll}
         onDragStart={(e) => {
@@ -2227,41 +2310,9 @@ export function SessionList({
             <span>{t("session.unfiled")}</span>
           </div>
         )}
-        {(showFolders ? unfiledSessions : roots).map((s) => (
-          <SessionNode
-            key={s.id}
-            session={s}
-            depth={0}
-            dragEnabled={showFolders}
-            currentSessionId={currentSessionId}
-            highlightedSessionId={highlightedSessionId}
-            childrenByParent={childrenByParent}
-            copiedId={copiedId}
-            providers={providers}
-            showArchived={showArchived}
-            contentScore={scoreMap.get(s.id) ?? null}
-            onSelect={onSelect}
-            onDelete={onDelete}
-            onCopy={copyId}
-            onRename={onRename}
-            onPin={onPin}
-            onUnpinOthers={onUnpinOthers}
-            onContextMenuOpen={openSessionContextMenu}
-            onArchive={onArchive}
-            onWorkerEligible={onWorkerEligible}
-            onDetails={onDetails}
-            onResumeEng={onResumeEng}
-            folders={folders}
-            tags={tags}
-            onMoveToFolder={moveToFolder}
-            onCreateFolder={createAndAssignFolder}
-            onSetTags={setSessionTags}
-            onCreateTag={createAndAssignTag}
-            selectedReqTagKeys={selectedReqTagKeys}
-            onToggleReqTag={toggleTagFilter}
-            sortField={sessionSort ?? "updated_at"}
-          />
-        ))}
+        {(showFolders ? unfiledSessions : roots).map((s) =>
+          renderNode(s, 0, showFolders),
+        )}
         {searching && sessions.length === 0 && (
           <div className="session-list-loading">
             <span className="session-list-spinner" aria-hidden="true" />
