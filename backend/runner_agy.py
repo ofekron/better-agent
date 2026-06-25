@@ -252,32 +252,18 @@ def _apply_file_attachments(prompt: str, files: list) -> str:
     return f"{preamble}\n\n{prompt}" if prompt else preamble
 
 
-def _agy_root(home: Path) -> Path:
-    return home / ".gemini" / "antigravity-cli"
-
-
 def _conversation_exists(home: Path, conversation_id: Optional[str]) -> bool:
     return bool(conversation_id) and _conversation_db(home, str(conversation_id)).is_file()
 
 
-def _last_conversation_for_cwd(home: Path, cwd: str) -> Optional[str]:
-    path = _agy_root(home) / "cache" / "last_conversations.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    sid = data.get(cwd)
-    if isinstance(sid, str) and _conversation_exists(home, sid):
-        return sid
-    return None
-
-
-def _resolve_resume_conversation(home: Path, cwd: str, requested: str) -> str:
+def _resolve_resume_conversation(home: Path, requested: str) -> str:
+    # Resume ONLY the app session's own conversation. Never infer a conversation
+    # from a shared signal (e.g. cwd) — multiple app sessions share a cwd, so any
+    # such inference grafts one session's conversation onto another. Fail closed:
+    # an unknown/missing requested id starts a fresh conversation.
     if _conversation_exists(home, requested):
         return requested
-    return _last_conversation_for_cwd(home, cwd) or ""
+    return ""
 
 
 def _discover_conversation_id(
@@ -285,18 +271,21 @@ def _discover_conversation_id(
     *,
     preferred: Optional[str],
     agy_home: Path,
-    cwd: str,
 ) -> Optional[str]:
+    # The agy conversation id for THIS run comes only from this run's own CLI log
+    # markers (authoritative) or, as a fallback, the app session's own resumed id.
+    # Until one of those is available, return None and let the caller keep polling
+    # — never substitute a cwd-shared id, which belongs to whatever app session
+    # last ran in this cwd.
+    def _preferred_or_none() -> Optional[str]:
+        return preferred if _conversation_exists(agy_home, preferred) else None
+
     if not log_path.is_file():
-        if _conversation_exists(agy_home, preferred):
-            return preferred
-        return _last_conversation_for_cwd(agy_home, cwd)
+        return _preferred_or_none()
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        if _conversation_exists(agy_home, preferred):
-            return preferred
-        return _last_conversation_for_cwd(agy_home, cwd)
+        return _preferred_or_none()
     parent_markers = (
         "Print mode: conversation=",
         "Created conversation ",
@@ -311,9 +300,7 @@ def _discover_conversation_id(
             match = _CONVERSATION_RE.search(line)
             if match:
                 return match.group(0)
-    if _conversation_exists(agy_home, preferred):
-        return preferred
-    return _last_conversation_for_cwd(agy_home, cwd)
+    return _preferred_or_none()
 
 
 def _write_state(run_dir: Path, state: dict[str, Any]) -> None:
@@ -1027,7 +1014,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     if scoped_env:
         run_env.update(scoped_env)
     agy_home = Path(run_env.get("HOME") or str(Path.home()))
-    resume_session_id = _resolve_resume_conversation(agy_home, cwd, session_id) if session_id else ""
+    resume_session_id = _resolve_resume_conversation(agy_home, session_id) if session_id else ""
 
     state = {
         "run_id": run_dir.name,
@@ -1086,7 +1073,6 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                 log_path,
                 preferred=resume_session_id or None,
                 agy_home=agy_home,
-                cwd=cwd,
             )
             if sid:
                 state["session_id"] = sid
@@ -1133,7 +1119,6 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         log_path,
         preferred=resume_session_id or None,
         agy_home=agy_home,
-        cwd=cwd,
     )
     if discovered_sid:
         state["session_id"] = discovered_sid

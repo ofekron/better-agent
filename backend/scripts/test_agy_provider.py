@@ -214,10 +214,30 @@ def test_model_fetch_and_runner() -> None:
             }),
             encoding="utf-8",
         )
+        argv_before_bad = argv_log.read_text(encoding="utf-8")
         code = runner_main(run_dir_3)
         check(code == 0, "bad stored id runner exits cleanly")
         complete_3 = json.loads((run_dir_3 / "complete.json").read_text(encoding="utf-8"))
-        check(complete_3["session_id"] == valid_sid, "runner repairs invalid stored agy id from cwd cache")
+        # Fail closed: an invalid stored id must NOT be "repaired" from the
+        # cwd-keyed cache. Many app sessions share a cwd, so adopting the cwd
+        # cache's conversation grafts another session's turn onto this one
+        # (the cross-session contamination bug). It must start fresh instead —
+        # never the cwd-cache id (valid_sid) and never the bad requested id.
+        check(complete_3["session_id"] != valid_sid, "invalid stored id is NOT repaired from cwd cache")
+        check(
+            complete_3["session_id"] != "99999999-9999-9999-9999-999999999999",
+            "invalid stored id is not passed through as the conversation",
+        )
+        check(
+            complete_3["session_id"] == "11111111-2222-3333-4444-555555555555",
+            "invalid stored id starts a fresh agy conversation",
+        )
+        argv_for_bad = argv_log.read_text(encoding="utf-8")[len(argv_before_bad):]
+        check(
+            f"conversation={valid_sid}" not in argv_for_bad
+            and "conversation=99999999-9999-9999-9999-999999999999" not in argv_for_bad,
+            "runner passes no cwd-cache/bad conversation id to the agy CLI",
+        )
 
         run_dir_4 = Path(tempfile.mkdtemp(prefix="bc-test-agy-run-auth-"))
         (run_dir_4 / "input.json").write_text(
