@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type UIEvent } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
 import type { OrchestrationMode, Provider, RequirementTag, Session, SessionFolder, SessionTag } from "../types";
@@ -31,6 +32,10 @@ interface Props {
    * can surface. If omitted, falls back to `sessions`. */
   allSessions?: Session[];
   currentSessionId?: string;
+  /** DOM node (above the sidebar tabs) where the pinned selected-session
+   * anchor is portaled. When null, the anchor renders inline at the top
+   * of the list as a fallback. */
+  selectedAnchorContainer?: HTMLElement | null;
   providers: Provider[];
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
@@ -983,6 +988,7 @@ export function SessionList({
   sessions,
   allSessions,
   currentSessionId,
+  selectedAnchorContainer,
   providers,
   onSelect,
   onDelete,
@@ -1779,11 +1785,19 @@ export function SessionList({
 
   return (
     <div className="session-list" data-testid="session-list">
-      {selectedSession && (
-        <div className="session-list-selected" data-testid="session-list-selected">
-          {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
-        </div>
-      )}
+      {selectedSession &&
+        (selectedAnchorContainer
+          ? createPortal(
+              <div className="session-list-selected" data-testid="session-list-selected">
+                {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+              </div>,
+              selectedAnchorContainer,
+            )
+          : (
+            <div className="session-list-selected" data-testid="session-list-selected">
+              {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+            </div>
+          ))}
       <div className="session-list-header">
         <div className="session-list-toolbar">
           <div className={`session-search${searchExpanded ? " expanded" : ""}`}>
