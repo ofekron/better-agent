@@ -98,6 +98,7 @@ import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, Fi
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
+import { isLeakedProviderMirror } from "./utils/modelDrift";
 import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
@@ -3517,14 +3518,14 @@ function AppMain({
     setSessionTokenUsageLast(currentSession.token_usage_last || null);
     if (currentSession.id !== lastSyncedSessionIdRef.current) {
       lastSyncedSessionIdRef.current = currentSession.id;
-      // Sync model from the session so the global selector reflects the
-      // session's actual provider/model. Without this, the drift detector
-      // below sees a mismatch (active provider default vs session model)
-      // and PATCHes the wrong model back, breaking cross-provider sessions.
-      if (currentSession.model) {
-        setModel(currentSession.model);
-        skipDriftRef.current = true;
-      }
+      // Re-establish the global selector from the focused session
+      // UNCONDITIONALLY on every switch, and always arm the skip. Arming
+      // lastSynced without overwriting `model` left a leaked active-provider
+      // default (e.g. glm-5.2 after switching the default provider) sitting in
+      // `model`, which the drift detector then PATCHed onto a different-provider
+      // session — corrupting its model while provider_id stayed put.
+      setModel(currentSession.model || "");
+      skipDriftRef.current = true;
       if (currentSession.cwd) setCwd(currentSession.cwd);
     }
   }, [currentSession]);
@@ -3541,6 +3542,10 @@ function AppMain({
       return;
     }
     if (currentSession.id !== lastSyncedSessionIdRef.current) return;
+    // Never persist a model that leaked from the active/default-provider
+    // mirror onto a session whose own provider differs — that write would
+    // corrupt the session's model (and now 400s at the backend, spamming).
+    if (isLeakedProviderMirror(model, currentProvider, defaultProvider)) return;
     // Gate on `model` being non-empty. Until the active provider's
     // default_model is pulled from /api/providers, local `model` is "" —
     // comparing against the session's stored model would always look
@@ -3561,7 +3566,7 @@ function AppMain({
       },
       { silent: true },
     ).then(() => refreshSessions()).catch(() => {});
-  }, [model, currentSession, refreshSessions, clientId]);
+  }, [model, currentSession, refreshSessions, clientId, defaultProvider, currentProvider]);
 
   // user_message_persisted ack is now handled imperatively by
   // `handleUserMessagePersisted` (passed to useWebSocket above) —
