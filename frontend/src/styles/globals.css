@@ -11759,6 +11759,78 @@ pre .inline-tag-highlight {
 }
 .supervisor-banner-close:hover { opacity: 1; }
 
+.pr-toast {
+  position: fixed;
+  bottom: 88px;
+  right: 24px;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(440px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #241a33;
+  border: 1px solid #4a3a6b;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: #ece4ff;
+  font-size: calc(13px * var(--app-font-scale));
+  animation: pr-toast-in 0.18s ease-out;
+}
+@keyframes pr-toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (max-width: 640px) {
+  .pr-toast {
+    right: 12px;
+    left: 12px;
+    bottom: 96px;
+    max-width: none;
+  }
+}
+.pr-toast-icon {
+  flex-shrink: 0;
+  color: #b794f6;
+}
+.pr-toast-link {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.pr-toast-link:hover .pr-toast-title {
+  text-decoration: underline;
+}
+.pr-toast-title {
+  font-weight: 600;
+  color: #d6bcff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr-toast-repo {
+  opacity: 0.7;
+  font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr-toast-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: calc(18px * var(--app-font-scale));
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+.pr-toast-close:hover { opacity: 1; }
+
 /* ─────────────────────────────────────────────────────────────────────
  * Startup-tasks banner — non-blocking indicator for backend background
  * work (migrations, recovery, jsonl replay). Floats above the prompt

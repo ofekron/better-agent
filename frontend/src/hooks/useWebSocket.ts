@@ -257,6 +257,15 @@ interface UseWebSocketOptions {
     error?: string;
     reason?: string;
   }) => void;
+  /** A pull request was created by the agent (Claude CLI `pr-link`
+   * agent_message). Fired only on the LIVE push, never on replay, so the
+   * caller can show an ephemeral chat-panel toast. */
+  onPrLink?: (info: {
+    sessionId?: string;
+    prNumber?: number;
+    prUrl: string;
+    prRepository?: string;
+  }) => void;
   /** Backend ack that a prompt was queued (not sent immediately
    * because another turn was running). */
   onPromptQueued?: (data: {
@@ -414,6 +423,7 @@ export function useWebSocket(
   const onSessionOrganizationChangedRef = useRef(options.onSessionOrganizationChanged);
   const onProjectMappingsChangedRef = useRef(options.onProjectMappingsChanged);
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
+  const onPrLinkRef = useRef(options.onPrLink);
   const onPromptQueuedRef = useRef(options.onPromptQueued);
   const onTurnStartedRef = useRef(options.onTurnStarted);
   const onQueueConsumedRef = useRef(options.onQueueConsumed);
@@ -466,6 +476,7 @@ export function useWebSocket(
     onSessionOrganizationChangedRef.current = options.onSessionOrganizationChanged;
     onProjectMappingsChangedRef.current = options.onProjectMappingsChanged;
     onSupervisorEventRef.current = options.onSupervisorEvent;
+    onPrLinkRef.current = options.onPrLink;
     onPromptQueuedRef.current = options.onPromptQueued;
     onTurnStartedRef.current = options.onTurnStarted;
     onQueueConsumedRef.current = options.onQueueConsumed;
@@ -793,7 +804,30 @@ export function useWebSocket(
         // to the focused pane id only as a defensive last resort —
         // any new event type that forgets to carry app_session_id
         // would otherwise misroute under split-fork view.
-        if (
+        // `pr-link` is a no-uuid metadata agent_message (a PR was just
+        // created). It never lands on the render tree — surface it only
+        // as an ephemeral chat-panel toast, on the LIVE push. Diverted
+        // BEFORE the turn-reducer routing below so it can't pollute the
+        // in-memory msg.events.
+        const prLinkData =
+          event.type === "agent_message"
+            ? (event.data as { type?: string; prUrl?: string } | undefined)
+            : undefined;
+        if (prLinkData?.type === "pr-link" && prLinkData.prUrl) {
+          const d = event.data as {
+            app_session_id?: string;
+            sessionId?: string;
+            prNumber?: number;
+            prUrl: string;
+            prRepository?: string;
+          };
+          onPrLinkRef.current?.({
+            sessionId: d.app_session_id ?? d.sessionId,
+            prNumber: d.prNumber,
+            prUrl: d.prUrl,
+            prRepository: d.prRepository,
+          });
+        } else if (
           event.type === "agent_message" ||
           event.type === "manager_event" ||
           event.type === "steer_prompt" ||

@@ -1045,6 +1045,37 @@ function AppMain({
     [],
   );
 
+  // Ephemeral PR-created toast shown in the chat panel. Single slot
+  // (latest wins), auto-dismisses after 10s. Fired only on the LIVE
+  // pr-link push (useWebSocket onPrLink), never on replay.
+  const [prToast, setPrToast] = useState<{
+    prNumber?: number;
+    prUrl: string;
+    prRepository?: string;
+    at: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!prToast) return;
+    const t = setTimeout(() => setPrToast(null), 10000);
+    return () => clearTimeout(t);
+  }, [prToast]);
+  const handlePrLink = useCallback(
+    (info: {
+      sessionId?: string;
+      prNumber?: number;
+      prUrl: string;
+      prRepository?: string;
+    }) => {
+      setPrToast({
+        prNumber: info.prNumber,
+        prUrl: info.prUrl,
+        prRepository: info.prRepository,
+        at: Date.now(),
+      });
+    },
+    [],
+  );
+
   // Supervisor prompt modal — shown when enabling supervisor so the user
   // can edit the per-turn custom prompt before activation.
   const [supervisorPromptModalOpen, setSupervisorPromptModalOpen] = useState(false);
@@ -1555,6 +1586,7 @@ function AppMain({
       window.dispatchEvent(new CustomEvent("project_mappings_changed"));
     },
     onSupervisorEvent: handleSupervisorEvent,
+    onPrLink: handlePrLink,
     onPromptQueued: (data) => {
       logPromptSend("app_prompt_queued", {
         app_session_id: data.app_session_id,
@@ -5457,6 +5489,43 @@ function AppMain({
               </button>
             </div>
           ) : null;
+          const prToastElement = prToast ? (
+            <div className="pr-toast" role="status">
+              <svg
+                className="pr-toast-icon"
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M3.25 1A2.25 2.25 0 0 0 2.5 5.372V10.628a2.25 2.25 0 1 0 1.5 0V5.372A2.25 2.25 0 0 0 3.25 1Zm0 1.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm0 9.25a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM12.75 3a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v4.756a2.25 2.25 0 1 1-1.5 0V5.872A2.25 2.25 0 0 1 10.5 3.75Zm2.25 8a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+              </svg>
+              <a
+                className="pr-toast-link"
+                href={prToast.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={prToast.prUrl}
+              >
+                <span className="pr-toast-title">
+                  {prToast.prNumber
+                    ? `Pull request #${prToast.prNumber} created`
+                    : "Pull request created"}
+                </span>
+                {prToast.prRepository && (
+                  <span className="pr-toast-repo">{prToast.prRepository}</span>
+                )}
+              </a>
+              <button
+                className="pr-toast-close"
+                onClick={() => setPrToast(null)}
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          ) : null;
           // Ask-singleton view: the regular <Chat> rendered for the
           // singleton. The greeting box is injected as the chat's header
           // slot; the inline session picker is injected PER TURN via
@@ -5833,6 +5902,7 @@ function AppMain({
               <>
                 {supervisorBannerElement}
                 {chatElement}
+                {prToastElement}
               </>
             );
           }
