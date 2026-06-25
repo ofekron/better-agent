@@ -63,6 +63,20 @@ function isKnownIcon(name: unknown): name is IconName {
  *  the caller (ExtensionModuleSlot), never run imperatively. */
 export async function runHookAction(action: HookAction, ctx: HookActionContext): Promise<void> {
   if (action.type === "navigate" && action.path) {
+    // Opening the Ask singleton must go through openAsk so the navigation is
+    // marked intentional; a bare navigate is bounced by the auto-select-first
+    // effect that redirects the default Ask landing to a real session.
+    // askSessionPath is URL-encoded (colons → %3A); manifests may declare the
+    // raw form. Match against both so either spelling routes through openAsk.
+    const askRaw = ctx.askSessionPath && decodeURIComponent(ctx.askSessionPath);
+    if (
+      ctx.openAsk &&
+      ctx.askSessionPath &&
+      (action.path === ctx.askSessionPath || action.path === askRaw)
+    ) {
+      ctx.openAsk();
+      return;
+    }
     ctx.navigate(action.path);
     return;
   }
