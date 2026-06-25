@@ -272,8 +272,12 @@ def _seed_from_sessions_if_empty() -> list[dict]:
     if existing or _projects_path().exists():
         return existing
 
+    import session_store
+
     seen: dict[tuple[str, str], dict] = {}
     for s in session_manager.list():
+        if not session_store.should_auto_register_project(s):
+            continue
         cwd = _normalize(s.get("cwd", ""))
         if not cwd:
             continue

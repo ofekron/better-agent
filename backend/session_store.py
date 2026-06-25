@@ -2244,6 +2244,15 @@ def assign_message_seq(session: dict, message: dict) -> dict:
 # ── Lifecycle ─────────────────────────────────────────────────────────
 
 
+def should_auto_register_project(session: dict) -> bool:
+    """Whether a session's cwd should be auto-registered as a user
+    project. `bare_config` sessions are internal/isolated (provisioned
+    machine-completion workers, TestApe-isolated runs); their cwd is an
+    implementation detail and must never surface in the user's project
+    list."""
+    return bool(session.get("cwd")) and not session.get("bare_config")
+
+
 def create_session(
     name: str = "",
     model: Optional[str] = None,

@@ -2632,7 +2632,7 @@ class SessionManager:
 
     def _ensure_project_for_session(self, sess: dict) -> None:
         cwd = sess.get("cwd")
-        if not cwd:
+        if not session_store.should_auto_register_project(sess):
             return
         try:
             import project_store
