@@ -7,20 +7,23 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+  componentStack: string | null;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
   public state: State = {
     hasError: false,
     error: null,
+    componentStack: null,
   };
 
   public static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+    return { hasError: true, error, componentStack: null };
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Uncaught error:", error, errorInfo);
+    this.setState({ componentStack: errorInfo.componentStack ?? null });
   }
 
   public render() {
@@ -40,6 +43,21 @@ export class ErrorBoundary extends Component<Props, State> {
         }}>
           <h1>Something went wrong.</h1>
           <p>{this.state.error?.message}</p>
+          {this.state.componentStack && (
+            <details style={{ maxWidth: "90vw", marginTop: "12px" }}>
+              <summary style={{ cursor: "pointer" }}>Component stack</summary>
+              <pre style={{
+                textAlign: "left",
+                maxHeight: "40vh",
+                overflow: "auto",
+                fontSize: "12px",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}>
+                {this.state.componentStack}
+              </pre>
+            </details>
+          )}
           <button
             onClick={() => window.location.reload()}
             style={{
