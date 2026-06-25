@@ -450,6 +450,12 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
         summary.emit()
 
 
+# Providers whose runner normalizes its turn into session_events.jsonl
+# (Claude-shaped envelopes). They share the same recovery replay reader.
+# All are GeminiProvider subclasses.
+_GEMINI_FAMILY_KINDS = frozenset({"gemini", "agy", "copilot"})
+
+
 def _provider_kind(desc: dict | None) -> str:
     if desc and desc.get("provider_kind"):
         return str(desc.get("provider_kind"))
@@ -1449,7 +1455,7 @@ def _replay_and_apply(
     kind = _provider_kind(desc)
     unmatched: list[dict] = []
     context_window: Optional[int] = None
-    if kind == "gemini":
+    if kind in _GEMINI_FAMILY_KINDS:
         all_events = _replay_from_gemini_jsonl(run_dir)
     elif kind == "codex":
         all_events, context_window = _replay_from_codex_rollout(run_dir)
@@ -1589,7 +1595,7 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
             desc = json.loads(bs_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    if _provider_kind(desc) == "gemini":
+    if _provider_kind(desc) in _GEMINI_FAMILY_KINDS:
         events = _replay_from_gemini_jsonl(run_dir)
     else:
         events = _replay_from_claude_jsonl(run_dir)

@@ -23,6 +23,15 @@ CLAUDE_INGESTION_VERSION = 2
 # v6: recover Codex native subagent panels from parent wait/notification rows
 # when live ingestion missed persisting child rollout sources.
 CODEX_INGESTION_VERSION = 6
+# Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
+# session_events.jsonl through the gemini-family reader instead of the Claude
+# parser, so runs reconciled under v1 (empty/partial render) re-digest on the
+# next startup.
+AGY_INGESTION_VERSION = 2
+# Same bug/fix as agy: copilot is a gemini-family provider whose runner writes
+# session_events.jsonl. v2: recovery now replays it through the gemini-family
+# reader instead of the Claude parser, so runs reconciled under v1 re-digest.
+COPILOT_INGESTION_VERSION = 2
 
 
 def current_ingestion_version(provider_kind: str | None) -> int:
@@ -30,6 +39,10 @@ def current_ingestion_version(provider_kind: str | None) -> int:
         return CODEX_INGESTION_VERSION
     if provider_kind == "claude":
         return CLAUDE_INGESTION_VERSION
+    if provider_kind == "agy":
+        return AGY_INGESTION_VERSION
+    if provider_kind == "copilot":
+        return COPILOT_INGESTION_VERSION
     return 1
 
 
