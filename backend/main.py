@@ -8476,13 +8476,25 @@ async def internal_agent_board_run_prompt(
     # extension subprocess cannot drive arbitrary/virtual session ids.
     if not session_manager.exists(session_id):
         raise HTTPException(status_code=404, detail="unknown session")
+    # Continue-mode delivery refuses a busy target; surface that synchronously
+    # so the drop UI can tell the user instead of silently dropping the prompt.
+    if coordinator.turn_manager.has_active_runs(session_id):
+        raise HTTPException(status_code=409, detail="session has an in-flight turn")
 
     async def _deliver() -> None:
         try:
-            await session_bridge.run_for_extension(session_id, prompt, source="agent-board")
+            result = await session_bridge.run_for_extension(session_id, prompt, source="agent-board")
         except Exception:
             logger.warning(
                 "agent-board run-prompt failed for %s", session_id[:8], exc_info=True
+            )
+            return
+        # run_for_extension returns an error dict (e.g. target became busy in
+        # the race after the pre-check) rather than raising — don't drop it.
+        if isinstance(result, dict) and result.get("error"):
+            logger.warning(
+                "agent-board run-prompt for %s returned error: %s",
+                session_id[:8], result.get("error"),
             )
 
     # Hold a reference until completion: a bare create_task may be GC'd

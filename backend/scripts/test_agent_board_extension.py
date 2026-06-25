@@ -146,6 +146,19 @@ def test_run_prompt_identity_gate(client: TestClient) -> None:
         )
         check(response.status_code == 200, "run-prompt accepts agent-board identity + real session")
         check(response.json().get("scheduled") is True, "run-prompt schedules delivery")
+
+        # Busy target → 409 synchronously (no silent drop of the prompt).
+        orig_busy = main.coordinator.turn_manager.has_active_runs
+        main.coordinator.turn_manager.has_active_runs = lambda sid: sid == real_sid
+        try:
+            response = client.post(
+                "/api/internal/agent-board/run-prompt",
+                headers=ab_headers,
+                json={"session_id": real_sid, "prompt": "do it"},
+            )
+            check(response.status_code == 409, "run-prompt rejects busy target session")
+        finally:
+            main.coordinator.turn_manager.has_active_runs = orig_busy
     finally:
         main.session_bridge.run_for_extension = original
 
