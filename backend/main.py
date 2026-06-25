@@ -10413,14 +10413,29 @@ async def websocket_chat(websocket: WebSocket):
                     send_mode, is_queued,
                 )
                 if send_mode == "steer":
-                    if await coordinator.steer_active_turn(
-                        app_session_id=app_session_id,
-                        prompt=cli_prompt or prompt,
-                        display_prompt=prompt,
-                        images=images if images else None,
-                        client_id=msg.get("client_id"),
-                        lifecycle_msg_id=lifecycle_msg_id,
+                    # Steer injects into the live turn and never reaches the
+                    # claim below, so dedup it here: a concurrent same-client_id
+                    # steer (offline re-dispatch after a reconnect) must not be
+                    # injected twice. One-shot — release right after.
+                    _steer_cid = msg.get("client_id")
+                    _steer_item = str(uuid.uuid4())
+                    if _steer_cid and coordinator.try_claim_prompt_client_id(
+                        app_session_id, _steer_item, _steer_cid,
                     ):
+                        continue
+                    try:
+                        _steered = await coordinator.steer_active_turn(
+                            app_session_id=app_session_id,
+                            prompt=cli_prompt or prompt,
+                            display_prompt=prompt,
+                            images=images if images else None,
+                            client_id=msg.get("client_id"),
+                            lifecycle_msg_id=lifecycle_msg_id,
+                        )
+                    finally:
+                        if _steer_cid:
+                            coordinator._forget_active_prompt_item(_steer_item)
+                    if _steered:
                         continue
                     send_mode = _fallback_ws_send_mode_after_failed_steer(
                         send_mode,
@@ -10501,24 +10516,41 @@ async def websocket_chat(websocket: WebSocket):
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
                     "_queued_id": item_id,
-                    "_client_id_claimed": True,
+                    "_client_id_claimed": bool(_claim_cid),
                 }
+
+                # From the claim above until submit_prompt hands the claim's
+                # release to turn-end, any failure must release the claim —
+                # otherwise the offline backlog's same-client_id re-dispatch
+                # would be deduped and the prompt silently lost. Fail closed
+                # toward NOT losing user intent.
+                def _release_claim_on_failure() -> None:
+                    if _claim_cid:
+                        coordinator._forget_active_prompt_item(item_id)
 
                 if send_mode == "interrupt" and is_queued:
                     params["_interrupt"] = True
                     # Cancel the current turn so the processor picks this up sooner.
                     # Pass the incoming lifecycle id so the displaced
                     # turn's done event carries the cross-ref.
-                    await coordinator.turn_manager.cancel_turn(
-                        app_session_id,
-                        interrupted_by_msg_id=lifecycle_msg_id,
-                    )
+                    try:
+                        await coordinator.turn_manager.cancel_turn(
+                            app_session_id,
+                            interrupted_by_msg_id=lifecycle_msg_id,
+                        )
+                    except Exception:
+                        _release_claim_on_failure()
+                        raise
                 elif alter_rewind_latest:
                     params["_alter_rewind_latest"] = True
-                    await coordinator.turn_manager.cancel_turn(
-                        app_session_id,
-                        interrupted_by_msg_id=lifecycle_msg_id,
-                    )
+                    try:
+                        await coordinator.turn_manager.cancel_turn(
+                            app_session_id,
+                            interrupted_by_msg_id=lifecycle_msg_id,
+                        )
+                    except Exception:
+                        _release_claim_on_failure()
+                        raise
 
                 if not is_queued:
                     try:
@@ -10542,28 +10574,32 @@ async def websocket_chat(websocket: WebSocket):
                 # processor keeps running and the detached runner keeps
                 # writing events into the persisted session JSON, so a
                 # reconnect+refetch shows the same content as live.
-                await asyncio.to_thread(
-                    session_manager.add_queued_prompt,
-                    app_session_id,
-                    {
-                        "id": item_id,
-                        "lifecycle_msg_id": lifecycle_msg_id,
-                        "content": prompt,
-                        "kind": lifecycle_kind,
-                        "queue_position": queue_position,
-                        "images_count": len(images),
-                        "files_count": len(files),
-                        "images": images if images else None,
-                        "files": files if files else None,
-                        "orchestration_mode": orchestration_mode,
-                        "send_target": msg.get("send_target"),
-                        "cli_prompt": cli_prompt,
-                        "client_id": msg.get("client_id"),
-                        "alter_rewind_latest": alter_rewind_latest,
-                        "capability_contexts": capability_contexts,
-                        "created_at": datetime.now().isoformat(),
-                    },
-                )
+                try:
+                    await asyncio.to_thread(
+                        session_manager.add_queued_prompt,
+                        app_session_id,
+                        {
+                            "id": item_id,
+                            "lifecycle_msg_id": lifecycle_msg_id,
+                            "content": prompt,
+                            "kind": lifecycle_kind,
+                            "queue_position": queue_position,
+                            "images_count": len(images),
+                            "files_count": len(files),
+                            "images": images if images else None,
+                            "files": files if files else None,
+                            "orchestration_mode": orchestration_mode,
+                            "send_target": msg.get("send_target"),
+                            "cli_prompt": cli_prompt,
+                            "client_id": msg.get("client_id"),
+                            "alter_rewind_latest": alter_rewind_latest,
+                            "capability_contexts": capability_contexts,
+                            "created_at": datetime.now().isoformat(),
+                        },
+                    )
+                except Exception:
+                    _release_claim_on_failure()
+                    raise
                 await ws_callback({
                     "type": "user_message_queued",
                     "data": {
@@ -10576,7 +10612,7 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception:
                     # Release the client_id claim taken above so the
                     # failed item doesn't block a later genuine re-send.
-                    coordinator._forget_active_prompt_item(item_id)
+                    _release_claim_on_failure()
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
