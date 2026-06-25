@@ -33,6 +33,7 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
 )
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_TABS_VISIBLE = True
+DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
 DEFAULT_CROSS_SESSION_DELEGATE_AUTO = False
 DEFAULT_CONTEXT_STRATEGY: ContextStrategy = "native_compact"
@@ -292,6 +293,23 @@ def set_session_tabs_visible(enabled: bool) -> bool:
     return enabled
 
 
+def get_voice_close_on_background() -> bool:
+    """Whether vocal mode auto-closes when the app goes to the background.
+    Default ON: the mic stops listening and vocal mode disables itself on
+    visibility loss, so the user does not need to remember to turn it off."""
+    val = _load().get("voice_close_on_background", DEFAULT_VOICE_CLOSE_ON_BACKGROUND)
+    return val if isinstance(val, bool) else DEFAULT_VOICE_CLOSE_ON_BACKGROUND
+
+
+def set_voice_close_on_background(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid voice_close_on_background: {enabled!r}")
+    prefs = _load()
+    prefs["voice_close_on_background"] = enabled
+    _save(prefs)
+    return enabled
+
+
 def get_last_models() -> dict:
     """Map of provider_id -> last model the user chose for it."""
     prefs = _load()
@@ -368,6 +386,7 @@ def get_all() -> dict:
         "session_sort": get_session_sort(),
         "sessions_tabs_sort": get_session_tabs_sort(),
         "sessions_tabs_visible": get_session_tabs_visible(),
+        "voice_close_on_background": get_voice_close_on_background(),
     }
 
 

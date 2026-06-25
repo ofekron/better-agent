@@ -1376,6 +1376,11 @@ async def patch_user_prefs(body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("sessions_tabs_visible must be a boolean")
             user_prefs.set_session_tabs_visible(val)
+        if "voice_close_on_background" in body:
+            val = body["voice_close_on_background"]
+            if not isinstance(val, bool):
+                raise ValueError("voice_close_on_background must be a boolean")
+            user_prefs.set_voice_close_on_background(val)
         return user_prefs.get_all()
 
     try:

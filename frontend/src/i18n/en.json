@@ -299,6 +299,8 @@
   "settings.contextTitle": "Context",
   "settings.internalLlmTitle": "Internal LLM",
   "settings.sessionsTitle": "Sessions",
+  "settings.voiceTitle": "Voice",
+  "settings.voiceCloseOnBackground": "Turn off vocal mode when the app goes to the background",
   "settings.extensionsTitle": "Extensions",
   "settings.extensionsHarnessDelivery": "Harness delivery",
   "settings.extensionsHarnessDeliveryHelp": "How Better Agent exposes extension harness files to provider runs.",
