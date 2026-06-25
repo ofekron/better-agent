@@ -188,9 +188,11 @@ function ContinuationPill({ chainDepth }: { chainDepth: number }) {
 // `key=value` pairs joined by `;` — `s=SCALE` (font scale) and
 // `bg=HEX` + `a=ALPHA` (transparent background highlight). ASCII + bracketed
 // so it round-trips through markdown untouched. Rendered here as a styled
-// inline span (NEVER raw HTML — the markdown pipeline escapes that by
-// design). Styled segments render their inner markdown in a nested
-// MarkdownPreview wrapped in a style span.
+// block callout (NEVER raw HTML — the markdown pipeline escapes that by
+// design): a background highlight + font scale paint reliably only on a
+// block box, not an inline span wrapping block-level markdown. Styled
+// segments render their inner markdown in a nested MarkdownPreview wrapped
+// in a `.bc-font-scaled` block.
 const STYLE_SENTINEL_RE = /⁣\[\[bcstyle:([^\]]*)\]\]([\s\S]*?)\[\[\/bcstyle\]\]⁣/;
 const STYLE_SENTINEL_STRIP_RE = /⁣\[\[bcstyle:[^\]]*\]\]|\[\[\/bcstyle\]\]⁣/g;
 
@@ -259,9 +261,9 @@ function ScaledMarkdown({
     const before = rest.slice(0, m.index);
     if (before) nodes.push(md(`t${i}`, before));
     nodes.push(
-      <span key={`s${i}`} style={parseStyleAttrs(m[1])} className="bc-font-scaled">
+      <div key={`s${i}`} style={parseStyleAttrs(m[1])} className="bc-font-scaled">
         {md(`si${i}`, m[2])}
-      </span>,
+      </div>,
     );
     rest = rest.slice(m.index + m[0].length);
     i += 1;
@@ -1063,6 +1065,15 @@ function renderSingleEvent(
       return <CompleteEvent key={idx} data={event.data} />;
     case "lifecycle_notice":
       return <LifecycleNotice key={idx} data={event.data ?? {}} />;
+    case "pr_link":
+      return (
+        <PrLinkEvent
+          key={idx}
+          prNumber={event.data?.prNumber as number | undefined}
+          prUrl={event.data?.prUrl as string | undefined}
+          prRepository={event.data?.prRepository as string | undefined}
+        />
+      );
     case "todos_snapshot":
       return <TodosSnapshotEvent key={idx} todos={event.data.todos as TodoItem[]} />;
     case "worker_event": {
@@ -1129,6 +1140,43 @@ function SteerPromptEvent({
         )}
       </span>
     </div>
+  );
+}
+
+function PrLinkEvent({
+  prNumber,
+  prUrl,
+  prRepository,
+}: {
+  prNumber?: number;
+  prUrl?: string;
+  prRepository?: string;
+}) {
+  if (!prUrl) return null;
+  const label = prNumber ? `Pull request #${prNumber}` : "Pull request";
+  return (
+    <a
+      className="event-pr-link"
+      href={prUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={prUrl}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 16 16"
+        fill="currentColor"
+        aria-hidden="true"
+        style={{ flexShrink: 0 }}
+      >
+        <path d="M3.25 1A2.25 2.25 0 0 0 2.5 5.372V10.628a2.25 2.25 0 1 0 1.5 0V5.372A2.25 2.25 0 0 0 3.25 1Zm0 1.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm0 9.25a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM12.75 3a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v4.756a2.25 2.25 0 1 1-1.5 0V5.872A2.25 2.25 0 0 1 10.5 3.75Zm2.25 8a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+      </svg>
+      <span className="event-pr-link-label">{label}</span>
+      {prRepository && (
+        <span className="event-pr-link-repo">{prRepository}</span>
+      )}
+    </a>
   );
 }
 
