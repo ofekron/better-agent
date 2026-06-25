@@ -4118,10 +4118,11 @@ function AppMain({
   );
 
   /** Rewind past a stopped/failed assistant turn and immediately re-send
-   * the prior user prompt as a fresh turn. Backend deletes the old
-   * user+assistant pair (rewinding all involved agents) and returns the
-   * prompt to retry; we round-trip through the existing WS send path so
-   * orchestration stays on a single code path. */
+   * the prior user prompt as a fresh turn. The backend rewinds the
+   * session to before the failed user message (removing the failed
+   * user+assistant pair and broadcasting rewind_complete) and returns the
+   * prompt to retry; we then re-send via the existing WS send path so the
+   * retry yields one user message, not a duplicate. */
   const handleRetryStopped = useCallback(
     async (assistantMessage: ChatMessage) => {
       if (!currentSession) return;
