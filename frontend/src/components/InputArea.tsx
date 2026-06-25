@@ -281,7 +281,7 @@ export function InputArea({
     const active = document.activeElement;
     if (active && active !== el && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
     el.focus();
-  }, [sessionId, viewport.mode]);
+  }, [sessionId, viewport.mode, disabled]);
 
 
   // Close the overflow menu on outside clicks.
