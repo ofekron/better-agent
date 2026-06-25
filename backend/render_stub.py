@@ -51,6 +51,83 @@ def _worker_events(worker: dict) -> list:
     return worker.get("events") or []
 
 
+# MCP tool short names (suffix after the last `__`) that spawn a panel 1:1
+# in the SAME assistant message they fire in. `create_worker` is excluded:
+# it's approval-gated and its worker panel appears later via a separate
+# delegation (ask/delegate), so its tool_use has no same-message panel and
+# would desync the positional match.
+_DELEGATION_TOOL_SHORT_NAMES = frozenset({
+    "ask",
+    "mssg",
+    "delegate_task",
+    "create_session",
+    "create_sub_session",
+})
+
+
+def _tool_short_name(name: str) -> str:
+    idx = name.rfind("__")
+    return name if idx == -1 else name[idx + 2:]
+
+
+def _delegation_tool_uses(manager_events: list) -> list:
+    """Delegation tool_use blocks in firing order, each tagged with the
+    index of the event entry that holds it (parallel asks in one entry
+    share that index)."""
+    out: list = []
+    for entry_index, ev in enumerate(manager_events):
+        if not isinstance(ev, dict) or ev.get("type") != "agent_message":
+            continue
+        data = ev.get("data")
+        if not isinstance(data, dict) or data.get("type") != "assistant":
+            continue
+        message = data.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if not isinstance(name, str):
+                continue
+            short = _tool_short_name(name)
+            if short in _DELEGATION_TOOL_SHORT_NAMES:
+                out.append((entry_index, short))
+    return out
+
+
+def _panel_matches_tool(short: str, worker: dict) -> bool:
+    kind = worker.get("panel_kind")
+    run_mode = worker.get("run_mode")
+    if short == "create_sub_session":
+        return kind == "sub_session_created"
+    if short == "create_session":
+        return kind == "session_created"
+    if short == "ask":
+        return run_mode in ("team_ask", "fork")
+    if short in ("mssg", "delegate_task"):
+        return run_mode == "team_message"
+    return False
+
+
+def _derive_panel_anchors(manager_events: list, workers: list) -> dict:
+    """delegation_id -> anchor index right after the triggering tool_use
+    entry. Mirrors frontend `derivePanelAnchors`: panels (in firing order)
+    consume compatible delegation tool_use blocks positionally; unmatched
+    panels (e.g. Codex native subagents) fall back to stored `insert_at`.
+    The backend-stamped `insert_at` is racy (captured before the tool_use
+    is tail-appended), so the derived position is authoritative when found."""
+    tool_uses = _delegation_tool_uses(manager_events)
+    anchors: dict = {}
+    cursor = 0
+    for worker, _index in workers:
+        if cursor < len(tool_uses) and _panel_matches_tool(tool_uses[cursor][1], worker):
+            anchors[worker.get("delegation_id")] = tool_uses[cursor][0] + 1
+            cursor += 1
+    return anchors
+
+
 def timeline_events(msg: dict) -> list:
     manager_events = primary_events(msg)
     workers = []
@@ -66,14 +143,18 @@ def timeline_events(msg: dict) -> list:
     if not workers:
         return _renderable(manager_events)
 
+    anchors = _derive_panel_anchors(manager_events, workers)
+
+    def _anchor_of(worker: dict):
+        derived = anchors.get(worker.get("delegation_id"))
+        if isinstance(derived, (int, float)):
+            return derived
+        stored = worker.get("insert_at")
+        return stored if isinstance(stored, (int, float)) else float("inf")
+
     ordered = sorted(
         workers,
-        key=lambda item: (
-            item[0].get("insert_at")
-            if isinstance(item[0].get("insert_at"), (int, float))
-            else float("inf"),
-            item[1],
-        ),
+        key=lambda item: (_anchor_of(item[0]), item[1]),
     )
     out = []
     manager_index = 0
@@ -82,9 +163,7 @@ def timeline_events(msg: dict) -> list:
         out.extend(_renderable(events))
 
     for worker, _index in ordered:
-        insert_at = worker.get("insert_at")
-        if not isinstance(insert_at, (int, float)):
-            insert_at = float("inf")
+        insert_at = _anchor_of(worker)
         stop = (
             len(manager_events)
             if insert_at == float("inf")
