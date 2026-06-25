@@ -213,14 +213,21 @@ bc_home = ba_home
 def encode_cwd(cwd: str) -> str:
     """Normalize a cwd into a filesystem-safe token.
 
-    Matches claude CLI's own ~/.claude/projects/ encoding: replace `/`
-    AND `_` with `-`. The `_`→`-` rule is non-obvious but verified —
-    paths containing underscores resolve to the same encoded name in
-    both stores, so a stale code path that recomputes from cwd hits
-    the right file.
+    Matches claude CLI's own ~/.claude/projects/ encoding: replace `/`,
+    `\\`, `:`, AND `_` with `-`. The `_`→`-` rule is non-obvious but
+    verified — paths containing underscores resolve to the same encoded
+    name in both stores, so a stale code path that recomputes from cwd
+    hits the right file. On Windows the `:`→`-` rule is required so the
+    drive letter encodes the same way Claude CLI writes it: `C:\\foo`
+    becomes `C--foo` (NOT `C:-foo`), matching `~/.claude/projects/C--foo/`.
+    Without this, the tailer opens a path that doesn't exist and
+    ingestion silently fails on Windows.
     """
     resolved = Path(cwd).expanduser().resolve().as_posix()
-    return resolved.replace("/", "-").replace("_", "-") or "root"
+    return (
+        resolved.replace("/", "-").replace("\\", "-").replace(":", "-").replace("_", "-")
+        or "root"
+    )
 
 
 def claude_projects_root_for_session(node: dict) -> Path:
