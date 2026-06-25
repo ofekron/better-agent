@@ -1,6 +1,6 @@
 const STYLE_ID = "ofek-dev-ask-view-styles";
 const STYLE_TEXT = `
-.ask-group{margin-bottom:24px}
+.ask-group{margin-bottom:16px}
 .ask-group .message-group{margin-bottom:0}
 .ask-group--resolved{opacity:.5;transition:opacity .2s ease}
 .ask-group--resolved .ask-picker-row-actions,.ask-group--resolved .ask-picker-actions{display:none}
