@@ -2298,6 +2298,18 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.chat-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  font-weight: 600;
+  padding: 1px 4px;
+  outline: none;
+}
 .chat-toolbar-badge-btn {
   font-size: calc(11px * var(--app-font-scale));
   padding: 2px 8px;
@@ -11346,6 +11358,21 @@ pre .inline-tag-highlight {
   margin-inline-start: 0;
   border-radius: 50%;
   vertical-align: middle;
+}
+
+@keyframes testape-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+.session-status-testape {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #a855f7;
+  filter: drop-shadow(0 0 3px rgba(168, 85, 247, 0.4));
+  vertical-align: middle;
+  animation: testape-pulse 2s ease-in-out infinite;
 }
 
 .session-status-unread-count {
