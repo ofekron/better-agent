@@ -430,42 +430,6 @@ def _last_assistant_text(sess: dict) -> str:
     return "\n".join(parts)
 
 
-def bind_tag_marker_watch() -> None:
-    """On ``lifecycle.turn_complete``, scan the last assistant message's
-    finalized text for any watched tag and set the declared attention marker
-    on the session. READ-ONLY over finalized render state."""
-
-    async def _on_turn_complete(event: BusEvent) -> None:
-        try:
-            import extension_applied_config
-
-            watch = extension_applied_config.tag_watch_rules()
-            if not watch:
-                return
-            sess = session_manager.get_ref(event.sid)
-            if not isinstance(sess, dict):
-                return
-            text = _last_assistant_text(sess)
-            if not text or "<" not in text:
-                return
-            for tag, rule in watch.items():
-                if f"<{tag}>" in text:
-                    session_manager.set_marker(
-                        event.sid, rule["extension_id"], rule["marker"]
-                    )
-        except Exception:
-            logger.exception("tag-marker watch failed for %s", event.sid)
-
-    bus.unsubscribe("extension_tag_marker_watch")
-    bus.subscribe(
-        "lifecycle.turn_complete",
-        _on_turn_complete,
-        priority=310,
-        name="extension_tag_marker_watch",
-    )
-    logger.info("event_bus: registered tag-marker watch subscriber")
-
-
 def bind_post_turn_hooks() -> None:
     """Dispatch ``lifecycle.turn_complete`` to every installed extension that
     declares an ``entrypoints.hooks.post_turn`` backend path. Fire-and-forget,

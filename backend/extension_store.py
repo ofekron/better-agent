@@ -1899,6 +1899,13 @@ def _purge_obsolete_extension_records(data: dict[str, Any]) -> bool:
         if obsolete_id in extensions:
             extensions.pop(obsolete_id, None)
             changed = True
+        # Also remove the on-disk installed package so
+        # `_rehydrate_installed_extension_records` cannot resurrect the
+        # retired id on the next load (it is no longer in managed paths).
+        pkg_dir = _install_root() / obsolete_id
+        if pkg_dir.exists():
+            shutil.rmtree(pkg_dir, ignore_errors=True)
+            changed = True
     return changed
 
 

@@ -4868,6 +4868,11 @@ class SessionManager:
             sess = self._cached(sid)
             if sess is None:
                 return None
+            # Change-gate: live ingest re-detects the same tag on every
+            # streaming delta of one turn — only write + broadcast when the
+            # marker actually changes so the WS isn't spammed per delta.
+            if session_store._markers_for_session(sid).get(extension_id) == marker:
+                return sess
             session_store.set_marker_projection(sid, extension_id, marker)
             self._fire(
                 sid,
@@ -4884,6 +4889,8 @@ class SessionManager:
             sess = self._cached(sid)
             if sess is None:
                 return None
+            if extension_id not in session_store._markers_for_session(sid):
+                return sess
             session_store.set_marker_projection(sid, extension_id, None)
             self._fire(sid, {"kind": "marker_cleared", "extension_id": extension_id})
             return sess

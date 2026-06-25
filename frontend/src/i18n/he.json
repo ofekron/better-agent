@@ -445,6 +445,7 @@
   "settings.fontFamily.mono": "מונוספייס",
   "settings.fontSize": "גודל גופן",
   "session.noSessions": "אין סשנים עדיין",
+  "session.noSessionsForFilter": "אין סשנים עבור הסינון הזה",
   "session.native": "מקורי",
   "session.manager": "Team",
   "session.workers": "עובדים",

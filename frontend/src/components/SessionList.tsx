@@ -2313,7 +2313,11 @@ export function SessionList({
           </div>
         )}
         {!searching && sessions.length === 0 && (
-          <div className="session-empty">{t("session.noSessions")}</div>
+          <div className="session-empty">
+            {advancedFilterActive || searchQueryActive
+              ? t("session.noSessionsForFilter")
+              : t("session.noSessions")}
+          </div>
         )}
         {sessions.length > 0 && filtered.length === 0 && !searching && (
           <div className="session-empty">{t("session.noMatch")}</div>

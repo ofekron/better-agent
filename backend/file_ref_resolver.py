@@ -194,9 +194,23 @@ def _apply_tag_rules(text: str) -> str:
 
 
 def tag_names() -> frozenset[str]:
-    """Currently-registered tag names — used by the turn-complete watcher to
-    decide which sessions need an attention marker."""
+    """Currently-registered tag names."""
     return frozenset(_tag_rules)
+
+
+def detect_markers(text: str) -> list[tuple[str, dict]]:
+    """Return ``(extension_id, marker)`` for every marker-bearing tag whose
+    opening ``<TAG>`` appears in RAW (pre-strip) text. The detection MUST run
+    on raw provider text — once ``_apply_tag_rules`` strips the wrapper the
+    signal is gone, so the render-tree copy can no longer be scanned."""
+    if not _tag_rules or "<" not in text:
+        return []
+    out: list[tuple[str, dict]] = []
+    for tag, rule in _tag_rules.items():
+        marker = rule.get("marker")
+        if marker and f"<{tag}>" in text:
+            out.append((rule.get("_extension_id", ""), marker))
+    return out
 
 
 def invalidate_path(abs_path: str) -> None:

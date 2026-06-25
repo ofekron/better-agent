@@ -155,6 +155,27 @@ def _normalize_for_render(event: dict) -> dict:
     return event
 
 
+def _agent_message_text(data: dict) -> str:
+    """Concatenate text-block text from a canonical agent_message ``data``
+    dict. Used to scan RAW (pre file-ref/tag rewrite) assistant text for
+    attention-marker tags."""
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    if isinstance(blocks, str):
+        return blocks
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
 def _unwrap_typed_worker_envelope(event: dict) -> dict:
     if not isinstance(event, dict) or event.get("type") != "agent_message":
         return event
@@ -853,6 +874,18 @@ class OrchestrationStrategy(ABC):
         norm_etype = normalized.get("type") or etype or "unknown"
         norm_data = normalized.get("data") if isinstance(normalized.get("data"), dict) else data
 
+        # Attention markers MUST be detected on RAW assistant text, BEFORE
+        # the file-ref/tag rewrite below strips the `<TAG>` wrapper out of
+        # norm_data. Captured here, applied once the event lands on the
+        # render tree. Live path only — replay re-detection is idempotent
+        # via set_marker's change-gate, but markers are a live signal.
+        attention_markers: list[tuple[str, dict]] = []
+        if source_is_provider_stream and etype in self._RENDER_TREE_ETYPES:
+            import file_ref_resolver
+            attention_markers = file_ref_resolver.detect_markers(
+                _agent_message_text(norm_data)
+            )
+
         if self._apply_metadata_side_effects(
             app_session_id=app_session_id,
             data=normalized_data,
@@ -1083,6 +1116,13 @@ class OrchestrationStrategy(ABC):
                     evs.append(normalized)
                 if source_is_provider_stream:
                     session_manager.bump_unread(app_session_id, msg_id)
+
+            # Set attention markers detected on the raw assistant text
+            # (captured pre-strip above). Change-gated, so re-detecting the
+            # same tag across streaming deltas broadcasts at most once.
+            for ext_id, marker in attention_markers:
+                if ext_id:
+                    session_manager.set_marker(app_session_id, ext_id, marker)
 
             import session_event_extensions
             session_event_extensions.apply_event(

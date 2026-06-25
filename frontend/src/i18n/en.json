@@ -445,6 +445,7 @@
   "settings.fontFamily.mono": "Monospace",
   "settings.fontSize": "Font size",
   "session.noSessions": "No sessions yet",
+  "session.noSessionsForFilter": "No sessions for this filter",
   "session.native": "Native",
   "session.manager": "Team",
   "session.workers": "workers",
