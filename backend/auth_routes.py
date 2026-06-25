@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 import auth
 import auth_secrets
+import qr_auth
 import setup_nonce
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -27,12 +28,45 @@ class SetupBody(BaseModel):
     password: str
 
 
+class RedeemBody(BaseModel):
+    grant: str
+
+
+class RefreshBody(BaseModel):
+    refresh_token: str
+
+
 def _is_loopback_request(request: Request) -> bool:
     host = request.client.host if request.client else ""
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host == "localhost"
+
+
+def _is_authenticated(request: Request) -> bool:
+    """Cookie session OR a valid bearer. qr_grant is in the public-route
+    allowlist (so the loopback login screen can reach it), which means the
+    gate never promotes a bearer into the session here — check it directly."""
+    if request.session.get("user"):
+        return True
+    header = request.headers.get("authorization") or ""
+    if header.lower().startswith("bearer "):
+        return auth.verify_token(header.split(" ", 1)[1].strip()) is not None
+    return False
+
+
+def _origin_base_url(request: Request) -> str:
+    """The origin the *client* used to reach us, honoring a reverse proxy.
+    The QR must point a phone back at the same externally-reachable origin
+    the admin is viewing — not the backend's internal bind address."""
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or request.url.netloc
+    )
+    return f"{proto}://{host}"
 
 
 @router.get("/needs_setup")
@@ -114,3 +148,66 @@ async def me(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="unauthenticated")
     return user
+
+
+# --- QR / refresh-token external access ------------------------------
+# qr_grant mints a single-use QR (loopback or an authenticated admin
+# only); a phone redeems it for a short access token + rotating refresh
+# token. See qr_auth.py for the token model. All three are exempted in
+# main.py's _AUTH_PUBLIC_ROUTES — qr_grant enforces its own gate below.
+
+
+@router.get("/qr_grant")
+async def qr_grant(request: Request) -> dict:
+    """Mint a one-time login QR. Restricted to loopback or an already
+    authenticated session so a stranger can't mint themselves an invite —
+    only the admin at the machine (or a logged-in device) can. The phone
+    that scans it redeems via /qr_redeem; nobody needs to type the
+    password."""
+    if not auth.is_bootstrapped():
+        raise HTTPException(status_code=409, detail="not configured")
+    if not _is_loopback_request(request) and not _is_authenticated(request):
+        raise HTTPException(
+            status_code=403,
+            detail="qr grant requires loopback or an authenticated session",
+        )
+    grant = qr_auth.mint_grant()
+    login_url = f"{_origin_base_url(request)}/?qr={grant}"
+    return {"login_url": login_url, "expires_in": qr_auth.GRANT_TTL}
+
+
+@router.post("/qr_redeem")
+async def qr_redeem(body: RedeemBody) -> dict:
+    """Redeem a one-time grant (from a scanned QR) for an access token +
+    rotating refresh token. No cookie is set: external devices ride the
+    short access token and refresh it, so there's no long-lived credential
+    sitting on the phone."""
+    if not auth.is_bootstrapped():
+        raise HTTPException(status_code=409, detail="not configured")
+    if not qr_auth.consume_grant(body.grant):
+        raise HTTPException(status_code=401, detail="invalid or used qr code")
+    username = auth.current_username()
+    if not username:
+        raise HTTPException(status_code=409, detail="not configured")
+    access, refresh = qr_auth.issue_session(username)
+    return {
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_in": auth.ACCESS_MAX_AGE,
+    }
+
+
+@router.post("/refresh")
+async def refresh(body: RefreshBody) -> dict:
+    """Rotate a refresh token: returns a fresh access + refresh pair and
+    invalidates the one presented. A replayed (already-rotated) token
+    revokes the whole family — see qr_auth.rotate."""
+    pair = qr_auth.rotate(body.refresh_token)
+    if pair is None:
+        raise HTTPException(status_code=401, detail="invalid or expired refresh token")
+    access, new_refresh = pair
+    return {
+        "access_token": access,
+        "refresh_token": new_refresh,
+        "expires_in": auth.ACCESS_MAX_AGE,
+    }

@@ -91,6 +91,7 @@ if [ "${1:-}" = "--reset-auth" ]; then
   kc_del username
   kc_del password_hash
   kc_del session_secret
+  rm -f "$BA_HOME/qr_auth_state.json"
   echo "Wiped. Run ./run.sh to bootstrap new credentials."
   exit 0
 fi
@@ -303,42 +304,35 @@ export BETTER_AGENT_FRONTEND_PORT="$FRONTEND_PORT"
 # Idempotent; cheap when deps are cached. Required so the argon2 import
 # in the keychain-bootstrap block below works on a fresh checkout.
 echo "Syncing backend deps..."
+# Create the venv on a fresh checkout — `uv pip install` won't make one.
+[ -x "$PY" ] || "$UV" venv "$DIR/backend/.venv"
 "$UV" pip install -q --python "$PY" -r "$DIR/backend/requirements.txt"
 
 # --- Install the `bagent` CLI command onto PATH (idempotent) --------
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
 bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)"
 
-# --- First-time keychain bootstrap ----------------------------------
+# --- First-time keychain bootstrap (non-interactive) ----------------
+# No prompts: a chosen username/password is friction for a single-user
+# local tool, so first run mints random credentials. Phones don't type
+# them — the login screen shows a one-time QR (backend-minted, see
+# qr_auth.py) to onboard external devices. Override either value via
+# BA_USERNAME / BA_PASSWORD if you want something memorable.
 if ! kc_has username || ! kc_has password_hash || ! kc_has session_secret; then
   echo
-  echo "Better Agent — first-time auth setup."
-  echo "Credentials are stored in your macOS login keychain only."
-  echo
-  read -p "Username: " UNAME
-  while true; do
-    read -s -p "Password: " PW1; echo
-    read -s -p "Confirm:  " PW2; echo
-    if [ -z "$PW1" ]; then
-      echo "Empty password — try again."
-      continue
-    fi
-    if [ "$PW1" != "$PW2" ]; then
-      echo "Mismatch — try again."
-      continue
-    fi
-    break
-  done
-  # Password reaches python via stdin (NOT argv), so it doesn't appear
-  # in `ps`. The resulting argon2 hash and the session secret DO appear
-  # briefly in the `security add-generic-password -w ...` argv; that's
-  # a single-user mac, ~ms window — acknowledged.
-  HASH=$(printf '%s' "$PW1" | "$PY" -c "import sys, argon2; print(argon2.PasswordHasher().hash(sys.stdin.read()))")
+  echo "Better Agent — minting random credentials (non-interactive)."
+  UNAME="${BA_USERNAME:-$("$PY" -c "import secrets; print('ba-'+secrets.token_hex(4))")}"
+  PW="${BA_PASSWORD:-$("$PY" -c "import secrets; print(secrets.token_urlsafe(18))")}"
+  # Password reaches python via stdin (NOT argv) so it stays out of `ps`.
+  HASH=$(printf '%s' "$PW" | "$PY" -c "import sys, argon2; print(argon2.PasswordHasher().hash(sys.stdin.read()))")
   SECRET=$("$PY" -c "import secrets; print(secrets.token_hex(32))")
   kc_set username "$UNAME"
   kc_set password_hash "$HASH"
   kc_set session_secret "$SECRET"
-  unset PW1 PW2 HASH SECRET UNAME
+  echo "  username: $UNAME"
+  echo "  password: $PW"
+  echo "  (scan the QR on the login screen to sign in a phone — no typing)"
+  unset PW HASH SECRET UNAME
   echo
   echo "Stored. Starting backend..."
   echo
