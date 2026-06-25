@@ -46,10 +46,7 @@ test-results/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
 
-# Internal agent instructions — not for public release
-/AGENTS.md
-/CLAUDE.md
-/GEMINI.md
+# Internal agent sync backups — not for public release
 /CLAUDE.md.bc-sync-backup.sha256
 /GEMINI.md.bc-sync-backup.sha256
 

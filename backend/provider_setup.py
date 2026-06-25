@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import hashlib
 import shutil
 import sys
@@ -8,7 +9,7 @@ import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 @dataclass(frozen=True)
@@ -111,28 +112,116 @@ async def provider_setup_status(kind: str) -> dict[str, Any]:
     return _public_status(installer, prerequisite, cli)
 
 
-async def install_provider_cli(kind: str) -> dict[str, Any]:
+# ---- Streaming install registry ----------------------------------------
+# An install run is a background asyncio task that streams the installer
+# subprocess stdout/stderr line-by-line to the frontend via global WS
+# events (`provider_install_progress` / `provider_install_finished`).
+# One run per kind; multiple kinds run concurrently. Authoritative state
+# is this in-memory registry — `GET /api/provider-setup/installs` returns
+# the snapshot for first paint, WS pings carry the live deltas.
+
+BroadcastFn = Callable[[str, dict], Awaitable[None]]
+LineFn = Callable[[str, str], Awaitable[None]]
+
+_INSTALL_RUNS: dict[str, dict[str, Any]] = {}
+_INSTALL_TASKS: dict[str, asyncio.Task] = {}
+_MAX_LINES = 1000
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _new_run(installer: ProviderInstaller) -> dict[str, Any]:
+    return {
+        "kind": installer.kind,
+        "label": installer.label,
+        "command": installer.command,
+        "state": "running",
+        "lines": [],
+        "started_at": _now_iso(),
+        "finished_at": None,
+        "returncode": None,
+        "installed": None,
+        "message": None,
+    }
+
+
+def _snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    return {**run, "lines": list(run["lines"])}
+
+
+def get_install_runs() -> dict[str, dict[str, Any]]:
+    return {kind: _snapshot(run) for kind, run in _INSTALL_RUNS.items()}
+
+
+async def start_install(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
+    """Start (or no-op) a streaming background install for `kind`.
+
+    Returns the current run snapshot immediately; the background task
+    keeps streaming lines via `broadcast`. Concurrent calls for the same
+    kind collapse to the already-running task."""
     installer = installer_for(kind)
+    existing = _INSTALL_RUNS.get(kind)
+    if existing and existing["state"] == "running":
+        return _snapshot(existing)
+
     prerequisite = await _check_argv(installer.prerequisite_argv)
     if not prerequisite["ok"]:
-        return _public_status(
-            installer,
-            prerequisite,
-            await _check_argv(installer.verify_argv),
-            install={
-                "ok": False,
-                "stdout": "",
-                "stderr": f"Missing prerequisite: {installer.prerequisite_argv[0]}",
-                "returncode": 127,
-            },
+        run = _new_run(installer)
+        run["state"] = "failed"
+        run["message"] = f"Missing prerequisite: {installer.prerequisite_argv[0]}"
+        run["returncode"] = 127
+        run["finished_at"] = _now_iso()
+        _INSTALL_RUNS[kind] = run
+        await broadcast("provider_install_finished", _snapshot(run))
+        return _snapshot(run)
+
+    run = _new_run(installer)
+    _INSTALL_RUNS[kind] = run
+    await broadcast("provider_install_progress", {"kind": kind, "phase": "started"})
+    task = asyncio.create_task(_run_install(installer, run, broadcast))
+    _INSTALL_TASKS[kind] = task
+    return _snapshot(run)
+
+
+async def _run_install(
+    installer: ProviderInstaller,
+    run: dict[str, Any],
+    broadcast: BroadcastFn,
+) -> None:
+    kind = installer.kind
+
+    async def on_line(stream: str, text: str) -> None:
+        run["lines"].append({"s": stream, "t": text})
+        if len(run["lines"]) > _MAX_LINES:
+            del run["lines"][: len(run["lines"]) - _MAX_LINES]
+        await broadcast(
+            "provider_install_progress",
+            {"kind": kind, "stream": stream, "text": text},
         )
-    install = (
-        await _run_installer_script(installer, timeout=300)
-        if installer.install_script_url
-        else await _run_argv(installer.install_argv, timeout=300)
-    )
+
+    try:
+        if installer.install_script_url:
+            result = await _run_installer_script_streaming(installer, 300, on_line)
+        else:
+            result = await _run_argv_streaming(installer.install_argv, 300, on_line)
+    except Exception as exc:  # pragma: no cover — defensive, surfaced to UI
+        run["state"] = "failed"
+        run["returncode"] = 1
+        run["message"] = _scrub(str(exc))
+        run["finished_at"] = _now_iso()
+        await broadcast("provider_install_finished", _snapshot(run))
+        return
+
     cli = await _check_argv(installer.verify_argv)
-    return _public_status(installer, prerequisite, cli, install=install)
+    run["returncode"] = result.get("returncode")
+    run["installed"] = bool(cli["ok"])
+    run["state"] = "succeeded" if (result.get("ok") and cli["ok"]) else "failed"
+    run["finished_at"] = _now_iso()
+    if not result.get("ok") and result.get("stderr"):
+        await on_line("stderr", result["stderr"])
+    await broadcast("provider_install_finished", _snapshot(run))
 
 
 async def _check_argv(argv: tuple[str, ...]) -> dict[str, Any]:
@@ -180,6 +269,44 @@ async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
     }
 
 
+async def _run_argv_streaming(
+    argv: tuple[str, ...],
+    timeout: int,
+    on_line: LineFn,
+) -> dict[str, Any]:
+    """Run `argv` streaming stdout/stderr line-by-line through `on_line`.
+    Returns {ok, returncode, stderr?}. `on_line` is awaited per line so it
+    can broadcast to WS clients."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def drain(stream: asyncio.StreamReader, name: str) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            await on_line(name, _scrub(line.decode(errors="replace").rstrip("\r\n")))
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(drain(proc.stdout, "stdout"), drain(proc.stderr, "stderr")),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return {
+            "ok": False,
+            "returncode": -1,
+            "stderr": f"{argv[0]} timed out after {timeout}s",
+        }
+    await proc.wait()
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode}
+
+
 async def _run_installer_script(installer: ProviderInstaller, timeout: int) -> dict[str, Any]:
     if installer.install_script_url not in {_AGY_INSTALL_SH, _AGY_INSTALL_PS1}:
         return {
@@ -214,6 +341,36 @@ async def _run_installer_script(installer: ProviderInstaller, timeout: int) -> d
             "stderr": _scrub(str(exc)),
             "returncode": 1,
         }
+
+
+async def _run_installer_script_streaming(
+    installer: ProviderInstaller,
+    timeout: int,
+    on_line: LineFn,
+) -> dict[str, Any]:
+    """Streaming counterpart of `_run_installer_script`: downloads the
+    allowlisted, hash-pinned script, then streams its output."""
+    if installer.install_script_url not in {_AGY_INSTALL_SH, _AGY_INSTALL_PS1}:
+        return {"ok": False, "returncode": 126, "stderr": "installer URL is not allowlisted"}
+    if not installer.install_script_sha256:
+        return {"ok": False, "returncode": 126, "stderr": "installer hash is not pinned"}
+    suffix = ".ps1" if installer.install_script_url.endswith(".ps1") else ".sh"
+    try:
+        with tempfile.TemporaryDirectory(prefix="bc-provider-install-") as tmp:
+            path = Path(tmp) / f"install{suffix}"
+            await asyncio.to_thread(
+                _download_installer_script,
+                installer.install_script_url,
+                installer.install_script_sha256,
+                path,
+            )
+            argv = tuple(
+                str(path) if arg == _INSTALLER_SCRIPT_ARG else arg
+                for arg in installer.install_argv
+            )
+            return await _run_argv_streaming(argv, timeout, on_line)
+    except Exception as exc:
+        return {"ok": False, "returncode": 1, "stderr": _scrub(str(exc))}
 
 
 def _download_installer_script(url: str, expected_sha256: str, path: Path) -> None:

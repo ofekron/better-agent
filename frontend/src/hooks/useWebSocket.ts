@@ -1262,6 +1262,18 @@ export function useWebSocket(
         if (event.type === "provider_changed") {
           window.dispatchEvent(new Event("provider_changed"));
         }
+        // Streaming provider-CLI install (Settings → Provider CLI tools).
+        // provider_setup streams installer stdout/stderr line-by-line
+        // (progress) and a terminal state (finished). useProviderInstalls
+        // owns the registry projection.
+        if (
+          event.type === "provider_install_progress" ||
+          event.type === "provider_install_finished"
+        ) {
+          window.dispatchEvent(
+            new CustomEvent(event.type, { detail: event.data }),
+          );
+        }
         // Per-provider model catalog delta (daily refresher / manual
         // refresh). ModelSelector listens via useModelsCatalogChanged
         // and refetches `/api/models`. Carries the four disjoint
