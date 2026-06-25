@@ -449,3 +449,9 @@ When writing tests:
 When writing dev/admin scripts: same rule. If a script needs the
 real home, it should accept an explicit path argument, not assume
 either default state directory.
+
+## Repository Rules
+
+- The public `better-agent` repository must work with GitHub.
+- The private `better-agent-private` repository must work with GitLab.
+
