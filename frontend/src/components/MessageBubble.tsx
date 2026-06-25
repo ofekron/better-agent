@@ -196,8 +196,12 @@ function ContinuationPill({ chainDepth }: { chainDepth: number }) {
 const STYLE_SENTINEL_RE = /⁣\[\[bcstyle:([^\]]*)\]\]([\s\S]*?)\[\[\/bcstyle\]\]⁣/;
 const STYLE_SENTINEL_STRIP_RE = /⁣\[\[bcstyle:[^\]]*\]\]|\[\[\/bcstyle\]\]⁣/g;
 
-function parseStyleAttrs(raw: string): { fontSize?: string; background?: string } {
-  const out: { fontSize?: string; background?: string } = {};
+function parseStyleAttrs(raw: string): {
+  fontSize?: string;
+  background?: string;
+  fontWeight?: string;
+} {
+  const out: { fontSize?: string; background?: string; fontWeight?: string } = {};
   let bg: string | undefined;
   let alpha = 0.2;
   let hasBg = false;
@@ -206,7 +210,9 @@ function parseStyleAttrs(raw: string): { fontSize?: string; background?: string 
     if (eq < 0) continue;
     const k = part.slice(0, eq).trim();
     const v = part.slice(eq + 1).trim();
-    if (k === "s") {
+    if (k === "b") {
+      if (v === "1") out.fontWeight = "bold";
+    } else if (k === "s") {
       const n = Number(v);
       if (Number.isFinite(n)) out.fontSize = `${Math.min(3, Math.max(1, n))}em`;
     } else if (k === "bg") {
