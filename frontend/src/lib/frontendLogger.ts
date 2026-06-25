@@ -57,4 +57,16 @@ export function installFrontendLogger(): void {
       reason instanceof Error ? reason.stack || "" : "",
     );
   });
+
+  const nativeConsoleError = console.error.bind(console);
+  console.error = (...args: unknown[]) => {
+    nativeConsoleError(...args);
+    const errArg = args.find((a) => a instanceof Error) as Error | undefined;
+    postFrontendLog(
+      "error",
+      "console.error",
+      args.map(stringifyArg).join(" "),
+      errArg?.stack || "",
+    );
+  };
 }

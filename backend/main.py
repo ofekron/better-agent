@@ -4902,9 +4902,44 @@ async def admin_restart_status(request_id: str):
     }
 
 
+_FRONTEND_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warn": logging.WARNING,
+    "error": logging.ERROR,
+}
+_FRONTEND_LOG_MAX = 16384
+
+
+def _clip(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value[:limit]
+
+
 @app.post("/api/logs/frontend")
-async def frontend_log():
-    return {"ok": True, "dropped": True}
+async def frontend_log(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True, "dropped": True}
+    if not isinstance(body, dict):
+        return {"ok": True, "dropped": True}
+
+    level = body.get("level")
+    log_level = _FRONTEND_LOG_LEVELS.get(level if isinstance(level, str) else "", logging.ERROR)
+    source = _clip(body.get("source"), 128) or "unknown"
+    message = _clip(body.get("message"), _FRONTEND_LOG_MAX)
+    stack = _clip(body.get("stack"), _FRONTEND_LOG_MAX)
+    url = _clip(body.get("url"), 2048)
+
+    line = f"[{source}] {message}"
+    if url:
+        line += f" | url={url}"
+    if stack:
+        line += f"\n{stack}"
+    frontend_logger.log(log_level, line)
+    return {"ok": True}
 
 
 @app.post("/api/admin/restart")
