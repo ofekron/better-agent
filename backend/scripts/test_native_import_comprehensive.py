@@ -950,14 +950,11 @@ def _poll_done(timeout: float) -> dict:
     return final
 
 
-def test_unsupported_providers() -> None:
-    # claude/codex/agy/gemini are all supported; only a synthetic unknown
-    # kind is unsupported.
+def test_unknown_kind_not_enumerated() -> None:
+    # Only the 4 supported kinds enumerate; an unknown kind yields nothing.
     prov = config_store.add_provider({"name": "future-cli", "kind": "future-cli", "mode": "subscription"})
     pid = prov["id"]
     try:
-        unsup = native_import.unsupported_providers([pid])
-        check(len(unsup) == 1 and unsup[0]["id"] == pid, "unknown kind unsupported (scoped)")
         check(native_import.enumerate_native_sessions([pid]) == [], "unknown kind not enumerated (scoped)")
     finally:
         try:
@@ -984,8 +981,8 @@ def main() -> None:
     test_enumerate_gemini()
     test_ingest_agy()
     test_ingest_gemini()
-    test_unsupported_providers()
     test_status_fallback()
+    test_unknown_kind_not_enumerated()
     test_restart_survival()
     test_job()  # last — touches config_store + background threads
     print(f"OK: native_import comprehensive — {CASES['n']} assertions passed")

@@ -36,7 +36,6 @@ from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_KINDS = {"claude", "codex", "agy", "gemini"}
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -165,8 +164,7 @@ def enumerate_native_sessions(
     `project_paths` opts into a project filter: only sessions whose cwd is
     under one of those project roots are returned, and junk cwds (system
     temp, the BA state home) are excluded. None disables both (legacy
-    "import everything" behavior). Unsupported provider kinds are skipped
-    here; the caller learns about them via `unsupported_providers()`.
+    "import everything" behavior). Unknown provider kinds are skipped.
     """
     out: list[NativeSession] = []
     for provider in _provider_records(provider_ids):
@@ -191,16 +189,6 @@ def enumerate_native_sessions(
     managed = _ba_managed_native_ids()
     if managed:
         out = [s for s in out if s.native_id not in managed]
-    return out
-
-
-def unsupported_providers(provider_ids: Optional[list[str]] = None) -> list[dict]:
-    """Providers whose native sessions we cannot enumerate yet."""
-    out: list[dict] = []
-    for provider in _provider_records(provider_ids):
-        kind = (provider.get("kind") or "claude").lower()
-        if kind not in SUPPORTED_KINDS:
-            out.append({"id": provider.get("id"), "name": provider.get("name"), "kind": kind})
     return out
 
 

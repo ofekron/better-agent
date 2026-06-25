@@ -26,15 +26,8 @@ interface PreviewSession {
   already_imported: boolean;
 }
 
-interface UnsupportedProvider {
-  id: string;
-  name: string;
-  kind: string;
-}
-
 interface Preview {
   sessions: PreviewSession[];
-  unsupported_providers: UnsupportedProvider[];
 }
 
 const EMPTY_STATUS: JobStatus = {
@@ -53,7 +46,7 @@ const EMPTY_STATUS: JobStatus = {
 export function NativeImportSetting() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<JobStatus>(EMPTY_STATUS);
-  const [preview, setPreview] = useState<Preview>({ sessions: [], unsupported_providers: [] });
+  const [preview, setPreview] = useState<Preview>({ sessions: [] });
   const [error, setError] = useState("");
   const pollRef = useRef<number | null>(null);
 
@@ -131,7 +124,6 @@ export function NativeImportSetting() {
   const completed = status.imported + status.skipped + status.failed;
   const pct = status.total > 0 ? Math.min(100, Math.round((completed / status.total) * 100)) : 0;
   const pending = preview.sessions.filter((s) => !s.already_imported).length;
-  const unsupported = preview.unsupported_providers;
 
   return (
     <div className="native-import-setting">
@@ -146,13 +138,6 @@ export function NativeImportSetting() {
           )}
         </div>
       </div>
-
-      {unsupported.length > 0 && (
-        <div className="native-import-notice">
-          {t("settings.nativeImportUnsupported", "Not supported yet:")}{" "}
-          {unsupported.map((u) => u.name || u.kind).join(", ")}
-        </div>
-      )}
 
       <div className="native-import-actions">
         <button
