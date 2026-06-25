@@ -5032,12 +5032,19 @@ async def rewind_session(session_id: str, body: dict):
 
 @app.post("/api/sessions/{session_id}/rewind_and_retry")
 async def rewind_and_retry(session_id: str, body: dict):
-    """Return inputs needed to retry a stopped/failed assistant message.
+    """Discard a stopped/failed turn and return inputs to retry it.
 
     Body: `{"assistant_message_id": <id>}`. The caller points at the
-    assistant bubble it wants to retry; this endpoint locates the user
-    message immediately preceding it and leaves the existing turn in
-    history. Explicit rewind stays on the dedicated rewind endpoint.
+    failed assistant bubble; this endpoint locates the user message
+    immediately preceding it and REWINDS the session to before that user
+    message — removing the failed user+assistant pair (and any worker
+    forks) — then returns the prompt so the caller re-sends it as a fresh
+    turn. Rewinding first is what stops the retry from persisting a
+    duplicate of the prompt.
+
+    When the failed user message has a provider rewind anchor
+    (`agent_message_uuid`) the provider CLI is rewound too; otherwise the
+    prompt never committed there, so only the render tree is truncated.
     """
     asst_id = (body or {}).get("assistant_message_id")
     if not asst_id:
@@ -5068,9 +5075,19 @@ async def rewind_and_retry(session_id: str, body: dict):
     user_msg = msgs[user_idx]
     retry_prompt = user_msg.get("content") or ""
 
+    try:
+        await coordinator.rewind_files(session_id, user_msg["id"])
+    except ValueError:
+        # No provider rewind anchor (failed before commit) or rewind
+        # unsupported — drop the failed pair from the render tree only so
+        # the retry replaces the prompt instead of duplicating it.
+        await coordinator.rewind_files(
+            session_id, user_msg["id"], provider_rewind=False
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
     return {
-        "messages": msgs,
-        "workers": sess.get("workers"),
         "retry_prompt": retry_prompt,
         "retry_model": sess.get("model"),
         "retry_cwd": sess.get("cwd"),

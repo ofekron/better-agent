@@ -3188,11 +3188,18 @@ class Coordinator:
         message_id: str,
         *,
         semantic_alter: bool = False,
+        provider_rewind: bool = True,
     ) -> dict:
         """Invoke `claude --resume <sid> --rewind-files <uuid>` and truncate
         session messages at/after the rewound user message. Also rewinds
         every worker that participated in the discarded turn (see
         `_rewind_workers_for_turn`).
+
+        `provider_rewind=False` truncates the render tree (and worker forks)
+        and broadcasts the rewind WITHOUT calling the provider CLI rewind —
+        used to discard a failed turn whose prompt never committed a provider
+        rewind anchor (no `agent_message_uuid`), so a retry replaces it
+        instead of duplicating the prompt.
         """
         session = session_manager.get(app_session_id)
         if not session:
@@ -3210,11 +3217,12 @@ class Coordinator:
         target = messages[target_idx]
         provider = self.provider_for_session(app_session_id)
         use_semantic_alter = semantic_alter and provider.supports_semantic_alter
-        if not provider.supports_rewind and not use_semantic_alter:
+        do_provider_rewind = provider_rewind and not use_semantic_alter
+        if do_provider_rewind and not provider.supports_rewind:
             raise ValueError(t("orchestrator.rewind_not_supported"))
         message_uuid = target.get("agent_message_uuid")
         rewind_session_id = app_session_id
-        if provider.rewind_requires_agent_identity and not use_semantic_alter:
+        if do_provider_rewind and provider.rewind_requires_agent_identity:
             if not message_uuid:
                 raise ValueError(t("orchestrator.message_no_claude_uuid"))
 
@@ -3224,7 +3232,7 @@ class Coordinator:
                 raise ValueError(t("orchestrator.session_no_sid_field", sid_field=sid_field))
             rewind_session_id = agent_sid
 
-        if not use_semantic_alter:
+        if do_provider_rewind:
             await provider.rewind(
                 rewind_session_id,
                 message_uuid or message_id,
