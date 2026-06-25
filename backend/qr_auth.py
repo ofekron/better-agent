@@ -118,7 +118,9 @@ def consume_grant(candidate: str | None) -> bool:
         state = _read()
         exp = state["grants"].pop(token, None)
         if exp is None:
-            _write(state)  # still flush the prune
+            # Unknown grant: nothing changed, so DON'T write. Writing here
+            # fsync'd the whole state file on every bogus redeem — a public,
+            # unauthenticated, event-loop-blocking DoS amplifier.
             return False
         ok = float(exp) > _now()
         _write(state)
@@ -150,7 +152,14 @@ def rotate(refresh_token: str | None) -> tuple[str, str] | None:
     with _lock:
         state = _read()
         rec = state["families"].get(fam)
-        if not rec or float(rec.get("exp", 0)) <= _now():
+        if not rec:
+            # Unknown family (the cheap, attacker-controllable case — any
+            # garbage token): nothing changed, so DON'T write/fsync. Avoids
+            # the public DoS amplifier. Reaching the expired/mismatch paths
+            # below requires guessing a live 144-bit family id, so writing
+            # there is not a cheap-attack vector.
+            return None
+        if float(rec.get("exp", 0)) <= _now():
             state["families"].pop(fam, None)
             _write(state)
             return None

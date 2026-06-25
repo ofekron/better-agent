@@ -44,6 +44,27 @@ def test_malformed_refresh_rejected():
     assert qr_auth.rotate("unknownfam.unknownjti") is None
 
 
+def test_consume_grant_miss_does_not_rewrite_state():
+    # A MISS (unknown grant) must never rewrite/fsync the state file. Before
+    # the fix consume_grant wrote on every miss — an unauthenticated,
+    # event-loop-blocking fsync DoS amplifier.
+    qr_auth.mint_grant()
+    path = qr_auth._path()
+    before = path.stat().st_mtime_ns
+    for _ in range(8):
+        assert qr_auth.consume_grant("nonexistent-token") is False
+    assert path.stat().st_mtime_ns == before, "consume_grant miss rewrote state"
+
+
+def test_rotate_unknown_family_does_not_rewrite_state():
+    qr_auth.issue_session("alice")
+    path = qr_auth._path()
+    before = path.stat().st_mtime_ns
+    for _ in range(8):
+        assert qr_auth.rotate("unknownfam.unknownjti") is None
+    assert path.stat().st_mtime_ns == before, "rotate unknown-family rewrote state"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -6,6 +6,7 @@ necessarily the only way to acquire a session.
 """
 
 import ipaddress
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
@@ -54,6 +55,69 @@ def _is_authenticated(request: Request) -> bool:
     if header.lower().startswith("bearer "):
         return auth.verify_token(header.split(" ", 1)[1].strip()) is not None
     return False
+
+
+_FORWARD_HEADERS = (
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+)
+
+
+def _has_forwarding_headers(request: Request) -> bool:
+    """True if any reverse-proxy forwarding header is present. A same-host
+    proxy connects from 127.0.0.1, so the loopback peer signal can no longer
+    prove "physically at the machine" — unauthenticated QR minting must not
+    trust loopback when forwarding is in play."""
+    return any(h in request.headers for h in _FORWARD_HEADERS)
+
+
+def _origin_host_port(raw: str) -> str | None:
+    """host[:port] of an Origin/Referer URL, lowercased; None if unparseable."""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return None
+    if not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    return f"{host}:{parsed.port}" if parsed.port is not None else host
+
+
+def _is_same_origin_browser_request(request: Request) -> bool:
+    """True when a browser request demonstrably comes from the page served
+    at THIS same origin, or carries no browser-origin signal at all (a
+    non-browser loopback caller — curl, the desktop app). False for a
+    CROSS-site fetch, e.g. a localhost:3000 dev server or local XSS calling
+    the :8000 backend — the vector that lets arbitrary same-machine web
+    content mint a QR grant off the shared loopback peer.
+
+    `Sec-Fetch-Site` is the primary signal: the browser sets it and JS can't
+    forge it. Origin/Referer-vs-Host is the fallback for clients that omit
+    it."""
+    sfs = request.headers.get("sec-fetch-site")
+    if sfs is not None:
+        return sfs in ("same-origin", "none")
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return True  # no browser-origin signal → non-browser caller
+    src = _origin_host_port(source)
+    host = (request.headers.get("host") or request.url.netloc or "").lower()
+    return src is not None and src == host
+
+
+def _qr_mint_allowed(
+    *, authed: bool, loopback: bool, has_forward: bool, same_origin: bool
+) -> bool:
+    """Gate for minting a one-time QR grant. An authenticated session may
+    always mint. Otherwise (the on-machine admin at the login screen) minting
+    is allowed ONLY from a loopback peer, for a same-origin / non-browser
+    request, and only when no proxy-forwarding header collapsed the peer to
+    loopback."""
+    if authed:
+        return True
+    return loopback and same_origin and not has_forward
 
 
 def _origin_base_url(request: Request) -> str:
@@ -166,10 +230,15 @@ async def qr_grant(request: Request) -> dict:
     password."""
     if not auth.is_bootstrapped():
         raise HTTPException(status_code=409, detail="not configured")
-    if not _is_loopback_request(request) and not _is_authenticated(request):
+    if not _qr_mint_allowed(
+        authed=_is_authenticated(request),
+        loopback=_is_loopback_request(request),
+        has_forward=_has_forwarding_headers(request),
+        same_origin=_is_same_origin_browser_request(request),
+    ):
         raise HTTPException(
             status_code=403,
-            detail="qr grant requires loopback or an authenticated session",
+            detail="qr grant requires loopback same-origin access or an authenticated session",
         )
     grant = qr_auth.mint_grant()
     login_url = f"{_origin_base_url(request)}/?qr={grant}"
@@ -177,11 +246,14 @@ async def qr_grant(request: Request) -> dict:
 
 
 @router.post("/qr_redeem")
-async def qr_redeem(body: RedeemBody) -> dict:
+async def qr_redeem(body: RedeemBody, request: Request) -> dict:
     """Redeem a one-time grant (from a scanned QR) for an access token +
     rotating refresh token. No cookie is set: external devices ride the
     short access token and refresh it, so there's no long-lived credential
     sitting on the phone."""
+    ip = request.client.host if request.client else "unknown"
+    if not auth.rate_limit_check(ip):
+        raise HTTPException(status_code=429, detail="too many attempts")
     if not auth.is_bootstrapped():
         raise HTTPException(status_code=409, detail="not configured")
     if not qr_auth.consume_grant(body.grant):
@@ -189,6 +261,7 @@ async def qr_redeem(body: RedeemBody) -> dict:
     username = auth.current_username()
     if not username:
         raise HTTPException(status_code=409, detail="not configured")
+    auth.rate_limit_reset(ip)
     access, refresh = qr_auth.issue_session(username)
     return {
         "access_token": access,
@@ -198,13 +271,17 @@ async def qr_redeem(body: RedeemBody) -> dict:
 
 
 @router.post("/refresh")
-async def refresh(body: RefreshBody) -> dict:
+async def refresh(body: RefreshBody, request: Request) -> dict:
     """Rotate a refresh token: returns a fresh access + refresh pair and
     invalidates the one presented. A replayed (already-rotated) token
     revokes the whole family — see qr_auth.rotate."""
+    ip = request.client.host if request.client else "unknown"
+    if not auth.rate_limit_check(ip):
+        raise HTTPException(status_code=429, detail="too many attempts")
     pair = qr_auth.rotate(body.refresh_token)
     if pair is None:
         raise HTTPException(status_code=401, detail="invalid or expired refresh token")
+    auth.rate_limit_reset(ip)
     access, new_refresh = pair
     return {
         "access_token": access,
