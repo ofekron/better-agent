@@ -992,6 +992,11 @@ class TurnManager:
         ~orchestrator.py:2506-3067) EXCEPT every terminal path now
         emits `lifecycle.turn_*` on the bus via
         `_publish_terminal_lifecycle` — the (ii) behavior change.
+
+        `cli_prompt` is the exact text sent to the model and MUST be
+        non-None. Callers that bypass `run_primary` (whose wrap fallback
+        would otherwise supply it) are responsible for defaulting it —
+        see the supervisor-direct branch in `handle_prompt`.
         """
         import traceback
 

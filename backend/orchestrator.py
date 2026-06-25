@@ -3421,9 +3421,15 @@ class Coordinator:
         # open-todo reminder) while everything else stays a normal turn.
         # `cli_prompt` (when set) is the text actually sent to the model,
         # while `prompt` is persisted/displayed as the user message. Used
-        # by the Ask singleton to keep the wrapper out of the visible
-        # history. Defaults to `prompt` so all other callers are unchanged.
-        cli_prompt = cli_prompt or prompt
+        # by the Ask singleton, team-messaging, file-discussion, semantic-alter,
+        # and the CLI override to keep their wrapper out of the visible history.
+        # MUST stay None when no caller set it: run_primary relies on
+        # `cli_prompt is None` to know it should apply wrap_cli_prompt (the
+        # team/manager BOOTSTRAP). Defaulting it to `prompt` here defeated
+        # that check and silently stripped the bootstrap from every normal
+        # team turn, so the coordinator never received delegation instructions.
+        # The supervisor-direct branch (the one run_turn caller that bypasses
+        # run_primary) defaults None→prompt itself.
         session = session_manager.get(app_session_id)
         if not session:
             await ws_callback({"type": "error", "data": {"error": t("error.ws_session_not_found")}})
@@ -3527,7 +3533,11 @@ class Coordinator:
                 await self.run_turn(
                     session=session,
                     prompt=prompt,
-                    cli_prompt=cli_prompt,
+                    # Native turn with no override: cli_prompt is the raw
+                    # prompt. This branch bypasses run_primary (whose wrap
+                    # fallback would otherwise supply it), so default
+                    # None→prompt here or the model receives an empty prompt.
+                    cli_prompt=cli_prompt or prompt,
                     app_session_id=app_session_id,
                     model=model,
                     cwd=cwd,
