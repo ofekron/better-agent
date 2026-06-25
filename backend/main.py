@@ -4143,7 +4143,7 @@ async def create_session(body: Any = Body(default=None)):
                 source="file_editor",
                 capability_contexts=capability_contexts,
             )
-        if session.get("cwd"):
+        if session_store.should_auto_register_project(session):
             try:
                 await asyncio.to_thread(
                     project_store.add_project,
@@ -4189,7 +4189,7 @@ async def create_session(body: Any = Body(default=None)):
             session["id"],
             backend_url.rstrip("/"),
         ) or session
-    if session.get("cwd"):
+    if session_store.should_auto_register_project(session):
         try:
             await asyncio.to_thread(
                 project_store.add_project,
@@ -10451,6 +10451,40 @@ async def websocket_chat(websocket: WebSocket):
                 )
 
                 item_id = str(uuid.uuid4())
+                # Atomic admission gate: claim the client_id BEFORE
+                # persisting/emitting anything. A concurrent same-client_id
+                # send (offline re-dispatch after a reconnect) that arrives
+                # while this turn is in flight would otherwise slip past the
+                # read-only dedup checks above and broadcast a phantom
+                # queued bubble before submit_prompt deduped it. Claiming
+                # here makes the dedup authoritative under concurrency.
+                _claim_cid = msg.get("client_id")
+                if _claim_cid:
+                    _dup_of = coordinator.try_claim_prompt_client_id(
+                        app_session_id, item_id, _claim_cid,
+                    )
+                    if _dup_of:
+                        _dup_lifecycle = (
+                            coordinator.user_prompt_manager
+                            .get_in_flight_lifecycle_msg_id(app_session_id)
+                        )
+                        if _dup_lifecycle:
+                            await ws_callback({
+                                "type": "user_message_queued",
+                                "data": {
+                                    "app_session_id": app_session_id,
+                                    **queued_payload(
+                                        lifecycle_msg_id=_dup_lifecycle,
+                                        content=prompt,
+                                        kind="send",
+                                        queue_position=0,
+                                        client_id=_claim_cid,
+                                        images_count=len(images),
+                                        orchestration_mode=orchestration_mode,
+                                    ),
+                                },
+                            })
+                        continue
                 params = {
                     "prompt": prompt,
                     "app_session_id": app_session_id,
@@ -10467,6 +10501,7 @@ async def websocket_chat(websocket: WebSocket):
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
                     "_queued_id": item_id,
+                    "_client_id_claimed": True,
                 }
 
                 if send_mode == "interrupt" and is_queued:
@@ -10539,6 +10574,9 @@ async def websocket_chat(websocket: WebSocket):
                 try:
                     await coordinator.submit_prompt_async(app_session_id, params)
                 except Exception:
+                    # Release the client_id claim taken above so the
+                    # failed item doesn't block a later genuine re-send.
+                    coordinator._forget_active_prompt_item(item_id)
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
