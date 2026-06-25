@@ -1561,11 +1561,17 @@ export function SessionList({
   }, [aiResult, onAiActiveChange]);
 
   const { roots, childrenByParent } = useMemo(() => {
+    // The selected session is shown only in the pinned anchor above the
+    // toolbar, so drop it from the list pool. Its sub-sessions reparent
+    // to root via the orphan branch below.
+    const pool = currentSessionId
+      ? filtered.filter((s) => s.id !== currentSessionId)
+      : filtered;
     const byId = new Map<string, Session>();
-    for (const s of filtered) byId.set(s.id, s);
+    for (const s of pool) byId.set(s.id, s);
     const childMap = new Map<string, Session[]>();
     const rootList: Session[] = [];
-    for (const s of filtered) {
+    for (const s of pool) {
       const pid = s.parent_session_id;
       if (pid && byId.has(pid)) {
         const arr = childMap.get(pid) ?? [];
@@ -1576,7 +1582,7 @@ export function SessionList({
       }
     }
     return { roots: rootList, childrenByParent: childMap };
-  }, [filtered]);
+  }, [filtered, currentSessionId]);
 
   const [collapsedFolders, setCollapsedFolders] = useLocalStorage<string[]>(
     "better-agent-collapsed-folders",
