@@ -64,35 +64,56 @@ export function clearStoredToken(): void {
 export function installBearerAuthInterceptor(): void {
   const originalFetch = window.fetch.bind(window);
 
-  // One shared refresh at a time. The backend rotates the refresh token on
-  // every use and revokes the family if a superseded token is replayed, so
-  // two parallel 401s must NOT each fire their own /refresh — they'd race,
-  // the second would present the just-rotated token, and the family would
-  // self-destruct. Everyone awaits the same in-flight rotation instead.
+  // One shared refresh at a time, BOTH within a tab and across tabs. The
+  // backend rotates the refresh token on every use and revokes the family if
+  // a superseded token is replayed, so two refreshes that each present the
+  // same stored token self-destruct the family. `refreshing` serializes the
+  // in-tab parallel 401s; a Web Lock serializes across tabs (two tabs share
+  // the same localStorage refresh token). Whoever wins the lock rotates;
+  // everyone else re-reads the token the winner stored instead of replaying
+  // the now-superseded one.
   let refreshing: Promise<boolean> | null = null;
-  const refreshOnce = (refreshUrl: string): Promise<boolean> => {
+
+  // Run `fn` while holding a cross-tab lock. Older browsers without the Web
+  // Locks API fall back to in-tab serialization only (prior behavior).
+  const withRefreshLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+    if (locks?.request) {
+      return locks.request("better_agent_token_refresh", fn) as Promise<T>;
+    }
+    return fn();
+  };
+
+  const refreshOnce = (refreshUrl: string, failedToken: string | null): Promise<boolean> => {
     if (refreshing) return refreshing;
     refreshing = (async () => {
-      const refresh = getStoredRefreshToken();
-      if (!refresh) return false;
       try {
-        const res = await originalFetch(refreshUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ refresh_token: refresh }),
-        });
-        if (!res.ok) {
+        return await withRefreshLock(async () => {
+          // Another tab may have rotated while we waited for the lock. If the
+          // stored access token changed since the request that 401'd, reuse
+          // it rather than replaying our (now-superseded) refresh token.
+          const current = getStoredToken();
+          if (failedToken && current && current !== failedToken) return true;
+          const refresh = getStoredRefreshToken();
+          if (!refresh) return false;
+          const res = await originalFetch(refreshUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ refresh_token: refresh }),
+          });
+          if (!res.ok) {
+            clearStoredToken();
+            return false;
+          }
+          const body = await res.json();
+          if (body?.access_token && body?.refresh_token) {
+            setTokens(body.access_token, body.refresh_token);
+            return true;
+          }
           clearStoredToken();
           return false;
-        }
-        const body = await res.json();
-        if (body?.access_token && body?.refresh_token) {
-          setTokens(body.access_token, body.refresh_token);
-          return true;
-        }
-        clearStoredToken();
-        return false;
+        });
       } catch {
         return false;
       } finally {
@@ -131,7 +152,8 @@ export function installBearerAuthInterceptor(): void {
     if (res.status === 401 && !isRefreshCall && !src && getStoredRefreshToken()) {
       const refreshUrl =
         new URL(url, window.location.href).origin + "/api/auth/refresh";
-      if (await refreshOnce(refreshUrl)) {
+      const failedToken = getStoredToken();
+      if (await refreshOnce(refreshUrl, failedToken)) {
         res = await originalFetch(input, withAuth(init, src));
       }
     }
