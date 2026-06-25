@@ -49,8 +49,10 @@ const TOOL_ICONS: Record<string, string> = {
   Bash: "$",
   bash: "$",
   execute_command: "$",
+  run_command: "$",
   Read: "R",
   read_file: "R",
+  view_file: "R",
   Write: "W",
   write_file: "W",
   create_file: "W",
@@ -59,9 +61,11 @@ const TOOL_ICONS: Record<string, string> = {
   Glob: "?",
   glob: "?",
   list_directory: "?",
+  list_dir: "?",
   Grep: "/",
   grep: "/",
   search: "/",
+  grep_search: "/",
   Task: "T",
   Agent: "A",
   Skill: "S",
@@ -129,23 +133,28 @@ interface BashArgs {
   description?: string;
 }
 
-/** Parse Bash args JSON (or Python-dict-like string) into command + description. */
+/** Parse Bash args JSON (or Python-dict-like string) into command + description.
+ *  agy's run_command tool uses `CommandLine` (and optional `Cwd`) instead of
+ *  `command`; accept both shapes. */
 function parseBashArgs(args: string): BashArgs | null {
+  const pick = (parsed: unknown): BashArgs | null => {
+    if (!parsed || typeof parsed !== "object") return null;
+    const obj = parsed as Record<string, unknown>;
+    const command = obj.command ?? obj.CommandLine;
+    if (typeof command !== "string") return null;
+    const description = obj.description ?? obj.Cwd;
+    return { command, description: typeof description === "string" ? description : undefined };
+  };
   try {
-    const parsed = JSON.parse(args);
-    if (parsed && typeof parsed === "object" && typeof parsed.command === "string") {
-      return { command: parsed.command, description: parsed.description };
-    }
+    const out = pick(JSON.parse(args));
+    if (out) return out;
   } catch (err) {
     void err;
   }
   // Try Python-dict form
   try {
-    const jsonified = args.replace(/'/g, '"');
-    const parsed = JSON.parse(jsonified);
-    if (parsed && typeof parsed === "object" && typeof parsed.command === "string") {
-      return { command: parsed.command, description: parsed.description };
-    }
+    const out = pick(JSON.parse(args.replace(/'/g, '"')));
+    if (out) return out;
   } catch (err) {
     void err;
   }
@@ -153,7 +162,7 @@ function parseBashArgs(args: string): BashArgs | null {
 }
 
 function isBashTool(tool: string): boolean {
-  return ["Bash", "bash", "execute_command"].includes(tool);
+  return ["Bash", "bash", "execute_command", "run_command"].includes(tool);
 }
 
 function isEditTool(tool: string): boolean {
@@ -223,6 +232,8 @@ function summarizeArgs(parsed: unknown): string {
   const preferred = [
     "instructions", "prompt", "command", "query", "pattern",
     "description", "file_path", "path", "url", "name", "title",
+    // agy uses PascalCase input keys
+    "CommandLine", "Query", "SearchPath", "AbsolutePath", "DirectoryPath",
   ];
   const sorted = [...entries].sort((a, b) => {
     const ai = preferred.indexOf(a[0]);
@@ -249,7 +260,7 @@ function summarizeArgs(parsed: unknown): string {
 function extractFilePath(parsed: unknown): string | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
-  const candidates = ["file_path", "path", "notebook_path", "filePath"];
+  const candidates = ["file_path", "path", "notebook_path", "filePath", "AbsolutePath"];
   for (const k of candidates) {
     const v = obj[k];
     if (typeof v === "string" && v) return v;
@@ -258,7 +269,24 @@ function extractFilePath(parsed: unknown): string | null {
 }
 
 function isFilePath(tool: string): boolean {
-  return ["Read", "read_file", "Write", "write_file", "create_file", "Edit", "edit_file"].includes(tool);
+  return ["Read", "read_file", "view_file", "Write", "write_file", "create_file", "Edit", "edit_file"].includes(tool);
+}
+
+/** Drop provider-internal bookkeeping fields that are not real tool inputs.
+ *  agy attaches `toolAction`/`toolSummary` to every tool payload; they are
+ *  orchestration metadata, not arguments, so hide them from the rendered
+ *  args rather than showing noise to the user. */
+function stripInternalToolKeys(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const INTERNAL = new Set(["toolAction", "toolSummary"]);
+  const src = value as Record<string, unknown>;
+  const hasInternal = Object.keys(src).some((k) => INTERNAL.has(k));
+  if (!hasInternal) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (!INTERNAL.has(k)) out[k] = v;
+  }
+  return out;
 }
 
 function parseEditArgs(args: string): EditArgs | null {
@@ -1471,7 +1499,7 @@ export function ToolCall({ tool, args, result, onFileClick, onViewDiff }: Props)
   // / Skill / Canvas) discard these values; the ref they never attach to
   // stays null, which the effect's `if (el)` guard tolerates.
   const editArgs = isEditTool(tool) ? parseEditArgs(argsStr) : null;
-  const parsedArgs = editArgs ? null : tryParseJsonValue(argsStr);
+  const parsedArgs = editArgs ? null : stripInternalToolKeys(tryParseJsonValue(argsStr));
   const parsedFilePath = extractFilePath(parsedArgs);
   // Header text: for Edit use the path from editArgs, for other file tools
   // prefer the parsed file_path, otherwise fall back to a short summary of
