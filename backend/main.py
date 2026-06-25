@@ -4575,6 +4575,11 @@ async def update_session_selectors(session_id: str, body: dict):
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if "provider_id" in body and isinstance(body["provider_id"], str) and body["provider_id"].strip():
+        if coordinator.turn_manager.has_active_runs(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail=t("error.provider_change_during_active_run"),
+            )
         updates["provider_id"] = body["provider_id"].strip()
         if "reasoning_effort" not in updates:
             provider_record = await asyncio.to_thread(
@@ -8440,6 +8445,11 @@ async def internal_session_bridge_delegate(
     return result
 
 
+_AGENT_BOARD_MAX_PROMPT_LEN = 8000
+# Strong refs to in-flight delivery tasks so they aren't GC'd mid-await.
+_AGENT_BOARD_DELIVERY_TASKS: set[asyncio.Task] = set()
+
+
 @app.post("/api/internal/agent-board/run-prompt")
 async def internal_agent_board_run_prompt(
     body: dict,
@@ -8460,16 +8470,26 @@ async def internal_agent_board_run_prompt(
     prompt = str((body or {}).get("prompt") or "").strip()
     if not session_id or not prompt:
         raise HTTPException(status_code=400, detail="session_id and prompt are required")
+    if len(prompt) > _AGENT_BOARD_MAX_PROMPT_LEN:
+        raise HTTPException(status_code=400, detail="prompt too long")
+    # Constrain the target to a real, existing session so a bug in the
+    # extension subprocess cannot drive arbitrary/virtual session ids.
+    if not session_manager.exists(session_id):
+        raise HTTPException(status_code=404, detail="unknown session")
 
     async def _deliver() -> None:
         try:
-            await session_bridge._run(session_id, prompt, "continue", source="agent-board")
+            await session_bridge.run_for_extension(session_id, prompt, source="agent-board")
         except Exception:
             logger.warning(
                 "agent-board run-prompt failed for %s", session_id[:8], exc_info=True
             )
 
-    asyncio.create_task(_deliver())
+    # Hold a reference until completion: a bare create_task may be GC'd
+    # mid-await, silently cancelling the delivery.
+    task = asyncio.create_task(_deliver())
+    _AGENT_BOARD_DELIVERY_TASKS.add(task)
+    task.add_done_callback(_AGENT_BOARD_DELIVERY_TASKS.discard)
     return {"scheduled": True}
 
 

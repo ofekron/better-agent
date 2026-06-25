@@ -82,31 +82,37 @@ def test_installed_and_exposed(client: TestClient) -> None:
 
 
 def test_run_prompt_identity_gate(client: TestClient) -> None:
-    calls: list[tuple] = []
-
-    async def _stub_run(target_sid, prompt, run_mode, **_kw):
-        calls.append((target_sid, prompt, run_mode))
+    async def _stub_run(target_sid, prompt, *, source):
         return {"session_id": target_sid}
 
-    original = main.session_bridge._run
-    main.session_bridge._run = _stub_run
+    core_token = getattr(main.coordinator, "internal_token", "")
+    created = client.post(
+        "/api/internal/create-session",
+        headers={"X-Internal-Token": core_token},
+        json={"name": "board target", "cwd": str(TMP_HOME)},
+    )
+    check(created.status_code == 200, "core create-session for a real target")
+    real_sid = created.json()["session_id"]
+
+    original = main.session_bridge.run_for_extension
+    main.session_bridge.run_for_extension = _stub_run
     try:
+        ab_headers = {"X-Internal-Token": extension_token_registry.mint(AGENT_BOARD_ID)}
+
         # Wrong identity: another extension's token must NOT reach the endpoint.
         response = client.post(
             "/api/internal/agent-board/run-prompt",
             headers={"X-Internal-Token": extension_token_registry.mint("ofek-dev.ask")},
-            json={"session_id": "s1", "prompt": "hi"},
+            json={"session_id": real_sid, "prompt": "hi"},
         )
         check(response.status_code == 403, "run-prompt rejects non-agent-board identity")
 
-        # No token at all → 403.
+        # No token at all → 403/422.
         response = client.post(
             "/api/internal/agent-board/run-prompt",
-            json={"session_id": "s1", "prompt": "hi"},
+            json={"session_id": real_sid, "prompt": "hi"},
         )
         check(response.status_code in (403, 422), "run-prompt rejects missing token")
-
-        ab_headers = {"X-Internal-Token": extension_token_registry.mint(AGENT_BOARD_ID)}
 
         # Correct identity but empty body → 400 (fail closed on bad input).
         response = client.post(
@@ -116,16 +122,32 @@ def test_run_prompt_identity_gate(client: TestClient) -> None:
         )
         check(response.status_code == 400, "run-prompt rejects empty session/prompt")
 
-        # Correct identity + valid body → scheduled.
+        # Unknown session id → 404 (cannot drive arbitrary/nonexistent sessions).
         response = client.post(
             "/api/internal/agent-board/run-prompt",
             headers=ab_headers,
-            json={"session_id": "sid-123", "prompt": "do it"},
+            json={"session_id": "does-not-exist", "prompt": "do it"},
         )
-        check(response.status_code == 200, "run-prompt accepts agent-board identity")
+        check(response.status_code == 404, "run-prompt rejects unknown session id")
+
+        # Over-long prompt → 400 (endpoint-level cap, not just lane-action cap).
+        response = client.post(
+            "/api/internal/agent-board/run-prompt",
+            headers=ab_headers,
+            json={"session_id": real_sid, "prompt": "x" * 9000},
+        )
+        check(response.status_code == 400, "run-prompt rejects over-long prompt")
+
+        # Correct identity + real session + valid prompt → scheduled.
+        response = client.post(
+            "/api/internal/agent-board/run-prompt",
+            headers=ab_headers,
+            json={"session_id": real_sid, "prompt": "do it"},
+        )
+        check(response.status_code == 200, "run-prompt accepts agent-board identity + real session")
         check(response.json().get("scheduled") is True, "run-prompt schedules delivery")
     finally:
-        main.session_bridge._run = original
+        main.session_bridge.run_for_extension = original
 
 
 # The engine reuses the agent-board project, which uses bare top-level imports
