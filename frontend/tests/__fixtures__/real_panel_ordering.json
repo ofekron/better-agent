@@ -1,0 +1,831 @@
+{
+ "seq3": {
+  "events": [
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "ai-title",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "file-history-snapshot",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Skill"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "ToolSearch"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__handoff__create_sub_session"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "ToolSearch"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "ToolSearch"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__mssg"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "Bash"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   }
+  ],
+  "workers": [
+   {
+    "delegation_id": "created_a8e15d64-c7d9-4d0b-81af-25166877cf4e",
+    "panel_kind": "sub_session_created",
+    "run_mode": "created",
+    "insert_at": 18,
+    "events": []
+   }
+  ]
+ },
+ "seq5": {
+  "events": [
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "ai-title",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "file-history-snapshot",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "attachment",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": [
+       {
+        "type": "tool_use",
+        "name": "mcp__communicate__ask"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "user",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   },
+   {
+    "type": "agent_message",
+    "data": {
+     "type": "assistant",
+     "message": {
+      "content": []
+     }
+    }
+   }
+  ],
+  "workers": [
+   {
+    "delegation_id": "team_ask_cc9afe34-7d79-42f4-9d87-be62588eb9c6",
+    "panel_kind": "sub_session",
+    "run_mode": "team_ask",
+    "insert_at": 4,
+    "events": []
+   },
+   {
+    "delegation_id": "team_ask_a97c6eb9-8e7e-47b2-9ab4-81199b03ad85",
+    "panel_kind": "sub_session",
+    "run_mode": "team_ask",
+    "insert_at": 7,
+    "events": []
+   },
+   {
+    "delegation_id": "team_ask_074c34d7-df82-4261-9de2-76d57b882e05",
+    "panel_kind": "sub_session",
+    "run_mode": "team_ask",
+    "insert_at": 11,
+    "events": []
+   }
+  ]
+ }
+}
