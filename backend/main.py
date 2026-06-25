@@ -2581,7 +2581,6 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "model_ids",
         "modes",
         "sources",
-        "initiated_by",
     }
     unknown = set(body) - allowed
     if unknown:
@@ -2600,7 +2599,6 @@ def _session_list_filter_args_from_body(body: dict | None) -> dict[str, Any]:
         "model_ids": _session_filter_list_from_body(body, "model_ids"),
         "modes": _session_filter_list_from_body(body, "modes"),
         "sources": _session_filter_list_from_body(body, "sources"),
-        "initiated_by": _session_filter_list_from_body(body, "initiated_by"),
     }
 
 
@@ -2617,7 +2615,6 @@ def _session_matches_list_filters(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
-    initiated_by: set[str],
     content_scores: dict[str, int] | None = None,
 ) -> bool:
     if not show_archived and session.get("archived"):
@@ -2637,8 +2634,6 @@ def _session_matches_list_filters(
     if modes and (session.get("orchestration_mode") or "team") not in modes:
         return False
     if sources and (session.get("source") or "web") not in sources:
-        return False
-    if initiated_by and _initiated_by(session) not in initiated_by:
         return False
     if tag_ids:
         manual_tags = {
@@ -2695,7 +2690,6 @@ def _filter_sort_sessions_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
-    initiated_by: set[str],
     content_scores: dict[str, int],
     sort_by: str,
 ) -> list[dict]:
@@ -2713,7 +2707,6 @@ def _filter_sort_sessions_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
-            initiated_by=initiated_by,
             content_scores=content_scores,
         )
     ]
@@ -2749,7 +2742,6 @@ def _build_local_sessions_page_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
-    initiated_by: set[str],
     search_fields: str | None,
     sort_by: str,
 ) -> tuple[list[dict], int]:
@@ -2788,7 +2780,6 @@ def _build_local_sessions_page_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
-            initiated_by=initiated_by,
             content_scores=content_scores,
             sort_by=sort_by,
         )
@@ -2819,7 +2810,6 @@ async def get_sessions(
     model_ids: str | None = Query(None),
     modes: str | None = Query(None),
     sources: str | None = Query(None),
-    initiated_by: str | None = Query(None),
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
 ):
@@ -2863,7 +2853,6 @@ async def get_sessions(
             "model_ids": _split_session_filter(model_ids),
             "modes": _split_session_filter(modes),
             "sources": _split_session_filter(sources),
-            "initiated_by": _split_session_filter(initiated_by),
             "search_fields": search_fields,
             "sort_by": effective_sort_by,
         }
@@ -10659,7 +10648,7 @@ def frontend_dist_dir() -> Path:
 @app.get("/provider-config-sync", include_in_schema=False)
 @app.get("/provider-config-sync/", include_in_schema=False)
 async def provider_config_sync_spa_route():
-    _require_builtin_runtime_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
+    _require_builtin_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
     return FileResponse(
         frontend_dist_dir() / "index.html",
         headers=_NO_CACHE_HEADERS,
