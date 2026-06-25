@@ -948,11 +948,17 @@ def _required_model_from_body_or_provider(body: dict, provider: dict) -> str:
     raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
 
 
-def _validate_provider_model(provider_id: str | None, model: str) -> None:
+def _validate_provider_model(
+    provider_id: str | None, model: str, include_retired: bool = False,
+) -> None:
     if not model:
         return
     import models as models_mod
-    available = set(models_mod.available_models(provider_id))
+    available = set(
+        models_mod.available_models_including_retired(provider_id)
+        if include_retired
+        else models_mod.available_models(provider_id)
+    )
     if model in available:
         return
     provider = (
@@ -4559,7 +4565,23 @@ async def update_session_selectors(session_id: str, body: dict):
     body = body or {}
     updates: dict = {}
     if "model" in body and isinstance(body["model"], str) and body["model"].strip():
-        updates["model"] = body["model"].strip()
+        requested_model = body["model"].strip()
+        provider_for_model = (
+            body.get("provider_id")
+            if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
+            else ((await _session_lite(session_id)) or {}).get("provider_id")
+        )
+        # Fail closed: with no resolvable provider, `available_models(None)`
+        # would validate against the DEFAULT provider — letting a foreign
+        # model (e.g. glm-5.2 onto a Claude session) slip through. Reject.
+        if not provider_for_model:
+            raise HTTPException(
+                status_code=400, detail=t("error.session_not_found_retry"),
+            )
+        await asyncio.to_thread(
+            _validate_provider_model, provider_for_model, requested_model, True,
+        )
+        updates["model"] = requested_model
     if "reasoning_effort" in body:
         requested_effort = _api_reasoning_effort(body.get("reasoning_effort"))
         if requested_effort is None:
