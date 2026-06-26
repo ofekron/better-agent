@@ -2766,12 +2766,8 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   useEffect(() => {
     if (!userToggledRef.current) setCollapsed(defaultCollapsed);
   }, [defaultCollapsed]);
-  // For the last group we split the single `collapsed` boolean across two
-  // surfaces: the user-prompt body folds away, but the assistant response
-  // stays fully expanded so the latest answer remains visible. Historical
-  // groups keep the original behavior (user body visible, assistant
-  // summarized) so old turns still compress in the scrollback.
-  const userBodyCollapsed = isLastGroup ? collapsed : false;
+  // User prompt body is never auto-collapsed — only the assistant response
+  // folds away in historical groups so old turns compress in the scrollback.
   const assistantCollapsed = isLastGroup ? false : collapsed;
   const toggleCollapsed = () => {
     userToggledRef.current = true;
@@ -3049,7 +3045,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             </button>
           )}
         </div>
-        {!userBodyCollapsed && (() => {
+        {(() => {
           const hasArtificial = hasArtificialSections(rawUserContent);
           return (
             <div className="message-box-body">

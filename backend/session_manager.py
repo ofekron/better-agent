@@ -2980,16 +2980,8 @@ class SessionManager:
                 orchestration_mode=mode, provider_id=provider_id,
             )
         def _do(s: dict) -> None:
-            # Inside the per-root lock. Re-check the gate atomically
-            # with the write — even if the PATCH handler 200'd at the
-            # pre-check, a queued prompt landing between pre-check and
-            # here means the user has a turn pending and we MUST 409.
-            if provider_id is not None and self._active_run_gate is not None:
-                if self._active_run_gate(sid):
-                    raise ProviderChangeWhileActive(
-                        "cannot change provider_id while a turn is "
-                        "queued or in flight"
-                    )
+            # Inside the per-root lock.
+            pass
             if model is not None:
                 s["model"] = model
             if reasoning_effort is not None:
@@ -3016,12 +3008,25 @@ class SessionManager:
         mode: str,
         agent_sid: Optional[str],
         *,
+        provider_id: Optional[str] = None,
+        model: Optional[str] = None,
         bump_updated_at: bool = True,
     ) -> Optional[dict]:
         field = session_store._agent_sid_field_for_mode(mode)
+        def _do(s: dict) -> None:
+            s[field] = agent_sid
+            if agent_sid is not None:
+                p_id = provider_id or s.get("provider_id")
+                m_val = model or s.get("model")
+                if field == "supervisor_agent_session_id":
+                    s["last_active_supervisor_provider_id"] = p_id
+                    s["last_active_supervisor_model"] = m_val
+                else:
+                    s["last_active_provider_id"] = p_id
+                    s["last_active_model"] = m_val
         sess = self._run(
             sid,
-            lambda s: s.__setitem__(field, agent_sid),
+            _do,
             {"kind": "agent_sid_set", "mode": mode, "agent_sid": agent_sid},
             bump_updated_at=bump_updated_at,
         )

@@ -5,11 +5,24 @@ independently-reusable state transition. Feature flows compose them via
 `fb.subflow(child_builder)`.
 
 Conventions:
-- Every builder takes `adapter_id` and the env-swing `base_url` (build-time
-  param, not a run-time variable) so the same flow runs in any environment.
+- Every builder takes `adapter_id` (build-time param). `base_url` defaults to
+  APP_BASE so the same flow runs in any environment.
 - Selectors prefer stable hooks: data-testid, aria-label, stable classes.
-- Names are deterministic (`stable_id=True` default) so the same subflow is
-  shared across every feature flow that references it.
+- Names are deterministic so the same subflow is shared across every feature
+  flow that references it.
+
+Environment requirement (FlowBuilder cannot set this in-flow):
+- The Chrome window MUST be desktop width (>820px content). Below that the
+  sidebar collapses into a closed drawer (no `session-list`) AND the composer
+  sends on Enter only at desktop width — `enterIsNewline = viewport.mode !==
+  "desktop"` (InputArea.tsx). CDP `Emulation.setDeviceMetricsOverride`
+  (`testape emulate`) is per-CDP-session and does NOT carry into a flow run's
+  own session, so resize the real OS window once after `testape chrome start`:
+    python3 testape/scripts/resize_chrome_window.py --port 9224
+- The fixed Agent Board FAB overlaps the send button, so flows send via Enter,
+  not via the send button.
+- Flows create fresh NATIVE sessions. Supervisor/Agent-Board modals only
+  surface on supervisor sessions and are out of scope here.
 """
 
 from testape_engine.flow_builder import FlowBuilder
@@ -34,17 +47,16 @@ SEL = {
     "stop_btn": '[data-testid="stop-btn"]',
 }
 
-# A trivial default prompt so session-creating subflows spawn the cheapest
-# possible real turn. Override at run time via --var prompt=...
+# Trivial default prompts so session-creating subflows spawn the cheapest
+# possible real turn. Override at run time via the run-time variable.
 DEFAULT_NEW_SESSION_PROMPT = "Reply with exactly: TESTAPE_OK"
-DEFAULT_FOLLOWUP_PROMPT = "Reply with exactly: TESTAPE_OK"
+DEFAULT_FOLLOWUP_PROMPT = "Reply with exactly: TESTAPE_FOLLOWUP"
 
 
 def open_app(adapter_id, base_url=APP_BASE):
     """Transition: anywhere -> app shell loaded.
 
-    Navigates to the app root and proves the adapter is attached to a live,
-    rendered Better Agent page (session list present). Used as the first
+    Navigates to the app root and proves the session list is visible. First
     subflow of every feature flow.
     """
     import re
@@ -52,9 +64,8 @@ def open_app(adapter_id, base_url=APP_BASE):
     fb = FlowBuilder(name="bc__open_app", adapter_id=adapter_id, folder="bc/lib")
     fb.navigate(base_url)
     fb.assert_url(re.escape(base_url) + r"/.*", fix_allowed=False, skip_allowed=False)
-    # Flat delay-then-check: the session list is a live region (timestamps,
-    # running pulses) that never passes a DOM-stable poll, so we assert
-    # visibility directly after giving the SPA time to mount.
+    # Flat delay-then-check: assert_dom evaluates once after `delay`, it is not
+    # a poll. The SPA needs a few seconds to mount; 10s covers cold starts.
     fb.assert_dom(SEL["session_list"], predicates=[{"op": "visible"}], delay=10)
     return fb
 
@@ -62,17 +73,14 @@ def open_app(adapter_id, base_url=APP_BASE):
 def open_new_session_modal(adapter_id):
     """Transition: app shell -> new-session modal open.
 
-    Clicks the header "New Session" button and proves the modal's initial
-    prompt textarea is visible. Pairs with submit_new_session (or any flow
-    that exercises modal controls) as the precondition.
+    Clicks the header "New Session" button and proves the modal's prompt
+    textarea is visible. Pairs with submit_new_session.
     """
     fb = FlowBuilder(
         name="bc__open_new_session_modal", adapter_id=adapter_id, folder="bc/lib"
     )
     fb.click(selector=SEL["new_session_btn"], delay=0.5)
-    fb.assert_dom(
-        SEL["modal_prompt_textarea"], predicates=[{"op": "visible"}], delay=10
-    )
+    fb.assert_dom(SEL["modal_prompt_textarea"], predicates=[{"op": "visible"}], delay=10)
     return fb
 
 
@@ -80,8 +88,8 @@ def submit_new_session(adapter_id, prompt=DEFAULT_NEW_SESSION_PROMPT):
     """Transition: new-session modal open -> fresh session view loaded.
 
     Types the initial prompt (run-time variable `prompt`), clicks Create, and
-    proves the session was created: modal closed, the new session is the
-    selected one in the list, and the in-session composer is present.
+    proves the session was created: modal closed, the new session is selected,
+    and the in-session composer is present.
     """
     fb = FlowBuilder(
         name="bc__submit_new_session", adapter_id=adapter_id, folder="bc/lib"
@@ -89,17 +97,8 @@ def submit_new_session(adapter_id, prompt=DEFAULT_NEW_SESSION_PROMPT):
     fb.click(selector=SEL["modal_prompt_textarea"], delay=0.3)
     fb.variable(var_id="prompt", name="Initial prompt", default_text=prompt)
     fb.click(selector=SEL["modal_create_btn"], delay=0.5)
-    # Flat delay-then-check: chat_container is a live region during the
-    # spawned turn, so a DOM-stable poll won't converge. Wait long enough
-    # for Create -> backend session create -> navigate -> modal close.
-    fb.assert_dom(
-        SEL["modal_prompt_textarea"],
-        predicates=[{"op": "not_exists"}],
-        delay=20,
-    )
-    fb.assert_dom(
-        SEL["session_selected"], predicates=[{"op": "exists"}], delay=5
-    )
+    fb.assert_dom(SEL["modal_prompt_textarea"], predicates=[{"op": "not_exists"}], delay=20)
+    fb.assert_dom(SEL["session_selected"], predicates=[{"op": "exists"}], delay=5)
     fb.assert_dom(SEL["input_textarea"], predicates=[{"op": "visible"}], delay=5)
     return fb
 
@@ -107,9 +106,8 @@ def submit_new_session(adapter_id, prompt=DEFAULT_NEW_SESSION_PROMPT):
 def create_new_session(adapter_id, base_url=APP_BASE, prompt=DEFAULT_NEW_SESSION_PROMPT):
     """Transition: anywhere -> fresh session view loaded.
 
-    Convenience composition of the two modal subflows plus open_app. This is
-    the canonical "start a brand new session" setup used by every flow that
-    needs a clean session to act on.
+    Canonical "start a brand new session" setup: open_app -> open modal ->
+    submit. Used by every flow that needs a clean session to act on.
     """
     fb = FlowBuilder(
         name="bc__create_new_session", adapter_id=adapter_id, folder="bc/lib"
@@ -120,44 +118,50 @@ def create_new_session(adapter_id, base_url=APP_BASE, prompt=DEFAULT_NEW_SESSION
     return fb
 
 
-def send_followup_message(adapter_id, prompt=DEFAULT_FOLLOWUP_PROMPT):
+def send_message(adapter_id, prompt=DEFAULT_FOLLOWUP_PROMPT):
     """Transition: idle session view -> user message sent.
 
-    Types a follow-up prompt into the in-session composer and sends it, then
-    proves the user's message rendered in the transcript. Does NOT wait for
-    the assistant turn to finish — pair with wait_assistant_turn_done.
+    Focuses the composer, types the prompt (run-time variable `followup`),
+    and sends with Enter (desktop viewport sends on Enter). Proves the user's
+    message rendered in the transcript. Does NOT wait for the assistant turn —
+    pair with wait_assistant_reply.
+
+    Note: Enter-to-send requires desktop viewport; the send button itself is
+    overlapped by the fixed Agent Board FAB and cannot be clicked reliably.
     """
-    fb = FlowBuilder(
-        name="bc__send_followup_message", adapter_id=adapter_id, folder="bc/lib"
-    )
+    fb = FlowBuilder(name="bc__send_message", adapter_id=adapter_id, folder="bc/lib")
     fb.click(selector=SEL["input_textarea"], delay=0.3)
     fb.variable(var_id="followup", name="Follow-up prompt", default_text=prompt)
-    fb.click(selector=SEL["send_btn"], delay=0.5)
+    fb.press_key("Enter", delay=0.5)
     fb.assert_dom(
-        SEL["user_message"], predicates=[{"op": "count_gte", "count": 1}], delay=15
+        SEL["user_message"], predicates=[{"op": "count_gte", "count": 1}], delay=10
     )
     return fb
 
 
-def wait_assistant_turn_done(adapter_id, timeout=120):
+def wait_assistant_reply(adapter_id, min_messages=1, timeout=180):
     """Transition: turn in flight -> turn finished (assistant replied, idle).
 
-    Waits for the transcript DOM to settle and proves at least one assistant
-    message rendered and no interrupt/stop control remains (turn complete).
+    Polls the transcript DOM until it settles (streaming stopped) via
+    wait_for_dom_stable, then confirms the turn is idle: no interrupt/stop
+    control and at least `min_messages` assistant bubbles rendered. Pass the
+    prior count+1 to assert "a NEW reply" after a follow-up.
     """
     fb = FlowBuilder(
-        name="bc__wait_assistant_turn_done", adapter_id=adapter_id, folder="bc/lib"
+        name="bc__wait_assistant_reply", adapter_id=adapter_id, folder="bc/lib"
     )
+    # wait_for_dom_stable is the FlowBuilder polling primitive (assert_dom is
+    # NOT a poll). chat_messages stops mutating once the streaming turn ends.
     fb.wait_for_dom_stable(
-        selector=SEL["chat_messages"], idle_ms=1500, timeout=timeout
+        selector=SEL["chat_messages"], idle_ms=2500, timeout=timeout
     )
+    # Confirm idle: interrupt-btn / stop-btn exist only while a turn runs.
+    fb.assert_dom(SEL["interrupt_btn"], predicates=[{"op": "not_exists"}], delay=2)
+    fb.assert_dom(SEL["stop_btn"], predicates=[{"op": "not_exists"}], delay=2)
     fb.assert_dom(
         SEL["assistant_message"],
-        predicates=[{"op": "count_gte", "count": 1}],
-        delay=15,
-    )
-    fb.assert_dom(
-        SEL["interrupt_btn"], predicates=[{"op": "not_exists"}], delay=10
+        predicates=[{"op": "count_gte", "count": min_messages}],
+        delay=5,
     )
     return fb
 
@@ -165,8 +169,8 @@ def wait_assistant_turn_done(adapter_id, timeout=120):
 def select_session_by_index(adapter_id, index=0):
     """Transition: session view A -> session view B (by list position).
 
-    Clicks the Nth session item in the sidebar. Used by flows that operate
-    on an existing session rather than creating a new one.
+    Clicks the Nth session item in the sidebar. Used by flows that operate on
+    an existing session rather than creating a new one.
     """
     fb = FlowBuilder(
         name="bc__select_session_by_index", adapter_id=adapter_id, folder="bc/lib"

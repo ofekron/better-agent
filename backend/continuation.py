@@ -59,6 +59,7 @@ def build_continuation_prompt(
     continuation_chain: Iterable[str],
     recall_results: Iterable[dict],
     has_recall_tool: bool,
+    reason: str = "context_exceeded",
 ) -> str:
     recall_text = format_recall_results(recall_results)
     provider_session_ids = [
@@ -79,9 +80,15 @@ def build_continuation_prompt(
     recall_text_block = ""
     if recall_text:
         recall_text_block = "\n\nPrevious transcript excerpts:\n" + recall_text
+
+    context_message = "Context window was exceeded"
+    if reason == "selector_changed":
+        context_message = "Session provider or model changed"
+
     return render_prompt(
         "continuation/context_exceeded.md",
         {
+            "context_message": context_message,
             "recall_hint": recall_hint,
             "app_session_id": app_session_id,
             "provider_session_ids_block": provider_session_ids_block,

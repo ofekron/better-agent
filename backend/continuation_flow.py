@@ -23,6 +23,7 @@ def start_continuation_for(
     prompt: str,
     provider_kind: str,
     old_provider_sid: str | None,
+    reason: str = "context_exceeded",
 ) -> ContinuationStart:
     session = session_manager.get(app_session_id) or {}
     chain = list(session.get("continuation_chain") or [])
@@ -47,6 +48,7 @@ def start_continuation_for(
         continuation_chain=chain,
         recall_results=recall_results,
         has_recall_tool=provider_kind in _RECALL_TOOL_PROVIDER_KINDS,
+        reason=reason,
     )
     return ContinuationStart(
         prompt=next_prompt,

@@ -2309,6 +2309,10 @@ def create_session(
             orchestration_mode
         ),
         "provider_id": provider_id,
+        "last_active_provider_id": None,
+        "last_active_model": None,
+        "last_active_supervisor_provider_id": None,
+        "last_active_supervisor_model": None,
         "agent_session_id": None,
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
@@ -2840,6 +2844,10 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         # same auth — because the fork's claude jsonl branches off the
         # parent's, which lives under that provider.
         "provider_id": parent.get("provider_id"),
+        "last_active_provider_id": parent.get("last_active_provider_id"),
+        "last_active_model": parent.get("last_active_model"),
+        "last_active_supervisor_provider_id": parent.get("last_active_supervisor_provider_id"),
+        "last_active_supervisor_model": parent.get("last_active_supervisor_model"),
         # Forks inherit the parent's node: the fork's claude jsonl
         # branches off the parent's, which lives on that node's disk.
         "node_id": parent.get("node_id") or "primary",
@@ -2923,6 +2931,10 @@ def create_sub_session(
         "updated_at": now,
         "orchestration_mode": "native",
         "provider_id": resolved_provider_id,
+        "last_active_provider_id": None,
+        "last_active_model": None,
+        "last_active_supervisor_provider_id": None,
+        "last_active_supervisor_model": None,
         "node_id": node_id or parent.get("node_id") or "primary",
         "agent_session_id": None,
         "supervisor_agent_session_id": None,

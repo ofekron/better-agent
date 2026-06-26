@@ -96,6 +96,18 @@ async def get_frontend_asset(extension_id: str, asset_path: str):
 
 
 @router.api_route(
+    "/{extension_id}/backend",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+async def dispatch_backend_extension_base(extension_id: str, request: Request):
+    # The bare base (no trailing slash) must dispatch directly to the
+    # extension's root handler. Relying on Starlette's redirect-to-slash is
+    # unsafe: the frontend StaticFiles mount at "/" preempts the redirect and
+    # turns the path into a 404 "Not Found". Delegate with an empty subpath.
+    return await dispatch_backend_extension(extension_id, "", request)
+
+
+@router.api_route(
     "/{extension_id}/backend/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
