@@ -1,6 +1,7 @@
 {
   "app.title": "Better Agent",
   "app.settingsButtonTitle": "Settings",
+  "app.moreActions": "More actions",
   "app.refreshButtonTitle": "Rebuild frontend + restart backend",
   "app.refreshModalTitle": "Refresh Better Agent",
   "app.refreshNowTitle": "Refresh now",

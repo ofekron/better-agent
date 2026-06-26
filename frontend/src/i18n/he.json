@@ -1,6 +1,7 @@
 {
   "app.title": "Better Agent",
   "app.settingsButtonTitle": "הגדרות",
+  "app.moreActions": "פעולות נוספות",
   "app.refreshButtonTitle": "בנייה מחדש של הפרונט + הפעלה מחדש של הבקאנד",
   "app.refreshModalTitle": "רענון Better Agent",
   "app.refreshNowTitle": "רענן עכשיו",

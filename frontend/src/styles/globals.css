@@ -6981,6 +6981,41 @@ button.run-badge-clickable:focus-visible {
   background: var(--bg-hover);
 }
 
+/* Mobile header overflow (kebab) menu — collapses machines/analytics/
+   refresh/extension icons so only settings + the trigger stay in the row. */
+.header-overflow-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.header-overflow-trigger[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.header-overflow-menu {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 100%;
+  margin-top: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 100;
+  min-width: 44px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.header-overflow-menu .setup-btn {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 6px 8px;
+}
+
 .project-updates-btn {
   position: relative;
 }
