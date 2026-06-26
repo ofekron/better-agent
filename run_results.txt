@@ -1,7 +1,0 @@
-flow	de7b343389350ef16021
-run	6ca51bd4-804a-48c0-9c33-f61b617f0c8d
-status	FAILED
-completed	True
-duration	180.0527069568634
-steps	1	unknown=1
-step	1	UNKNOWN	Flow
