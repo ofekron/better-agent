@@ -290,15 +290,29 @@ const TEMPLATES: Template[] = [
   },
   {
     id: "zai",
-    label: "Z.AI",
-    blurb: "Z.AI's Anthropic-compatible API. Needs an API key.",
+    label: "Z.AI (Claude)",
+    blurb: "Z.AI's Anthropic-compatible API via the `claude` CLI. Needs an API key.",
     defaults: {
-      name: "Z.AI",
+      name: "Z.AI (Claude)",
       kind: "claude",
       mode: "api_key",
       base_url: "https://api.z.ai/api/anthropic",
       config_dir: "$HOME/.claude-zai",
       default_model: "glm-4.6",
+      default_reasoning_effort: "medium",
+    },
+  },
+  {
+    id: "zai-openai",
+    label: "Z.AI (OpenAI)",
+    blurb: "Z.AI's native OpenAI endpoint via the `codex-zai` launcher (codex -p zai-openai). This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Install the launcher + profile first (docs), then add it here.",
+    defaults: {
+      name: "Z.AI (OpenAI)",
+      kind: "zai-openai",
+      mode: "api_key",
+      base_url: "",
+      config_dir: "$HOME/.codex",
+      default_model: "glm-5.2",
       default_reasoning_effort: "medium",
     },
   },
@@ -2101,6 +2115,7 @@ function WizardTemplates({
     fugu: { labelKey: "setup.templateFuguLabel", blurbKey: "setup.templateFuguBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
+    "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },
     custom: { labelKey: "setup.templateCustomLabel", blurbKey: "setup.templateCustomBlurb" },
   };
   return (
