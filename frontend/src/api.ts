@@ -14,6 +14,7 @@
 
 import { Capacitor } from "@capacitor/core";
 import { withTokenQuery } from "./bearerAuth";
+import { extId } from "./extensionIds";
 import type {
   Schedule,
   SessionFolder,
@@ -135,7 +136,7 @@ export async function fetchSessionSchedules(
   sessionId: string,
 ): Promise<{ schedules: Schedule[] }> {
   const res = await fetch(
-    `${API}/api/extensions/ofek-dev.scheduler/backend/sessions/${encodeURIComponent(sessionId)}/schedules`,
+    `${API}/api/extensions/${extId("scheduler")}/backend/sessions/${encodeURIComponent(sessionId)}/schedules`,
     { credentials: "include" },
   );
   return _json(res);
@@ -153,7 +154,7 @@ export async function createSessionSchedule(
   },
 ): Promise<{ schedule: Schedule }> {
   const res = await fetch(
-    `${API}/api/extensions/ofek-dev.scheduler/backend/sessions/${encodeURIComponent(sessionId)}/schedules`,
+    `${API}/api/extensions/${extId("scheduler")}/backend/sessions/${encodeURIComponent(sessionId)}/schedules`,
     {
       method: "POST",
       credentials: "include",
@@ -171,7 +172,7 @@ export async function cancelSchedule(
 ): Promise<void> {
   const params = new URLSearchParams({ app_session_id: sessionId });
   const res = await fetch(
-    `${API}/api/extensions/ofek-dev.scheduler/backend/schedules/${encodeURIComponent(scheduleId)}?${params.toString()}`,
+    `${API}/api/extensions/${extId("scheduler")}/backend/schedules/${encodeURIComponent(scheduleId)}?${params.toString()}`,
     { method: "DELETE", credentials: "include" },
   );
   if (!res.ok) {

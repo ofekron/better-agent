@@ -217,7 +217,7 @@ describe("ToolCall — apply_patch rendering", () => {
       "+".padEnd(260, "y"),
       "*** Update File: /workspace/better-agent/.claude/skills/project-structure/sections/requirements/integration-contracts.md",
       "@@",
-      "+`get-requirements` is supplied by the private `ofek-dev.requirements` runtime MCP, which replaces the reserved server name.",
+      "+`get-requirements` is supplied by the private requirements runtime MCP, which replaces the reserved server name.",
       "*** End Patch",
     ].join("\n");
     const h = await mount(<ToolCall tool="apply_patch" args={longPatch} />);

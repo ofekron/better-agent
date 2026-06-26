@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import { trackPromise } from "../progress/store";
 
-const TEAM_ORCHESTRATION_API = `${API}/api/extensions/ofek-dev.team-orchestration/backend`;
+const teamOrchestrationApi = () => extBackendBase("team");
 
 /** Dropdown for the global `delegate_task_policy`. Controls how the
  * `delegate_task` tool routes a delegated task:
@@ -18,7 +18,7 @@ export function DelegateTaskPolicySetting() {
 
   useEffect(() => {
     trackPromise("delegateTaskPolicy:load", () =>
-      fetch(`${TEAM_ORCHESTRATION_API}/settings/delegate-task-policy`),
+      fetch(`${teamOrchestrationApi()}/settings/delegate-task-policy`),
     )
       .promise
       .then((r: Response) => r.json())
@@ -33,7 +33,7 @@ export function DelegateTaskPolicySetting() {
     try {
       await trackPromise(
         "delegateTaskPolicy:save",
-        () => fetch(`${TEAM_ORCHESTRATION_API}/settings/delegate-task-policy`, {
+        () => fetch(`${teamOrchestrationApi()}/settings/delegate-task-policy`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ policy: next }),

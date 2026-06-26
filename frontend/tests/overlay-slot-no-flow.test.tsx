@@ -22,13 +22,13 @@ function ruleBody(selector: string): string {
 }
 
 const OVERLAY_MODULE: ExtensionFrontendModule = {
-  extension_id: "ofek-dev.machine-nodes",
-  extension_name: "Machine nodes",
+  extension_id: "test.overlay-fixture",
+  extension_name: "Overlay fixture",
   slot: "global-approval-overlay",
   id: "node-approvals",
   label: "Node approvals",
   kind: "module",
-  module_url: "/api/extensions/ofek-dev.machine-nodes/frontend/ui/x.entry.js",
+  module_url: "/api/extensions/test.overlay-fixture/frontend/ui/x.entry.js",
 };
 
 afterEach(() => cleanup());

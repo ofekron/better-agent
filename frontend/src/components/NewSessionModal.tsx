@@ -22,6 +22,7 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
+import { extId } from "../extensionIds";
 import { ProgressButton } from "../progress/ProgressButton";
 import Icon from "./Icon";
 import { SessionFolderPopover } from "./SessionFolderPopover";
@@ -466,14 +467,14 @@ export function NewSessionModal({
           ? [
               {
                 id: "browser_harness_enabled",
-                extensionId: "ofek-dev.browser-harness",
+                extensionId: extId("browserHarness"),
                 label: t("orchestration.browserHarness"),
                 defaultValue: true,
                 applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessEnabled: value }),
                 children: [
                   {
                     id: "browser_harness_headless",
-                    extensionId: "ofek-dev.browser-harness",
+                    extensionId: extId("browserHarness"),
                     label: t("orchestration.browserHarnessHeadless"),
                     defaultValue: true,
                     applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessHeadless: value }),

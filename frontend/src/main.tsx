@@ -8,6 +8,7 @@ import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
 import { installFrontendLogger } from './lib/frontendLogger'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
+import { loadBuiltinExtensionIds } from './extensionIds'
 import './i18n'
 import './styles/globals.css'
 import App from './App'
@@ -29,14 +30,19 @@ installFrontendLogger()
 cleanupRestoredModalSentinel()
 clearHardRefreshMarker()
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary>
-      <ScreenWakeLock />
-      <App />
-    </ErrorBoundary>
-  </StrictMode>,
-)
+// Private/commercial extension ids are fetched from the backend (never
+// hardcoded in this repo) and must be available before any runtime call
+// site that builds an extension API URL.
+loadBuiltinExtensionIds().finally(() => {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <ScreenWakeLock />
+        <App />
+      </ErrorBoundary>
+    </StrictMode>,
+  )
+})
 
 // The workbox service worker is intentionally NOT registered. On a
 // localhost/LAN deployment the app always talks to a backend that is

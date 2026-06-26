@@ -18,7 +18,7 @@ import { useVisualViewport } from "./hooks/useVisualViewport";
 import { useMachines } from "./hooks/useMachines";
 import { Chat } from "./components/Chat";
 import { ASK_SINGLETON_ID } from "./askSession";
-import { EDIT_SINGLETON_ID } from "./projectStructureEditSession";
+import { editSingletonId } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
 import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
@@ -126,6 +126,7 @@ import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
 import { API, WS_URL } from "./api";
+import { extBackendBase, extId } from "./extensionIds";
 import { eventBus, subscribeMany } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders } from "./utils/providerCache";
@@ -138,9 +139,9 @@ type RestartStatus = {
   refresh_result?: { request_id?: string } | null;
 };
 
-const REARRANGER_API = `${API}/api/extensions/ofek-dev.rearranger/backend`;
+const rearrangerApi = () => extBackendBase("rearranger");
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
-const SUPERVISOR_API = `${API}/api/extensions/ofek-dev.supervisor/backend`;
+const supervisorApi = () => extBackendBase("supervisor");
 const PROVIDER_CONFIG_SYNC_PATH = "/api/extensions/ofek-dev.provider-config-sync/backend";
 const PROVIDER_CONFIG_SYNC_ROUTES: ProviderConfigSyncFetchRoutes = {
   projects: "/api/projects",
@@ -520,22 +521,22 @@ interface AppMainProps {
   suppressDonationWelcome: boolean;
 }
 
-const BUILTIN_EXTENSION_IDS = {
-  ask: "ofek-dev.ask",
-  team: "ofek-dev.team-orchestration",
-  supervisor: "ofek-dev.supervisor",
-  projectStructure: "ofek-dev.project-structure",
-  machineNodes: "ofek-dev.machine-nodes",
-  credentialBroker: "ofek-dev.credential-broker",
-  providerConfigSync: "ofek-dev.provider-config-sync",
-  canvas: "ofek-dev.canvas",
-  rearranger: "ofek-dev.rearranger",
-  promptEngineer: "ofek-dev.prompt-engineer",
-  browserHarness: "ofek-dev.browser-harness",
-  testape: "ofek.testape",
-} as const;
+const BUILTIN_FLAG_KEYS = [
+  "ask",
+  "team",
+  "supervisor",
+  "projectStructure",
+  "machineNodes",
+  "credentialBroker",
+  "providerConfigSync",
+  "canvas",
+  "rearranger",
+  "promptEngineer",
+  "browserHarness",
+  "testape",
+] as const;
 
-type BuiltinExtensionFlags = Record<keyof typeof BUILTIN_EXTENSION_IDS, boolean>;
+type BuiltinExtensionFlags = Record<(typeof BUILTIN_FLAG_KEYS)[number], boolean>;
 
 const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   ask: true,
@@ -563,8 +564,8 @@ function useBuiltinExtensionFlags(authStatus: "loading" | "authed"): BuiltinExte
       const payload = await res.json();
       const records = Array.isArray(payload.extensions) ? payload.extensions : [];
       const next = { ...DEFAULT_BUILTIN_EXTENSION_FLAGS };
-      for (const [key, id] of Object.entries(BUILTIN_EXTENSION_IDS) as Array<[keyof BuiltinExtensionFlags, string]>) {
-        const record = records.find((item: any) => item?.manifest?.id === id);
+      for (const key of BUILTIN_FLAG_KEYS) {
+        const record = records.find((item: any) => item?.manifest?.id === extId(key));
         next[key] = record ? record.enabled === true : false;
       }
       setFlags(next);
@@ -3028,7 +3029,7 @@ function AppMain({
       if (builtinExtensions.projectStructure && data.projects?.length) {
         const cwds = data.projects.map((p: Project) => p.path);
         try {
-          const countsRes = await fetch(`${API}/api/extensions/ofek-dev.project-structure/backend/project-updates/counts-batch`, {
+          const countsRes = await fetch(`${extBackendBase("projectStructure")}/project-updates/counts-batch`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ cwds }),
@@ -3187,7 +3188,7 @@ function AppMain({
     if (!currentSession || !selectedProjectPath) return;
     if (
       currentSession.id === ASK_SINGLETON_ID ||
-      currentSession.id === EDIT_SINGLETON_ID
+      currentSession.id === editSingletonId()
     ) {
       return;
     }
@@ -3237,7 +3238,7 @@ function AppMain({
     // session-view auto-detects the id and mounts Ask extension slots.
     const exists =
       route.sessionId === ASK_SINGLETON_ID ||
-      route.sessionId === EDIT_SINGLETON_ID ||
+      route.sessionId === editSingletonId() ||
       sessions.some((s) => s.id === route.sessionId) ||
       openSessionRecords[route.sessionId];
     if (!exists) {
@@ -3312,7 +3313,7 @@ function AppMain({
     lastNavigatedSidRef.current = currentSession.id;
     if (
       currentSession.id === ASK_SINGLETON_ID ||
-      currentSession.id === EDIT_SINGLETON_ID
+      currentSession.id === editSingletonId()
     ) {
       return;
     }
@@ -4359,7 +4360,7 @@ function AppMain({
       try {
         const r = await progressTrackPromise(
           `session:resumeEng:${parentSessionId}`,
-          () => fetch(`${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${parentSessionId}/prompt-engineer`),
+          () => fetch(`${extBackendBase("promptEngineer")}/sessions/${parentSessionId}/prompt-engineer`),
         ).promise;
         if (!r.ok) {
           // Stale badge (eng was cleaned up by a sibling tab). Refresh
@@ -4685,7 +4686,7 @@ function AppMain({
   const handleProjectStructureEdit = useCallback(async () => {
     try {
       const projectCwd = selectedProjectPath || cwd;
-      const res = await fetch(`${API}/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure`, {
+      const res = await fetch(`${extBackendBase("projectStructure")}/project-structure-edit/ensure`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectCwd }),
@@ -4696,7 +4697,7 @@ function AppMain({
         window.alert(message);
         return;
       }
-      const sessionId = data.session_id || EDIT_SINGLETON_ID;
+      const sessionId = data.session_id || editSingletonId();
       navigate(sessionPath(sessionId));
     } catch (e) {
       console.warn("project-structure-edit/ensure failed", e);
@@ -5846,7 +5847,7 @@ function AppMain({
                   ? (enabled) => {
                       if (!currentSession) return;
                       updateRearranger(currentSession.id, { enabled });
-                      void fetch(`${REARRANGER_API}/toggle`, {
+                      void fetch(`${rearrangerApi()}/toggle`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
@@ -5868,7 +5869,7 @@ function AppMain({
                         applySessionMetadata(currentSession.id, { supervisor_enabled: false });
                         void progressTrackedFetch(
                           `session:supervisorToggle:${currentSession.id}`,
-                          `${SUPERVISOR_API}/sessions/${currentSession.id}/supervisor-toggle`,
+                          `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
                           {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
@@ -5895,7 +5896,7 @@ function AppMain({
                       try {
                         const res = await progressTrackedFetch(
                           `session:separateSupervisor:${currentSession.id}`,
-                          `${SUPERVISOR_API}/sessions/${currentSession.id}/separate_supervisor`,
+                          `${supervisorApi()}/sessions/${currentSession.id}/separate_supervisor`,
                           { method: "POST" },
                         );
                         if (!res.ok) {
@@ -5988,7 +5989,7 @@ function AppMain({
                   ? () => {
                       void progressTrackedFetch(
                         `session:supervisorReview:${currentSession.id}`,
-                        `${SUPERVISOR_API}/sessions/${currentSession.id}/review-last-work`,
+                        `${supervisorApi()}/sessions/${currentSession.id}/review-last-work`,
                         { method: "POST" },
                       );
                     }
@@ -6110,7 +6111,7 @@ function AppMain({
             try {
               const r = await progressTrackPromise(
                 `promptEng:fetchResult:${engId}`,
-                () => fetch(`${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-eng-result`),
+                () => fetch(`${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-eng-result`),
               ).promise;
               if (!r.ok) {
                 throw new Error(
@@ -6175,7 +6176,7 @@ function AppMain({
             try {
               await progressTrackedFetch(
                 `promptEng:cancel:${engId}`,
-                `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-engineer`,
+                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
                 { method: "DELETE" },
               );
             } catch {
@@ -6190,7 +6191,7 @@ function AppMain({
             try {
               await progressTrackedFetch(
                 `promptEng:cancel:${engId}`,
-                `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${engId}/prompt-engineer`,
+                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
                 { method: "DELETE" },
               );
             } catch {
@@ -6620,7 +6621,7 @@ function AppMain({
                     `promptEng:start:${parentId}`,
                     async () => {
                       const r = await fetch(
-                        `${API}/api/extensions/ofek-dev.prompt-engineer/backend/sessions/${parentId}/prompt-engineer`,
+                        `${extBackendBase("promptEngineer")}/sessions/${parentId}/prompt-engineer`,
                         {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
@@ -6756,7 +6757,7 @@ function AppMain({
                 });
                 void progressTrackedFetch(
                   `session:supervisorToggle:${currentSession.id}`,
-                  `${SUPERVISOR_API}/sessions/${currentSession.id}/supervisor-toggle`,
+                  `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
                   {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },

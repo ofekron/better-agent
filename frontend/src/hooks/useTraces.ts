@@ -1,9 +1,9 @@
 import { useState, useCallback } from "react";
 import type { Trace, TraceIndexEntry } from "../types";
 
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 
-const TRACE_INSPECTOR_API = `${API}/api/extensions/ofek-dev.trace-inspector/backend/traces`;
+const traceInspectorApi = () => `${extBackendBase("traceInspector")}/traces`;
 
 export function useTraces() {
   const [traces, setTraces] = useState<TraceIndexEntry[]>([]);
@@ -15,7 +15,7 @@ export function useTraces() {
     try {
       const params = new URLSearchParams();
       if (sessionId) params.set("session_id", sessionId);
-      const resp = await fetch(`${TRACE_INSPECTOR_API}?${params}`, { credentials: "include" });
+      const resp = await fetch(`${traceInspectorApi()}?${params}`, { credentials: "include" });
       const data = await resp.json();
       setTraces(data.traces || []);
     } catch {
@@ -28,7 +28,7 @@ export function useTraces() {
   const fetchTrace = useCallback(async (traceId: string) => {
     setLoading(true);
     try {
-      const resp = await fetch(`${TRACE_INSPECTOR_API}/${encodeURIComponent(traceId)}`, { credentials: "include" });
+      const resp = await fetch(`${traceInspectorApi()}/${encodeURIComponent(traceId)}`, { credentials: "include" });
       const data = await resp.json();
       if (data.trace_id) {
         setCurrentTrace(data);
@@ -46,7 +46,7 @@ export function useTraces() {
     setLoading(true);
     try {
       const resp = await fetch(
-        `${TRACE_INSPECTOR_API}/search?q=${encodeURIComponent(query)}`,
+        `${traceInspectorApi()}/search?q=${encodeURIComponent(query)}`,
         { credentials: "include" },
       );
       const data = await resp.json();

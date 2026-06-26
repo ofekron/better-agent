@@ -144,6 +144,8 @@ BUILTIN_REARRANGER_EXTENSION_ID = _pid("rearranger")
 BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = _pid("prompt_engineer")
 BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
+BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
+BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
@@ -195,6 +197,35 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["runtime_required_paths"].items() if _pid(k)},
 }
+
+# Frontend-facing logical key -> resolved extension id. Private ids are absent
+# in a pure-public checkout (registry not loaded) and filtered out. The
+# frontend fetches this so it never hardcodes private ids.
+_FRONTEND_BUILTIN_KEYS = {
+    "ask": BUILTIN_ASK_EXTENSION_ID,
+    "team": BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+    "supervisor": BUILTIN_SUPERVISOR_EXTENSION_ID,
+    "projectStructure": BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+    "machineNodes": BUILTIN_MACHINE_NODES_EXTENSION_ID,
+    "credentialBroker": BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID,
+    "providerConfigSync": BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
+    "canvas": BUILTIN_CANVAS_EXTENSION_ID,
+    "rearranger": BUILTIN_REARRANGER_EXTENSION_ID,
+    "promptEngineer": BUILTIN_PROMPT_ENGINEER_EXTENSION_ID,
+    "browserHarness": BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
+    "agentBoard": BUILTIN_AGENT_BOARD_EXTENSION_ID,
+    "traceInspector": BUILTIN_TRACE_INSPECTOR_EXTENSION_ID,
+    "requirements": BUILTIN_REQUIREMENTS_EXTENSION_ID,
+    "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
+    "testape": BUILTIN_TESTAPE_EXTENSION_ID,
+    "scheduler": BUILTIN_SCHEDULER_EXTENSION_ID,
+}
+
+
+def builtin_extension_id_map() -> dict[str, str]:
+    """Logical key -> resolved extension id for known builtins, with private
+    ids dropped when the private registry isn't loaded (pure-public)."""
+    return {k: v for k, v in _FRONTEND_BUILTIN_KEYS.items() if v}
 
 
 class ExtensionError(ValueError):
