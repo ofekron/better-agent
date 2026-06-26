@@ -5425,6 +5425,11 @@ async def update_note(session_id: str, note_id: str, body: dict):
 
 # ── Right panel ────────────────────────────────────────────────────
 
+# Single source for tab validation across the public PATCH and the
+# internal POST endpoints. Add new tab ids here, not at each handler.
+_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen"}
+
+
 @app.patch("/api/sessions/{session_id}/right-panel")
 async def patch_right_panel(session_id: str, body: dict):
     """Update right-panel UI state (open/closed + active tab).
@@ -5441,8 +5446,7 @@ async def patch_right_panel(session_id: str, body: dict):
             status_code=400,
             detail="At least one of 'open' or 'tab' must be present",
         )
-    valid_tabs = {"files", "notes", "canvas", "comments", "todos"}
-    if tab_val is not None and tab_val not in valid_tabs:
+    if tab_val is not None and tab_val not in _VALID_RIGHT_PANEL_TABS:
         raise HTTPException(
             status_code=400, detail=f"Invalid tab: {tab_val!r}",
         )
@@ -5452,6 +5456,54 @@ async def patch_right_panel(session_id: str, body: dict):
         open=bool(open_val) if open_val is not None else None,
         tab=tab_val,
         client_id=body.get("client_id"),
+    )
+    if not sess:
+        raise HTTPException(
+            status_code=404, detail=t("error.session_not_found_retry"),
+        )
+    return {
+        "right_panel_open": sess.get("right_panel_open"),
+        "right_panel_active_tab": sess.get("right_panel_active_tab"),
+    }
+
+
+@app.post("/api/internal/sessions/{session_id}/right-panel")
+async def internal_set_right_panel(
+    session_id: str,
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Internal-token-authed twin of PATCH /api/sessions/{id}/right-panel.
+
+    Lets extensions (via better_agent_sdk.Client.set_right_panel) open
+    the right panel and switch its active tab without holding a user
+    cookie. Same validation rules and same broadcast as the public
+    endpoint. The ``client_id`` echoed on the broadcast is pinned to the
+    calling extension id — extensions cannot suppress another tab's
+    echo by spoofing client_id."""
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    if not extension_id or not extension_store.is_extension_active(extension_id):
+        raise HTTPException(status_code=403, detail="extension is not active")
+    await _require_session_async(session_id)
+    open_val = body.get("open")
+    tab_val = body.get("tab")
+    if open_val is None and tab_val is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'open' or 'tab' must be present",
+        )
+    if tab_val is not None and tab_val not in _VALID_RIGHT_PANEL_TABS:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid tab: {tab_val!r}",
+        )
+    sess = await asyncio.to_thread(
+        session_manager.set_right_panel,
+        session_id,
+        open=bool(open_val) if open_val is not None else None,
+        tab=tab_val,
+        client_id=f"ext:{extension_id}",
     )
     if not sess:
         raise HTTPException(
