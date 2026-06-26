@@ -152,9 +152,11 @@ def _resolve_gemini_cli() -> Optional[str]:
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
+    from paths import atomic_replace
+
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
 
 
 def _new_uuid() -> str:

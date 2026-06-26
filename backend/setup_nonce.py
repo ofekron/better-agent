@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 
 _TTL_SECONDS = 10 * 60
@@ -36,7 +36,7 @@ def mint() -> str:
         except OSError:
             pass
         raise
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
     os.chmod(path, _FILE_MODE)
     return nonce
 

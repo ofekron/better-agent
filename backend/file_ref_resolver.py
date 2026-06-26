@@ -434,10 +434,12 @@ def _atomic_write_tmp(path: Path, text: str) -> None:
     is unlinked in `finally` so a crash mid-write doesn't leave debris.
     INVARIANT: same recipe used by both migration helpers in this
     module — they must not diverge in atomicity guarantees."""
+    from paths import atomic_replace
+
     tmp = path.with_suffix(path.suffix + ".bcfile.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_replace(tmp, path)
     finally:
         if tmp.exists():
             try:

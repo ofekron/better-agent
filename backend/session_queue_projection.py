@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 _lock = threading.Lock()
 _loaded = False
@@ -61,7 +61,7 @@ def _write_record_locked(record: dict[str, Any]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             json.dump(record, fh)
-        os.replace(tmp_path, path)
+        atomic_replace(tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)

@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
 def atomic_write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
 
 
 def pid_alive(pid: Optional[int]) -> bool:

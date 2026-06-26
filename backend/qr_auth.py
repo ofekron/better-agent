@@ -33,7 +33,7 @@ from threading import Lock
 from typing import Any
 
 import auth
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 GRANT_TTL = 5 * 60          # seconds — QR is short-lived on purpose
 # Sliding window: each refresh pushes the expiry out again, so a phone
@@ -93,7 +93,7 @@ def _write(state: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
     os.chmod(path, _FILE_MODE)
 
 

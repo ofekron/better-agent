@@ -24,7 +24,7 @@ import os
 from pathlib import Path
 
 from event_ingester import event_ingester
-from paths import ba_home
+from paths import atomic_replace, ba_home
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def _atomic_copy(src: Path, dst: Path) -> None:
             if not chunk:
                 break
             fdst.write(chunk)
-    os.replace(tmp, dst)
+    atomic_replace(tmp, dst)
 
 
 class _FileSlot:
@@ -132,7 +132,7 @@ class RedigestBackup:
         # cold-loads between the two sees a consistent pair.
         for slot in self._slots:
             if slot.had_backup:
-                os.replace(slot.backup, slot.live)
+                atomic_replace(slot.backup, slot.live)
             else:
                 slot.live.unlink(missing_ok=True)
         event_ingester.close(self.root_id)

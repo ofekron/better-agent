@@ -117,7 +117,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from paths import encode_cwd
+from paths import atomic_replace, encode_cwd
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -527,7 +527,7 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     from observing a half-written file."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
 
 
 # ============================================================================

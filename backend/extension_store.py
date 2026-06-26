@@ -24,7 +24,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from env_compat import dual_env_many, get_env
 from json_store import read_json, write_json
-from paths import ba_home
+from paths import atomic_replace, ba_home
 import password_manager
 import extension_applied_config
 import extension_instructions
@@ -279,7 +279,7 @@ def _write_store_unlocked(data: dict[str, Any]) -> None:
     ) as fh:
         json.dump(data, fh, indent=2)
         tmp_name = fh.name
-    os.replace(tmp_name, path)
+    atomic_replace(tmp_name, path)
 
 
 def _merge_store_for_save(

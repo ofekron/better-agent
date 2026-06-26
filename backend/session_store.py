@@ -53,7 +53,7 @@ from reasoning_effort import normalize_reasoning_effort
 # session_manager → session_store → orchs.manager.* → session_manager
 # cycle.
 
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 _logger = logging.getLogger(__name__)
 
@@ -347,7 +347,7 @@ def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(drafts, f)
-        os.replace(tmp_path, path)
+        atomic_replace(tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -442,7 +442,7 @@ def _write_summary_file(root_id: str, summary: dict) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(summary, f)
-        os.replace(tmp_path, sp)
+        atomic_replace(tmp_path, sp)
         root_path = _sessions_dir() / f"{root_id}.json"
         target_mtime_ns = time.time_ns()
         try:
@@ -1069,7 +1069,7 @@ def _write_index_sidecar(
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle)
-        os.replace(tmp_path, path)
+        atomic_replace(tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -2606,7 +2606,7 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(root, f, separators=(",", ":"))
         with perf.timed("store.session.write_full.replace"):
-            os.replace(tmp_path, path)
+            atomic_replace(tmp_path, path)
         with perf.timed("store.session.write_full.signature"):
             file_signature = _session_file_signature(path)
     except Exception:

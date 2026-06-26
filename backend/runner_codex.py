@@ -1125,9 +1125,11 @@ def _resolve_codex_cli() -> Optional[str]:
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
+    from paths import atomic_replace
+
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
 
 
 def _materialize_image_attachments(run_dir: Path, images: list) -> list[Path]:

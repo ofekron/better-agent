@@ -23,6 +23,7 @@ scope.
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 try:  # POSIX only; absent on Windows.
@@ -46,6 +47,51 @@ _DEFAULT_ALIAS_DIR = ".better-agent"
 # (not a Python flag) so spawned subprocesses inherit it.
 _TEST_MODE_ENV = "BETTER_AGENT_TEST_MODE"
 _USER_HOME: Path | None = None
+
+# Windows error codes that mean "the destination/temp is transiently locked",
+# not "this rename is invalid". ERROR_ACCESS_DENIED (5) and
+# ERROR_SHARING_VIOLATION (32) are raised by MoveFileEx when another process
+# (antivirus, the Search indexer, or a reader that opened the file without
+# FILE_SHARE_DELETE) holds a handle for a few milliseconds. They clear on
+# their own, so a retry is the correct response.
+_WIN_TRANSIENT_REPLACE_ERRNOS = frozenset({5, 32})
+
+
+def atomic_replace(src, dst, *, _retries: int = 10, _base_delay: float = 0.005) -> None:
+    """`os.replace(src, dst)` hardened against transient Windows lock errors.
+
+    Every persistence module here writes atomically by serializing to a temp
+    file and renaming it into place with `os.replace`. On POSIX that rename is
+    truly atomic and never fails for transient reasons, so this is a single
+    pass-through call with zero behavior change.
+
+    On Windows, `os.replace` maps to `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
+    which intermittently fails with `ERROR_ACCESS_DENIED` (WinError 5) or
+    `ERROR_SHARING_VIOLATION` (WinError 32) when antivirus, the Search
+    indexer, or a concurrent reader briefly holds the destination or temp
+    file open. The original write is fine — only the rename lost a race — so
+    we retry with exponential backoff (capped ~1.1s total) and re-raise the
+    last error only if the lock outlives the budget. Any non-transient error
+    is re-raised immediately. This brings Windows up to the reliability the
+    macOS path already has; it does not change what is written or where.
+    """
+    if os.name != "nt":
+        os.replace(src, dst)
+        return
+    delay = _base_delay
+    last_err: OSError | None = None
+    for _ in range(_retries):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as e:
+            if getattr(e, "winerror", None) not in _WIN_TRANSIENT_REPLACE_ERRNOS:
+                raise
+            last_err = e
+            time.sleep(delay)
+            delay = min(delay * 2, 0.2)
+    assert last_err is not None
+    raise last_err
 
 
 def user_home() -> Path:

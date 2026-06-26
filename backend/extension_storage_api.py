@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 
 import extension_store
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 router = APIRouter(prefix="/api/internal/extension-storage", tags=["extension-storage"])
 
@@ -129,7 +129,7 @@ async def storage_put(
                 handle.write(value)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, path)
+            atomic_replace(tmp, path)
             if path.is_symlink() or not path.is_file():
                 raise HTTPException(status_code=400, detail="key does not reference a file")
         finally:

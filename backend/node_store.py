@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from env_compat import get_env
-from paths import ba_home
+from paths import atomic_replace, ba_home
 from topology import NodeSpec, load_topology, local_node_id
 
 
@@ -238,7 +238,7 @@ def _save_offsets_atomic(node_id: str, offsets: dict[str, int]) -> None:
         json.dump(payload, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, p)
+    atomic_replace(tmp, p)
     # Sync the directory so the rename is durable on power loss.
     try:
         dir_fd = os.open(str(d), os.O_RDONLY)

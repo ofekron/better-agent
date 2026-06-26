@@ -20,7 +20,7 @@ import secrets
 import threading
 from pathlib import Path
 
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 _LOCK = threading.Lock()
 # Cache keyed by the registry file's fingerprint (path, mtime_ns, size) so a
@@ -67,7 +67,7 @@ def _persist_locked(data: dict[str, str]) -> None:
         os.chmod(tmp, 0o600)
     except OSError:
         pass
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
     try:
         os.chmod(path, 0o600)
     except OSError:

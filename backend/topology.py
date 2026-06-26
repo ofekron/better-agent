@@ -218,13 +218,15 @@ def remove_node(node_id: str) -> bool:
     del nodes[node_id]
     # Atomic write: write to temp file in same dir, then os.replace
     content = yaml.dump(raw, default_flow_style=False, sort_keys=False)
+    from paths import atomic_replace
+
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent, prefix=".topology-", suffix=".tmp"
     )
     try:
         os.write(fd, content.encode("utf-8"))
         os.close(fd)
-        os.replace(tmp_path, path)
+        atomic_replace(tmp_path, path)
     except BaseException:
         # Clean up temp file on any failure
         try:

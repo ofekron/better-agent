@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from event_bus import BusEvent
-from paths import ba_home
+from paths import atomic_replace, ba_home
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ def rotate_to_replayed() -> bool:
             os.fsync(dst.fileno())
         live.unlink()
     else:
-        os.replace(live, replayed)
+        atomic_replace(live, replayed)
     # fsync the parent dir so the rename is durable on power loss.
     try:
         d_fd = os.open(str(live.parent), os.O_RDONLY)
@@ -312,7 +312,7 @@ def truncate() -> None:
     with tmp.open("w", encoding="utf-8") as f:
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, live)
+    atomic_replace(tmp, live)
 
 
 def iter_replay_envelopes() -> Iterator[WalEnvelope]:
