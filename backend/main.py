@@ -3070,6 +3070,7 @@ async def get_sessions(
             provider_ids=_split_session_filter(provider_ids),
             model_ids=_split_session_filter(model_ids),
             modes=_split_session_filter(modes),
+            sources=_split_session_filter(sources),
             content_scores=content_scores,
             sort_by=effective_sort_by,
             status_sort=effective_status_sort,
