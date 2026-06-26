@@ -92,7 +92,11 @@ async def get_frontend_asset(extension_id: str, asset_path: str):
         path = extension_store.resolve_frontend_asset(extension_id, asset_path)
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return FileResponse(path)
+    # Extension asset URLs have no version hash, so a browser that cached an
+    # older module would keep using it after the extension is upgraded.
+    # no-cache forces revalidation every load; ETag/mtime still short-circuits
+    # to 304 when the file hasn't changed.
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 @router.api_route(
