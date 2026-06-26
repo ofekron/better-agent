@@ -45,6 +45,10 @@ DEFAULT_FONT_SIZE = 14
 MIN_FONT_SIZE = 11
 MAX_FONT_SIZE = 20
 DEFAULT_LANGUAGE = "en"
+SUPPORTED_LANGUAGES: tuple[str, ...] = (
+    "en", "he", "es", "fr", "de", "pt", "it", "ru",
+    "zh", "ja", "ko", "ar", "hi", "nl",
+)
 DEFAULT_FIRST_RUN_WIZARD_DONE = False
 DEFAULT_FOLDER_VIEW_ENABLED = True
 DEFAULT_NETWORK_BIND_ADDRESS: NetworkBindAddress = "127.0.0.1"
@@ -88,13 +92,13 @@ def set_send_mode(mode: SendMode) -> SendMode:
 def get_language() -> str:
     prefs = _load()
     lang = prefs.get("language", DEFAULT_LANGUAGE)
-    if lang not in ("en", "he"):
+    if lang not in SUPPORTED_LANGUAGES:
         return DEFAULT_LANGUAGE
     return lang
 
 
 def set_language(lang: str) -> str:
-    if lang not in ("en", "he"):
+    if lang not in SUPPORTED_LANGUAGES:
         raise ValueError(f"Invalid language: {lang!r}")
     prefs = _load()
     prefs["language"] = lang
