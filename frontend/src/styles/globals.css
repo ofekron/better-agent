@@ -956,6 +956,24 @@ body {
   border-color: var(--accent, #7b68ee);
 }
 
+/* Mobile drawer is narrow (~320px). The single-row toolbar crowds the
+   expanded search input to near-zero width, so the user can't see what
+   they type. Let the toolbar wrap and give the expanded search its own
+   full-width row; the collapsed icon stays compact inline. */
+@media (max-width: 1024px) {
+  .session-list-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .session-search.expanded {
+    flex: 1 1 100%;
+    order: -1;
+  }
+  .session-search.expanded .session-search-input-wrap {
+    flex: 1 1 auto;
+  }
+}
+
 .session-org-toggle {
   width: var(--session-toolbar-control-size);
   height: var(--session-toolbar-control-size);
