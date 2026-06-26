@@ -5,6 +5,7 @@ import Icon from "./Icon";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
 import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
 import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
+import { mergeIncomingImages } from "../utils/shareAttach";
 import { fileToAttachment } from "../utils/fileAttach";
 import { splitPreview, applyQueuedEdit } from "../utils/queuedPreview";
 import {
@@ -309,6 +310,22 @@ export function InputArea({
     setFiles([]);
     setIgnoreNextDraft(null);
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reconcile draft_images injected WHILE this session is already mounted
+  // (e.g. the OS share sheet attaching a screenshot to the open session).
+  // The restore effect above only runs on session switch, so without this
+  // an external inject would never surface. Additive only: appends prop
+  // entries not already present, so it neither clobbers in-progress local
+  // composition nor fights the send-clear path. Writes straight to local
+  // state (no onImagesChange) since the parent already owns these values.
+  const draftImagesKey = useMemo(
+    () => draftImages?.map((i) => i.base64).join("\n") ?? "",
+    [draftImages],
+  );
+  useEffect(() => {
+    if (!draftImages || draftImages.length === 0) return;
+    setImagesLocal((prev) => mergeIncomingImages(prev, draftImages));
+  }, [draftImagesKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const canSend = (localDraft.trim() || images.length > 0 || files.length > 0 || tagCount > 0) && !disabled;
   const promptMentionItems = useMemo(
