@@ -5,6 +5,18 @@ import { API } from "../api";
 const LANGUAGES = [
   { code: "en", labelKey: "language.en" },
   { code: "he", labelKey: "language.he" },
+  { code: "es", labelKey: "language.es" },
+  { code: "fr", labelKey: "language.fr" },
+  { code: "de", labelKey: "language.de" },
+  { code: "pt", labelKey: "language.pt" },
+  { code: "it", labelKey: "language.it" },
+  { code: "ru", labelKey: "language.ru" },
+  { code: "zh", labelKey: "language.zh" },
+  { code: "ja", labelKey: "language.ja" },
+  { code: "ko", labelKey: "language.ko" },
+  { code: "ar", labelKey: "language.ar" },
+  { code: "hi", labelKey: "language.hi" },
+  { code: "nl", labelKey: "language.nl" },
 ] as const;
 
 export function LanguageSelector() {
