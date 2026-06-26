@@ -15,14 +15,14 @@ under ``entrypoints`` in their ``better-agent-extension.json``::
         ),
     )
     page = Page(
-        label="Project structure",
+        label="My page",
         icon="clipboard",
         open=HookAction.ensure(
-            endpoint="/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+            endpoint="/api/extensions/<extension-id>/backend/<path>/ensure",
             path_template="/s/{session_id}",
             include_cwd=True,
         ),
-        badge=Badge(endpoint="/api/extensions/ofek-dev.project-structure/backend/project-updates/total"),
+        badge=Badge(endpoint="/api/extensions/<extension-id>/backend/<path>/total"),
     )
 
 The serialized dicts match core's manifest schema (validated by
