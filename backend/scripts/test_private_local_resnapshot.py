@@ -58,8 +58,12 @@ def _run(stale: bool, snap_impl) -> tuple[dict, list]:
     orig_paths = es._PRIVATE_EXTENSION_PATHS
     orig_snap = es._install_private_package_snapshot
     orig_required = es.REQUIRED_EXTENSION_IDS
+    orig_discover = es._discover_private_extensions
     es._PRIVATE_EXTENSION_PATHS = {PS: "extensions/project-structure"}
     es.REQUIRED_EXTENSION_IDS = set()
+    # Discovery is now a generic dir-scan; neutralize it so only the patched
+    # map's PS is processed (this test is about resnapshot, not discovery).
+    es._discover_private_extensions = lambda root: {}
 
     def tracked(eid, package_dir):
         calls.append(eid)
@@ -76,6 +80,7 @@ def _run(stale: bool, snap_impl) -> tuple[dict, list]:
         es._PRIVATE_EXTENSION_PATHS = orig_paths
         es._install_private_package_snapshot = orig_snap
         es.REQUIRED_EXTENSION_IDS = orig_required
+        es._discover_private_extensions = orig_discover
     return data, calls
 
 

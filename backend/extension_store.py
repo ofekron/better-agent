@@ -2082,6 +2082,15 @@ def _install_private_package_snapshot(extension_id: str, package_dir: Path) -> d
         shutil.rmtree(target, ignore_errors=True)
         raise
     now = _now()
+    repo_root = _local_private_extension_repo_root()
+    mapped_path = _PRIVATE_EXTENSION_PATHS.get(extension_id)
+    if mapped_path is None and repo_root is not None:
+        try:
+            mapped_path = str(package_dir.resolve().relative_to(repo_root))
+        except ValueError:
+            mapped_path = f"extensions/{package_dir.name}"
+    elif mapped_path is None:
+        mapped_path = f"extensions/{package_dir.name}"
     return {
         "manifest": manifest,
         "enabled": True,
@@ -2089,8 +2098,8 @@ def _install_private_package_snapshot(extension_id: str, package_dir: Path) -> d
         "updated_at": now,
         "source": {
             "type": "better_agent_local",
-            "repo_url": str(_local_private_extension_repo_root() or ""),
-            "extension_path": _PRIVATE_EXTENSION_PATHS[extension_id],
+            "repo_url": str(repo_root or ""),
+            "extension_path": mapped_path,
             "ref": "",
             "commit_sha": commit_sha,
             "install_path": str(target),
@@ -2199,14 +2208,48 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
     return changed
 
 
+def _discover_private_extensions(repo_root: Path | None) -> dict[str, str]:
+    """Generic directory scan: discover private extensions by manifest, not by
+    hardcoded id. Returns {extension_id: "extensions/<dir>"} for every
+    better-agent-extension.json under <repo_root>/extensions/*. New private
+    extensions are picked up here without a public-code entry — the public core
+    never has to know their ids ahead of time.
+    """
+    discovered: dict[str, str] = {}
+    if repo_root is None:
+        return discovered
+    extensions_root = repo_root / "extensions"
+    if not extensions_root.is_dir():
+        return discovered
+    for entry in sorted(extensions_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest_path = entry / "better-agent-extension.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        ext_id = str(raw.get("id") or "").strip()
+        if ext_id:
+            discovered[ext_id] = f"extensions/{entry.name}"
+    return discovered
+
+
 def _ensure_private_extensions(data: dict[str, Any]) -> bool:
     changed = False
     repo_root = _local_private_extension_repo_root()
     deleted = set((data.get("deleted_extensions") or {}).keys())
-    for extension_id in _PRIVATE_EXTENSION_PATHS:
+    # Hardcoded map (preserves special-case entries like marketplace) augmented
+    # by a generic manifest scan, so new private extensions load without a
+    # public-code id entry.
+    paths = dict(_PRIVATE_EXTENSION_PATHS)
+    for ext_id, ext_path in _discover_private_extensions(repo_root).items():
+        paths.setdefault(ext_id, ext_path)
+    for extension_id, extension_path in paths.items():
         if extension_id in deleted and extension_id not in REQUIRED_EXTENSION_IDS:
             continue
-        extension_path = _PRIVATE_EXTENSION_PATHS[extension_id]
         record = data["extensions"].get(extension_id)
         package_dir = (repo_root / extension_path).resolve() if repo_root is not None else None
         if (
@@ -2337,10 +2380,20 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
             and _record_has_required_runtime_paths(record)
         ):
             continue
-        installed = _install_private_package_snapshot(extension_id, package_dir)
+        install_error = False
+        try:
+            installed = _install_private_package_snapshot(extension_id, package_dir)
+        except ExtensionError as exc:
+            # A broken discovered extension must not crash reconciliation — record
+            # a placeholder so the store stays usable (mirrors the public path).
+            install_error = True
+            installed = _placeholder_record(
+                extension_id, source_type="private_placeholder", error=str(exc)
+            )
+            installed["source"]["extension_path"] = extension_path
         existing = record or {}
         if extension_id not in REQUIRED_EXTENSION_IDS:
-            installed["enabled"] = bool(existing.get("enabled", True))
+            installed["enabled"] = False if install_error else bool(existing.get("enabled", True))
         installed["installed_at"] = existing.get("installed_at") or installed["installed_at"]
         installed["instructions_enabled"] = extension_instructions.normalize_state(existing)
         data["extensions"][extension_id] = installed
