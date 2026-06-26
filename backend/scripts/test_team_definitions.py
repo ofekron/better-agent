@@ -75,8 +75,8 @@ def _patch_sources(monkeypatch) -> None:
         "team_definition_sources",
         lambda: [
             {
-                "source_id": "extension:ofek.testape:testape-ui-expert",
-                "extension_id": "ofek.testape",
+                "source_id": f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
+                "extension_id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
                 "extension_name": "Testape",
                 "name": "testape-ui-expert",
                 "path": "/tmp/ui-expert.json",
@@ -90,7 +90,7 @@ def test_build_plan_selects_profile_workers(monkeypatch) -> None:
     _patch_sources(monkeypatch)
 
     plan = team_definitions.build_plan(
-        source_id="extension:ofek.testape:testape-ui-expert",
+        source_id=f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
         profile="web-ui",
         team_instance_id="team-1",
         variables={

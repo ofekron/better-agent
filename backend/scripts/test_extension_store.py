@@ -569,9 +569,9 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
     # managed-id package no longer exists) must register so its MCP injects.
     # Uses a synthetic non-managed id so the managed-id skip
     # (_managed_extension_package_exists) does not apply and rehydration is the
-    # only path that can create the record. ofek-dev.requirements can no longer
-    # exercise this: its managed package now lives in better-agent-private, so
-    # the managed-id skip correctly short-circuits rehydration for it.
+    # only path that can create the record. The requirements extension can no
+    # longer exercise this: its managed package now lives in better-agent-private,
+    # so the managed-id skip correctly short-circuits rehydration for it.
     ext_id = "ofek.rehydrate-fixture"
     install_root = extension_store._install_root()
     # Clean slate: the suite shares one temp home, so drop any fixture registry
@@ -704,7 +704,7 @@ def _make_team_definition_repo(root: Path) -> tuple[Path, str]:
     (package / "teams").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.testape",
+        "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
         "name": "Testape",
         "version": "1.0.0",
         "description": "Team definitions",
@@ -1152,7 +1152,7 @@ def test_manifest_rejects_missing_team_definition_file() -> None:
         package.mkdir(parents=True)
         manifest = {
             "kind": "better-agent-extension",
-            "id": "ofek.testape",
+            "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
             "name": "Testape",
             "version": "1.0.0",
             "surfaces": ["backend_feature"],
@@ -1199,7 +1199,7 @@ def test_installed_extension_exports_team_definition_sources() -> None:
             extension_path="extensions/testape",
         )
         sources = extension_store.team_definition_sources()
-        source = next(item for item in sources if item["source_id"] == "extension:ofek.testape:testape-ui-expert")
+        source = next(item for item in sources if item["source_id"] == f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert")
         if source["definition"]["manager"]["id"] != "coordinator":
             raise AssertionError(source)
         if source["extension_name"] != "Testape":
@@ -3260,11 +3260,11 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
                 "label": "Project structure",
                 "open": {
                     "type": "ensure",
-                    "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+                    "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
                     "path_template": "/s/{session_id}",
                 },
                 "badge": {
-                    "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total",
+                    "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total",
                 },
             },
         },

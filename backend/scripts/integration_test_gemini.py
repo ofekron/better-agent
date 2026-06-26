@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import extension_store  # noqa: E402
 import httpx
 import itsdangerous
 import uvicorn
@@ -274,7 +275,7 @@ async def main() -> int:
                 failures += 1
 
             r = await client.post(
-                f"/api/extensions/ofek-dev.prompt-engineer/backend/sessions/{sid}/prompt-engineer",
+                f"/api/extensions/{extension_store.BUILTIN_PROMPT_ENGINEER_EXTENSION_ID}/backend/sessions/{sid}/prompt-engineer",
                 json={"draft": "x", "mode": "fork"},
             )
             if r.status_code == 400:

@@ -46,7 +46,7 @@ def check(condition: bool, message: str) -> None:
 
 
 def test_registration() -> None:
-    check(AGENT_BOARD_ID == "ofek-dev.agent-board", "agent-board id constant")
+    check(AGENT_BOARD_ID == extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID, "agent-board id constant")
     check(
         extension_store._PRIVATE_EXTENSION_PATHS.get(AGENT_BOARD_ID) == "extensions/agent-board",
         "agent-board registered in private path table",

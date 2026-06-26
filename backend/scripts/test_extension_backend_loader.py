@@ -371,11 +371,11 @@ def main() -> int:
         response = client.get("/api/extensions/ofek.backend/backend/ping")
         check(response.status_code == 200, "re-enabled extension backend route dispatches without restart")
 
-        response = client.get("/api/extensions/ofek-dev.machine-nodes/backend/pending_nodes")
+        response = client.get(f"/api/extensions/{extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID}/backend/pending_nodes")
         check(response.status_code == 200, "core built-in backend compatibility route returns")
         check(response.json() == {"pending_nodes": []}, "machine-node pending fallback returns empty snapshot")
         extension_store.set_enabled(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID, False)
-        response = client.get("/api/extensions/ofek-dev.machine-nodes/backend/pending_nodes")
+        response = client.get(f"/api/extensions/{extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID}/backend/pending_nodes")
         check(response.status_code == 404, "disabled core built-in compatibility route fails closed")
 
         extension_backend_loader._clear_spec_cache()  # type: ignore[attr-defined]
