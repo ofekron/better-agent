@@ -151,6 +151,8 @@
   "setup.templateCodexBlurb": "מנוי OpenAI Codex — שימוש ב-Codex CLI עם חשבון ChatGPT שלכם.",
   "setup.templateAgyLabel": "Antigravity",
   "setup.templateAgyBlurb": "מנוי Google Antigravity דרך agy CLI.",
+  "setup.templateFuguLabel": "Sakana Fugu",
+  "setup.templateFuguBlurb": "מערכת רב-סוכנת Sakana Fugu דרך הלאנצ'ר `codex-fugu`. קודם התקן אותו (sakana.ai/fugu), ואז הוסף כאן.",
   "setup.templateCopilotLabel": "Copilot",
   "setup.templateCopilotBlurb": "מנוי GitHub Copilot דרך ה-`copilot` CLI, אימות באמצעות `gh auth login`.",
   "setup.templateOllamaLabel": "Ollama",

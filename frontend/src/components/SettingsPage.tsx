@@ -68,7 +68,7 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "ollama" | "zai" | "custom";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "ollama" | "zai" | "zai-openai" | "custom";
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
 type SettingsSection =
   | "providers"
@@ -158,6 +158,22 @@ function configDirCopyForKind(kind: string): {
       hintKey: "setup.configDirHintCodex",
     };
   }
+  if (kind === "fugu") {
+    // Fugu deploys its profile into the Codex CLI config dir (~/.codex).
+    return {
+      labelKey: "setup.configDirLabelCodex",
+      placeholderKey: "setup.configDirPlaceholderCodex",
+      hintKey: "setup.configDirHintCodex",
+    };
+  }
+  if (kind === "zai-openai") {
+    // Z.AI (OpenAI) runs through Codex with a `zai-openai` profile in ~/.codex.
+    return {
+      labelKey: "setup.configDirLabelCodex",
+      placeholderKey: "setup.configDirPlaceholderCodex",
+      hintKey: "setup.configDirHintCodex",
+    };
+  }
   if (kind === "gemini") {
     return {
       labelKey: "setup.configDirLabelGemini",
@@ -240,6 +256,20 @@ const TEMPLATES: Template[] = [
       base_url: "",
       config_dir: "",
       default_model: "gpt-5.2-codex",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "fugu",
+    label: "Sakana Fugu",
+    blurb: "Sakana Fugu multi-agent system via the `codex-fugu` launcher. Install it first (sakana.ai/fugu), then add it here.",
+    defaults: {
+      name: "Fugu",
+      kind: "fugu",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "$HOME/.codex",
+      default_model: "fugu",
       default_reasoning_effort: "",
     },
   },
@@ -2068,6 +2098,7 @@ function WizardTemplates({
     codex: { labelKey: "setup.templateCodexLabel", blurbKey: "setup.templateCodexBlurb" },
     copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
     agy: { labelKey: "setup.templateAgyLabel", blurbKey: "setup.templateAgyBlurb" },
+    fugu: { labelKey: "setup.templateFuguLabel", blurbKey: "setup.templateFuguBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
     custom: { labelKey: "setup.templateCustomLabel", blurbKey: "setup.templateCustomBlurb" },

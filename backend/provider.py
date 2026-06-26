@@ -734,6 +734,17 @@ def _resolve_class(kind: str) -> type[Provider]:
     if kind == "codex":
         from provider_codex import CodexProvider
         return CodexProvider
+    if kind == "fugu":
+        # Fugu is Codex with the `codex-fugu` launcher; reuses CodexProvider
+        # and runner_codex, only the binary and model catalog differ.
+        from provider_fugu import FuguProvider
+        return FuguProvider
+    if kind == "zai-openai":
+        # Z.AI over its OpenAI Chat Completions endpoint (wire_api=chat), where
+        # Z.AI's automatic context caching is reported. Codex with a different
+        # profile/binary/catalog; reuses CodexProvider and runner_codex.
+        from provider_zai_openai import ZaiOpenAIProvider
+        return ZaiOpenAIProvider
     if kind == "agy":
         from provider_agy import AgyProvider
         return AgyProvider

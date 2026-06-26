@@ -152,6 +152,8 @@
   "setup.templateCodexBlurb": "OpenAI Codex subscription — uses the Codex CLI with your ChatGPT account.",
   "setup.templateAgyLabel": "Antigravity",
   "setup.templateAgyBlurb": "Google Antigravity subscription — uses the agy CLI.",
+  "setup.templateFuguLabel": "Sakana Fugu",
+  "setup.templateFuguBlurb": "Sakana Fugu multi-agent system via the `codex-fugu` launcher. Install it first (sakana.ai/fugu), then add it here.",
   "setup.templateCopilotLabel": "Copilot",
   "setup.templateCopilotBlurb": "GitHub Copilot subscription — uses the `copilot` CLI, OAuth via `gh auth login`.",
   "setup.templateOllamaLabel": "Ollama",

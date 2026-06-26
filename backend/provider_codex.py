@@ -257,6 +257,13 @@ class CodexProvider(Provider):
     pushed onto the orchestrator queue."""
 
     KIND: ClassVar[str] = "codex"
+    # `--runner-kind` for the frozen entrypoint dispatch and `runner_argv`.
+    # Subclasses that reuse this runner but need their own frozen dispatch
+    # (Fugu) override this.
+    RUNNER_KIND: ClassVar[str] = "codex"
+    # CLI binary the codex runner resolves and spawns in app-server mode.
+    # Fugu overrides this to `codex-fugu` (which runs `codex -p fugu`).
+    CODEX_BINARY: ClassVar[str] = "codex"
 
     # Codex forks via the app-server `thread/fork`, which branches a
     # previous session's rollout into a new, isolated thread.
@@ -363,6 +370,7 @@ class CodexProvider(Provider):
             "session_id": session_id,
             "mode": runner_mode,
             "provider_kind": self.KIND,
+            "codex_binary": self.CODEX_BINARY,
             "app_session_id": app_session_id,
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
@@ -413,7 +421,7 @@ class CodexProvider(Provider):
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = subprocess.Popen(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="codex"),
+                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind=self.RUNNER_KIND),
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
