@@ -103,6 +103,9 @@ interface Props {
   supervisorEnabled?: boolean;
   /** Flip the supervisor toggle. */
   onToggleSupervisor?: (enabled: boolean) => void;
+  /** Reopen the supervisor prompt modal to edit the custom prompt
+   *  while supervisor is already enabled. */
+  onEditSupervisorPrompt?: () => void;
   /** Graduate the supervisor's claude session into a new native BC root
    *  and re-back the supervisor on this session as a fork of the
    *  graduated session. Only meaningful when `supervisorEnabled` and
@@ -161,6 +164,7 @@ export function InputArea({
   onImagesChange,
   supervisorEnabled,
   onToggleSupervisor,
+  onEditSupervisorPrompt,
   onSeparateSupervisor,
   onAddNote,
   onAddCapabilityToNextTurn,
@@ -862,6 +866,7 @@ export function InputArea({
                     onReviewLastWork,
                     onSendTargetChange,
                     onToggleSupervisor,
+                    onEditPrompt: onEditSupervisorPrompt,
                     onSeparateSupervisor,
                     closeMenu: () => setMenuOpen(false),
                   }}
