@@ -1207,10 +1207,12 @@ class TurnManager:
                 and new_sid != session.get(session_id_field)
                 and session_id_field != "supervisor_agent_session_id"
             ):
+                provider = self._c.provider_for_session(app_session_id)
                 persist_mode = session.get("orchestration_mode") or mode
                 with session_manager.batch(persist_id):
                     session_manager.set_agent_sid(
                         persist_id, persist_mode, new_sid,
+                        provider_id=provider.id, model=model,
                     )
                     if session.get("forked_from_agent_sid"):
                         session_manager.clear_forked_from(persist_id)
@@ -1607,6 +1609,51 @@ class TurnManager:
                 continuation_active_msg_id = _msg_id
             return continuation.chain_depth
 
+        def _should_preempt_selector_change_continuation() -> bool:
+            if not current_session_id:
+                return False
+            session_rec = session_manager.get(primary_session_id or app_session_id) or {}
+            if session_id_field == "supervisor_agent_session_id":
+                last_prov = session_rec.get("last_active_supervisor_provider_id")
+                last_mod = session_rec.get("last_active_supervisor_model")
+            else:
+                last_prov = session_rec.get("last_active_provider_id")
+                last_mod = session_rec.get("last_active_model")
+
+            current_prov_id = session_rec.get("provider_id")
+            current_model = session_rec.get("model")
+
+            if last_prov is not None and current_prov_id != last_prov:
+                return True
+            if last_mod is not None and current_model != last_mod:
+                return True
+            return False
+
+        def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
+            nonlocal current_session_id, discovered_session_id, prompt
+            nonlocal _session_rec_chain, continuation_active_msg_id
+            continuation = start_continuation_for(
+                session_manager=session_manager,
+                app_session_id=primary_session_id or app_session_id,
+                prompt=prompt,
+                provider_kind=provider_kind,
+                old_provider_sid=old_provider_sid,
+                reason="selector_changed",
+            )
+            _session_rec_chain = continuation.continuation_chain
+            current_session_id = None
+            discovered_session_id = None
+            prompt = continuation.prompt
+
+            _in_flight = self.current_assistant_msgs.get(app_session_id)
+            _msg_id = _in_flight.get("id") if _in_flight else None
+            if _msg_id:
+                session_manager.set_msg_continuation_active(
+                    app_session_id, _msg_id, continuation.chain_depth,
+                )
+                continuation_active_msg_id = _msg_id
+            return continuation.chain_depth
+
         while True:
             if cancel_event.is_set():
                 # Displaced before spawn (pending-cancel consumed by
@@ -1624,6 +1671,18 @@ class TurnManager:
                 chain_depth = _start_context_continuation(old_provider_sid)
                 logger.info(
                     "continuation: preempting native compaction for %s "
+                    "(provider=%s chain depth %d, old sid %s)",
+                    app_session_id[:8],
+                    provider_kind or "unknown",
+                    chain_depth,
+                    (old_provider_sid or "none")[:8],
+                )
+                continue
+            if _should_preempt_selector_change_continuation():
+                old_provider_sid = current_session_id
+                chain_depth = _start_selector_change_continuation(old_provider_sid)
+                logger.info(
+                    "continuation: preempting due to provider/model change for %s "
                     "(provider=%s chain depth %d, old sid %s)",
                     app_session_id[:8],
                     provider_kind or "unknown",
@@ -1863,6 +1922,8 @@ class TurnManager:
                                 session_manager.set_agent_sid(
                                     primary_session_id or app_session_id,
                                     discovery_mode, sid,
+                                    provider_id=provider.id,
+                                    model=model,
                                 )
 
                         if event.type in ("complete", "error"):
