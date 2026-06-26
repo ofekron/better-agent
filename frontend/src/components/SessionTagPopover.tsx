@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import type { SessionTag } from "../types";
+import { SearchInput } from "./SearchInput";
 
 /** Viewport-coord anchor of the trigger (from getBoundingClientRect). */
 export interface PopoverAnchor {
@@ -124,7 +125,7 @@ export function SessionTagPopover({
       style={pos}
     >
       <div className="session-tag-popover-header">{t("session.tagPopoverTitle")}</div>
-      <input
+      <SearchInput
         type="text"
         className="session-tag-popover-search"
         placeholder={t("session.tagSearch")}

@@ -5,6 +5,7 @@ import { trackedFetch, useOpProgress } from "../progress/store";
 import { PickerNode } from "./PickerNode";
 import Icon from "./Icon";
 import { SearchMethods } from "./SearchMethods";
+import { SearchInput } from "./SearchInput";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
@@ -245,7 +246,7 @@ export function DirPickerModal({
             </button>
           </form>
 
-          <input
+          <SearchInput
             type="text"
             className="dir-picker-search"
             value={search}
