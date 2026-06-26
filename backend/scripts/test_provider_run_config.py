@@ -216,10 +216,10 @@ def _install_scheduler_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('scheduler')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"]["ofek-dev.scheduler"] = {
+    data["extensions"][extension_store.BUILTIN_SCHEDULER_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": "ofek-dev.scheduler",
+            "id": extension_store.BUILTIN_SCHEDULER_EXTENSION_ID,
             "name": "Scheduler",
             "version": "1.0.0",
             "description": "Scheduler",
@@ -259,7 +259,7 @@ def _install_scheduler_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, "ofek-dev.scheduler")
+    _save_runtime_extension_record(data, extension_store.BUILTIN_SCHEDULER_EXTENSION_ID)
 
 
 def _install_core_mcp_gate_extensions() -> None:
@@ -933,7 +933,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     check("canvas" not in servers, "public canvas MCP is not injected")
     check("project-updates" not in servers, "project-updates is no longer injected as a built-in MCP")
     env = servers["scheduler"]["env"]
-    check(env["BETTER_CLAUDE_EXTENSION_ID"] == "ofek-dev.scheduler", "extension MCP env selects scheduler owner")
+    check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_SCHEDULER_EXTENSION_ID, "extension MCP env selects scheduler owner")
     check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "built-in MCP carries Better Agent session id")
     check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "built-in MCP carries provider id")
     check(
@@ -1272,7 +1272,7 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     check(req is not None, "native requirements MCP is injected per managed run")
     if req:
         env = req["env"]
-        check(env["BETTER_CLAUDE_EXTENSION_ID"] == "ofek-dev.requirements", "native requirements MCP env selects requirements extension")
+        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, "native requirements MCP env selects requirements extension")
         check(env["BETTER_CLAUDE_EXTENSION_MCP_SERVER"] == "better-agent-requirements", "native requirements MCP env selects extension server")
         check(env["BETTER_CLAUDE_BACKEND_URL"] == "http://127.0.0.1:8000", "native requirements MCP launcher env carries backend URL")
         check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "native requirements MCP launcher env carries app session id")

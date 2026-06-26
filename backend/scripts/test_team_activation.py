@@ -14,6 +14,7 @@ os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = _TMP_HOME
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import extension_store  # noqa: E402
 import main  # noqa: E402
 import team_activation_store  # noqa: E402
 import team_store  # noqa: E402
@@ -34,7 +35,7 @@ def test_team_activation_records_progress_and_team_members() -> None:
     activation = team_activation_store.create(
         root_session_id=root["id"],
         team_instance_id="team-web",
-        source_id="extension:ofek.testape:testape-ui-expert",
+        source_id=f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
         profile="web-ui",
     )
     calls = []
@@ -64,7 +65,7 @@ def test_team_activation_records_progress_and_team_members() -> None:
                 default_cwd="/repo",
                 bare_config=False,
                 plan={
-                    "source_id": "extension:ofek.testape:testape-ui-expert",
+                    "source_id": f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
                     "profile": "web-ui",
                     "team_instance_id": "team-web",
                     "manager": {"id": "coordinator", "cwd": "/repo"},

@@ -2,7 +2,7 @@
 TestApe-isolated run) must NOT auto-register its cwd as a user project,
 while a normal session MUST.
 
-Regression for the bug where the ofek-dev.requirements extension's
+Regression for the bug where the requirements extension's
 provisioned worker (cwd = the extension's own install dir) leaked a
 hash-named project into the user's project list.
 

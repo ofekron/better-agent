@@ -112,13 +112,13 @@ def _enable_builtin_ui_extensions() -> None:
                     "icon": "clipboard",
                     "open": {
                         "type": "ensure",
-                        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
                         "path_template": "/s/{session_id}",
                         "id_field": "session_id",
                         "include_cwd": True,
                     },
                     "badge": {
-                        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
                     },
                 },
             },
@@ -285,11 +285,11 @@ def test_ui_hooks_surfaces_project_structure_page() -> None:
     assert len(pages) == 1
     page = pages[0]
     assert page["open"]["type"] == "ensure"
-    assert page["open"]["endpoint"] == "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure"
+    assert page["open"]["endpoint"] == f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure"
     assert page["open"]["path_template"] == "/s/{session_id}"
     assert page["open"]["include_cwd"] is True
     assert page["badge"] == {
-        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
     }
     quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID]
     assert len(quick_buttons) == 1
@@ -437,11 +437,11 @@ def test_sdk_builders_round_trip_through_validation() -> None:
         label="Project structure",
         icon="clipboard",
         open=sdk.HookAction.ensure(
-            "/api/extensions/ofek-dev.project-structure/backend/project-structure-edit/ensure",
+            f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
             "/s/{session_id}",
             include_cwd=True,
         ),
-        badge=sdk.Badge("/api/extensions/ofek-dev.project-structure/backend/project-updates/total"),
+        badge=sdk.Badge(f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"),
     )
     manifest = _base_manifest()
     manifest["entrypoints"] = {"quick_button": quick_button.to_dict(), "page": page.to_dict()}
@@ -449,7 +449,7 @@ def test_sdk_builders_round_trip_through_validation() -> None:
     assert v["entrypoints"]["quick_button"]["label"] == "Ask"
     assert v["entrypoints"]["page"]["open"]["include_cwd"] is True
     assert v["entrypoints"]["page"]["badge"] == {
-        "endpoint": "/api/extensions/ofek-dev.project-structure/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
     }
 
 
