@@ -84,6 +84,24 @@ def _event_uuid_holder(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     return data if "uuid" in data else None
 
 
+def _db_main_text(agy_home: Path, conversation_id: Optional[str], parent_uuid: str) -> str:
+    """Best-effort main-thread answer from the conversation DB, used only when
+    agy's stdout is empty (rare). Reassembles via the same path as native
+    import; may include thoughts/markers since the DB blobs jumble them — stdout
+    is always preferred."""
+    if not conversation_id:
+        return ""
+    db_path = _conversation_db(agy_home, conversation_id)
+    if not db_path.is_file():
+        return ""
+    for event in _extract_parent_main_events(db_path, parent_uuid):
+        content = event.get("data", {}).get("message", {}).get("content", [{}])
+        block = content[0] if content else {}
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    return ""
+
+
 def _existing_event_uuids(events_path: Path) -> set[str]:
     """Uuids already written to session_events.jsonl. Seeds the streaming
     cursor so a resumed conversation (cumulative DB) does not re-emit prior
@@ -109,13 +127,37 @@ def _existing_event_uuids(events_path: Path) -> set[str]:
 
 
 def _stabilize_event_uuids(events: list[dict[str, Any]], conversation_id: Optional[str]) -> None:
-    """Assign uuid5(... conversation_id|index) so re-emission is idempotent."""
+    """Assign deterministic uuids so re-emission is idempotent.
+
+    agent_message / worker_event holders get uuid5(conversation|index). The
+    index is stable because _agy_worker_events rebuilds the same ordered list
+    each call. worker_start/worker_complete have no message uuid, so they get
+    a synthetic uuid5(conversation|type|delegation_id) — without it the
+    seen-based dedup could never collapse them and they'd re-emit every poll
+    and every resume."""
     if not conversation_id:
         return
     for i, event in enumerate(events):
         holder = _event_uuid_holder(event)
         if holder is not None:
             holder["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, f"{conversation_id}|{i}"))
+            continue
+        data = event.get("data")
+        if isinstance(data, dict) and "uuid" not in data:
+            key = f"{event.get('type')}|{data.get('delegation_id') or data.get('worker_session_id') or i}"
+            data["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, f"{conversation_id}|{key}"))
+
+
+def _is_main_text_agent_message(event: dict[str, Any]) -> bool:
+    """A top-level assistant text bubble (not a tool_use, tool_result, or
+    worker envelope). Used to keep DB prose OUT of the live stream — agy's
+    print-mode stdout is the authoritative main-thread answer."""
+    if event.get("type") != "agent_message":
+        return False
+    content = (event.get("data") or {}).get("message", {}).get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return isinstance(content[0], dict) and content[0].get("type") == "text"
 
 
 def _stream_new_events(
@@ -124,13 +166,19 @@ def _stream_new_events(
     agy_home: Path,
     conversation_id: Optional[str],
     parent_uuid: str,
-    emitted: dict[str, Any],
+    emitted: dict[str, set],
+    include_prose: bool = True,
 ) -> None:
-    """Append agy steps not yet written to session_events.jsonl.
+    """Append agy events not yet written to session_events.jsonl.
 
-    Emits each event exactly once by stable output index; safe to call
+    Idempotent by uuid (emitted['seen'], seeded from the existing file so a
+    resumed conversation's prior turns are not re-emitted). Safe to call
     repeatedly during the run and once more as the final post-exit flush.
-    """
+
+    include_prose=False skips main-thread assistant text — the live stream uses
+    agy's clean print-mode stdout as the answer (the DB blobs jumble thoughts,
+    echoed input context, and protobuf markers), so only tool calls and
+    subagent worker panels are streamed from the DB."""
     if not conversation_id:
         return
     events = _agy_worker_events(
@@ -139,11 +187,10 @@ def _stream_new_events(
         parent_uuid=parent_uuid,
     )
     _stabilize_event_uuids(events, conversation_id)
-    # Skip events already on disk: a resumed conversation re-walks prior turns
-    # from the cumulative DB, and stabilized uuids are deterministic per
-    # conversation|index, so cross-run dedup by uuid is safe and idempotent.
     new: list[dict[str, Any]] = []
-    for event in events[emitted["count"]:]:
+    for event in events:
+        if not include_prose and _is_main_text_agent_message(event):
+            continue
         holder = _event_uuid_holder(event)
         uid = holder.get("uuid") if holder else None
         if uid and uid in emitted["seen"]:
@@ -151,35 +198,11 @@ def _stream_new_events(
         if uid:
             emitted["seen"].add(uid)
         new.append(event)
-    emitted["count"] = len(events)
     if not new:
         return
     with events_path.open("a", encoding="utf-8") as fh:
         for event in new:
             fh.write(json.dumps(event) + "\n")
-
-
-def _events_file_has_main_events(events_path: Path) -> bool:
-    """True if session_events.jsonl already holds a top-level agent_message
-    (a parent text turn or tool_use). Worker_start/worker_event/worker_complete
-    envelopes do not count — they route into subagent panels, not the main
-    assistant bubble. Used to decide whether the stdout fallback is needed."""
-    if not events_path.is_file():
-        return False
-    try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if ev.get("type") == "agent_message":
-            return True
-    return False
 
 
 def _load_json_object(path: Path) -> dict:
@@ -1032,7 +1055,6 @@ def _agy_worker_events(
             "run_mode": "agy_subagent",
         }})
     return events
-    return events
 
 
 def _fail(run_dir: Path, error: str) -> None:
@@ -1120,13 +1142,16 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     cancel_path = run_dir / "cancel"
     cancelled = False
     events_path = run_dir / "session_events.jsonl"
-    # Mutable holder so the streaming watcher and the final flush share one
-    # emit cursor — every event is written to disk exactly once. `seen` is
-    # seeded from the existing events file so a resumed conversation does not
-    # re-emit prior turns from the cumulative DB.
+    # Shared dedup set for the streaming watcher and final flush — every event
+    # is written to disk exactly once. Seeded from the existing events file so a
+    # resumed conversation does not re-emit prior turns from the cumulative DB.
+    # `main_uuid` is a per-run uuid shared by the empty placeholder (written
+    # during the turn) and the final stdout answer (written at exit) so apply_event
+    # replaces the placeholder with the clean answer; per-run so each turn of a
+    # resumed conversation is its own message.
     emitted: dict[str, Any] = {
-        "count": 0,
         "seen": _existing_event_uuids(events_path),
+        "main_uuid": _new_uuid(),
     }
 
     async def _watch_cancel() -> None:
@@ -1157,17 +1182,30 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     async def _watch_stream() -> None:
         # Stream agy steps into session_events.jsonl as they land so the
         # provider's polling tailer can feed the render tree during the turn.
-        # Without this, nothing is emitted until agy exits, so a long or hung
-        # agy turn renders as an empty bubble stuck "streaming" forever.
+        # Only tool calls and subagent worker panels come from the DB — main
+        # prose is taken from agy's clean print-mode stdout at exit, because
+        # the step blobs jumble thoughts + echoed input context + markers.
+        # An empty placeholder agent_message (stable uuid) is emitted once so
+        # the in-flight assistant message binds to it; the final stdout event
+        # reuses that uuid and apply_event replaces the empty content with the
+        # clean answer. Without the placeholder the stdout-only event would
+        # arrive after the live-apply window and render as an orphan.
         while proc.returncode is None:
             sid = state.get("session_id")
             if sid:
+                if not emitted.get("placeholder_written"):
+                    placeholder = _assistant_event("", model=model, parent_uuid=sid)
+                    placeholder["data"]["uuid"] = emitted["main_uuid"]
+                    with events_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(placeholder) + "\n")
+                    emitted["placeholder_written"] = True
                 _stream_new_events(
                     events_path,
                     agy_home=agy_home,
                     conversation_id=sid,
                     parent_uuid=sid,
                     emitted=emitted,
+                    include_prose=False,
                 )
             await asyncio.sleep(_STREAM_INTERVAL)
 
@@ -1206,36 +1244,32 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         auth_error or stderr or f"agy CLI exited with code {proc.returncode}"
     )
     parent_uuid = state.get("session_id") or _new_uuid()
-    # Final flush: any steps added after the last stream poll. Re-runs
-    # _agy_worker_events in full but only writes events past the shared emit
-    # cursor, so nothing duplicates.
+    # Final flush of tool calls + subagent worker panels from the DB (main prose
+    # is excluded — it comes from stdout below).
     _stream_new_events(
         events_path,
         agy_home=agy_home,
         conversation_id=state.get("session_id"),
         parent_uuid=parent_uuid,
         emitted=emitted,
+        include_prose=False,
     )
-    # If the conversation DB yielded ordered parent text/tool events, those ARE
-    # the assistant response (rendered as separated turns + tool calls). Only
-    # fall back to the single stdout block when extraction produced nothing —
-    # e.g. DB unreadable, auth-failure fast exit, or a pure-stdout run. On
-    # failure we always emit the error text so the user sees what went wrong.
-    has_main_events = _events_file_has_main_events(events_path)
-    if not success or not has_main_events:
-        # No ordered parent events to render (DB unreadable, auth-failure fast
-        # exit, pure-stdout run) OR the run failed — emit the stdout / error
-        # block as the terminal assistant message so output is never lost.
-        final_text = stdout if success else f"Error: {error}"
-        final_event = _assistant_event(
-            final_text,
-            model=model,
-            parent_uuid=parent_uuid,
-        )
-        final_seed = f"{state.get('session_id') or ''}|final"
-        final_event["data"]["uuid"] = str(uuid.uuid5(_AGY_UUID_NAMESPACE, final_seed))
-        with events_path.open("a", encoding="utf-8") as events:
-            events.write(json.dumps(final_event) + "\n")
+    # agy's print-mode stdout is the authoritative main-thread answer: clean
+    # rendered prose, free of the thoughts / echoed input context / protobuf
+    # markers that the step blobs contain. Always emit exactly one main-thread
+    # event reusing the placeholder's uuid, so apply_event replaces the empty
+    # placeholder with the real answer (never leaving an empty bubble). On
+    # success prefer stdout, falling back to DB-reassembled text when agy
+    # produced no stdout (rare); on failure emit the error.
+    main_uuid = emitted["main_uuid"]
+    if success:
+        final_text = stdout or _db_main_text(agy_home, state.get("session_id"), parent_uuid)
+    else:
+        final_text = f"Error: {error}"
+    final_event = _assistant_event(final_text, model=model, parent_uuid=parent_uuid)
+    final_event["data"]["uuid"] = main_uuid
+    with events_path.open("a", encoding="utf-8") as events:
+        events.write(json.dumps(final_event) + "\n")
 
     state["complete"] = True
     state["finished_at"] = datetime.now().isoformat()

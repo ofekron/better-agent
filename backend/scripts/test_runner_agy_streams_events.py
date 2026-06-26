@@ -193,31 +193,42 @@ async def main() -> int:
             ln for ln in events_path.read_text(encoding="utf-8").splitlines()
             if ln.strip()
         ]
-        has_final = any(
-            json.loads(ln).get("data", {}).get("type") == "assistant"
-            for ln in final_lines
-        )
-        if has_final:
-            print(f"{PASS}  terminal assistant message written ({len(final_lines)} total events)")
+        # The terminal assistant message is agy's clean print-mode stdout,
+        # replacing the empty placeholder via the shared per-run main uuid.
+        agent_msgs = []
+        for ln in final_lines:
+            ev = json.loads(ln)
+            if ev.get("type") == "agent_message":
+                c = ev["data"]["message"]["content"][0]
+                agent_msgs.append((ev["data"]["uuid"], c.get("text", "") if isinstance(c, dict) else ""))
+        non_empty = [t for _, t in agent_msgs if t]
+        if non_empty and non_empty[-1] == "final agy answer":
+            print(f"{PASS}  clean stdout answer emitted ('final agy answer')")
         else:
-            print(f"{FAIL}  no terminal assistant message in session_events.jsonl")
+            print(f"{FAIL}  terminal text should be clean stdout 'final agy answer', "
+                  f"got {non_empty!r}")
             failures += 1
 
-        # (3) Idempotency: no duplicate render-tree uuids across the streamed
-        # + final-flush emission (deterministic uuid5 means each logical event
-        # appears once; final assistant message has its own seed).
-        uuids = []
+        # (3) Idempotency: the ONLY uuid allowed to repeat is the placeholder →
+        # stdout replace pair (same per-run uuid; apply_event replaces by uuid
+        # in the render tree). Every other uuid must be unique.
+        from collections import Counter
+        main_uuid = agent_msgs[0][0] if agent_msgs else None
+        counts = Counter(u for u, _ in agent_msgs)
+        # worker/subagent uuids also appear once each; check the whole file.
+        all_uuids = []
         for ln in final_lines:
             ev = json.loads(ln)
             uid = runner_agy._event_uuid_holder(ev)
             if uid and uid.get("uuid"):
-                uuids.append(uid["uuid"])
-        dupes = len(uuids) - len(set(uuids))
-        if dupes == 0:
-            print(f"{PASS}  no duplicate event uuids ({len(uuids)} uuids)")
+                all_uuids.append(uid["uuid"])
+        counts = Counter(all_uuids)
+        bad_dupes = {u: c for u, c in counts.items() if c > 1 and u != main_uuid}
+        main_count = counts.get(main_uuid, 0)
+        if not bad_dupes and main_count <= 2:
+            print(f"{PASS}  no unintended duplicate event uuids ({len(all_uuids)} uuids)")
         else:
-            print(f"{FAIL}  {dupes} duplicate event uuid(s) — streamed + final "
-                  f"flush are duplicating in the render tree")
+            print(f"{FAIL}  unintended duplicates: {bad_dupes} (main x{main_count})")
             failures += 1
 
         return 1 if failures else 0

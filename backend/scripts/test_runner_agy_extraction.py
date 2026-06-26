@@ -179,7 +179,7 @@ def main() -> int:
         con.close()
 
         # First (live) run writes the turn's events.
-        emitted = {"count": 0, "seen": runner_agy._existing_event_uuids(events_path)}
+        emitted = {"seen": runner_agy._existing_event_uuids(events_path)}
         runner_agy._stream_new_events(
             events_path, agy_home=home, conversation_id=_SID,
             parent_uuid=_SID, emitted=emitted,
@@ -190,7 +190,7 @@ def main() -> int:
             failures += 1
         else:
             # Resume: a fresh process re-seeds the cursor from the existing file.
-            emitted2 = {"count": 0, "seen": runner_agy._existing_event_uuids(events_path)}
+            emitted2 = {"seen": runner_agy._existing_event_uuids(events_path)}
             runner_agy._stream_new_events(
                 events_path, agy_home=home, conversation_id=_SID,
                 parent_uuid=_SID, emitted=emitted2,
