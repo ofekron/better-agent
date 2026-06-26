@@ -84,6 +84,30 @@ def _event_uuid_holder(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     return data if "uuid" in data else None
 
 
+def _existing_event_uuids(events_path: Path) -> set[str]:
+    """Uuids already written to session_events.jsonl. Seeds the streaming
+    cursor so a resumed conversation (cumulative DB) does not re-emit prior
+    turns as new events."""
+    if not events_path.is_file():
+        return set()
+    seen: set[str] = set()
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return seen
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        holder = _event_uuid_holder(ev)
+        if holder and holder.get("uuid"):
+            seen.add(holder["uuid"])
+    return seen
+
+
 def _stabilize_event_uuids(events: list[dict[str, Any]], conversation_id: Optional[str]) -> None:
     """Assign uuid5(... conversation_id|index) so re-emission is idempotent."""
     if not conversation_id:
@@ -100,7 +124,7 @@ def _stream_new_events(
     agy_home: Path,
     conversation_id: Optional[str],
     parent_uuid: str,
-    emitted: dict[str, int],
+    emitted: dict[str, Any],
 ) -> None:
     """Append agy steps not yet written to session_events.jsonl.
 
@@ -115,13 +139,24 @@ def _stream_new_events(
         parent_uuid=parent_uuid,
     )
     _stabilize_event_uuids(events, conversation_id)
-    new = events[emitted["count"]:]
+    # Skip events already on disk: a resumed conversation re-walks prior turns
+    # from the cumulative DB, and stabilized uuids are deterministic per
+    # conversation|index, so cross-run dedup by uuid is safe and idempotent.
+    new: list[dict[str, Any]] = []
+    for event in events[emitted["count"]:]:
+        holder = _event_uuid_holder(event)
+        uid = holder.get("uuid") if holder else None
+        if uid and uid in emitted["seen"]:
+            continue
+        if uid:
+            emitted["seen"].add(uid)
+        new.append(event)
+    emitted["count"] = len(events)
     if not new:
         return
     with events_path.open("a", encoding="utf-8") as fh:
         for event in new:
             fh.write(json.dumps(event) + "\n")
-    emitted["count"] = len(events)
 
 
 def _events_file_has_main_events(events_path: Path) -> bool:
@@ -365,37 +400,96 @@ def _looks_like_tool_json(text: str) -> bool:
     )
 
 
-def _meaningful_text(strings: list[str]) -> Optional[str]:
-    skip_prefixes = (
-        "sessionID",
-        "agent_message",
-        "toolAction",
-        "toolSummary",
-    )
-    candidates: list[str] = []
-    for text in strings:
-        if _UUID_RE.fullmatch(text.strip('"$')):
-            continue
-        if len(text) < 96 and _CONVERSATION_RE.search(text):
-            continue
-        if any(text.startswith(prefix) for prefix in skip_prefixes):
-            continue
-        if "bot-" in text:
-            continue
-        if text.startswith("{") or text.endswith("}"):
-            continue
-        if _looks_like_tool_json(text):
-            continue
-        if len(text) < 12:
-            continue
-        if not re.search(r"\s", text):
-            continue
-        if not re.search(r"[a-zA-Z]{3}", text):
-            continue
-        candidates.append(text)
-    if not candidates:
+# agy's bot-identifier streaming separator, e.g. "2(bot-<uuid>)" or
+# "2(bot-<uuid>B)" when the uuid runs into a trailing hex byte. Splits the
+# streaming copy (which carries the model's "thought") from the final copy.
+_BOT_ID_RE = re.compile(r"\d*\(bot-[0-9a-fA-F-]{4,}[:)?]?")
+
+# Strings that are CLI-injected system notices, not model output. agy emits
+# these as `[Message] sender=system ... [Notice] ...` (step_type 101) on events
+# like a server restart; they must never render as the assistant's answer.
+_SYSTEM_NOTICE_PREFIXES = ("[Message]", "[Notice]", "System Message")
+
+_SKIP_PREFIXES = (
+    "sessionID",
+    "agent_message",
+    "toolAction",
+    "toolSummary",
+)
+
+
+def _is_prose(text: str) -> bool:
+    """True if a cleaned blob string looks like assistant prose (not a uuid,
+    tool json, system notice, or binary garbage)."""
+    if _UUID_RE.fullmatch(text.strip('"$')):
+        return False
+    if len(text) < 96 and _CONVERSATION_RE.search(text):
+        return False
+    if any(text.startswith(p) for p in _SYSTEM_NOTICE_PREFIXES):
+        return False
+    if any(text.startswith(p) for p in _SKIP_PREFIXES):
+        return False
+    if "bot-" in text:
+        return False
+    if text.startswith("{") or text.endswith("}"):
+        return False
+    if _looks_like_tool_json(text):
+        return False
+    if len(text) < 12:
+        return False
+    if not re.search(r"\s", text):
+        return False
+    if not re.search(r"[a-zA-Z]{3}", text):
+        return False
+    return True
+
+
+def _strip_lead_marker(text: str) -> str:
+    """Strip a short protobuf field-marker prefix glued to the start of prose
+    (e.g. "gLet me know...", a leading field byte). Only strips when the prefix
+    up to the first sentence boundary contains NO space — a real prose prefix
+    like "s why I open" has a space and must be preserved."""
+    text = text.strip()
+    m = re.search(r"(I\s|I'|[A-Z][a-z]+\s)", text[:40])
+    if m and 0 < m.start() <= 20 and not re.search(r"\s", text[:m.start()]):
+        text = text[m.start():]
+    return text
+
+
+def _join_fragments(frags: list[str]) -> str:
+    """Join agy's streaming fragments back into one answer.
+
+    Fragments split at apostrophe boundaries, so the apostrophe byte is dropped
+    by the printable-string extraction and a contraction surfaces as two
+    fragments ("That" + "s why"). Space-join, then restore the common 's
+    contraction/possessive. A lone "s" word is otherwise vanishingly rare in
+    prose, so the restoration is safe."""
+    text = " ".join(frags)
+    return re.sub(r"\b([A-Za-z]+) s\b", r"\1's", text)
+
+
+def _reassemble_answer(strings: list[str]) -> Optional[str]:
+    """Reconstruct the assistant's final answer from agy's protobuf-ish blobs.
+
+    agy fragments one answer across many printable strings AND stores it twice
+    (streaming + final), separated by "2(bot-<uuid>)" identifiers. The model's
+    internal "thought" lives in the streaming segment BEFORE the last bot-id;
+    the clean final answer is the segment AFTER it. Keep prose candidates,
+    split each on the bot-id separator, take the last non-empty segment, strip
+    a leading marker off each fragment, and join in order. Returns None when
+    the step carries no model prose (system notice, pure tool step, garbage)."""
+    segments: list[list[str]] = [[]]
+    for raw in strings:
+        for i, part in enumerate(_BOT_ID_RE.split(raw)):
+            if i > 0:
+                segments.append([])
+            part = _strip_lead_marker(part).strip("\x00`")
+            if _is_prose(part):
+                segments[-1].append(part)
+    answer = segments[-1] if segments[-1] else max(segments, key=len)
+    if not answer:
         return None
-    return max(candidates, key=len)
+    return _join_fragments(answer)
 
 
 def _agent_message(
@@ -551,30 +645,6 @@ def _tool_signature(tool_name: str, payload: dict[str, Any]) -> str:
     return f"{tool_name}|{key}"
 
 
-def _strip_protobuf_artifacts(text: str) -> str:
-    """Clean the protobuf-ish wrappers agy puts around model prose.
-
-    agy stores several noisy variants of the same prose in a step blob:
-      - a trailing bot-identifier "2(bot-<uuid>:)" (uuid may be partial,
-        suffix may be ':' or ')')
-      - a leading snake_case tool name + field-type/marker bytes
-        (e.g. "grep_searchB^I am searching...")
-      - a stray leading field marker ("^I am...", "II am...", "UI am...")
-    The real prose reliably begins at a sentence boundary — "I ", "I'",
-    or a Capitalized word + space. Strip a short marker prefix (<=20 chars)
-    up to that boundary so the rendered text is clean."""
-    text = text.strip()
-    # Trailing bot-identifier (tolerant of ':', ')', or truncated uuid).
-    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]+[:)]?", "", text)
-    text = re.sub(r"\d*\(bot-[0-9a-fA-F-]*$", "", text)
-    text = text.strip(":`,")
-    # Leading marker prefix up to the first sentence boundary.
-    m = re.search(r"(I\s|I'|[A-Z][a-z]+\s)", text[:40])
-    if m and 0 < m.start() <= 20:
-        text = text[m.start():]
-    return text.strip()
-
-
 class _ParentMainState:
     """Stateful per-step builder for the parent's MAIN-thread events.
 
@@ -607,11 +677,10 @@ class _ParentMainState:
             return []
         payload = step.get("json") or {}
         is_subagent_delegation = bool(payload and "Subagents" in payload)
-        # agy wraps type-15 assistant prose in protobuf field markers and a
-        # "2(bot-<uuid>)" identifier. _meaningful_text rejects strings
-        # containing "bot-", so strip the artifacts first or the turn is lost.
-        cleaned = [_strip_protobuf_artifacts(s) for s in step["strings"]]
-        text = _meaningful_text(cleaned)
+        # Reassemble the answer from agy's fragmented, duplicated, protobuf-
+        # wrapped blobs: drops the model "thought", CLI system notices, and the
+        # streaming copy, keeping the clean final answer.
+        text = _reassemble_answer(step["strings"])
         if text and text in self._prompt_texts:
             text = None
         # A step can carry BOTH an assistant text turn and a tool call (like a
@@ -838,7 +907,7 @@ def _extract_subagent_conversation_events(
                     ),
                 }})
                 continue
-        text = _meaningful_text(strings)
+        text = _reassemble_answer(strings)
         if not text or text in prompt_texts:
             continue
         if step.get("step_type") in {7, 8, 9, 23, 101, 127, 132} and last_tool_id:
@@ -901,7 +970,7 @@ def extract_main_conversation_events(
                 parent_uuid=parent_uuid,
             ))
             continue
-        text = _meaningful_text(strings)
+        text = _reassemble_answer(strings)
         if not text:
             continue
         if step.get("step_type") in {7, 8, 9, 23, 101, 127, 132} and last_tool_id:
@@ -1052,8 +1121,13 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     cancelled = False
     events_path = run_dir / "session_events.jsonl"
     # Mutable holder so the streaming watcher and the final flush share one
-    # emit cursor — every event is written to disk exactly once.
-    emitted: dict[str, int] = {"count": 0}
+    # emit cursor — every event is written to disk exactly once. `seen` is
+    # seeded from the existing events file so a resumed conversation does not
+    # re-emit prior turns from the cumulative DB.
+    emitted: dict[str, Any] = {
+        "count": 0,
+        "seen": _existing_event_uuids(events_path),
+    }
 
     async def _watch_cancel() -> None:
         nonlocal cancelled

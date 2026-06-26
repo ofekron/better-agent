@@ -103,7 +103,7 @@ def main() -> int:
         #     yields None, _watch_stream never gets a sid, so it never tails the
         #     foreign db. Assert the foreign content is reachable IF a sid were
         #     set, proving the gate (not absence of data) is what protects us.
-        emitted: dict[str, int] = {"count": 0}
+        emitted: dict[str, object] = {"count": 0, "seen": set()}
         events_path = run_dir / "session_events.jsonl"
         if sid is None:
             # No sid -> no streaming call happens; events file stays empty.
