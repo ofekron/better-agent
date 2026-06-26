@@ -472,6 +472,7 @@ function SessionNode({
     <>
       <motion.div
         layout
+        layoutId={`session-row-${session.id}`}
         transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
         className={`session-item ${
           session.id === currentSessionId ? "active" : ""
