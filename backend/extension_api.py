@@ -76,6 +76,14 @@ async def list_extensions(include_hidden: bool = Query(default=False)):
     return {"extensions": extensions}
 
 
+@router.get("/builtin-ids")
+async def get_builtin_ids():
+    """Logical key -> extension id for known builtins. Private ids are present
+    only where the private registry is loaded; the frontend fetches this so it
+    never hardcodes private/commercial ids."""
+    return {"ids": extension_store.builtin_extension_id_map()}
+
+
 @router.get("/frontend-entrypoints")
 async def get_frontend_entrypoints():
     return {"entrypoints": extension_store.frontend_entrypoints()}

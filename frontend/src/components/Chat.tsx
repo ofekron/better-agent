@@ -77,8 +77,9 @@ import {
 } from "../progress/store";
 
 import { API, createSessionSchedule } from "../api";
+import { extBackendBase } from "../extensionIds";
 
-const TEAM_ORCHESTRATION_API = `${API}/api/extensions/ofek-dev.team-orchestration/backend`;
+const teamOrchestrationApi = () => extBackendBase("team");
 
 function UserInputCard({
   request,
@@ -540,7 +541,7 @@ export function Chat({
     const fetchApprovals = async () => {
       try {
         const res = await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals?cwd=${encodeURIComponent(cwd)}`,
+          `${teamOrchestrationApi()}/pending_approvals?cwd=${encodeURIComponent(cwd)}`,
         );
         if (!res.ok) return;
         const data = await res.json();
@@ -584,7 +585,7 @@ export function Chat({
     }
     try {
       const res = await fetch(
-        `${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
+        `${extBackendBase("credentialBroker")}/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -653,7 +654,7 @@ export function Chat({
       workerApprovals: pendingApprovals,
       approveWorker: async (delegationId: string, description: string, orchestrationMode: string) => {
         await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals/${delegationId}/approve`,
+          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -666,7 +667,7 @@ export function Chat({
       },
       denyWorker: async (delegationId: string) => {
         await fetch(
-          `${TEAM_ORCHESTRATION_API}/pending_approvals/${delegationId}/deny`,
+          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
           { method: "POST" },
         );
         setPendingApprovals((prev) =>
@@ -676,7 +677,7 @@ export function Chat({
       credentialConsents: pendingCredentials,
       approveCredential: async (consentId: string, secrets: Record<string, string>) => {
         const body = Object.keys(secrets).length ? { secrets } : {};
-        const res = await fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/${consentId}/approve`, {
+        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/approve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -688,7 +689,7 @@ export function Chat({
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
       denyCredential: async (consentId: string) => {
-        const res = await fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/credentials/${consentId}/deny`, {
+        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/deny`, {
           method: "POST",
         });
         if (!res.ok) {

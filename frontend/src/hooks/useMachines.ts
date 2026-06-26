@@ -1,9 +1,9 @@
 import { useEffect, useReducer } from "react";
 
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import type { NodeSnapshot, NodeStateChangedData } from "../types";
 
-const MACHINE_NODES_API = `${API}/api/extensions/ofek-dev.machine-nodes/backend`;
+const machineNodesApi = () => extBackendBase("machineNodes");
 
 interface MachinesState {
   /** Snapshot of all machines (primary + worker_nodes) from the
@@ -35,7 +35,7 @@ function _refetch(): Promise<void> {
   if (_inFlight) return _inFlight;
   _inFlight = (async () => {
     try {
-      const r = await fetch(`${MACHINE_NODES_API}/nodes`, { credentials: "include" });
+      const r = await fetch(`${machineNodesApi()}/nodes`, { credentials: "include" });
       const data = r.ok ? await r.json() : [];
       _state = {
         machines: Array.isArray(data) ? (data as NodeSnapshot[]) : [],
@@ -100,7 +100,7 @@ if (import.meta.hot) {
 /** Delete a node from the topology. Returns true on success. */
 export async function deleteNode(nodeId: string): Promise<boolean> {
   try {
-    const r = await fetch(`${MACHINE_NODES_API}/nodes/${encodeURIComponent(nodeId)}`, {
+    const r = await fetch(`${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}`, {
       method: "DELETE",
       credentials: "include",
     });
@@ -116,7 +116,7 @@ export async function deleteNode(nodeId: string): Promise<boolean> {
 export async function restartNode(nodeId: string): Promise<boolean> {
   try {
     const r = await fetch(
-      `${MACHINE_NODES_API}/nodes/${encodeURIComponent(nodeId)}/restart`,
+      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/restart`,
       { method: "POST", credentials: "include" },
     );
     return r.ok;

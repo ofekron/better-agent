@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import { trackPromise } from "../progress/store";
 
 interface PasswordManagerItem {
@@ -28,7 +28,7 @@ export function PasswordManagerSetting() {
     setError("");
     try {
       const response = await trackPromise("passwordManager:list", () =>
-        fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/settings/password-manager`, { credentials: "include" }),
+        fetch(`${extBackendBase("credentialBroker")}/settings/password-manager`, { credentials: "include" }),
       ).promise;
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as { items?: PasswordManagerItem[] };
@@ -53,7 +53,7 @@ export function PasswordManagerSetting() {
     setError("");
     try {
       const response = await trackPromise("passwordManager:store", () =>
-        fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/settings/password-manager/store`, {
+        fetch(`${extBackendBase("credentialBroker")}/settings/password-manager/store`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -87,7 +87,7 @@ export function PasswordManagerSetting() {
     setError("");
     try {
       const response = await trackPromise("passwordManager:delete", () =>
-        fetch(`${API}/api/extensions/ofek-dev.credential-broker/backend/settings/password-manager`, {
+        fetch(`${extBackendBase("credentialBroker")}/settings/password-manager`, {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
