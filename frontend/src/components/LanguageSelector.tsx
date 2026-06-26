@@ -2,21 +2,24 @@ import { useTranslation } from "react-i18next";
 import { trackedFetch } from "../progress/store";
 import { API } from "../api";
 
+// Each option shows its autonym (native name) so a user who switched to a
+// language they don't read can still find their own. These are intentionally
+// language-independent — never run through t().
 const LANGUAGES = [
-  { code: "en", labelKey: "language.en" },
-  { code: "he", labelKey: "language.he" },
-  { code: "es", labelKey: "language.es" },
-  { code: "fr", labelKey: "language.fr" },
-  { code: "de", labelKey: "language.de" },
-  { code: "pt", labelKey: "language.pt" },
-  { code: "it", labelKey: "language.it" },
-  { code: "ru", labelKey: "language.ru" },
-  { code: "zh", labelKey: "language.zh" },
-  { code: "ja", labelKey: "language.ja" },
-  { code: "ko", labelKey: "language.ko" },
-  { code: "ar", labelKey: "language.ar" },
-  { code: "hi", labelKey: "language.hi" },
-  { code: "nl", labelKey: "language.nl" },
+  { code: "en", autonym: "English" },
+  { code: "he", autonym: "עברית" },
+  { code: "es", autonym: "Español" },
+  { code: "fr", autonym: "Français" },
+  { code: "de", autonym: "Deutsch" },
+  { code: "pt", autonym: "Português" },
+  { code: "it", autonym: "Italiano" },
+  { code: "ru", autonym: "Русский" },
+  { code: "zh", autonym: "中文" },
+  { code: "ja", autonym: "日本語" },
+  { code: "ko", autonym: "한국어" },
+  { code: "ar", autonym: "العربية" },
+  { code: "hi", autonym: "हिन्दी" },
+  { code: "nl", autonym: "Nederlands" },
 ] as const;
 
 export function LanguageSelector() {
@@ -45,7 +48,7 @@ export function LanguageSelector() {
     >
       {LANGUAGES.map((lang) => (
         <option key={lang.code} value={lang.code}>
-          {t(lang.labelKey)}
+          {lang.autonym}
         </option>
       ))}
     </select>
