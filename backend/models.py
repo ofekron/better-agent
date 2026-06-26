@@ -319,6 +319,9 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     if kind == "codex":
         from provider_codex import fetch_codex_models
         return fetch_codex_models
+    if kind == "fugu":
+        from provider_fugu import fetch_fugu_models
+        return fetch_fugu_models
     if kind == "agy":
         from provider_agy import fetch_agy_models
         return fetch_agy_models
@@ -354,6 +357,9 @@ def _static_cold_start(provider: dict) -> list[str]:
     if kind == "codex":
         from provider_codex import CODEX_MODELS
         return list(CODEX_MODELS)
+    if kind == "fugu":
+        from provider_fugu import FUGU_MODELS
+        return list(FUGU_MODELS)
     if kind == "agy":
         from provider_agy import AGY_MODELS
         return list(AGY_MODELS)

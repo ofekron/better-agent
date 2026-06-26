@@ -1117,11 +1117,17 @@ async def _start_app_server(
 logger = logging.getLogger(__name__)
 
 
-def _resolve_codex_cli() -> Optional[str]:
-    """Find the codex CLI binary."""
+def _resolve_codex_cli(inputs: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Find the codex CLI binary.
+
+    Honors `inputs["codex_binary"]` so the Fugu provider can resolve its
+    `codex-fugu` launcher (which runs `codex -p fugu`) without forking the
+    runner. Defaults to `codex`.
+    """
     from cli_paths import resolve_cli_binary
 
-    return resolve_cli_binary("codex")
+    binary = (inputs or {}).get("codex_binary") or "codex"
+    return resolve_cli_binary(binary)
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -2321,7 +2327,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 existing_tool_names=existing_tool_names,
             )
 
-    codex_bin = _resolve_codex_cli()
+    codex_bin = _resolve_codex_cli(inputs)
     if not codex_bin:
         _fail(run_dir, "codex CLI not found on PATH")
         return 1
