@@ -87,16 +87,20 @@ async def get_ui_hooks():
 
 
 @router.get("/{extension_id}/frontend/{asset_path:path}")
-async def get_frontend_asset(extension_id: str, asset_path: str):
+async def get_frontend_asset(extension_id: str, asset_path: str, request: Request):
     try:
         path = extension_store.resolve_frontend_asset(extension_id, asset_path)
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    # Extension asset URLs have no version hash, so a browser that cached an
-    # older module would keep using it after the extension is upgraded.
-    # no-cache forces revalidation every load; ETag/mtime still short-circuits
-    # to 304 when the file hasn't changed.
-    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    # frontend_entrypoints() stamps the install commit_sha into the URL as
+    # `?v=<sha>`. When present, content can't have changed without the URL
+    # changing too -> cache forever. When absent (unversioned local-dev
+    # install, or legacy cached URL) -> revalidate every load.
+    versioned = bool(request.query_params.get("v"))
+    cache_control = (
+        "public, max-age=31536000, immutable" if versioned else "no-cache"
+    )
+    return FileResponse(path, headers={"Cache-Control": cache_control})
 
 
 @router.api_route(
