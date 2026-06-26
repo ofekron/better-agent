@@ -80,7 +80,6 @@ _INTERNAL_KINDS = {
     "user_msg_appended",
     "assistant_msg_appended",
     "assistant_msg_removed",
-    "user_msg_marked_error",
     "trace_id_set",
     "session_token_usage_added",
     "user_claude_uuid_set",
@@ -227,6 +226,24 @@ class SessionWSBroadcaster:
                     "messages": [change.get("msg")],
                 },
             })
+            return
+        if kind == "user_msg_marked_error":
+            # The user prompt's persist-ack (`user_message_persisted`) is
+            # broadcast at append time, before the turn runs. If the turn
+            # later errors and stamps status=error on the user message,
+            # the persisted frame on the client has stale status. Push
+            # the updated snapshot so the canonical user message reflects
+            # the failure — otherwise the brief error flash from the
+            # `error` WS event is overwritten by the stale persisted msg.
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [msg],
+                    },
+                })
             return
         if kind == "msg_retrying_set":
             # Per-message marker the orchestrator stamps while it sleeps
