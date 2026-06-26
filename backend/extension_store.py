@@ -3774,12 +3774,17 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
         entrypoint = (install_root / frontend_path).resolve()
         if not entrypoint.is_relative_to(install_root) or not entrypoint.is_file():
             continue
+        # Bust browser/PWA caches when an extension is upgraded: the asset
+        # URL itself carries the install commit sha, so a new version becomes
+        # a new module URL in the JS module map (no stale dynamic-import).
+        v = str(record["source"].get("commit_sha") or "")[:12] or "unversioned"
+        bust = f"?v={v}"
         entries.append(
             {
                 "extension_id": manifest["id"],
                 "name": manifest["name"],
                 "entrypoint": frontend_path,
-                "entrypoint_url": f"/api/extensions/{manifest['id']}/frontend/{frontend_path}",
+                "entrypoint_url": f"/api/extensions/{manifest['id']}/frontend/{frontend_path}{bust}",
                 "frontend_modules": [
                     {
                         "slot": item["slot"],
@@ -3787,7 +3792,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                         "label": item["label"],
                         "kind": item["kind"],
                         "module": item["module"],
-                        "module_url": f"/api/extensions/{manifest['id']}/frontend/{item['module']}",
+                        "module_url": f"/api/extensions/{manifest['id']}/frontend/{item['module']}{bust}",
                     }
                     for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
                 ],
