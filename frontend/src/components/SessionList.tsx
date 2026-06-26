@@ -32,6 +32,11 @@ interface Props {
    * can surface. If omitted, falls back to `sessions`. */
   allSessions?: Session[];
   currentSessionId?: string;
+  /** The currently-focused session object. Used as the authoritative
+   * fallback for the pinned anchor so an active search filter cannot
+   * hide it (the backend-filtered `sessions`/`allSessions` may exclude
+   * a non-matching selected session). */
+  selectedSession?: Session | null;
   /** DOM node (above the sidebar tabs) where the pinned selected-session
    * anchor is portaled. When null, the anchor renders inline at the top
    * of the list as a fallback. */
@@ -992,6 +997,7 @@ export function SessionList({
   sessions,
   allSessions,
   currentSessionId,
+  selectedSession: selectedSessionProp,
   selectedAnchorContainer,
   providers,
   onSelect,
@@ -1827,7 +1833,8 @@ export function SessionList({
   const selectedSession =
     (currentSessionId &&
       (sessions.find((s) => s.id === currentSessionId) ??
-        allSessions?.find((s) => s.id === currentSessionId))) ||
+        allSessions?.find((s) => s.id === currentSessionId) ??
+        (selectedSessionProp?.id === currentSessionId ? selectedSessionProp : null))) ||
     null;
 
   return (

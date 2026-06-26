@@ -5521,6 +5521,7 @@ function AppMain({
               sessions={sessionsForProject}
               allSessions={sessions}
               currentSessionId={currentSession?.id}
+              selectedSession={currentSession}
               selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
               onSelect={(id) => {
