@@ -459,16 +459,20 @@ async def call_local_or_remote(node_id: str, method: str, params: dict):
     translation wrap this themselves (see `main._file_op`)."""
     if node_id == "primary":
         return await dispatch_rpc(method, params)
+    # `topology.local_node_id()` raises when topology.yaml is absent
+    # (dynamic-only deploy). That only means we can't CONFIRM the node
+    # IS the local host — not that it's unreachable. Dynamic worker
+    # nodes register without topology and are served by
+    # `node_link.rpc_call`, which raises `NodeOffline` when the node
+    # isn't connected. So on a topology resolve failure we fall through
+    # to the remote path instead of aborting; we never dispatch locally
+    # on a mismatch, preserving the no-silent-local-fallback guard.
     try:
         from topology import local_node_id as _lid
-        local_id = _lid()
+        if node_id == _lid():
+            return await dispatch_rpc(method, params)
     except Exception:
-        raise RuntimeError(
-            f"node_id={node_id!r} requires topology.yaml; "
-            f"BETTER_CLAUDE_TOPOLOGY_PATH not configured"
-        )
-    if node_id == local_id:
-        return await dispatch_rpc(method, params)
+        pass
     import node_link
     return await node_link.rpc_call(node_id, method, params)
 

@@ -722,28 +722,94 @@ def test_project_store_repairs_despite_stale_marker() -> bool:
         shutil.rmtree(home, ignore_errors=True)
 
 
-async def test_file_op_no_topology_fails_clearly() -> bool:
-    """Calling `call_local_or_remote` with a non-primary node_id when
-    no topology is configured surfaces a clear RuntimeError (not a
-    silent fallback to local)."""
-    label = "call_local_or_remote without topology yields clear error"
+async def test_file_op_no_topology_routes_remote_not_local() -> bool:
+    """Without topology.yaml, a non-primary node_id MUST route to
+    `node_link.rpc_call` (raising `NodeOffline` when the node isn't
+    connected) — never silently fall back to local `dispatch_rpc`.
+    Dynamic worker nodes register without topology and are reachable
+    only via node_link, so aborting with a topology error broke
+    browsing them."""
+    label = "call_local_or_remote without topology routes remote, not local"
     saved = os.environ.pop("BETTER_CLAUDE_TOPOLOGY_PATH", None)
+    local_dispatched = {"hit": False}
+
+    def _local_trap(*_a, **_kw):
+        local_dispatched["hit"] = True
+        return {}
+
     try:
         import importlib
         import topology
         topology._cache = None
         import node_rpc_handlers
         importlib.reload(node_rpc_handlers)
+        node_rpc_handlers.dispatch_rpc = _local_trap  # guard: no local fallback
         try:
             await node_rpc_handlers.call_local_or_remote(
                 "linux-box", "list_directories", {"path": "/tmp"},
             )
-            _fail(label, "expected RuntimeError, got success")
+            _fail(label, "expected NodeOffline, got success")
             return False
-        except RuntimeError as e:
-            if "topology.yaml" not in str(e):
-                _fail(label, f"wrong error: {e}")
+        except Exception as e:
+            import node_link
+            if not isinstance(e, node_link.NodeOffline):
+                _fail(label, f"expected NodeOffline, got {type(e).__name__}: {e}")
                 return False
+        if local_dispatched["hit"]:
+            _fail(label, "dispatched locally on a non-primary node_id")
+            return False
+        _ok(label)
+        return True
+    finally:
+        if saved is not None:
+            os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = saved
+
+
+async def test_file_op_no_topology_routes_connected_dynamic_node() -> bool:
+    """The fix's whole point: without topology.yaml, a CONNECTED
+    dynamic node is served via node_link and the op succeeds. Stubs
+    `node_link.rpc_call` to a canned reply so we don't need a live
+    WS connection; asserts the call reaches node_link with the right
+    node_id and never touches local dispatch."""
+    label = "call_local_or_remote serves connected dynamic node via node_link"
+    saved = os.environ.pop("BETTER_CLAUDE_TOPOLOGY_PATH", None)
+    seen = {"node_id": None}
+    local_dispatched = {"hit": False}
+
+    def _local_trap(*_a, **_kw):
+        local_dispatched["hit"] = True
+        return {}
+
+    try:
+        import importlib
+        import topology
+        topology._cache = None
+        import node_rpc_handlers
+        importlib.reload(node_rpc_handlers)
+        node_rpc_handlers.dispatch_rpc = _local_trap
+        import node_link
+        orig_rpc = node_link.rpc_call
+
+        async def _fake_rpc(node_id, method, params, *_, **__):
+            seen["node_id"] = node_id
+            return {"entries": [], "path": params.get("path", "")}
+
+        node_link.rpc_call = _fake_rpc
+        try:
+            result = await node_rpc_handlers.call_local_or_remote(
+                "ofeks-macbook-air", "list_directories", {"path": "/home"},
+            )
+        finally:
+            node_link.rpc_call = orig_rpc
+        if seen["node_id"] != "ofeks-macbook-air":
+            _fail(label, f"node_link not called with right id: {seen['node_id']}")
+            return False
+        if local_dispatched["hit"]:
+            _fail(label, "dispatched locally instead of via node_link")
+            return False
+        if result != {"entries": [], "path": "/home"}:
+            _fail(label, f"unexpected result: {result}")
+            return False
         _ok(label)
         return True
     finally:
@@ -1483,7 +1549,8 @@ async def main() -> int:
     async_results = [
         await test_dispatch_rpc_json_serializability(),
         await test_dispatch_rpc_rejects_path_outside_cwd_roots(),
-        await test_file_op_no_topology_fails_clearly(),
+        await test_file_op_no_topology_routes_remote_not_local(),
+        await test_file_op_no_topology_routes_connected_dynamic_node(),
         await test_run_headless_rewind_rpc_wiring(),
         await test_provisioning_node_id_routing(),
     ]
