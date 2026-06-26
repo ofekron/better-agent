@@ -115,6 +115,30 @@ class Client:
         except (ValueError, UnicodeDecodeError) as exc:
             raise BetterAgentError("core returned a non-JSON response") from exc
 
+    # ── right panel ──────────────────────────────────────────────────
+    def set_right_panel(
+        self,
+        *,
+        open: bool | None = None,
+        tab: str | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Open/close the right panel and/or switch its active tab.
+
+        ``tab`` must match a valid tab id registered in core
+        (e.g. ``"files"``, ``"canvas"``, ``"screen"``)."""
+        sid = session_id or self.app_session_id
+        if not sid:
+            raise BetterAgentError("set_right_panel requires app_session_id")
+        body: dict[str, Any] = {}
+        if open is not None:
+            body["open"] = bool(open)
+        if tab is not None:
+            body["tab"] = tab
+        if not body:
+            raise BetterAgentError("set_right_panel requires at least one of open/tab")
+        return self._post(f"/api/internal/sessions/{sid}/right-panel", body, timeout=10.0)
+
     # ── team definitions / runtime teams ─────────────────────────────
     def list_team_definitions(self) -> dict[str, Any]:
         return self._post(
