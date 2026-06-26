@@ -13383,6 +13383,14 @@ button.progress-inflight {
     min-height: 360px;
   }
 
+  /* Inline flow slots (e.g. machine sidebar scope-tabs) must hug their
+     content. Without this, the 360px above overrides the base --inline
+     zero (equal specificity, later source order) and reserves a huge
+     empty block between the machine pills and the PROJECTS list. */
+  .extension-module-slot--inline {
+    min-height: 0;
+  }
+
   .extension-module-slot--toolbar,
   .extension-module-slot--topbar,
   .extension-module-slot.extension-quick-button--module {
