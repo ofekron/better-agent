@@ -4102,11 +4102,7 @@ async def _file_op(node_id: str, method: str, params: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
-        # The "topology.yaml required" RuntimeError raised by
-        # `call_local_or_remote` is a 400 (client error); other
         # RuntimeErrors come from the remote handler → 502.
-        if "topology.yaml" in str(e):
-            raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=502, detail=str(e))
 
 
