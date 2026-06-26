@@ -37,6 +37,7 @@ export function sortSessionsForList(
   sessions: Session[],
   folderView = false,
   sortField: string = "updated_at",
+  rankOf?: (session: Session) => number,
 ): Session[] {
   return sessions
     .map((session, index) => ({ session, index }))
@@ -53,6 +54,14 @@ export function sortSessionsForList(
       const pinnedDelta =
         Number(Boolean(b.session.pinned)) - Number(Boolean(a.session.pinned));
       if (pinnedDelta !== 0) return pinnedDelta;
+      // Status sort (optional): empty-new + pinned stay above; status is the
+      // strongest key below them, time the tie-break. Mirrors the backend
+      // key (isEmpty, pinned, status, ts). When rankOf is absent the order
+      // is byte-identical to the time-only sort (zero blast radius).
+      if (rankOf) {
+        const rankDelta = rankOf(b.session) - rankOf(a.session);
+        if (rankDelta !== 0) return rankDelta;
+      }
       const modifiedDelta =
         sessionSortNumeric(b.session, sortField) -
         sessionSortNumeric(a.session, sortField);

@@ -71,6 +71,10 @@ export interface MarkerInfo {
   color: string;
   tooltip: string;
   sound?: boolean;
+  // Source tag (e.g. NEEDS_USER_DECISION / ALL_TASKS__DONE). Set by the
+  // backend at marker-detect time so status sort classifies by tag, never
+  // by drifting color/tooltip.
+  tag?: string;
 }
 
 export interface SessionMeta {
@@ -421,6 +425,7 @@ class SessionRegistry {
         color: d.marker.color,
         tooltip: d.marker.tooltip,
         ...(d.marker.sound ? { sound: true } : {}),
+        ...(d.marker.tag ? { tag: d.marker.tag } : {}),
       };
     } else {
       delete markers[d.extension_id];
@@ -665,6 +670,7 @@ class SessionRegistry {
     const e = this.sessions.get(sid);
     if (!e) return EMPTY_SESSION;
     const cached = this.metaCache.get(sid);
+    let result: SessionMeta;
     if (
       cached &&
       cached.unread_count === e.unread_count &&
@@ -672,19 +678,35 @@ class SessionRegistry {
       cached.markers === e.markers &&
       cached.testape_active === e.testape_active
     ) {
-      return cached;
+      result = cached;
+    } else {
+      result = {
+        is_running: isRunning(e.monitoring_state),
+        unread_count: e.unread_count,
+        monitoring_state: e.monitoring_state,
+        markers: e.markers,
+        testape_active: !!e.testape_active,
+      };
+      this.metaCache.set(sid, result);
     }
-    // is_running is the DERIVED projection of monitoring_state — never
-    // stored separately, so it can't drift from the one source.
-    const next: SessionMeta = {
-      is_running: isRunning(e.monitoring_state),
-      unread_count: e.unread_count,
-      monitoring_state: e.monitoring_state,
-      markers: e.markers,
-      testape_active: !!e.testape_active,
-    };
-    this.metaCache.set(sid, next);
-    return next;
+    // TEMP DEBUG #185: consecutive calls must return the same ref between
+    // mutations. Log when a sid's returned ref changes identity.
+    const _dbg = (window.__gsLast ??= {});
+    const _prev = _dbg[sid];
+    if (_prev && _prev !== result) {
+      (window.__gsJitterList ??= []).push({
+        sid: sid.slice(0, 8),
+        pU: _prev.unread_count, cU: result.unread_count,
+        pS: _prev.monitoring_state, cS: result.monitoring_state,
+        pT: _prev.testape_active, cT: result.testape_active,
+        sameMarkers: _prev.markers === result.markers,
+        sameUnread: _prev.unread_count === result.unread_count,
+        sameState: _prev.monitoring_state === result.monitoring_state,
+      });
+      if ((window.__gsJitterList as unknown[]).length > 80) (window.__gsJitterList as unknown[]).length = 80;
+    }
+    _dbg[sid] = result;
+    return result;
   }
 
   getProject(path: string, nodeId: string): ProjectAggregate {
@@ -692,6 +714,47 @@ class SessionRegistry {
       this.projects.get(projectKey(path, nodeId || "primary")) ??
       EMPTY_AGGREGATE
     );
+  }
+
+  /** Live `SessionMeta` for a sid, or null if the registry has no entry for
+   * it (vs `getSession`, which returns the shared EMPTY_SESSION). Status
+   * sort uses this to decide live-rank vs page-row fallback. */
+  peekMeta(sid: string): SessionMeta | null {
+    return this.sessions.has(sid) ? this.getSession(sid) : null;
+  }
+
+  /** Seed entries from a loaded `/api/sessions` page so deeper-page rows
+   * (beyond the bootstrap's first page) have a registry entry for both
+   * status rank AND the running/unread badge. Only FILLS missing sids —
+   * never overwrites a live entry, which may be fresher than the page
+   * snapshot. */
+  seedFromRows(rows: Array<{
+    id?: string;
+    is_running?: boolean;
+    unread_count?: number;
+    cwd?: string;
+    node_id?: string;
+    monitoring_state?: string;
+    markers?: Record<string, MarkerInfo>;
+  }>): void {
+    let changed = false;
+    for (const s of rows) {
+      if (!s?.id || this.sessions.has(s.id)) continue;
+      const ms: MonitoringState = (s.monitoring_state as MonitoringState)
+        || (s.is_running ? "active" : "stopped");
+      this.sessions.set(s.id, {
+        unread_count: Math.max(0, Number(s.unread_count) || 0),
+        monitoring_state: ms,
+        cwd: s.cwd ?? "",
+        node_id: s.node_id || "primary",
+        markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
+        testape_active: false,
+      });
+      this.recomputeProject(s.cwd ?? "", s.node_id || "primary");
+      this.notifySession(s.id);
+      changed = true;
+    }
+    if (changed) this.version += 1;
   }
 
   subscribeSession(sid: string, fn: Listener): () => void {
@@ -744,6 +807,51 @@ function projectKey(path: string, nodeId: string): string {
 
 // Module-level singleton. Bound at App mount via `sessionRegistry.bind()`.
 export const sessionRegistry = new SessionRegistry();
+
+// Status-sort tags + states. MUST mirror the backend `_session_status_rank`
+// in `backend/main.py` (parity locked by a test) — same buckets, same
+// highest-wins precedence.
+const MARKER_TAG_NEEDS_DECISION = "NEEDS_USER_DECISION";
+const MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE";
+const RUNNING_STATES = new Set<string>(["active", "waiting_on_background"]);
+
+interface StatusFields {
+  monitoring_state?: string;
+  unread_count?: number;
+  markers?: Record<string, MarkerInfo>;
+}
+
+/** Status bucket (4 running → 0 none) for a session's live or row-snapshot
+ * status fields. Higher sorts first. Mirrors the backend rank exactly. */
+export function statusRankOf(s: StatusFields): number {
+  const state = s.monitoring_state ?? "stopped";
+  if (RUNNING_STATES.has(state)) return 4;
+  const tags = new Set(
+    Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
+  );
+  if (state === "blocked_on_user" || tags.has(MARKER_TAG_NEEDS_DECISION)) return 3;
+  if ((s.unread_count ?? 0) > 0) return 2;
+  if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;
+  return 0;
+}
+
+/** Rank for a session row: prefer the LIVE registry entry (so it agrees with
+ * the rendered badge); fall back to the row's own decorate fields when the
+ * registry has no entry yet (deeper page not yet seeded). */
+export function statusRankForRow(session: {
+  id: string;
+  monitoring_state?: string;
+  unread_count?: number;
+  markers?: Record<string, MarkerInfo>;
+}): number {
+  const live = sessionRegistry.peekMeta(session.id);
+  if (live) return statusRankOf(live);
+  return statusRankOf({
+    monitoring_state: session.monitoring_state,
+    unread_count: session.unread_count,
+    markers: session.markers,
+  });
+}
 
 export function useSessionMeta(sid: string | null | undefined): SessionMeta {
   return useSyncExternalStore(

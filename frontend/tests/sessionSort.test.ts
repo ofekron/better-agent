@@ -66,4 +66,44 @@ describe("sortSessionsForList", () => {
     const out = sortSessionsForList(sessions, false, "last_user_prompt_at");
     expect(out[0].id).toBe("pinned");
   });
+
+  describe("rankOf seam (status sort)", () => {
+    // rankOf mirrors the backend rank: 4 running … 0 none.
+    const rankById: Record<string, number> = { run: 4, decide: 3, neww: 2, done: 1, idle: 0 };
+    const rankOf = (s: Session) => rankById[s.id] ?? 0;
+
+    it("no rankOf → byte-identical to the time-only sort", () => {
+      const sessions = [
+        mk({ id: "old", updated_at: "2026-01-01T00:00:00Z" }),
+        mk({ id: "new", updated_at: "2026-06-01T00:00:00Z" }),
+      ];
+      const withUndefined = sortSessionsForList(sessions, false, "updated_at", undefined);
+      const baseline = sortSessionsForList(sessions, false, "updated_at");
+      expect(withUndefined.map((s) => s.id)).toEqual(baseline.map((s) => s.id));
+    });
+
+    it("status is the strongest key below empty-new + pinned", () => {
+      const sessions = [
+        // idle but far newer
+        mk({ id: "idle", updated_at: "2030-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+        // running but old
+        mk({ id: "run", updated_at: "2020-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+        // needs-decision, mid
+        mk({ id: "decide", updated_at: "2024-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+      ];
+      const out = sortSessionsForList(sessions, false, "updated_at", rankOf);
+      expect(out.map((s) => s.id)).toEqual(["run", "decide", "idle"]);
+    });
+
+    it("pinned beats status; empty-new beats both", () => {
+      const sessions = [
+        mk({ id: "run", updated_at: "2020-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+        mk({ id: "idle", pinned: true, updated_at: "2020-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+        mk({ id: "empty", updated_at: "2020-01-01T00:00:00Z", message_count: 0 } as Partial<Session> & Pick<Session, "id">),
+      ];
+      const out = sortSessionsForList(sessions, false, "updated_at", rankOf);
+      // empty-new first, then pinned-idle, then running
+      expect(out.map((s) => s.id)).toEqual(["empty", "idle", "run"]);
+    });
+  });
 });

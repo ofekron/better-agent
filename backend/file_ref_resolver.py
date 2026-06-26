@@ -211,7 +211,10 @@ def detect_markers(text: str) -> list[tuple[str, dict]]:
     for tag, rule in _tag_rules.items():
         marker = rule.get("marker")
         if marker and f"<{tag}>" in text:
-            out.append((rule.get("_extension_id", ""), marker))
+            # New dict — never mutate the shared rule["marker"] ref. The tag
+            # rides the projection so consumers (status sort) classify by tag,
+            # not by drifting color/tooltip.
+            out.append((rule.get("_extension_id", ""), {**marker, "tag": tag}))
     return out
 
 
