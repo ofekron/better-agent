@@ -4151,9 +4151,13 @@ class SessionManager:
                 return
             m["status"] = "error"
             m["errorText"] = text
+        def _enrich(s: dict) -> dict:
+            m = _find_message(s, msg_id)
+            return {"msg": copy.deepcopy(m) if m is not None else None}
         return self._run(
             sid, _do,
             {"kind": "user_msg_marked_error", "msg_id": msg_id, "text": text},
+            enrich=_enrich,
         )
 
     # ── Watcher cursors ────────────────────────────────────────────
