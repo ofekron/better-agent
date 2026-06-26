@@ -18,7 +18,7 @@ Environment requirement (FlowBuilder cannot set this in-flow):
   "desktop"` (InputArea.tsx). CDP `Emulation.setDeviceMetricsOverride`
   (`testape emulate`) is per-CDP-session and does NOT carry into a flow run's
   own session, so resize the real OS window once after `testape chrome start`:
-    python3 testape/scripts/resize_chrome_window.py --port 9224
+    testape chrome resize --port 9224 --width 1440 --height 900
 - The fixed Agent Board FAB overlaps the send button, so flows send via Enter,
   not via the send button.
 - Flows create fresh NATIVE sessions. Supervisor/Agent-Board modals only
@@ -31,6 +31,9 @@ APP_BASE = "http://localhost:3000"
 
 # Stable selectors (verified against the live app).
 SEL = {
+    "login_username": 'input[autocomplete="username"]',
+    "login_password": 'input[autocomplete="current-password"]',
+    "login_submit": 'button[type="submit"]',
     "new_session_btn": '[aria-label="New Session"]',
     "modal_prompt_textarea": "textarea.ns-investigation-textarea",
     "modal_create_btn": ".modal-content .btn-primary",
@@ -52,6 +55,14 @@ SEL = {
 DEFAULT_NEW_SESSION_PROMPT = "Reply with exactly: TESTAPE_OK"
 DEFAULT_FOLLOWUP_PROMPT = "Reply with exactly: TESTAPE_FOLLOWUP"
 
+# Auth. The bc-test tab must be authenticated before open_app can find
+# session-list; run the auth__login flow once (cookie lasts 30 days). Username
+# is the app's real login (from keychain). The password is NEVER authored in
+# plaintext — only a keychain:// reference; the agent resolves it at the typing
+# edge and self-provisions via an OS-rendered dialog on first run.
+BC_USERNAME = "ofekron"
+PASSWORD_KEYCHAIN_REF = "keychain://better_agent_password"
+
 
 def open_app(adapter_id, base_url=APP_BASE):
     """Transition: anywhere -> app shell loaded.
@@ -67,6 +78,43 @@ def open_app(adapter_id, base_url=APP_BASE):
     # Flat delay-then-check: assert_dom evaluates once after `delay`, it is not
     # a poll. The SPA needs a few seconds to mount; 10s covers cold starts.
     fb.assert_dom(SEL["session_list"], predicates=[{"op": "visible"}], delay=10)
+    return fb
+
+
+def login(
+    adapter_id,
+    base_url=APP_BASE,
+    username=BC_USERNAME,
+    password_ref=PASSWORD_KEYCHAIN_REF,
+):
+    """Transition: logged-out -> authenticated app shell.
+
+    Navigates to the app root, proves the login form is showing, types the
+    username and the keychain-referenced password, submits, and proves the
+    session-list rendered (cookie set). The password is authored only as a
+    ``keychain://`` reference; the agent resolves it at type time and prompts
+    via an OS dialog on first run, so the plaintext never enters the model, the
+    flow source, or the FS DB.
+
+    Run the auth__login feature flow once to authenticate the persistent tab;
+    the session cookie then lasts 30 days and every feature flow's open_app
+    works directly.
+    """
+    fb = FlowBuilder(name="bc__login", adapter_id=adapter_id, folder="bc/lib")
+    fb.navigate(base_url)
+    fb.assert_dom(
+        SEL["login_password"], predicates=[{"op": "visible"}], delay=10
+    )
+    fb.click(selector=SEL["login_username"], delay=0.3)
+    fb.variable(var_id="bc_username", name="Login username", default_text=username)
+    fb.click(selector=SEL["login_password"], delay=0.3)
+    fb.variable(var_id="bc_password", name="Login password", default_text=password_ref)
+    fb.click(selector=SEL["login_submit"], delay=0.5)
+    # After submit the SPA sets the cookie and renders the shell. session-list
+    # is the durable proof of "logged in" (absent on the login screen).
+    fb.assert_dom(
+        SEL["session_list"], predicates=[{"op": "visible"}], delay=20
+    )
     return fb
 
 
