@@ -283,6 +283,10 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
         (extension_store.BUILTIN_REARRANGER_EXTENSION_ID, "post", "/api/internal/rearranger/toggle", {"app_session_id": "s", "enabled": True}),
         (extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID, "post", "/api/internal/supervisor/default-prompt", {}),
+        # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
+        # the gate, a pure-public checkout (constant None) lets any core-token
+        # holder through the `None != None` identity check.
+        (extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID, "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
     ]
     import extension_token_registry
     for extension_id, method, path, payload in checks:

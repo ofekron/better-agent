@@ -8638,6 +8638,12 @@ async def internal_agent_board_run_prompt(
     turn in the background so the drop request returns immediately."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    # Runtime-readiness gate MUST precede the identity check: in a pure-public
+    # checkout BUILTIN_AGENT_BOARD_EXTENSION_ID is None (registry not loaded),
+    # and principal_extension_id() is also None for a core token — so a bare
+    # `None != None` identity check would let any core-token holder through.
+    # runtime_not_ready_message(None) returns "not installed" -> 404 first.
+    _require_builtin_runtime_extension(extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID)
     if (
         coordinator.principal_extension_id(x_internal_token)
         != extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID

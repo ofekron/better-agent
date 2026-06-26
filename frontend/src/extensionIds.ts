@@ -57,10 +57,13 @@ export function builtinIdsLoaded(): boolean {
 export async function loadBuiltinExtensionIds(): Promise<void> {
   try {
     const res = await fetch(`${API}/api/extensions/builtin-ids`, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data && typeof data.ids === "object") setBuiltinExtensionIds(data.ids as Record<string, string>);
-  } catch {
-    // best-effort: features whose id didn't load are simply unreachable
+  } catch (err) {
+    // best-effort: features whose id didn't load build empty-id URLs and 404.
+    // Surface the failure so it isn't silently mistaken for "no extensions".
+    console.error("assistant: failed to load builtin extension ids — private-extension UI will be unreachable", err);
   }
   _loaded = true;
 }
