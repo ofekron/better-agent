@@ -512,4 +512,30 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
     // …but a brand-new sid IS materialized from the page row.
     expect(sessionRegistry.getSession("seed-new").is_running).toBe(true);
   });
+
+  // Regression for #185: <SessionStatusBadge> → useSessionMeta →
+  // useSyncExternalStore infinite-looped ("getSnapshot should be cached").
+  // applyRoutedDelta's update path dropped `testape_active`, leaving it
+  // undefined; getSession cached `!!undefined` (false) but compared it
+  // against the raw `undefined` on the next call, so the cache missed
+  // every time and getSnapshot returned a fresh object each render.
+  it("getSession returns a stable reference after a routed delta (#185)", async () => {
+    await resetRegistry();
+    const sid = "sess-cache-invariant";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    // session_unread_changed routes through applyRoutedDelta's update
+    // path — the one that used to drop testape_active.
+    eventBus.publish("session_unread_changed", {
+      session_id: sid,
+      unread_count: 3,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    const a = sessionRegistry.getSession(sid);
+    const b = sessionRegistry.getSession(sid);
+    expect(a).toBe(b); // SAME reference — cache invariant holds
+    expect(a.testape_active).toBe(false);
+  });
 });

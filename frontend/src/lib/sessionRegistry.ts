@@ -489,6 +489,7 @@ class SessionRegistry {
         cwd: payloadCwd,
         node_id: payloadNode,
         markers: {},
+        testape_active: false,
       };
       this.sessions.set(sid, inserted);
       this.recomputeProject(payloadCwd, payloadNode);
@@ -516,6 +517,7 @@ class SessionRegistry {
       cwd: payloadCwd,
       node_id: payloadNode,
       markers: prev.markers,
+      testape_active: prev.testape_active ?? false,
     });
     this.version += 1;
     this.notifySession(sid);
@@ -670,43 +672,32 @@ class SessionRegistry {
     const e = this.sessions.get(sid);
     if (!e) return EMPTY_SESSION;
     const cached = this.metaCache.get(sid);
-    let result: SessionMeta;
+    // Compare the PROJECTED values that go into the result, not the raw
+    // entry fields — `testape_active` is optional and some mutation paths
+    // leave it `undefined`, but the result stores `!!e.testape_active`
+    // (false). Comparing `cached.testape_active (false)` to
+    // `e.testape_active (undefined)` is always false, so the cache would
+    // miss on every call, returning a fresh object each time and sending
+    // `useSyncExternalStore` into an infinite render loop (#185).
+    const testapeActive = !!e.testape_active;
     if (
       cached &&
       cached.unread_count === e.unread_count &&
       cached.monitoring_state === e.monitoring_state &&
       cached.markers === e.markers &&
-      cached.testape_active === e.testape_active
+      cached.testape_active === testapeActive
     ) {
-      result = cached;
-    } else {
-      result = {
-        is_running: isRunning(e.monitoring_state),
-        unread_count: e.unread_count,
-        monitoring_state: e.monitoring_state,
-        markers: e.markers,
-        testape_active: !!e.testape_active,
-      };
-      this.metaCache.set(sid, result);
+      return cached;
     }
-    // TEMP DEBUG #185: consecutive calls must return the same ref between
-    // mutations. Log when a sid's returned ref changes identity.
-    const _dbg = (window.__gsLast ??= {});
-    const _prev = _dbg[sid];
-    if (_prev && _prev !== result) {
-      (window.__gsJitterList ??= []).push({
-        sid: sid.slice(0, 8),
-        pU: _prev.unread_count, cU: result.unread_count,
-        pS: _prev.monitoring_state, cS: result.monitoring_state,
-        pT: _prev.testape_active, cT: result.testape_active,
-        sameMarkers: _prev.markers === result.markers,
-        sameUnread: _prev.unread_count === result.unread_count,
-        sameState: _prev.monitoring_state === result.monitoring_state,
-      });
-      if ((window.__gsJitterList as unknown[]).length > 80) (window.__gsJitterList as unknown[]).length = 80;
-    }
-    _dbg[sid] = result;
-    return result;
+    const next: SessionMeta = {
+      is_running: isRunning(e.monitoring_state),
+      unread_count: e.unread_count,
+      monitoring_state: e.monitoring_state,
+      markers: e.markers,
+      testape_active: testapeActive,
+    };
+    this.metaCache.set(sid, next);
+    return next;
   }
 
   getProject(path: string, nodeId: string): ProjectAggregate {
