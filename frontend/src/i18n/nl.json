@@ -101,7 +101,7 @@
   "input.interruptButton": "⚡ Onderbreken",
   "input.interruptTitle": "Huidige beurt annuleren en deze prompt onmiddellijk versturen",
   "input.forkTargetTitle": "Versturen / Fork gaat naar dit paneel",
-  "input.engineerButton": "⚙ Engineer",
+  "input.engineerButton": "⚙ Ingenieur",
   "input.sendButton": "Versturen",
   "input.steerButton": "Sturen",
   "input.steerTitle": "Versturen in de actieve Codex-beurt",
