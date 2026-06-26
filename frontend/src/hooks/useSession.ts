@@ -19,6 +19,8 @@ import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 import { API } from "../api";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
+import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
+import { subscribeMany } from "../lib/eventBus";
 
 export { sortSessionsForList };
 
@@ -77,6 +79,11 @@ export type SessionListFilters = {
   modes?: string[];
   sources?: string[];
   sortBy?: string;
+  /** Status-bucket grouping as the strongest sort key (below empty-new +
+   * pinned). Backend-owned (pref `session_status_sort`); the value here
+   * mirrors the `/api/sessions` response so the local re-sort matches the
+   * backend page order. */
+  statusSort?: boolean;
 };
 
 function sameStringList(a?: string[], b?: string[]): boolean {
@@ -103,7 +110,8 @@ function sameSessionListFilters(
     sameStringList(a.modelIds, b.modelIds) &&
     sameStringList(a.modes, b.modes) &&
     sameStringList(a.sources, b.sources) &&
-    (a.sortBy ?? "") === (b.sortBy ?? "")
+    (a.sortBy ?? "") === (b.sortBy ?? "") &&
+    Boolean(a.statusSort) === Boolean(b.statusSort)
   );
 }
 
@@ -610,6 +618,19 @@ export function useSession(authStatus?: string) {
   const currentSessionRef = useRef<Session | null>(null);
   currentSessionRef.current = currentSession;
 
+  // Single sort entry-point for the sidebar list. Reads folderView/sortBy/
+  // statusSort/search from the live filters ref so every call site stays a
+  // one-arg call. When status sort is on (and not searching), injects the
+  // registry-backed rank; otherwise behaves exactly as the time-only sort.
+  const sortForList = useCallback((list: Session[]) => {
+    const f = sessionListFiltersRef.current;
+    const folderView = f.folderView ?? false;
+    const sortBy = f.sortBy ?? "updated_at";
+    const searchActive = Boolean(f.search?.trim());
+    const rankOf = f.statusSort && !searchActive ? statusRankForRow : undefined;
+    return sortSessionsForList(list, folderView, sortBy, rankOf);
+  }, []);
+
   useEffect(() => {
     if (!currentSession || wsTargetSessionId === null) return;
     rememberSessionTree(currentSession);
@@ -617,24 +638,25 @@ export function useSession(authStatus?: string) {
 
   const mergeSessionPage = useCallback(
     (prev: Session[], page: Session[], replace: boolean) => {
-      const filters = sessionListFiltersRef.current;
-      const folderView = filters.folderView ?? false;
-      const sortBy = filters.sortBy ?? "updated_at";
+      // Pure sort/merge ONLY. Do NOT mutate `sessionRegistry` here — this
+      // runs as a `setSessions` updater, which React executes during its
+      // render pass. Mutating an external store that `useSyncExternalStore`
+      // subscribes to (SessionStatusBadge) mid-render triggers React's
+      // "getSnapshot should be cached" infinite loop (#185). Registry
+      // seeding happens in `fetchSessionPage`, outside the updater.
       if (replace) {
         const backendIds = new Set(page.map((s) => s.id));
         const pendingOffline = prev.filter(
           (s) => s.offline_pending && !backendIds.has(s.id),
         );
-        return sortSessionsForList([...pendingOffline, ...page], folderView, sortBy);
+        return sortForList([...pendingOffline, ...page]);
       }
       const existingIds = new Set(prev.map((s) => s.id));
-      return sortSessionsForList(
+      return sortForList(
         [...prev, ...page.filter((s) => !existingIds.has(s.id))],
-        folderView,
-        sortBy,
       );
     },
-    [],
+    [sortForList],
   );
 
   const fetchSessionPage = useCallback(
@@ -642,6 +664,7 @@ export function useSession(authStatus?: string) {
       offset: number,
       replace: boolean,
       filterSnapshot: SessionListFilters = sessionListFiltersRef.current,
+      limitOverride?: number,
     ) => {
       if (sessionsLoadingPageRef.current && !replace) return;
       const requestSeq = ++sessionListRequestSeqRef.current;
@@ -652,7 +675,7 @@ export function useSession(authStatus?: string) {
       try {
         const params = new URLSearchParams({
           offset: String(offset),
-          limit: String(SESSION_LIST_PAGE_SIZE),
+          limit: String(limitOverride ?? SESSION_LIST_PAGE_SIZE),
         });
         const filters = filterSnapshot;
         if (filters.projectPath) params.set("project_path", filters.projectPath);
@@ -683,6 +706,11 @@ export function useSession(authStatus?: string) {
         const rawPage = data.sessions || [];
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
+        // Seed the registry from this page (async callback — NOT during
+        // render) so deeper-page rows have a live entry for both the
+        // status rank and the running/unread badge. Only fills missing
+        // sids; never clobbers a fresher live entry.
+        sessionRegistry.seedFromRows(page);
         setSessions((prev) => mergeSessionPage(prev, page, replace));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
@@ -709,6 +737,50 @@ export function useSession(authStatus?: string) {
     if (!sessionsLoaded || !sessionsHasMoreRef.current) return;
     await fetchSessionPage(sessionsNextOffsetRef.current, false);
   }, [fetchSessionPage, sessionsLoaded]);
+
+  // Re-paginate the FULL loaded span (not just page 0) so a status-churn
+  // refetch doesn't collapse the user's scroll depth back to one page.
+  // Capped at the backend's max page size (le=200): beyond 200 loaded rows
+  // the refetch covers only the top 200 — acceptable since the top status
+  // buckets are what the user is sorting toward.
+  const refetchLoadedSpan = useCallback(() => {
+    const loaded = sessionsRef.current.length;
+    const span = Math.min(Math.max(loaded, SESSION_LIST_PAGE_SIZE), 200);
+    void fetchSessionPage(0, true, sessionListFiltersRef.current, span);
+  }, [fetchSessionPage]);
+
+  // Status sort only: keep the list fresh against live status churn. On any
+  // status-affecting delta, (a) re-sort loaded rows off the live registry
+  // (immediate, authoritative interim view) and (b) debounce a full-span
+  // re-pagination so sessions on unloaded/deeper pages bubble in. The
+  // refetch debounce (2.5s) clears the backend's 2s monitoring-snapshot
+  // tick so the live re-sort and the refetch don't fight.
+  useEffect(() => {
+    if (!sessionListFilters.statusSort) return;
+    let resortTimer: number | undefined;
+    let refetchTimer: number | undefined;
+    const onDelta = () => {
+      window.clearTimeout(resortTimer);
+      resortTimer = window.setTimeout(() => {
+        setSessions((prev) => sortForList([...prev]));
+      }, 60);
+      window.clearTimeout(refetchTimer);
+      refetchTimer = window.setTimeout(() => {
+        refetchLoadedSpan();
+      }, 2500);
+    };
+    const unsub = subscribeMany([
+      ["session_monitoring_changed", onDelta],
+      ["session_running_changed", onDelta],
+      ["session_unread_changed", onDelta],
+      ["session_marker_changed", onDelta],
+    ]);
+    return () => {
+      unsub();
+      window.clearTimeout(resortTimer);
+      window.clearTimeout(refetchTimer);
+    };
+  }, [sessionListFilters.statusSort, sortForList, refetchLoadedSpan]);
 
   useEffect(() => {
     // Fire on mount + whenever we transition to 'authed'. If the mount-time
@@ -780,12 +852,10 @@ export function useSession(authStatus?: string) {
         // case `appendSessionIfNew` already inserted it. Without this
         // check the sidebar shows the new session twice.
         setSessions((prev) =>
-          sortSessionsForList(
+          sortForList(
             prev.some((s) => s.id === session.id)
               ? prev.map((s) => (s.id === session.id ? session : s))
               : [session, ...prev],
-            filters.folderView ?? false,
-            filters.sortBy ?? "updated_at",
           ),
         );
         lastEventSeqBySessionRef.current = {
@@ -804,11 +874,7 @@ export function useSession(authStatus?: string) {
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
-        : sortSessionsForList(
-            [session, ...prev],
-            sessionListFiltersRef.current.folderView ?? false,
-            sessionListFiltersRef.current.sortBy ?? "updated_at",
-          ),
+        : sortForList([session, ...prev]),
     );
     selectRequestIdRef.current++;
     setCurrentSession(session);
@@ -819,11 +885,7 @@ export function useSession(authStatus?: string) {
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
-        : sortSessionsForList(
-            [session, ...prev],
-            sessionListFiltersRef.current.folderView ?? false,
-            sessionListFiltersRef.current.sortBy ?? "updated_at",
-          ),
+        : sortForList([session, ...prev]),
     );
   }, []);
 
@@ -1709,10 +1771,8 @@ export function useSession(authStatus?: string) {
       const data = await response.json();
       const nextPinned = Boolean(data.pinned);
       setSessions((prev) =>
-        sortSessionsForList(
+        sortForList(
           prev.map((s) => (s.id === sessionId ? { ...s, pinned: nextPinned } : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
         )
       );
       void fetchSessions();
@@ -1736,10 +1796,8 @@ export function useSession(authStatus?: string) {
       );
       if (!unpinnedIds.size) return;
       setSessions((prev) =>
-        sortSessionsForList(
+        sortForList(
           prev.map((s) => (unpinnedIds.has(s.id) ? { ...s, pinned: false } : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
         )
       );
       void fetchSessions();
@@ -1833,10 +1891,8 @@ export function useSession(authStatus?: string) {
         return next;
       };
       setSessions((prev) =>
-        sortSessionsForList(
+        sortForList(
           prev.map((s) => (s.id === sessionId ? apply(s) : s)),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
         )
       );
       setCurrentSession((prev) => {
@@ -1901,12 +1957,10 @@ export function useSession(authStatus?: string) {
         return next;
       };
       setSessions((prev) =>
-        sortSessionsForList(
+        sortForList(
           prev
             .map((s) => (s.id === sessionId ? apply(s) : s))
             .filter(isSidebarVisibleSession),
-          sessionListFiltersRef.current.folderView ?? false,
-          sessionListFiltersRef.current.sortBy ?? "updated_at",
         )
       );
       setCurrentSession((prev) => {
@@ -1928,11 +1982,7 @@ export function useSession(authStatus?: string) {
     const filters = sessionListFiltersRef.current;
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
-      return sortSessionsForList(
-        [session, ...prev],
-        filters.folderView ?? false,
-        filters.sortBy ?? "updated_at",
-      );
+      return sortForList([session, ...prev]);
     });
   }, []);
 

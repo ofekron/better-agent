@@ -187,6 +187,12 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // Live PR-creation notice. Normally diverted in `useWebSocket` to the
+  // ephemeral chat-panel toast (commit 9653bf49) because pr-link has no
+  // uuid and never lands on the render tree; kept in the union so any
+  // frame that does reach `MessageBubble.renderGroupedEvents` (e.g. a
+  // future replay path) still type-checks and renders via PrLinkEvent.
+  | "pr_link"
   // Backend startup task lifecycle delta (register/done/failed/reset).
   // `useWebSocket` re-dispatches as a window CustomEvent that
   // `StartupTasksBanner` listens to; the banner's authoritative
@@ -1033,6 +1039,14 @@ export interface Session {
     | "comments"
     | "todos"
     | null;
+  /** Sidebar-list decorate fields — added by the backend session-list
+   * decorate step, NOT on the persisted tree. Live badges read status from
+   * `sessionRegistry`; these power the status-sort row-rank fallback for
+   * deeper-page rows the registry has not seeded yet. */
+  is_running?: boolean;
+  monitoring_state?: string;
+  unread_count?: number;
+  markers?: Record<string, { color: string; tooltip: string; sound?: boolean; tag?: string }>;
 }
 
 export interface Note {

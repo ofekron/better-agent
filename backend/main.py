@@ -1391,11 +1391,21 @@ async def patch_user_prefs(body: dict = Body(...)):
             if not isinstance(val, str):
                 raise ValueError("session_sort must be a string")
             user_prefs.set_session_sort(val)
+        if "session_status_sort" in body:
+            val = body["session_status_sort"]
+            if not isinstance(val, bool):
+                raise ValueError("session_status_sort must be a boolean")
+            user_prefs.set_session_status_sort(val)
         if "sessions_tabs_sort" in body:
             val = body["sessions_tabs_sort"]
             if not isinstance(val, str):
                 raise ValueError("sessions_tabs_sort must be a string")
             user_prefs.set_session_tabs_sort(val)
+        if "sessions_tabs_status_sort" in body:
+            val = body["sessions_tabs_status_sort"]
+            if not isinstance(val, bool):
+                raise ValueError("sessions_tabs_status_sort must be a boolean")
+            user_prefs.set_session_tabs_status_sort(val)
         if "sessions_tabs_visible" in body:
             val = body["sessions_tabs_visible"]
             if not isinstance(val, bool):
@@ -2516,12 +2526,67 @@ async def _auto_delete_expired_sessions() -> None:
             logger.exception("auto-delete expired session failed sid=%s", sid)
 
 
-def _session_list_sort_key(session: dict, folder_view: bool, sort_by: str) -> tuple:
-    inner = (
+# Attention-marker tags emitted by the user-attention extension. The tag
+# rides the marker projection (see file_ref_resolver.detect_markers); we
+# read it here rather than match on color/tooltip (which drift).
+_MARKER_TAG_NEEDS_DECISION = "NEEDS_USER_DECISION"
+_MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE"
+_RUNNING_STATES = ("active", "waiting_on_background")
+
+
+def _session_status_rank(
+    session: dict,
+    monitoring_by_sid: dict[str, str],
+    unread_by_sid: dict[str, int],
+) -> int:
+    """Status bucket for the status-sort option (higher sorts first under
+    reverse=True): 4 running, 3 needs-user-decision, 2 has-new, 1
+    all-tasks-done, 0 none. Highest applicable bucket wins."""
+    sid = session.get("id") or ""
+    # Snapshot wins for local rows (their summary has no monitoring_state at
+    # sort time); fall back to the row's own fields for remote-node rows that
+    # aren't in the local snapshot.
+    state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    if state in _RUNNING_STATES:
+        return 4
+    markers = session.get("markers") or {}
+    tags = {
+        (m or {}).get("tag")
+        for m in markers.values()
+        if isinstance(m, dict)
+    }
+    if state == "blocked_on_user" or _MARKER_TAG_NEEDS_DECISION in tags:
+        return 3
+    unread = unread_by_sid.get(sid)
+    if unread is None:
+        unread = session.get("unread_count", 0)
+    if (unread or 0) > 0:
+        return 2
+    if _MARKER_TAG_ALL_TASKS_DONE in tags:
+        return 1
+    return 0
+
+
+def _session_list_sort_key(
+    session: dict,
+    folder_view: bool,
+    sort_by: str,
+    *,
+    status_sort: bool = False,
+    monitoring_by_sid: dict[str, str] | None = None,
+    unread_by_sid: dict[str, int] | None = None,
+) -> tuple:
+    # empty-new and pinned stay above status; status is the strongest key
+    # below them, time the tie-break: (isEmpty, pinned, [status], ts).
+    inner: tuple = (
         int(session.get("message_count", 0) or 0) == 0,
         bool(session.get("pinned", False)),
-        session_store.timestamp_sort_value(session.get(sort_by)),
     )
+    if status_sort:
+        inner += (
+            _session_status_rank(session, monitoring_by_sid or {}, unread_by_sid or {}),
+        )
+    inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:
         return inner
     # folderized sessions first when folder view is on
@@ -2683,14 +2748,23 @@ def _session_filtered_sort_key(
     search: str | None,
     content_scores: dict[str, int],
     sort_by: str,
+    status_sort: bool = False,
+    monitoring_by_sid: dict[str, str] | None = None,
+    unread_by_sid: dict[str, int] | None = None,
 ) -> tuple:
+    # In search mode relevance dominates; status only breaks ties below the
+    # search score: (pinned, score>0, score, [status], ts).
     search_score = content_scores.get(str(session.get("id") or ""), 0)
-    inner = (
+    inner: tuple = (
         bool(session.get("pinned", False)),
         search_score > 0,
         search_score,
-        session_store.timestamp_sort_value(session.get(sort_by)),
     )
+    if status_sort:
+        inner += (
+            _session_status_rank(session, monitoring_by_sid or {}, unread_by_sid or {}),
+        )
+    inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:
         return inner
     # folderized sessions first when folder view is on
@@ -2713,6 +2787,7 @@ def _filter_sort_sessions_for_list(
     sources: set[str],
     content_scores: dict[str, int],
     sort_by: str,
+    status_sort: bool = False,
 ) -> list[dict]:
     out = [
         session for session in sessions
@@ -2731,6 +2806,15 @@ def _filter_sort_sessions_for_list(
             content_scores=content_scores,
         )
     ]
+    # Snapshots read ONCE per request (not per-session) — the same cheap
+    # caches the decorate step uses. monitoring is the 2s background-tick
+    # cache; the frontend's live registry rank is the authoritative interim
+    # view between fetches (see useSession debounced refetch).
+    monitoring_by_sid: dict[str, str] = {}
+    unread_by_sid: dict[str, int] = {}
+    if status_sort:
+        _, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
+        unread_by_sid = session_manager.unread_counts_snapshot()
     out.sort(
         key=(
             (lambda session: _session_filtered_sort_key(
@@ -2739,9 +2823,19 @@ def _filter_sort_sessions_for_list(
                 search=search,
                 content_scores=content_scores,
                 sort_by=sort_by,
+                status_sort=status_sort,
+                monitoring_by_sid=monitoring_by_sid,
+                unread_by_sid=unread_by_sid,
             ))
             if search and search.strip()
-            else (lambda session: _session_list_sort_key(session, folder_view, sort_by))
+            else (lambda session: _session_list_sort_key(
+                session,
+                folder_view,
+                sort_by,
+                status_sort=status_sort,
+                monitoring_by_sid=monitoring_by_sid,
+                unread_by_sid=unread_by_sid,
+            ))
         ),
         reverse=True,
     )
@@ -2765,6 +2859,7 @@ def _build_local_sessions_page_for_list(
     sources: set[str],
     search_fields: str | None,
     sort_by: str,
+    status_sort: bool = False,
 ) -> tuple[list[dict], int]:
     content_scores: dict[str, int] = {}
     search_query = (search or "").strip()
@@ -2803,6 +2898,7 @@ def _build_local_sessions_page_for_list(
             sources=sources,
             content_scores=content_scores,
             sort_by=sort_by,
+            status_sort=status_sort,
         )
     total = len(out)
     end = offset + limit
@@ -2860,6 +2956,7 @@ async def get_sessions(
             sort_by if sort_by in user_prefs.SESSION_SORT_VALUES
             else user_prefs.get_session_sort()
         )
+        effective_status_sort = user_prefs.get_session_status_sort()
         filters = {
             "offset": offset,
             "limit": limit,
@@ -2876,6 +2973,7 @@ async def get_sessions(
             "sources": _split_session_filter(sources),
             "search_fields": search_fields,
             "sort_by": effective_sort_by,
+            "status_sort": effective_status_sort,
         }
     if not connected:
         with perf.timed("sessions.list.local_page_thread"):
@@ -2886,6 +2984,8 @@ async def get_sessions(
             "limit": limit,
             "total": total,
             "has_more": offset + limit < total,
+            "sort_by": effective_sort_by,
+            "status_sort": effective_status_sort,
         }
 
     content_scores: dict[str, int] = {}
@@ -2972,6 +3072,7 @@ async def get_sessions(
             modes=_split_session_filter(modes),
             content_scores=content_scores,
             sort_by=effective_sort_by,
+            status_sort=effective_status_sort,
         )
     total = len(out)
     end = offset + limit
@@ -2988,6 +3089,8 @@ async def get_sessions(
         "limit": limit,
         "total": total,
         "has_more": end < total,
+        "sort_by": effective_sort_by,
+        "status_sort": effective_status_sort,
     }
 
 

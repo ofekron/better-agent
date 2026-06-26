@@ -93,7 +93,7 @@ import {
   type VoicePromptEventDetail,
 } from "./lib/voiceActivation";
 import { useRoute, sessionPath } from "./hooks/useRoute";
-import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
+import { ackSessionSeen, sessionRegistry, statusRankForRow, useSessionMeta } from "./lib/sessionRegistry";
 import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, TokenUsage } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
@@ -126,7 +126,7 @@ import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
 import { API, WS_URL } from "./api";
-import { eventBus } from "./lib/eventBus";
+import { eventBus, subscribeMany } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
@@ -2062,15 +2062,42 @@ function AppMain({
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
   // tabs bar can be hidden and its order chosen from Settings.
   const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
+  const [sessionTabsStatusSort, setSessionTabsStatusSort] = useState(false);
   const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
-    const apply = (d: { sessions_tabs_sort?: unknown; sessions_tabs_visible?: unknown }) => {
+    const apply = (d: {
+      sessions_tabs_sort?: unknown;
+      sessions_tabs_status_sort?: unknown;
+      sessions_tabs_visible?: unknown;
+    }) => {
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
+      if (typeof d.sessions_tabs_status_sort === "boolean") setSessionTabsStatusSort(d.sessions_tabs_status_sort);
       if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
     };
     const off = eventBus.subscribe("user_prefs_changed", (p) => apply(p as Record<string, unknown>));
     return off;
   }, []);
+  // When tabs status sort is on, recompute the tab order on live status
+  // deltas (tabs are fully loaded, so no refetch needed — just re-rank).
+  const [tabsStatusTick, setTabsStatusTick] = useState(0);
+  useEffect(() => {
+    if (!sessionTabsStatusSort) return;
+    let timer: number | undefined;
+    const bump = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setTabsStatusTick((t) => t + 1), 60);
+    };
+    const unsub = subscribeMany([
+      ["session_monitoring_changed", bump],
+      ["session_running_changed", bump],
+      ["session_unread_changed", bump],
+      ["session_marker_changed", bump],
+    ]);
+    return () => {
+      unsub();
+      window.clearTimeout(timer);
+    };
+  }, [sessionTabsStatusSort]);
   const firstRunWizardOpenedRef = useRef(false);
   // Load user prefs (language + shortcuts) from backend after auth
   useEffect(() => {
@@ -2086,6 +2113,9 @@ function AppMain({
         }
         if (typeof data.sessions_tabs_sort === "string") {
           setSessionTabsSort(data.sessions_tabs_sort);
+        }
+        if (typeof data.sessions_tabs_status_sort === "boolean") {
+          setSessionTabsStatusSort(data.sessions_tabs_status_sort);
         }
         if (typeof data.sessions_tabs_visible === "boolean") {
           setSessionTabsVisible(data.sessions_tabs_visible);
@@ -3461,6 +3491,7 @@ function AppMain({
   // on the chosen timestamp). Open-order (newest-opened first) is the stable
   // tie-break for sessions sharing/lacking a timestamp.
   const sortedOpenSessions = useMemo(() => {
+    void tabsStatusTick; // recompute when live status changes (status sort on)
     const openOrder = openSessionIds.slice().reverse();
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
@@ -3473,11 +3504,23 @@ function AppMain({
     return records
       .map((s, i) => ({ s, i }))
       .sort((a, b) => {
+        // Tabs are fully loaded → rank straight off the live registry. Status
+        // is the strongest key; timestamp the tie-break; open-order last.
+        if (sessionTabsStatusSort) {
+          const r = statusRankForRow(b.s) - statusRankForRow(a.s);
+          if (r !== 0) return r;
+        }
         const d = tsOf(b.s) - tsOf(a.s);
         return d !== 0 ? d : a.i - b.i; // stable: keep open-order on ties
       })
       .map((e) => e.s);
-  }, [openSessionIds, findOpenSessionRecord, sessionTabsSort]);
+  }, [
+    openSessionIds,
+    findOpenSessionRecord,
+    sessionTabsSort,
+    sessionTabsStatusSort,
+    tabsStatusTick,
+  ]);
 
   const navigateToCreatedSession = useCallback(
     (session: Session) => {

@@ -1147,6 +1147,47 @@ export function SessionList({
     });
   }, []);
 
+  // Status-bucket sort toggle — orthogonal to the timestamp sort above.
+  // Backend pref `session_status_sort` is the source of truth.
+  const [sessionStatusSort, setSessionStatusSort] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (v: unknown) => {
+      if (!cancelled && typeof v === "boolean") setSessionStatusSort(v);
+    };
+    fetch(`${API}/api/user-prefs`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((data: { session_status_sort?: unknown }) => apply(data.session_status_sort))
+      .catch(() => {});
+    const off = eventBus.subscribe(
+      "user_prefs_changed",
+      (p) => apply((p as { session_status_sort?: unknown }).session_status_sort),
+    );
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+  const toggleSessionStatusSort = useCallback(() => {
+    setSessionStatusSort((prev) => {
+      const next = !prev;
+      void (async () => {
+        try {
+          const res = await fetch(`${API}/api/user-prefs`, {
+            method: "PATCH",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_status_sort: next }),
+          });
+          if (!res.ok) throw new Error("session_status_sort patch failed");
+        } catch {
+          setSessionStatusSort(prev); // revert — pref is the authority
+        }
+      })();
+      return next; // optimistic → backendFilters change → refetch
+    });
+  }, []);
+
   const toggleFolderView = useCallback(async () => {
     const next = !folderViewEnabled;
     setFolderViewEnabled(next); // optimistic → backendFilters change → refetch
@@ -1384,6 +1425,7 @@ export function SessionList({
       folderIds: selectedFolderIds,
       folderView: folderViewEnabled,
       sortBy: sessionSort,
+      statusSort: sessionStatusSort,
       tagIds: selectedTagIds,
       providerIds: activeProviderIds,
       modelIds: activeModelIds,
@@ -1401,6 +1443,7 @@ export function SessionList({
       fileEditModeFilter,
       folderViewEnabled,
       sessionSort,
+      sessionStatusSort,
       search,
       selectedSearchFields,
       selectedFolderIds,
@@ -2013,6 +2056,22 @@ export function SessionList({
                   onClick={() => void changeSessionSort("last_opened_at")}
                 >
                   {t("session.sortByOpened")}
+                </button>
+              </div>
+            </div>
+            <div className="session-filter-group">
+              <div className="session-filter-label" title={t("session.groupByStatusHint")}>
+                {t("session.groupByStatus")}
+              </div>
+              <div className="session-tag-filter">
+                <button
+                  type="button"
+                  className={`session-tag-toggle ${sessionStatusSort ? "active" : ""}`}
+                  aria-pressed={sessionStatusSort}
+                  title={t("session.groupByStatusHint")}
+                  onClick={toggleSessionStatusSort}
+                >
+                  {t("session.groupByStatusOn")}
                 </button>
               </div>
             </div>

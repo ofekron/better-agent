@@ -32,6 +32,8 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
     "updated_at", "last_user_prompt_at", "last_opened_at",
 )
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
+DEFAULT_SESSION_STATUS_SORT = False
+DEFAULT_SESSION_TABS_STATUS_SORT = False
 DEFAULT_SESSION_TABS_VISIBLE = True
 DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
@@ -262,6 +264,40 @@ def set_session_sort(value: str) -> SessionSort:
     return value
 
 
+def get_session_status_sort() -> bool:
+    """Whether the sidebar session list groups by status bucket (running >
+    needs-decision > has-new > all-tasks-done) as the strongest key (below
+    empty-new + pinned), with the chosen timestamp as the tie-break."""
+    val = _load().get("session_status_sort", DEFAULT_SESSION_STATUS_SORT)
+    return val if isinstance(val, bool) else DEFAULT_SESSION_STATUS_SORT
+
+
+def set_session_status_sort(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid session_status_sort: {enabled!r}")
+    prefs = _load()
+    prefs["session_status_sort"] = enabled
+    _save(prefs)
+    return enabled
+
+
+def get_session_tabs_status_sort() -> bool:
+    """Status-bucket grouping for the open-session tabs bar (same buckets as
+    the sidebar). Tabs are fully loaded client-side so the frontend ranks
+    off the live registry; this pref just persists the toggle."""
+    val = _load().get("sessions_tabs_status_sort", DEFAULT_SESSION_TABS_STATUS_SORT)
+    return val if isinstance(val, bool) else DEFAULT_SESSION_TABS_STATUS_SORT
+
+
+def set_session_tabs_status_sort(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid sessions_tabs_status_sort: {enabled!r}")
+    prefs = _load()
+    prefs["sessions_tabs_status_sort"] = enabled
+    _save(prefs)
+    return enabled
+
+
 def get_session_tabs_sort() -> SessionTabsSort:
     """Which timestamp the open-session tabs bar sorts by (descending):
     last modification, last user prompt, or last opened on a client."""
@@ -384,7 +420,9 @@ def get_all() -> dict:
         "network_bind_address": get_network_bind_address(),
         "folder_view_enabled": get_folder_view_enabled(),
         "session_sort": get_session_sort(),
+        "session_status_sort": get_session_status_sort(),
         "sessions_tabs_sort": get_session_tabs_sort(),
+        "sessions_tabs_status_sort": get_session_tabs_status_sort(),
         "sessions_tabs_visible": get_session_tabs_visible(),
         "voice_close_on_background": get_voice_close_on_background(),
     }

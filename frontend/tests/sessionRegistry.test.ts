@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { eventBus } from "../src/lib/eventBus";
-import { sessionRegistry } from "../src/lib/sessionRegistry";
+import {
+  sessionRegistry,
+  statusRankOf,
+  statusRankForRow,
+} from "../src/lib/sessionRegistry";
 
 /**
  * Reducer-level tests for the singleton sessionRegistry.
@@ -448,5 +452,64 @@ describe("sessionRegistry — bootstrap mechanics", () => {
     await bootstrapWith([]);
     expect(sessionRegistry.getSession("preboot").is_running).toBe(true);
     expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+  });
+});
+
+describe("status rank (mirror of backend _session_status_rank)", () => {
+  const m = (tag: string) => ({ ext: { color: "#x", tooltip: "t", tag } });
+
+  it("buckets: 4 running, 3 needs, 2 new, 1 done, 0 none — highest wins", () => {
+    expect(statusRankOf({ monitoring_state: "active" })).toBe(4);
+    expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(4);
+    expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(3);
+    expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(3);
+    expect(statusRankOf({ unread_count: 2 })).toBe(2);
+    expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
+    expect(statusRankOf({ monitoring_state: "idle" })).toBe(0);
+    // precedence: running outranks a stale needs-decision marker
+    expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(4);
+    // classification by TAG, not color — untagged marker is inert
+    expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
+  });
+
+  it("statusRankForRow prefers the live registry over the row snapshot", async () => {
+    await resetRegistry();
+    const sid = "rank-live";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "active",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    // Row snapshot claims stopped, but the live registry says active → live wins.
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(4);
+  });
+
+  it("statusRankForRow falls back to row fields when the sid is unseeded", async () => {
+    await resetRegistry();
+    expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(4);
+    expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(2);
+    expect(statusRankForRow({ id: "deep-page-3" })).toBe(0);
+  });
+
+  it("seedFromRows fills missing sids without clobbering fresher live state", async () => {
+    await resetRegistry();
+    const sid = "seed-1";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "active",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    // A staler page row for the SAME sid must NOT downgrade the live entry…
+    sessionRegistry.seedFromRows([
+      { id: sid, monitoring_state: "stopped", cwd: "/p", node_id: "primary" },
+      { id: "seed-new", monitoring_state: "active", cwd: "/p", node_id: "primary" },
+    ]);
+    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    // …but a brand-new sid IS materialized from the page row.
+    expect(sessionRegistry.getSession("seed-new").is_running).toBe(true);
   });
 });
