@@ -3,6 +3,7 @@ import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type { FileNode, FileSearchResult, SearchMethod } from "../types";
 import { SearchMethods } from "./SearchMethods";
+import { SearchInput } from "./SearchInput";
 import { API } from "../api";
 import { fetchWithRetry } from "../utils/fetchRetry";
 import { joinPickerPath } from "src/utils/pathJoin";
@@ -259,7 +260,7 @@ export function FileTree({
     <div className="file-tree">
       {header}
       <div className="file-tree-search">
-        <input
+        <SearchInput
           ref={searchRef}
           type="text"
           className="file-tree-search-input"

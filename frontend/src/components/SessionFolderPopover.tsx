@@ -4,6 +4,7 @@ import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { buildFolderPathMap } from "../sessionFolders";
 import type { SessionFolder } from "../types";
 import type { PopoverAnchor } from "./SessionTagPopover";
+import { SearchInput } from "./SearchInput";
 
 interface Props {
   anchor: PopoverAnchor;
@@ -112,7 +113,7 @@ export function SessionFolderPopover({
       style={pos}
     >
       <div className="session-tag-popover-header">{t("session.folderPopoverTitle")}</div>
-      <input
+      <SearchInput
         type="text"
         className="session-tag-popover-search"
         placeholder={t("session.folderSearch")}

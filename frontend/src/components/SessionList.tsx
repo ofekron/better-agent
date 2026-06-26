@@ -18,6 +18,7 @@ import { SessionFolderPopover } from "./SessionFolderPopover";
 import { NewFolderDropPopover } from "./NewFolderDropPopover";
 import { SessionTagPopover, type PopoverAnchor } from "./SessionTagPopover";
 import Icon from "./Icon";
+import { SearchInput } from "./SearchInput";
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
@@ -1858,7 +1859,7 @@ export function SessionList({
           <div className={`session-search${searchExpanded ? " expanded" : ""}`}>
             <div className="session-search-input-wrap">
               <Icon name="search" size={13} className="session-search-icon" />
-              <input
+              <SearchInput
                 type="text"
                 placeholder={search || searchFocused ? t("session.searchPlaceholder") : ""}
                 value={search}
