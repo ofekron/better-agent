@@ -57,6 +57,9 @@ def _seed_extension() -> Path:
                 "",
                 "def create_router(context):",
                 "    router = APIRouter()",
+                "    @router.api_route('/', methods=['GET'])",
+                "    def root():",
+                "        return {'root': True}",
                 "    @router.get('/ping')",
                 "    def ping():",
                 "        return {",
@@ -266,6 +269,15 @@ def main() -> int:
         check(response.json()["extension_id"] == "ofek.backend", "backend extension receives context")
         check(response.json()["source_repo_url"] == "https://example.test/extensions.git", "backend extension receives source repo")
         check(response.json()["source_extension_path"] == "extensions/backend", "backend extension receives source path")
+        # Bare base (no trailing slash) must dispatch DIRECTLY to the extension's
+        # root handler. follow_redirects=False is essential: unpatched code only
+        # 307-redirects to the slashed path, which the live app's static mount
+        # preempts into a 404 "Not Found" — the actual page-load bug.
+        response = client.get("/api/extensions/ofek.backend/backend", follow_redirects=False)
+        check(
+            response.status_code == 200 and response.json().get("root") is True,
+            "bare extension backend base (no trailing slash) reaches root handler",
+        )
         response = client.get(
             "/api/extensions/ofek.backend/backend/headers",
             headers={

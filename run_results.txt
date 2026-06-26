@@ -1,0 +1,8 @@
+flow	b112c75245a30e5f380c
+run	e73da31a-9162-4c7a-8a1d-3e624516c0e0
+status	Failed
+completed	True
+duration	180.02871227264404
+steps	4	failed=1,passed=2,unknown=1
+step	3	FAILED	TextValidation "dom: [data-testid="session-list"]"
+reason	exists: no elements match '[data-testid="session-list"]'

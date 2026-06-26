@@ -75,7 +75,13 @@ class _UPM:
 
 
 class _RetryProvider:
-    def __init__(self, outcomes: list[dict]) -> None:
+    def __init__(
+        self,
+        outcomes: list[dict],
+        *,
+        id: str = "codex",
+        emit_discovered: bool = False,
+    ) -> None:
         self._runs: dict = {}
         self.outcomes = outcomes
         self.prompts: list[str] = []
@@ -83,6 +89,8 @@ class _RetryProvider:
         self.continuation_chains: list[list[str] | None] = []
         self.cancelled: list[str] = []
         self.KIND = "codex"
+        self.id = id
+        self._emit_discovered = emit_discovered
 
     def start_run(self, **kw):
         self.prompts.append(kw["prompt"])
@@ -98,6 +106,14 @@ class _RetryProvider:
             {"popen": type("Popen", (), {"pid": os.getpid()})()},
         )()
 
+        if self._emit_discovered and payload.get("session_id"):
+            kw["loop"].call_soon_threadsafe(
+                queue.put_nowait,
+                type("E", (), {
+                    "type": "session_discovered",
+                    "data": {"session_id": payload["session_id"]},
+                })(),
+            )
         kw["loop"].call_soon_threadsafe(
             queue.put_nowait,
             type("E", (), {"type": "complete", "data": payload})(),
@@ -492,6 +508,63 @@ def test_codex_context_fill_preempts_native_compaction() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_lazy_selector_change_continuation() -> None:
+    print("T7d lazy selector change continuation")
+    session = session_manager.create(name="lazy-selector", cwd="/tmp", model="sonnet", provider_id="prov-a")
+    sid = session["id"]
+
+    # Simulate a successful previous run that set last_active_provider_id and last_active_model
+    session_manager.set_agent_sid(sid, "native", "old-provider-sid", provider_id="prov-a", model="sonnet")
+
+    # Change session selectors (provider/model) to simulate user action
+    session_manager.set_selectors(sid, provider_id="prov-b", model="haiku")
+
+    provider = _RetryProvider(
+        [{
+            "success": True,
+            "session_id": "fresh-provider-b",
+            "token_usage": {"input_tokens": 1},
+        }],
+        id="prov-b",
+        emit_discovered=True,
+    )
+    c = _StubCoordinator()
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="continue on new model",
+            cwd="/tmp",
+            model="haiku",
+            session_id="old-provider-sid",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-lazy-selector",
+        )
+
+    result = asyncio.run(_go())
+    fresh = session_manager.get(sid) or {}
+    check("provider spawned once", len(provider.prompts) == 1)
+    check("real spawn is fresh", provider.session_ids == [None])
+    check(
+        "chain persisted old provider sid",
+        fresh.get("continuation_chain") == ["old-provider-sid"],
+    )
+    check("runner received continuation chain", provider.continuation_chains == [["old-provider-sid"]])
+    check("prompt contains provider change msg", "Session provider or model changed" in provider.prompts[0])
+    check("last active provider updated", fresh.get("last_active_provider_id") == "prov-b")
+    check("last active model updated", fresh.get("last_active_model") == "haiku")
+    check("result success", result.get("success") is True)
+
+
 def test_wait_for_clear_runs_blocks_then_releases() -> None:
     print("T8 wait_for_clear_runs barrier")
     tm = TurnManager(_StubCoordinator())
@@ -526,6 +599,7 @@ def main() -> int:
     test_rate_limit_retry_spawns_once_then_emits_terminal()
     test_forced_context_overflow_retries_as_fresh_continuation()
     test_codex_context_fill_preempts_native_compaction()
+    test_lazy_selector_change_continuation()
     test_wait_for_clear_runs_blocks_then_releases()
     print()
     if failures:
