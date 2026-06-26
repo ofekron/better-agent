@@ -532,6 +532,7 @@ const BUILTIN_EXTENSION_IDS = {
   rearranger: "ofek-dev.rearranger",
   promptEngineer: "ofek-dev.prompt-engineer",
   browserHarness: "ofek-dev.browser-harness",
+  testape: "ofek.testape",
 } as const;
 
 type BuiltinExtensionFlags = Record<keyof typeof BUILTIN_EXTENSION_IDS, boolean>;
@@ -548,6 +549,7 @@ const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   rearranger: true,
   promptEngineer: true,
   browserHarness: true,
+  testape: true,
 };
 
 function useBuiltinExtensionFlags(authStatus: "loading" | "authed"): BuiltinExtensionFlags {
@@ -596,6 +598,7 @@ function AppMain({
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
   const canvasPanelModules = useExtensionFrontendModules("right-panel-canvas");
+  const screenPanelModules = useExtensionFrontendModules("right-panel-screen");
   const askGreetingModules = useExtensionFrontendModules("ask-greeting");
   const askSessionPickerModules = useExtensionFrontendModules("ask-session-picker");
   const sessionActionModalModules = useExtensionFrontendModules("session-action-modal");
@@ -1098,6 +1101,10 @@ function AppMain({
   // Supervisor prompt modal — shown when enabling supervisor so the user
   // can edit the per-turn custom prompt before activation.
   const [supervisorPromptModalOpen, setSupervisorPromptModalOpen] = useState(false);
+  // "enable" — confirm button reads Enable and activates supervisor.
+  // "edit" — confirm button reads Save; supervisor is already enabled, the
+  // enabled:true write in onConfirm is a no-op and only the prompt updates.
+  const [supervisorPromptModalMode, setSupervisorPromptModalMode] = useState<"enable" | "edit">("enable");
   // INVARIANT: the modal is bound to whichever session was current
   // when it opened — `onConfirm` writes via `currentSession.id` at
   // click time. Force-close on session switch so a stale modal can't
@@ -2151,13 +2158,16 @@ function AppMain({
   }, []);
   const [viewingFile, setViewingFile] = useState<ViewingFile | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<
-    "files" | "canvas" | "notes" | "comments" | "todos"
+    "files" | "canvas" | "notes" | "comments" | "todos" | "screen"
   >("files");
   useEffect(() => {
     if (!builtinExtensions.canvas && rightPanelTab === "canvas") {
       setRightPanelTab("files");
     }
-  }, [builtinExtensions.canvas, rightPanelTab]);
+    if (!builtinExtensions.testape && rightPanelTab === "screen") {
+      setRightPanelTab("files");
+    }
+  }, [builtinExtensions.canvas, builtinExtensions.testape, rightPanelTab]);
   const [sessionTokenUsage, setSessionTokenUsage] =
     useState<TokenUsage | null>(null);
   const [sessionTokenUsageLast, setSessionTokenUsageLast] =
@@ -3328,7 +3338,11 @@ function AppMain({
     if (lastTabSyncedSidRef.current === currentSession.id) return;
     lastTabSyncedSidRef.current = currentSession.id;
     const persisted = localRightPanelStates[currentSession.id]?.tab;
-    if (persisted && (persisted !== "canvas" || builtinExtensions.canvas)) {
+    if (
+      persisted &&
+      (persisted !== "canvas" || builtinExtensions.canvas) &&
+      (persisted !== "screen" || builtinExtensions.testape)
+    ) {
       setRightPanelTab(persisted);
       return;
     }
@@ -5848,6 +5862,7 @@ function AppMain({
                   ? (enabled) => {
                       if (!currentSession) return;
                       if (enabled) {
+                        setSupervisorPromptModalMode("enable");
                         setSupervisorPromptModalOpen(true);
                       } else {
                         applySessionMetadata(currentSession.id, { supervisor_enabled: false });
@@ -5861,6 +5876,15 @@ function AppMain({
                           },
                         );
                       }
+                    }
+                  : undefined
+              }
+              onEditSupervisorPrompt={
+                builtinExtensions.supervisor
+                  ? () => {
+                      if (!currentSession) return;
+                      setSupervisorPromptModalMode("edit");
+                      setSupervisorPromptModalOpen(true);
                     }
                   : undefined
               }
@@ -6347,6 +6371,18 @@ function AppMain({
                   {t("rightPanel.canvas")}
                 </button>
               )}
+              {builtinExtensions.testape && screenPanelModules.length > 0 && (
+                <button
+                  className={`right-panel-tab ${rightPanelTab === "screen" ? "active" : ""}`}
+                  onClick={() => {
+                    setRightPanelTab("screen");
+                    if (currentSession && !isMobile)
+                      patchRightPanel(currentSession.id, { tab: "screen", clearAutoReasons: true });
+                  }}
+                >
+                  {t("rightPanel.screen", "Screen")}
+                </button>
+              )}
               <button
                 className={`right-panel-tab ${rightPanelTab === "comments" ? "active" : ""}`}
                 onClick={() => {
@@ -6373,6 +6409,18 @@ function AppMain({
             ) : builtinExtensions.canvas && rightPanelTab === "canvas" ? (
               currentSession ? (
                 canvasPanelModules.map((module) => (
+                  <ExtensionModuleSlot
+                    key={`${module.extension_id}:${module.id}`}
+                    module={module}
+                    context={{ sessionId: currentSession.id }}
+                  />
+                ))
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : builtinExtensions.testape && rightPanelTab === "screen" ? (
+              currentSession ? (
+                screenPanelModules.map((module) => (
                   <ExtensionModuleSlot
                     key={`${module.extension_id}:${module.id}`}
                     module={module}
@@ -6697,6 +6745,7 @@ function AppMain({
             context={{
               activeModal: "supervisor-prompt",
               open: supervisorPromptModalOpen,
+              mode: supervisorPromptModalMode,
               defaultPrompt: currentSession?.supervisor_custom_prompt ?? "",
               onConfirm: (prompt: string) => {
                 if (!currentSession) return;

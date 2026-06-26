@@ -220,6 +220,7 @@ interface Props {
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   disabled: boolean;
   session?: Session | null;
+  onRename?: (id: string, name: string) => void;
   /** Experimental: toggle the per-session rearranger side session. */
   onToggleRearranger?: (enabled: boolean) => void;
   tags?: InlineTag[];
@@ -275,6 +276,9 @@ interface Props {
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
   onToggleSupervisor?: (enabled: boolean) => void;
+  /** Reopen the supervisor prompt modal to edit the custom prompt
+   *  while supervisor is already enabled. */
+  onEditSupervisorPrompt?: () => void;
   /** Graduate the supervisor's claude session into a new native BC root
    *  and re-back the supervisor on this session as a fork of it. */
   onSeparateSupervisor?: () => void;
@@ -362,6 +366,7 @@ export function Chat({
   onViewDiff,
   disabled,
   session,
+  onRename,
   onAddTag,
   onAdvSync,
   tags,
@@ -388,6 +393,7 @@ export function Chat({
   onQueuedTextEdit,
   onReviewLastWork,
   onToggleSupervisor,
+  onEditSupervisorPrompt,
   onSeparateSupervisor,
   sendTarget,
   onSendTargetChange,
@@ -428,6 +434,35 @@ export function Chat({
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(session?.name ?? "");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setEditing(false);
+    setEditName(session?.name ?? "");
+  }, [session?.id, session?.name]);
+
+  const startEdit = () => {
+    if (session && onRename) {
+      setEditName(session.name);
+      setEditing(true);
+    }
+  };
+
+  const commitEdit = () => {
+    setEditing(false);
+    const trimmed = editName.trim();
+    if (session && onRename && trimmed && trimmed !== session.name) {
+      onRename(session.id, trimmed);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setEditName(session?.name ?? "");
+  };
+
   const loadOlderOpId = `chat:loadOlder:${session?.id ?? "none"}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
 
@@ -918,9 +953,30 @@ export function Chat({
       )}
       {session && !hideToolbar && (
         <div className="chat-toolbar">
-          <div className="chat-toolbar-title" title={session.name}>
-            {session.name}
-          </div>
+          {editing && onRename ? (
+            <input
+              ref={(el) => { inputRef.current = el; }}
+              className="chat-rename-input"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") commitEdit();
+                if (e.key === "Escape") cancelEdit();
+              }}
+              onBlur={commitEdit}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+            />
+          ) : (
+            <div
+              className="chat-toolbar-title"
+              title={session.name}
+              onDoubleClick={startEdit}
+            >
+              {session.name}
+            </div>
+          )}
           {onShowNotes && (session.notes?.length ?? 0) > 0 && (
             <button
               className="chat-toolbar-badge-btn"
@@ -1193,6 +1249,7 @@ export function Chat({
               onSendTargetChange={onSendTargetChange}
               supervisorEnabled={!!session?.supervisor_enabled}
               onToggleSupervisor={onToggleSupervisor}
+              onEditSupervisorPrompt={onEditSupervisorPrompt}
               onSeparateSupervisor={onSeparateSupervisor}
               onAddNote={onAddNote}
               onAddCapabilityToNextTurn={onAddCapabilityToNextTurn}
