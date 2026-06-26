@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 describe("frontend logger", () => {
-  it("does not forward console output", async () => {
+  it("does not forward non-error console output", async () => {
     const { installFrontendLogger } = await import("../src/lib/frontendLogger");
 
     installFrontendLogger();
@@ -38,7 +38,6 @@ describe("frontend logger", () => {
     console.log("normal noisy log");
     console.debug("debug noisy log");
     console.warn("warning noise");
-    console.error("error noise");
 
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -50,5 +49,31 @@ describe("frontend logger", () => {
     window.dispatchEvent(new ErrorEvent("error", { message: "boom" }));
 
     expect(fetch).toHaveBeenCalled();
+  });
+
+  it("surfaces React componentStack in the stack field, not buried in the message", async () => {
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    // Mirror what ErrorBoundary.componentDidCatch does: console.error with
+    // an Error plus React's ErrorInfo object carrying `componentStack`.
+    const err = new Error("Maximum update depth exceeded");
+    const errorInfo = {
+      componentStack:
+        "\n    at SessionStatusBadge (/src/components/SessionStatusBadge.tsx:8:3)\n    at SessionNode (/src/components/SessionList.tsx:87:3)",
+    };
+    console.error("Uncaught error:", err, errorInfo);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const payload = JSON.parse(call[1].body);
+
+    // The component tree must be in the stack field, readable.
+    expect(payload.stack).toContain("React component stack:");
+    expect(payload.stack).toContain("at SessionStatusBadge");
+    expect(payload.stack).toContain("at SessionNode");
+    // And NOT duplicated as escaped-JSON bloat inside the message.
+    expect(payload.message).not.toContain("componentStack");
+    expect(payload.message).not.toContain("SessionStatusBadge");
   });
 });

@@ -62,11 +62,48 @@ export function installFrontendLogger(): void {
   console.error = (...args: unknown[]) => {
     nativeConsoleError(...args);
     const errArg = args.find((a) => a instanceof Error) as Error | undefined;
+    // React's error boundaries pass an ErrorInfo object carrying
+    // `componentStack` (the "at <Component>" tree) as a separate arg.
+    // That tree is the most useful clue for debugging a crash, so surface
+    // it in the dedicated stack field instead of letting it get buried as
+    // escaped JSON inside the message.
+    const componentStack = extractComponentStack(args);
+    let stack = errArg?.stack || "";
+    if (componentStack) {
+      stack = stack
+        ? `${stack}\nReact component stack:${componentStack}`
+        : `React component stack:${componentStack}`;
+    }
+    // Drop the React ErrorInfo object from the message — its
+    // componentStack is now in the stack field; keeping it would
+    // duplicate the whole tree as escaped JSON bloat.
+    const msgArgs = args.filter(
+      (a) => !isReactErrorInfo(a),
+    );
     postFrontendLog(
       "error",
       "console.error",
-      args.map(stringifyArg).join(" "),
-      errArg?.stack || "",
+      msgArgs.map(stringifyArg).join(" "),
+      stack,
     );
   };
+}
+
+/** Pull React's `componentStack` out of a console.error arg list (the
+ * `ErrorInfo` object a boundary passes next to the Error), if present. */
+function extractComponentStack(args: unknown[]): string {
+  for (const a of args) {
+    if (isReactErrorInfo(a)) {
+      return (a as { componentStack: string }).componentStack;
+    }
+  }
+  return "";
+}
+
+function isReactErrorInfo(a: unknown): boolean {
+  return (
+    !!a &&
+    typeof a === "object" &&
+    typeof (a as { componentStack?: unknown }).componentStack === "string"
+  );
 }
