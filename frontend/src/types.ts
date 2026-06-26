@@ -187,6 +187,8 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // A PR link surfaced in the timeline; rendered as a PrLinkEvent card.
+  | "pr_link"
   // Backend startup task lifecycle delta (register/done/failed/reset).
   // `useWebSocket` re-dispatches as a window CustomEvent that
   // `StartupTasksBanner` listens to; the banner's authoritative

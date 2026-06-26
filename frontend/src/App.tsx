@@ -5868,7 +5868,6 @@ function AppMain({
               onAdvSync={handleAdvSync}
               onAdvSyncClick={handleAdvSyncClick}
               onRemoveTag={handleRemoveTag}
-              onRename={renameSession}
               draft={currentSession?.draft_input ?? ""}
               onDraftChange={(value) => {
                 if (!currentSession) return;
