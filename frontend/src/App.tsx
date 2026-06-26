@@ -635,6 +635,8 @@ function AppMain({
   const { machines } = useMachines(authStatus);
   const showMachinesLink = builtinExtensions.machineNodes && machines.length > 1;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileHeaderMenuOpen, setMobileHeaderMenuOpen] = useState(false);
+  const mobileHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [mobileRightOpen, setMobileRightOpen] = useState(false);
   const [mobileRightFullscreen, setMobileRightFullscreen] = useState(false);
   const closeMobileRightPanel = useCallback(() => {
@@ -646,6 +648,17 @@ function AppMain({
   // close innermost-first via the hook's module-scope stack).
   useBackButtonDismiss(mobileSidebarOpen, () => setMobileSidebarOpen(false));
   useBackButtonDismiss(mobileRightOpen, closeMobileRightPanel);
+  // Close the mobile header overflow menu on outside click.
+  useEffect(() => {
+    if (!mobileHeaderMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!mobileHeaderMenuRef.current?.contains(e.target as Node)) {
+        setMobileHeaderMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [mobileHeaderMenuOpen]);
   // Drive --vv-offset only when a virtual keyboard is plausible.
   useVisualViewport(isMobile);
   // Close drawers automatically when transitioning to desktop so
@@ -5408,35 +5421,76 @@ function AppMain({
                 {t("app.reconciling")}
               </span>
             )}
-            {showMachinesLink && (
-              <button
-                className="setup-btn"
-                onClick={() => navigate("/machines")}
-                title={t("sidebar.machinesLink")}
-                aria-label={t("sidebar.machinesLink")}
-              >
-                <Icon name="server" size={18} />
-              </button>
-            )}
-            <button
-              className="setup-btn"
-              onClick={() => navigate("/analytics")}
-              title={t("analytics.title")}
-              aria-label={t("analytics.title")}
-            >
-              <Icon name="chart" size={18} />
-            </button>
-            {!isMobile && (
-              <button
-                className="setup-btn"
-                onClick={openRefreshModal}
-                disabled={restarting}
-                title={t("app.refreshButtonTitle")}
-                aria-label={t("app.refreshButtonTitle")}
-              >
-                {restarting ? "…" : <Icon name="refresh" size={18} />}
-              </button>
-            )}
+            {(() => {
+              const closeMenu = () => setMobileHeaderMenuOpen(false);
+              const secondary = (
+                <>
+                  {showMachinesLink && (
+                    <button
+                      className="setup-btn"
+                      onClick={() => {
+                        navigate("/machines");
+                        closeMenu();
+                      }}
+                      title={t("sidebar.machinesLink")}
+                      aria-label={t("sidebar.machinesLink")}
+                    >
+                      <Icon name="server" size={18} />
+                    </button>
+                  )}
+                  <button
+                    className="setup-btn"
+                    onClick={() => {
+                      navigate("/analytics");
+                      closeMenu();
+                    }}
+                    title={t("analytics.title")}
+                    aria-label={t("analytics.title")}
+                  >
+                    <Icon name="chart" size={18} />
+                  </button>
+                  <button
+                    className="setup-btn"
+                    onClick={() => {
+                      openRefreshModal();
+                      closeMenu();
+                    }}
+                    disabled={restarting}
+                    title={t("app.refreshButtonTitle")}
+                    aria-label={t("app.refreshButtonTitle")}
+                  >
+                    {restarting ? "…" : <Icon name="refresh" size={18} />}
+                  </button>
+                  <ExtensionPageIcons context={hookActionContext} />
+                </>
+              );
+              return isMobile ? (
+                <div
+                  className="header-overflow-wrapper"
+                  ref={mobileHeaderMenuRef}
+                >
+                  <button
+                    className="setup-btn header-overflow-trigger"
+                    onClick={() => setMobileHeaderMenuOpen((v) => !v)}
+                    aria-label={t("app.moreActions")}
+                    aria-expanded={mobileHeaderMenuOpen}
+                    title={t("app.moreActions")}
+                  >
+                    <Icon name="more-vertical" size={18} />
+                  </button>
+                  {mobileHeaderMenuOpen && (
+                    <div
+                      className="header-overflow-menu"
+                      onClick={() => setMobileHeaderMenuOpen(false)}
+                    >
+                      {secondary}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                secondary
+              );
+            })()}
             <button
               className="setup-btn"
               onClick={() => navigate("/settings")}
@@ -5445,7 +5499,6 @@ function AppMain({
             >
               <Icon name="settings" size={18} />
             </button>
-            <ExtensionPageIcons context={hookActionContext} />
           </div>
           {builtinExtensions.machineNodes && machines.length > 1 && (
             <>
