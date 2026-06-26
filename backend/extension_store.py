@@ -2341,6 +2341,16 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
                 refreshed["installed_at"] = record.get("installed_at") or refreshed["installed_at"]
                 refreshed["instructions_enabled"] = extension_instructions.normalize_state(record)
                 data["extensions"][extension_id] = refreshed
+                # The persistent backend subprocess was spawned with the old
+                # env baked in at start (permissions, minted internal token), so
+                # a manifest change that affects it stays stale until the proc
+                # is recycled. Evict so the next request spawns a fresh proc.
+                try:
+                    from extension_backend_loader import evict_persistent_backend
+
+                    evict_persistent_backend(extension_id)
+                except Exception:
+                    pass
                 changed = True
             continue
         if record and (record.get("source") or {}).get("type") == "better_agent_signed":
