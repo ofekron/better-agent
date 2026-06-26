@@ -2838,32 +2838,52 @@ function AppMain({
   // destination): screenshot(s) handed in by the native share sheet,
   // awaiting a session to attach to.
   const [sharedImages, setSharedImages] = useState<PastedImage[]>([]);
+
+  // MERGE the shared image(s) into a target session's draft_images
+  // (never overwrites) and persist, preserving the TARGET session's own
+  // draft_input. applySessionMetadata runs synchronously so the patch is
+  // visible before any navigate. Shared by both the direct-attach path
+  // (open session) and the SharePicker path (chosen destination).
+  const mergeImagesIntoSession = useCallback(
+    (targetId: string, images: PastedImage[]) => {
+      const target = sessions.find((s) => s.id === targetId);
+      const { draft_input, draft_images } = buildShareDraftPatch(target, images);
+      applySessionMetadata(targetId, { draft_images });
+      flushDraftPatch(targetId, draft_input, draft_images);
+    },
+    [sessions, applySessionMetadata, flushDraftPatch]
+  );
+
   const handleSharedImages = useCallback(
     (incoming: PastedImage[]) => {
+      const open = currentSessionRef.current;
+      if (open) {
+        // A session is already focused — attach the screenshot(s)
+        // straight to its composer instead of routing through the share
+        // picker. InputArea reconciles the externally-injected
+        // draft_images into its local state without a remount.
+        mergeImagesIntoSession(open.id, incoming);
+        return;
+      }
       setSharedImages(incoming);
       navigate("/share");
     },
-    [navigate]
+    [mergeImagesIntoSession, navigate]
   );
   useShareTarget(handleSharedImages);
 
   // Attach the shared image(s) to a chosen session's composer and open
-  // it. MERGES with that session's existing draft_images (never
-  // overwrites) and preserves the TARGET session's own draft_input —
-  // reusing handleImagesChange would clobber it with currentSession's.
-  // applySessionMetadata runs synchronously BEFORE navigate so the
-  // optimistic select stub (useSession.selectSession) carries the merged
-  // images into InputArea at the sessionId-change mount.
+  // it (the SharePicker callback). applySessionMetadata runs before
+  // navigate so the optimistic select stub (useSession.selectSession)
+  // carries the merged images into InputArea at the sessionId-change
+  // mount.
   const attachImagesToSession = useCallback(
     (targetId: string) => {
-      const target = sessions.find((s) => s.id === targetId);
-      const { draft_input, draft_images } = buildShareDraftPatch(target, sharedImages);
-      applySessionMetadata(targetId, { draft_images });
-      flushDraftPatch(targetId, draft_input, draft_images);
+      mergeImagesIntoSession(targetId, sharedImages);
       setSharedImages([]);
       navigate(sessionPath(targetId));
     },
-    [sessions, sharedImages, applySessionMetadata, flushDraftPatch, navigate]
+    [mergeImagesIntoSession, sharedImages, navigate]
   );
 
   const cancelShare = useCallback(() => {

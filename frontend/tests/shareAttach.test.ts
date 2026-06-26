@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildShareDraftPatch } from "../src/utils/shareAttach";
+import { buildShareDraftPatch, mergeIncomingImages } from "../src/utils/shareAttach";
 import type { PastedImage, Session } from "../src/types";
 
 const img = (id: string): PastedImage => ({
@@ -35,5 +35,27 @@ describe("buildShareDraftPatch", () => {
   it("supports multiple shared images (SEND_MULTIPLE)", () => {
     const patch = buildShareDraftPatch(undefined, [img("a"), img("b"), img("c")]);
     expect(patch.draft_images).toHaveLength(3);
+  });
+});
+
+describe("mergeIncomingImages", () => {
+  it("appends only images not already present (additive union)", () => {
+    const merged = mergeIncomingImages([img("a")], [img("a"), img("b")]);
+    expect(merged.map((i) => i.base64)).toEqual(["a", "b"]);
+  });
+
+  it("returns the same array reference when nothing is new (no rerender churn)", () => {
+    const cur = [img("a")];
+    expect(mergeIncomingImages(cur, [img("a")])).toBe(cur);
+  });
+
+  it("does not remove local-only entries (send-clear owns removal)", () => {
+    const merged = mergeIncomingImages([img("a"), img("b")], []);
+    expect(merged.map((i) => i.base64)).toEqual(["a", "b"]);
+  });
+
+  it("injects a share-sheet screenshot into an already-open composer", () => {
+    const merged = mergeIncomingImages([img("local")], [img("local"), img("screenshot")]);
+    expect(merged.map((i) => i.base64)).toEqual(["local", "screenshot"]);
   });
 });
