@@ -2457,9 +2457,11 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
         install_error = False
         try:
             installed = _install_private_package_snapshot(extension_id, package_dir)
-        except ExtensionError as exc:
+        except (ExtensionError, OSError, subprocess.SubprocessError) as exc:
             # A broken discovered extension must not crash reconciliation — record
             # a placeholder so the store stays usable (mirrors the public path).
+            # Widened beyond ExtensionError so a missing python binary, permission
+            # error, or smoke-test subprocess failure is contained too.
             install_error = True
             installed = _placeholder_record(
                 extension_id, source_type="private_placeholder", error=str(exc)
