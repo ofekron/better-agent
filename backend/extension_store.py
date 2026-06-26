@@ -65,29 +65,87 @@ _RESERVED_MCP_SERVER_NAMES = {
     "session-bridge",
 }
 
+def _load_private_builtin_registry() -> dict[str, Any]:
+    """Load private/commercial extension ids + metadata from the private
+    checkout (gitignored from this public repo).
+
+    The registry is a static property of the SOURCE TREE (the better-agent-private
+    sibling), not of the runtime marketplace repo path — tests legitimately
+    point BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH at a temp root to isolate
+    extension *packages*, and they must not lose the builtin *ids*. So: prefer an
+    env-configured root that actually contains the registry, else fall back to
+    the source-tree sibling. Returns empty maps when the private checkout is
+    absent (pure-public) — private BUILTIN_* ids then resolve to None and every
+    gate referencing them fails closed. No private id string lives here.
+    """
+    import importlib.util
+
+    empty = {"ids": {}, "paths": {}, "llm_tasks": {}, "mcp_replacements": {},
+             "runtime_required_paths": {}, "display_names": {}}
+    if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1":
+        return empty
+    candidates: list[Path] = []
+    configured = str(os.environ.get("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser().resolve())
+    here = Path(__file__).resolve().parent
+    candidates.append((here.parent / "better-agent-private").resolve())
+    for root in candidates:
+        path = root / "private_builtin_ids.py"
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("_private_builtin_ids", path)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+        except Exception:
+            continue
+        return {
+            "ids": getattr(module, "PRIVATE_BUILTIN_IDS", {}),
+            "paths": getattr(module, "PRIVATE_EXTENSION_DIRS", {}),
+            "llm_tasks": getattr(module, "INTERNAL_LLM_TASKS", {}),
+            "mcp_replacements": getattr(module, "MCP_REPLACEMENTS", {}),
+            "runtime_required_paths": getattr(module, "RUNTIME_REQUIRED_PATHS", {}),
+            "display_names": getattr(module, "DISPLAY_NAMES", {}),
+        }
+    return empty
+
+
+_PRIVATE_REGISTRY = _load_private_builtin_registry()
+_PRIV_IDS = _PRIVATE_REGISTRY["ids"]
+
+
+def _pid(key: str) -> str | None:
+    """Real extension id for a private logical key, or None when the private
+    checkout is absent (fail closed)."""
+    return _PRIV_IDS.get(key)
+
+
+# Public builtin ids stay literal in the public repo.
 BUILTIN_ASK_EXTENSION_ID = "ofek-dev.ask"
 BUILTIN_SESSION_BRIDGE_EXTENSION_ID = "ofek-dev.session-bridge"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
-BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = "ofek-dev.team-orchestration"
-BUILTIN_SUPERVISOR_EXTENSION_ID = "ofek-dev.supervisor"
-BUILTIN_REQUIREMENTS_EXTENSION_ID = "ofek-dev.requirements"
-BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = "ofek-dev.project-structure"
-BUILTIN_MACHINE_NODES_EXTENSION_ID = "ofek-dev.machine-nodes"
-BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = "ofek-dev.credential-broker"
 BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
-BUILTIN_CANVAS_EXTENSION_ID = "ofek-dev.canvas"
-BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = "ofek-dev.trace-inspector"
-BUILTIN_REARRANGER_EXTENSION_ID = "ofek-dev.rearranger"
-BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = "ofek-dev.prompt-engineer"
-BUILTIN_BROWSER_HARNESS_EXTENSION_ID = "ofek-dev.browser-harness"
-BUILTIN_AGENT_BOARD_EXTENSION_ID = "ofek-dev.agent-board"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
+# Private/commercial ids resolve from the gitignored private registry; None in
+# pure-public. The real id strings never appear in this public module.
+BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = _pid("team_orchestration")
+BUILTIN_SUPERVISOR_EXTENSION_ID = _pid("supervisor")
+BUILTIN_REQUIREMENTS_EXTENSION_ID = _pid("requirements")
+BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = _pid("project_structure")
+BUILTIN_MACHINE_NODES_EXTENSION_ID = _pid("machine_nodes")
+BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = _pid("credential_broker")
+BUILTIN_CANVAS_EXTENSION_ID = _pid("canvas")
+BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = _pid("trace_inspector")
+BUILTIN_REARRANGER_EXTENSION_ID = _pid("rearranger")
+BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = _pid("prompt_engineer")
+BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
+BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
-    BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: frozenset({"project-updates"}),
-    BUILTIN_REQUIREMENTS_EXTENSION_ID: frozenset({"get-requirements"}),
-    BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID: frozenset({"credential-broker"}),
+    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
     BUILTIN_COORDINATION_EXTENSION_ID: frozenset({"better-agent-coordination"}),
 }
@@ -99,18 +157,7 @@ _OBSOLETE_EXTENSION_IDS = {
     "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
 }
 _PRIVATE_EXTENSION_PATHS = {
-    BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: "extensions/team-orchestration",
-    BUILTIN_SUPERVISOR_EXTENSION_ID: "extensions/supervisor",
-    BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: "extensions/project-structure",
-    BUILTIN_MACHINE_NODES_EXTENSION_ID: "extensions/machine-nodes",
-    BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID: "extensions/credential-broker",
-    BUILTIN_REQUIREMENTS_EXTENSION_ID: "extensions/requirements",
-    BUILTIN_CANVAS_EXTENSION_ID: "extensions/canvas",
-    BUILTIN_TRACE_INSPECTOR_EXTENSION_ID: "extensions/trace-inspector",
-    BUILTIN_REARRANGER_EXTENSION_ID: "extensions/rearranger",
-    BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "extensions/prompt-engineer",
-    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "extensions/browser-harness",
-    BUILTIN_AGENT_BOARD_EXTENSION_ID: "extensions/agent-board",
+    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["paths"].items() if _pid(k)},
     MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
 _PUBLIC_EXTENSION_PATHS = {
@@ -126,23 +173,12 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "Session Bridge",
     BUILTIN_COORDINATION_EXTENSION_ID: "Coordination",
-    BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: "Team orchestration",
-    BUILTIN_SUPERVISOR_EXTENSION_ID: "Supervisor",
-    BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: "Project structure",
-    BUILTIN_MACHINE_NODES_EXTENSION_ID: "Machine nodes",
-    BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID: "Credential broker",
-    BUILTIN_REQUIREMENTS_EXTENSION_ID: "Requirements",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "Provider Config Sync",
-    BUILTIN_CANVAS_EXTENSION_ID: "Canvas",
-    BUILTIN_TRACE_INSPECTOR_EXTENSION_ID: "Trace inspector",
-    BUILTIN_REARRANGER_EXTENSION_ID: "Rearranger",
-    BUILTIN_PROMPT_ENGINEER_EXTENSION_ID: "Prompt engineer",
-    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: "Browser harness",
-    BUILTIN_AGENT_BOARD_EXTENSION_ID: "Agent Board",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
     MARKETPLACE_EXTENSION_ID: "Marketplace",
+    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["display_names"].items() if _pid(k)},
 }
 _DEFAULT_MARKETPLACE_BASE_URL = "https://ofek-dev.com/api/marketplace"
 _DEFAULT_MARKETPLACE_PUBLIC_KEY = "a61a192e23f0f0898fa096ae64e0d22d853eb0701e2c94a6d55fff7b2f52b7fd"
@@ -153,14 +189,11 @@ _required_artifact_update_checked: set[str] = set()
 
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
-    BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: ("default_session",),
-    BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",),
-    BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID: ("project_structure_edit",),
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
-    BUILTIN_BROWSER_HARNESS_EXTENSION_ID: ("default_session",),
+    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["llm_tasks"].items() if _pid(k)},
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
-    BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",),
+    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["runtime_required_paths"].items() if _pid(k)},
 }
 
 
