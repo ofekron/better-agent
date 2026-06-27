@@ -47,8 +47,7 @@ def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
     """Per-route timeout for one extension-backend roundtrip. Looks up the
     request subpath in the manifest-declared ``backend_timeouts`` (exact match,
     then longest segment-prefix, then ``default``), falling back to the global
-    ``_HOST_TIMEOUT_SECONDS``. Clamped to ``MAX_BACKEND_TIMEOUT_SECONDS`` as
-    defense-in-depth in case a spec carries an unvalidated value."""
+    ``_HOST_TIMEOUT_SECONDS``."""
     timeouts = spec.get("backend_timeouts")
     if not isinstance(timeouts, dict) or not timeouts:
         return _HOST_TIMEOUT_SECONDS
@@ -65,7 +64,7 @@ def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
         if best_len < 0:
             chosen = timeouts.get("default")
     if isinstance(chosen, (int, float)) and not isinstance(chosen, bool) and chosen > 0:
-        return min(float(chosen), float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS))
+        return float(chosen)
     return _HOST_TIMEOUT_SECONDS
 
 
