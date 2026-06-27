@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -1042,15 +1042,25 @@ export function SessionList({
   const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
   const [, setNowTick] = useState(0);
   const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
-  const handleItemsScroll = useCallback(
-    (event: UIEvent<HTMLDivElement>) => {
-      if (!hasMore || loadingMore || !onLoadMore) return;
-      const el = event.currentTarget;
-      if (el.scrollHeight - el.scrollTop - el.clientHeight > 160) return;
-      onLoadMore();
-    },
-    [hasMore, loadingMore, onLoadMore],
-  );
+  // Pagination via a bottom sentinel observed against the scroll
+  // container. The sidebar — not .session-list-items — is the scroll
+  // element (the whole menu scrolls as one column), so an Intersection
+  // Observer rooted on the sidebar fires regardless of which ancestor
+  // actually scrolls. rootMargin prefetches the next page ~160px early.
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!hasMore || loadingMore || !onLoadMore) return;
+    const node = loadMoreSentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore();
+      },
+      { root: node.closest(".sidebar"), rootMargin: "160px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
 
   // Desktop right-click context menu for session rows. State is lifted
   // here (one open menu for the whole list) so right-clicking a second
@@ -1795,7 +1805,7 @@ export function SessionList({
     prevIdsRef.current = new Set(renderedOrder.map((s) => s.id));
     if (!firstId || firstId === prevFirst) return;
     if (prevIds.has(firstId)) return;
-    itemsScrollRef.current?.scrollTo({ top: 0 });
+    (itemsScrollRef.current?.closest(".sidebar") as HTMLElement | null)?.scrollTo({ top: 0 });
   }, [renderedOrder]);
 
   // Single SessionNode factory so the in-list rows and the pinned
@@ -2040,7 +2050,6 @@ export function SessionList({
       <div
         ref={itemsScrollRef}
         className="session-list-items"
-        onScroll={handleItemsScroll}
         onDragStart={(e) => {
           if (isSessionDrag(e)) setIsDraggingSession(true);
         }}
@@ -2428,7 +2437,11 @@ export function SessionList({
           </div>
         )}
         {hasMore && !loadingMore && (
-          <div className="session-list-more" aria-hidden="true" />
+          <div
+            ref={loadMoreSentinelRef}
+            className="session-list-more"
+            aria-hidden="true"
+          />
         )}
       </div>
       </LayoutGroup>
