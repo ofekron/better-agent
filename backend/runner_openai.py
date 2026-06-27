@@ -14,7 +14,8 @@ v1 scope (deliberate):
   - native mode only (no team/manager orchestration).
   - in-process coding tools: Bash, Read, Write, Edit, Grep, Glob.
   - permission: honor the run's permission mode; gate risky tools behind the
-    in-process tool_approval registry unless the mode is bypass.
+    backend tool-approval round-trip (POST /api/internal/tool-approvals/request)
+    unless the mode is bypass.
   - text-only (no image/file attachments yet).
   - per-agent-session OpenAI message history persisted under ba_home() so
     multi-turn resume works (BA owns the conversation store for this kind).
@@ -38,6 +39,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+
+from tool_approval_client import request_tool_approval
 
 logger = logging.getLogger("runner_openai")
 
@@ -526,6 +529,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     app_session_id = inputs.get("app_session_id") or _new_uuid()
     permission = inputs.get("permission")
     bypass = _is_bypass(permission)
+    backend_url = inputs.get("backend_url") or ""
+    internal_token = inputs.get("internal_token") or ""
+    # Interactive approval needs the backend HTTP channel. Without it the gate
+    # can't surface a prompt — fail closed with a clear message rather than a
+    # user-blaming "denied" (mirrors runner.py's interactive_permissions guard).
+    interactive = bool(backend_url) and bool(internal_token) and bool(app_session_id)
     resume_sid = inputs.get("session_id")
 
     session_id, messages = _load_history(resume_sid)
@@ -584,8 +593,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 if (run_dir / "cancel").exists():
                     error = "cancelled"
                     break
-                result = await _dispatch_tool(call, cwd, app_session_id,
-                                              run_dir.name, bypass, permission, emitter)
+                result = await _dispatch_tool(
+                    call, cwd, app_session_id, run_dir, bypass,
+                    interactive, backend_url, internal_token, emitter,
+                )
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
                 })
@@ -654,8 +665,9 @@ async def _one_round(
 
 
 async def _dispatch_tool(
-    call: dict, cwd: Path, app_session_id: str, run_id: str,
-    bypass: bool, permission: Optional[dict], emitter: EventEmitter,
+    call: dict, cwd: Path, app_session_id: str, run_dir: Path,
+    bypass: bool, interactive: bool, backend_url: str, internal_token: str,
+    emitter: EventEmitter,
 ) -> str:
     name = call["name"]
     try:
@@ -664,14 +676,29 @@ async def _dispatch_tool(
         emitter.emit_tool_result(call["id"], f"Error: bad arguments json: {e}")
         return f"Error: bad arguments json: {e}"
 
-    # permission gate: non-bypass runs ask before risky tools
+    # permission gate: non-bypass runs ask the backend before risky tools
     if not bypass and name in {"Bash", "Write", "Edit"}:
-        approved = await _request_approval(
-            app_session_id, run_id, name, args, permission,
+        if not interactive:
+            # No approval channel — fail closed honestly, without blaming the
+            # user. Bypass mode is the explicit opt-out for ungated execution.
+            msg = "Error: approval required but backend approval channel unavailable"
+            emitter.emit_tool_result(call["id"], msg)
+            return msg
+        verdict = await _request_approval(
+            app_session_id=app_session_id, run_id=run_dir.name,
+            tool_name=name, args=args,
+            backend_url=backend_url, internal_token=internal_token,
+            cancel_path=run_dir / "cancel",
         )
-        if not approved:
-            emitter.emit_tool_result(call["id"], "Error: tool use denied by user")
-            return "Error: tool use denied by user"
+        if verdict == "cancelled":
+            msg = "Error: tool use cancelled by user"
+        elif verdict != "approved":
+            msg = "Error: tool use denied by user"
+        else:
+            msg = None
+        if msg is not None:
+            emitter.emit_tool_result(call["id"], msg)
+            return msg
 
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
@@ -688,20 +715,48 @@ async def _dispatch_tool(
     return result
 
 
+async def _wait_cancel(cancel_path: Path) -> bool:
+    while True:
+        if cancel_path.exists():
+            return True
+        await asyncio.sleep(0.5)
+
+
 async def _request_approval(
+    *,
     app_session_id: str, run_id: str, tool_name: str, args: dict,
-    permission: Optional[dict],
-) -> bool:
-    try:
-        from tool_approval import registry
-    except Exception:
-        return True  # backend module unavailable in this runner context -> allow
-    rec = registry.create(
-        app_session_id=app_session_id, run_id=run_id, provider_kind="openai",
+    backend_url: str, internal_token: str, cancel_path: Path,
+) -> str:
+    """Ask the backend for a human decision. Returns 'approved' | 'denied' |
+    'cancelled'. The backend (not this client) is the fail-closed authority:
+    any transport error or timeout resolves to 'denied'. A turn-cancel
+    sentinel aborts the in-flight request as 'cancelled' instead of waiting
+    for the backend timeout."""
+    approval_task = asyncio.ensure_future(asyncio.to_thread(
+        request_tool_approval,
+        backend_url=backend_url,
+        internal_token=internal_token,
+        app_session_id=app_session_id,
+        run_id=run_id,
+        provider_kind="openai",
         tool_name=tool_name,
         summary={"tool": tool_name, "args": args},
+    ))
+    cancel_task = asyncio.ensure_future(_wait_cancel(cancel_path))
+    done, pending = await asyncio.wait(
+        {approval_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED,
     )
-    return await registry.await_decision(rec)
+    for t in pending:
+        t.cancel()
+    if cancel_task in done:
+        return "cancelled"
+    try:
+        approved = approval_task.result() if approval_task in done else False
+    except Exception:
+        # The client swallows errors itself, but defend the contract: any raise
+        # out of the thread is a denial, never a turn-aborting exception.
+        approved = False
+    return "approved" if approved else "denied"
 
 
 _SYSTEM_PROMPT = (
