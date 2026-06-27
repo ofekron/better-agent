@@ -364,7 +364,7 @@ def main() -> int:
         finally:
             extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
 
-        # Resolver unit checks: longest-prefix match, default fallback, cap clamp.
+        # Resolver unit checks: longest-prefix match, default fallback, no cap.
         spec = {"backend_timeouts": {"a/b": 7, "a": 3, "default": 2}}
         check(extension_backend_loader._resolve_host_timeout(spec, "a/b") == 7.0, "exact route match wins")  # type: ignore[attr-defined]
         check(extension_backend_loader._resolve_host_timeout(spec, "a/b/c") == 7.0, "longest segment-prefix wins")  # type: ignore[attr-defined]
@@ -377,13 +377,8 @@ def main() -> int:
         )
         check(
             extension_backend_loader._resolve_host_timeout({"backend_timeouts": {"x": 10 ** 9}}, "x")  # type: ignore[attr-defined]
-            == float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS),
-            "oversized per-route timeout is clamped to the cap",
-        )
-        check(
-            extension_backend_loader._resolve_host_timeout({"backend_timeouts": {"default": 10 ** 9}}, "unmatched")  # type: ignore[attr-defined]
-            == float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS),
-            "oversized default timeout is clamped to the cap",
+            == float(10 ** 9),
+            "large per-route timeout is honored verbatim (no cap)",
         )
 
         # Manifest validation: reject bad backend_timeouts, accept good ones.
@@ -394,11 +389,11 @@ def main() -> int:
         else:
             raise AssertionError("non-numeric backend_timeouts must be rejected")
         try:
-            extension_store._validate_backend_timeouts({"x": extension_store.MAX_BACKEND_TIMEOUT_SECONDS + 1})  # type: ignore[attr-defined]
+            extension_store._validate_backend_timeouts({"x": 0})  # type: ignore[attr-defined]
         except extension_store.ExtensionError:
             pass
         else:
-            raise AssertionError("over-cap backend_timeouts must be rejected")
+            raise AssertionError("non-positive backend_timeouts must be rejected")
         validated = extension_store._validate_backend_timeouts({"/sessions/search/": 930, "default": 30})  # type: ignore[attr-defined]
         check(validated == {"sessions/search": 930.0, "default": 30.0}, "valid backend_timeouts are slash-normalized")
 

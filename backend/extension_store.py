@@ -33,12 +33,6 @@ import extension_mcp
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
 
-# Upper bound on a per-route extension-backend call timeout (seconds). The host
-# kills the extension subprocess when a roundtrip exceeds the resolved timeout;
-# this cap bounds how long a single request may pin core + the subprocess so a
-# buggy/hostile manifest cannot declare an effectively unbounded hold.
-MAX_BACKEND_TIMEOUT_SECONDS = 3600
-
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -1335,9 +1329,8 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
     """Per-route extension-backend call timeouts (seconds). Keys are backend
     route subpaths (the path after ``/backend/``, slash-normalized) or the
     special ``default`` applied to any route without an explicit entry. Values
-    are positive numbers capped at ``MAX_BACKEND_TIMEOUT_SECONDS``. Fail closed:
-    a malformed entry rejects the whole manifest rather than silently dropping
-    to the 30s host default."""
+    are positive numbers. Fail closed: a malformed entry rejects the whole
+    manifest rather than silently dropping to the 30s host default."""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -1347,11 +1340,8 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
         route = "default" if key == "default" else str(key).strip().strip("/")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a number")
-        if value <= 0 or value > MAX_BACKEND_TIMEOUT_SECONDS:
-            raise ExtensionError(
-                f"entrypoints.backend_timeouts['{key}'] must be between 0 and "
-                f"{MAX_BACKEND_TIMEOUT_SECONDS} seconds"
-            )
+        if value <= 0:
+            raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a positive number")
         result[route] = float(value)
     return result
 
