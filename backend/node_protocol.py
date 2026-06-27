@@ -1,7 +1,8 @@
 """Wire protocol between primary and worker-node backends.
 
-INVARIANT — Trust boundary: the bearer token (`BETTER_CLAUDE_NODE_TOKEN`)
-authenticates each node's WS connection to primary. Primary's per-worker
+INVARIANT — Trust boundary: the bearer credential a node presents is
+its PER-NODE secret (argon2-verified against `node_registry_store` on
+primary). There is no shared token. Primary's per-worker
 `internal_token` is shipped to nodes inside `spawn_run` payloads (so
 the spawned worker on the node can call back into primary's
 `/api/internal/*` endpoints — ask-fork, delegate, etc.). A compromised

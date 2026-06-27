@@ -99,25 +99,6 @@ def test_topology_missing_env_raises() -> bool:
             os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = saved
 
 
-def test_topology_node_token_required() -> bool:
-    label = "node_token() without env raises"
-    saved = os.environ.pop("BETTER_CLAUDE_NODE_TOKEN", None)
-    try:
-        import topology
-        topology.node_token()
-        _fail(label, "expected raise")
-        return False
-    except Exception as e:
-        if "BETTER_CLAUDE_NODE_TOKEN" in str(e):
-            _ok(label)
-            return True
-        _fail(label, f"wrong error: {e}")
-        return False
-    finally:
-        if saved is not None:
-            os.environ["BETTER_CLAUDE_NODE_TOKEN"] = saved
-
-
 def test_topology_local_node_id_unknown_raises() -> bool:
     label = "local_node_id() unknown node raises"
     tmpdir = tempfile.mkdtemp(prefix="bc-topo-")
@@ -144,6 +125,89 @@ def test_topology_local_node_id_unknown_raises() -> bool:
     finally:
         os.environ.pop("BETTER_CLAUDE_NODE_ID", None)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_resolve_known_spec_per_node_auth() -> bool:
+    """Model C: every node authenticates with its own per-node registry
+    secret (argon2). topology.yaml is an allowlist of permitted ids +
+    each declared node's cwd_roots policy; there is NO shared token.
+    Directly exercises node_link._resolve_known_spec (no server/WS)."""
+    label = "_resolve_known_spec enforces per-node auth + topology allowlist"
+    home = tempfile.mkdtemp(prefix="bc-auth-")
+    topo_path = Path(home) / "topology.yaml"
+    topo_path.write_text(
+        "schema_version: 1\n"
+        "primary: {id: primary, address: 'ws://localhost:8001', cwd_roots: []}\n"
+        "nodes:\n"
+        "  declared: {address: 'ws://localhost:8002', cwd_roots: ['/safe']}\n"
+    )
+    saved_home = os.environ.get("BETTER_AGENT_HOME") or os.environ.get("BETTER_CLAUDE_HOME")
+    saved_topo = os.environ.get("BETTER_AGENT_TOPOLOGY_PATH") or os.environ.get("BETTER_CLAUDE_TOPOLOGY_PATH")
+    # get_env prefers BETTER_AGENT_* over BETTER_CLAUDE_*, so set BOTH
+    # prefixes or the dev shell's real topology/home shadows the fixture.
+    os.environ["BETTER_AGENT_HOME"] = home
+    os.environ["BETTER_CLAUDE_HOME"] = home
+    os.environ["BETTER_AGENT_TOPOLOGY_PATH"] = str(topo_path)
+    os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = str(topo_path)
+    try:
+        import topology
+        import node_registry_store
+        import node_link
+        topology._cache = None
+        node_registry_store.add(
+            node_id="declared", address="", cwd_roots=["/self-reported"],
+            secret_hash=node_registry_store.hash_secret("s-declared"),
+        )
+        node_registry_store.add(
+            node_id="dynamic", address="", cwd_roots=["/dyn"],
+            secret_hash=node_registry_store.hash_secret("s-dynamic"),
+        )
+
+        # 1. Declared + approved + correct secret → topology spec wins
+        #    (manifest cwd_roots, NOT the self-reported /self-reported).
+        spec, reason = node_link._resolve_known_spec("declared", "s-declared")
+        if reason is not None or spec is None or spec.cwd_roots != ("/safe",):
+            _fail(label, f"declared good secret: spec={spec!r} reason={reason!r}")
+            return False
+        # 2. Declared + approved + WRONG secret → bad secret.
+        spec, reason = node_link._resolve_known_spec("declared", "wrong")
+        if spec is not None or reason != "bad secret":
+            _fail(label, f"declared bad secret: spec={spec!r} reason={reason!r}")
+            return False
+        # 3. Declared but NOT yet approved → registration flow (None, None).
+        node_registry_store.remove("declared")
+        spec, reason = node_link._resolve_known_spec("declared", "whatever")
+        if not (spec is None and reason is None):
+            _fail(label, f"declared unapproved must be (None,None): {spec!r} {reason!r}")
+            return False
+        # 4. Topology allowlist: unknown id, not approved → hard reject.
+        spec, reason = node_link._resolve_known_spec("ghost", "x")
+        if spec is not None or reason is None or "topology" not in reason:
+            _fail(label, f"ghost must be allowlist-rejected: {spec!r} {reason!r}")
+            return False
+        # 5. Dynamic (not in topology) but approved → registry spec.
+        spec, reason = node_link._resolve_known_spec("dynamic", "s-dynamic")
+        if reason is not None or spec is None or spec.cwd_roots != ("/dyn",):
+            _fail(label, f"dynamic approved: spec={spec!r} reason={reason!r}")
+            return False
+        # 6. Dynamic + wrong secret → bad secret.
+        spec, reason = node_link._resolve_known_spec("dynamic", "nope")
+        if spec is not None or reason != "bad secret":
+            _fail(label, f"dynamic bad secret: {spec!r} {reason!r}")
+            return False
+        _ok(label)
+        return True
+    finally:
+        for prefix in ("BETTER_AGENT_", "BETTER_CLAUDE_"):
+            if saved_home is not None:
+                os.environ[f"{prefix}HOME"] = saved_home
+            else:
+                os.environ.pop(f"{prefix}HOME", None)
+            if saved_topo is not None:
+                os.environ[f"{prefix}TOPOLOGY_PATH"] = saved_topo
+            else:
+                os.environ.pop(f"{prefix}TOPOLOGY_PATH", None)
+        shutil.rmtree(home, ignore_errors=True)
 
 
 # ==========================================================================
@@ -336,7 +400,6 @@ async def test_dispatch_rpc_rejects_path_outside_cwd_roots() -> bool:
     home = tempfile.mkdtemp(prefix="bc-cwd-")
     saved_home = os.environ.get("BETTER_CLAUDE_HOME")
     saved_topo = os.environ.get("BETTER_CLAUDE_TOPOLOGY_PATH")
-    saved_token = os.environ.get("BETTER_CLAUDE_NODE_TOKEN")
     os.environ["BETTER_CLAUDE_HOME"] = home
     topo = Path(home) / "topology.yaml"
     topo.write_text(
@@ -345,7 +408,6 @@ async def test_dispatch_rpc_rejects_path_outside_cwd_roots() -> bool:
         "nodes: {}\n"
     )
     os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = str(topo)
-    os.environ["BETTER_CLAUDE_NODE_TOKEN"] = "test"
     try:
         import importlib
         import topology
@@ -386,10 +448,6 @@ async def test_dispatch_rpc_rejects_path_outside_cwd_roots() -> bool:
             os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = saved_topo
         else:
             os.environ.pop("BETTER_CLAUDE_TOPOLOGY_PATH", None)
-        if saved_token is not None:
-            os.environ["BETTER_CLAUDE_NODE_TOKEN"] = saved_token
-        else:
-            os.environ.pop("BETTER_CLAUDE_NODE_TOKEN", None)
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -1091,10 +1149,25 @@ async def run_handshake_tests() -> list[bool]:
     )
     os.environ["BETTER_CLAUDE_HOME"] = home
     os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = str(topo_path)
-    os.environ["BETTER_CLAUDE_NODE_TOKEN"] = "good-token"
     os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
     import topology
     topology._cache = None
+    # Per-node-secret auth (Model C): pre-approve n1 with its own argon2
+    # secret. There is no shared token; the node presents "good-token" and
+    # primary verifies it against this hash via node_registry_store.
+    import node_registry_store
+    node_registry_store.add(
+        node_id="n1",
+        address=f"ws://localhost:{next_port}",
+        cwd_roots=["/tmp"],
+        secret_hash=node_registry_store.hash_secret("good-token"),
+    )
+    node_registry_store.add(
+        node_id="n2",
+        address=f"ws://localhost:{next_port + 1}",
+        cwd_roots=["/tmp"],
+        secret_hash=node_registry_store.hash_secret("good-token"),
+    )
 
     server = BackgroundUvicorn("main:app", port)
     results: list[bool] = []
@@ -1109,20 +1182,25 @@ async def run_handshake_tests() -> list[bool]:
         authed_headers = {"Authorization": f"Bearer {user_token}"}
         ws_url_chat = f"{ws_url_chat}?token={user_token}"
 
-        # --- Bad token ---
-        label = "node_link rejects bad bearer token"
+        # --- Bad per-node secret ---
+        label = "node_link rejects bad per-node secret"
         ok = False
         try:
             async with websockets.connect(
                 ws_url, additional_headers={"Authorization": "Bearer WRONG"},
             ) as ws:
-                await ws.recv()
+                await ws.send(json.dumps({
+                    "type": "handshake", "protocol_version": 1, "node_id": "n1",
+                }))
+                reply = json.loads(await ws.recv())
+                if reply.get("type") == "handshake_reject":
+                    ok = True
         except Exception:
-            ok = True
+            pass
         if ok:
             _ok(label)
         else:
-            _fail(label, "bad-token connect did not fail")
+            _fail(label, "bad-secret handshake did not reject")
         results.append(ok)
 
         # --- Protocol version mismatch ---
@@ -1146,8 +1224,8 @@ async def run_handshake_tests() -> list[bool]:
             _fail(label, "no handshake_reject for v99")
         results.append(ok)
 
-        # --- Unknown node_id ---
-        label = "node_link rejects node_id not in topology"
+        # --- Unknown node_id (topology allowlist) ---
+        label = "node_link rejects node_id not declared in topology"
         ok = False
         try:
             async with websockets.connect(
@@ -1529,8 +1607,8 @@ async def main() -> int:
     sync_results = [
         test_topology_schema_mismatch_raises(),
         test_topology_missing_env_raises(),
-        test_topology_node_token_required(),
         test_topology_local_node_id_unknown_raises(),
+        test_resolve_known_spec_per_node_auth(),
     ]
 
     _section("Schema migrations")
