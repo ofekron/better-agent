@@ -45,7 +45,10 @@ def _marketplace_headers(access_token: str) -> dict[str, str]:
 
 
 def _ofekdev_rows(access_token: str) -> list[dict[str, object]]:
-    url = f"{_marketplace_base_url()}/extensions"
+    # The hosted marketplace is a static publish: the aggregate catalog lives at
+    # extensions.json (not /extensions, which is the artifact directory and would
+    # return a filesystem autoindex). Per-item metadata lives at extensions/<id>/metadata.
+    url = f"{_marketplace_base_url()}/extensions.json"
     request = urllib.request.Request(url, headers=_marketplace_headers(access_token))
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
