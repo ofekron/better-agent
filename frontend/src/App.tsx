@@ -5756,10 +5756,7 @@ function AppMain({
           </div>
         ) : null}
 
-        <div
-          className="session-list-wrapper"
-          style={isMobile ? undefined : { flex: "1 1 auto", minHeight: 0 }}
-        >
+        <div className="session-list-wrapper">
           {workersTabAvailable && sidebarTab === "workers" ? (
             <div className="sidebar-workers-panel">
               {teamSidebarModules.map((module) => (
