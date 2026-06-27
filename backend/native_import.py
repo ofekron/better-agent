@@ -158,6 +158,7 @@ def _ba_managed_native_ids() -> set[str]:
 def enumerate_native_sessions(
     provider_ids: Optional[list[str]] = None,
     project_paths: Optional[list[str]] = None,
+    hydrate: bool = True,
 ) -> list[NativeSession]:
     """List native sessions for the given providers (all if None).
 
@@ -165,6 +166,13 @@ def enumerate_native_sessions(
     under one of those project roots are returned, and junk cwds (system
     temp, the BA state home) are excluded. None disables both (legacy
     "import everything" behavior). Unknown provider kinds are skipped.
+
+    `hydrate=False` skips the per-session display reads that are not needed
+    to identify a session (claude's first-`cwd` jsonl scan). Identity fields
+    (`provider_kind`, `native_id`) are always populated. Used by
+    `count_native_sessions` so a counts-only preview avoids reading every
+    jsonl on disk. MUST stay True whenever `project_paths` is set — the
+    project filter needs `cwd`.
     """
     out: list[NativeSession] = []
     for provider in _provider_records(provider_ids):
@@ -172,7 +180,7 @@ def enumerate_native_sessions(
         pid = provider.get("id") or ""
         try:
             if kind == "claude":
-                out.extend(_enumerate_claude(pid, provider))
+                out.extend(_enumerate_claude(pid, provider, hydrate=hydrate))
             elif kind == "codex":
                 out.extend(_enumerate_codex(pid, provider))
             elif kind == "agy":
@@ -226,7 +234,7 @@ def _first_cwd_from_jsonl(path: Path, *, max_lines: int = 40) -> str:
     return ""
 
 
-def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
+def _enumerate_claude(provider_id: str, provider: dict, *, hydrate: bool = True) -> list[NativeSession]:
     projects = _claude_projects_dir(provider)
     out: list[NativeSession] = []
     if not projects.exists():
@@ -241,7 +249,7 @@ def _enumerate_claude(provider_id: str, provider: dict) -> list[NativeSession]:
             provider_kind="claude",
             native_id=jsonl_path.stem,
             jsonl_path=str(jsonl_path),
-            cwd=_first_cwd_from_jsonl(jsonl_path),
+            cwd=_first_cwd_from_jsonl(jsonl_path) if hydrate else "",
             created_at=datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
         ))
     return out
@@ -796,6 +804,37 @@ def _registry_set(key: str, root_id: str) -> None:
 def already_imported_keys() -> set[str]:
     with _REGISTRY_LOCK:
         return set(_registry_load().keys())
+
+
+def count_native_sessions(provider_ids: Optional[list[str]] = None) -> dict:
+    """Counts-only preview of importable native sessions, grouped by provider.
+
+    Returns `{total, imported, pending, by_provider:{kind:{total,imported,
+    pending}}}`. Drives the settings panel without shipping one row per
+    session — the per-session list can reach hundreds of MB across a full
+    Claude+Codex history. Uses `hydrate=False` so identifying the sessions
+    never reads their jsonl bodies.
+    """
+    sessions = enumerate_native_sessions(provider_ids, hydrate=False)
+    imported = already_imported_keys()
+    by_provider: dict[str, dict] = {}
+    for s in sessions:
+        g = by_provider.setdefault(
+            s.provider_kind, {"total": 0, "imported": 0, "pending": 0}
+        )
+        g["total"] += 1
+        if s.registry_key in imported:
+            g["imported"] += 1
+        else:
+            g["pending"] += 1
+    total = sum(g["total"] for g in by_provider.values())
+    imported_n = sum(g["imported"] for g in by_provider.values())
+    return {
+        "total": total,
+        "imported": imported_n,
+        "pending": total - imported_n,
+        "by_provider": by_provider,
+    }
 
 
 # --------------------------------------------------------------------------- #

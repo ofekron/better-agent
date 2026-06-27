@@ -1218,28 +1218,15 @@ async def native_import_status():
     return native_import.get_status()
 
 
-@app.get("/api/native-import/sessions")
-async def native_import_preview(provider_ids: Optional[str] = None):
-    """Preview the native sessions that would be imported, plus which
-    are already imported. Read-only; does not start a job."""
+@app.get("/api/native-import/summary")
+async def native_import_summary(provider_ids: Optional[str] = None):
+    """Counts-only preview of importable native sessions, grouped by
+    provider. Read-only; does not start a job. Returns grouped counts
+    instead of one row per session — a full Claude+Codex history is tens
+    of thousands of sessions and the row dump reached hundreds of MB."""
     import native_import
     ids = provider_ids.split(",") if provider_ids else None
-    sessions = await asyncio.to_thread(native_import.enumerate_native_sessions, ids)
-    imported = await asyncio.to_thread(native_import.already_imported_keys)
-    return {
-        "sessions": [
-            {
-                "provider_id": s.provider_id,
-                "provider_kind": s.provider_kind,
-                "native_id": s.native_id,
-                "title": s.title,
-                "cwd": s.cwd,
-                "created_at": s.created_at,
-                "already_imported": s.registry_key in imported,
-            }
-            for s in sessions
-        ],
-    }
+    return await asyncio.to_thread(native_import.count_native_sessions, ids)
 
 
 def _parse_native_import_limit(body: dict):
