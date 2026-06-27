@@ -9535,6 +9535,11 @@ button.run-badge-clickable:focus-visible {
 .message-box-icon.orchestration-icon {
   opacity: 0.7;
 }
+.message-box-header.standalone-user-source {
+  cursor: default;
+  background: transparent;
+  padding: 2px 0 4px;
+}
 
 .message-box-body {
   padding: 12px 16px;
