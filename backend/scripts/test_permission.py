@@ -42,7 +42,7 @@ check("codex approval", permission.CODEX_APPROVAL_POLICIES,
 check("codex sandbox", permission.CODEX_SANDBOX_MODES,
       ("read-only", "workspace-write", "danger-full-access"))
 check("gemini modes", permission.GEMINI_APPROVAL_MODES,
-      ("default", "auto_edit", "yolo", "plan"))
+      ("auto_edit", "yolo", "plan"))
 
 # ── defaults preserve prior bypass behavior ────────────────────────────
 check("claude default", permission.default_permission_for_kind("claude"),

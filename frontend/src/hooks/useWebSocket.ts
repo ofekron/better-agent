@@ -1365,6 +1365,19 @@ export function useWebSocket(
             new CustomEvent("user_input_resolved", { detail: event.data }),
           );
         }
+        // Interactive tool/command approval: a runner (Claude can_use_tool /
+        // Codex app-server) needs a human decision mid-turn. Chat renders an
+        // Approve/Deny card; the decision POSTs back and unblocks the runner.
+        if (event.type === "tool_approval_requested") {
+          window.dispatchEvent(
+            new CustomEvent("tool_approval_requested", { detail: event.data }),
+          );
+        }
+        if (event.type === "tool_approval_resolved") {
+          window.dispatchEvent(
+            new CustomEvent("tool_approval_resolved", { detail: event.data }),
+          );
+        }
       } catch {
         // ignore parse errors
       }

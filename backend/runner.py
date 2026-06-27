@@ -110,6 +110,8 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLINotFoundError,
     ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ProcessError,
     ResultMessage,
     SystemMessage,
@@ -118,6 +120,24 @@ from claude_agent_sdk import (
 )
 
 from paths import encode_cwd
+from tool_approval_client import request_tool_approval
+
+
+def _describe_tool_call(tool_name: object, tool_input: object) -> dict:
+    """Build a size-capped, secret-free summary of a tool call for the approval
+    card. Values are stringified and truncated; structure is preserved."""
+    raw = tool_input if isinstance(tool_input, dict) else {}
+    described: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, default=str)
+            except Exception:
+                text = str(value)
+        described[str(key)] = text[:500]
+    return {"tool": str(tool_name), "input": described}
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -1504,6 +1524,7 @@ async def _run_one_turn(
     claude_config_dir: Path,
     log: logging.Logger,
     cancel_path: Optional[Path] = None,
+    interactive_permissions: bool = False,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -1633,6 +1654,18 @@ async def _run_one_turn(
                 }
 
             await client.query(_multimodal_msg())
+        elif interactive_permissions:
+            # can_use_tool set → SDK requires an async-iterable prompt.
+            _text = prompt
+
+            async def _text_msg():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": _text}]},
+                    "parent_tool_use_id": None,
+                }
+
+            await client.query(_text_msg())
         else:
             await client.query(prompt)
 
@@ -2103,9 +2136,75 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     plugins = [skill_plugin] if skill_plugin else []
 
+    # CAVEAT (unverified): can_use_tool is registered even on resumed turns
+    # (resume=session_id). If the Claude Agent SDK rejects can_use_tool+resume
+    # at query time, every non-first interactive turn breaks. Needs a live SDK
+    # probe to confirm; if it fails, add probe-and-degrade here (force bypass
+    # for the turn + surface a one-time notice) — never a silent fallback.
+    # Interactive tool approvals: for permission modes that ask, register a
+    # can_use_tool callback that round-trips to the backend → frontend. The
+    # SDK only invokes it when the mode actually requires approval, so it's
+    # safe to register for any non-bypass mode. bypassPermissions/dontAsk
+    # never ask, so no callback (and no async-iterable prompt constraint).
+    interactive_permissions = (
+        permission_mode in ("default", "acceptEdits", "plan", "auto")
+        and bool(backend_url)
+        and bool(internal_token)
+        and bool(app_session_id)
+    )
+    can_use_tool_cb = None
+    if interactive_permissions:
+        _approval_run_id = run_dir.name
+        _approval_cancel_path = run_dir / "cancel"
+        _approval_backend_url = backend_url
+        _approval_token = internal_token
+        _approval_session = app_session_id
+
+        async def _wait_cancel() -> bool:
+            while True:
+                if _approval_cancel_path.exists():
+                    return True
+                await asyncio.sleep(0.5)
+
+        async def _can_use_tool(tool_name, tool_input, context):
+            summary = _describe_tool_call(tool_name, tool_input)
+            # Race the backend decision against the turn cancel sentinel so
+            # Stop aborts an in-flight approval instead of hanging up to the
+            # backend timeout. The losing task is cancelled.
+            approval_task = asyncio.ensure_future(asyncio.to_thread(
+                request_tool_approval,
+                backend_url=_approval_backend_url,
+                internal_token=_approval_token,
+                app_session_id=_approval_session,
+                run_id=_approval_run_id,
+                provider_kind="claude",
+                tool_name=str(tool_name),
+                summary=summary,
+            ))
+            cancel_task = asyncio.ensure_future(_wait_cancel())
+            done, pending = await asyncio.wait(
+                {approval_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if cancel_task in done:
+                return PermissionResultDeny(
+                    behavior="deny", message="Cancelled by user",
+                )
+            approved = approval_task.result() if approval_task in done else False
+            if approved:
+                return PermissionResultAllow(behavior="allow")
+            return PermissionResultDeny(
+                behavior="deny",
+                message="Denied by user in Better Agent",
+            )
+
+        can_use_tool_cb = _can_use_tool
+
     options = ClaudeAgentOptions(
         mcp_servers=mcp_servers,
         permission_mode=permission_mode,
+        can_use_tool=can_use_tool_cb,
         cwd=cwd,
         model=model,
         effort=reasoning_effort,
@@ -2236,6 +2335,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 cwd=cwd,
                 claude_config_dir=_claude_config_dir,
                 log=log,
+                interactive_permissions=interactive_permissions,
             )
         except Exception as e:
             if not _is_network_error(e):

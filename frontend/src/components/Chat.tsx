@@ -13,6 +13,7 @@ import type {
   PendingApproval,
   CredentialConsent,
   UserInputRequest,
+  ToolApproval,
   Provider,
   RunInfo,
   Session,
@@ -181,6 +182,63 @@ function UserInputCard({
         <button type="button" onClick={cancel} disabled={submitting}>Cancel</button>
         <button type="button" className="primary" onClick={submit} disabled={!canSubmit || submitting}>
           Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ToolApprovalCard({
+  approval,
+  sessionId,
+  onResolved,
+}: {
+  approval: ToolApproval;
+  sessionId: string;
+  onResolved: (approvalId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const input = (approval.summary?.input ?? {}) as Record<string, unknown>;
+  const detail =
+    typeof input.command === "string"
+      ? input.command
+      : Array.isArray(input.files)
+        ? (input.files as string[]).join(", ")
+        : "";
+  const decide = async (approved: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await fetch(
+        `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ approved }),
+        },
+      );
+      onResolved(approval.approval_id);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="user-input-card">
+      <div className="user-input-card__title">{t("toolApproval.title")}</div>
+      <div className="user-input-card__question">
+        <div className="user-input-card__header">
+          {t("toolApproval.tool", { tool: approval.tool_name || approval.summary?.tool || "" })}
+        </div>
+        {detail ? <div className="user-input-card__body">{detail}</div> : null}
+      </div>
+      <div className="user-input-card__actions">
+        <button type="button" onClick={() => decide(false)} disabled={busy}>
+          {t("toolApproval.deny")}
+        </button>
+        <button type="button" className="primary" onClick={() => decide(true)} disabled={busy}>
+          {t("toolApproval.approve")}
         </button>
       </div>
     </div>
@@ -649,6 +707,61 @@ export function Chat({
       window.removeEventListener("user_input_resolved", onResolved);
     };
   }, [session?.id, removePendingUserInput]);
+  // Interactive tool/command approvals (Claude can_use_tool / Codex app-server).
+  // Backend holds them in-memory with a fail-closed timeout; rehydrate on
+  // mount/reconnect so a missed WS event doesn't silently become a denial.
+  const [pendingToolApprovals, setPendingToolApprovals] = useState<ToolApproval[]>([]);
+  const removeToolApproval = useCallback((approvalId: string) => {
+    setPendingToolApprovals((prev) => prev.filter((a) => a.approval_id !== approvalId));
+  }, []);
+  const refetchToolApprovals = useCallback(async () => {
+    const sid = session?.id;
+    if (!sid) {
+      setPendingToolApprovals([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/tool-approvals/pending`, {
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const fetched = Array.isArray(data.approvals) ? (data.approvals as ToolApproval[]) : [];
+      // Merge, don't replace: a late REST snapshot (taken before a WS-added
+      // approval existed) must not clobber a card the live WS event already
+      // added — otherwise the user can't approve and the backend denies.
+      setPendingToolApprovals((prev) => {
+        const byId = new Map(prev.map((a) => [a.approval_id, a]));
+        for (const f of fetched) byId.set(f.approval_id, f);
+        return [...byId.values()];
+      });
+    } catch {
+      // ignore
+    }
+  }, [session?.id]);
+  useEffect(() => {
+    refetchToolApprovals();
+  }, [refetchToolApprovals]);
+  useEffect(() => {
+    const onRequested = (e: Event) => {
+      const detail = (e as CustomEvent<ToolApproval>).detail;
+      if (!detail || detail.app_session_id !== session?.id) return;
+      setPendingToolApprovals((prev) => [
+        ...prev.filter((a) => a.approval_id !== detail.approval_id),
+        detail,
+      ]);
+    };
+    const onResolved = (e: Event) => {
+      const detail = (e as CustomEvent<{ approval_id?: string }>).detail;
+      if (detail?.approval_id) removeToolApproval(detail.approval_id);
+    };
+    window.addEventListener("tool_approval_requested", onRequested);
+    window.addEventListener("tool_approval_resolved", onResolved);
+    return () => {
+      window.removeEventListener("tool_approval_requested", onRequested);
+      window.removeEventListener("tool_approval_resolved", onResolved);
+    };
+  }, [session?.id, removeToolApproval]);
   const chatInlineActionContext = useMemo(
     () => ({
       workerApprovals: pendingApprovals,
@@ -1203,6 +1316,14 @@ export function Chat({
             key={request.request_id}
             request={request}
             onDone={removePendingUserInput}
+          />
+        ))}
+        {pendingToolApprovals.map((approval) => (
+          <ToolApprovalCard
+            key={approval.approval_id}
+            approval={approval}
+            sessionId={session?.id ?? ""}
+            onResolved={removeToolApproval}
           />
         ))}
       </motion.div>

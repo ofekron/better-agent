@@ -643,6 +643,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
 
     _permission = inputs.get("permission") or {}
+    # Gemini has NO headless interactive-approval channel: in `-p` mode the
+    # CLI throws ("requires user confirmation, which is not supported in
+    # non-interactive mode") before emitting any answerable event. So unlike
+    # Claude/Codex there is no tool_approval round-trip here — only the
+    # headless-safe modes (yolo / auto_edit / plan) are exposed (see
+    # permission.GEMINI_APPROVAL_MODES). "default" is intentionally absent.
     _approval_mode = (
         _permission.get("mode") if isinstance(_permission, dict) else None
     ) or "yolo"

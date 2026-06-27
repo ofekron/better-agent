@@ -27,6 +27,7 @@ import os
 import sys
 import time
 import uuid
+from tool_approval_client import request_tool_approval
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -72,6 +73,17 @@ def _codex_approval_policy(permission: Optional[dict]) -> str:
 
 def _codex_sandbox_mode(permission: Optional[dict]) -> str:
     return (permission or {}).get("sandbox") or "danger-full-access"
+
+
+def _codex_approval_summary(method: str, params: dict) -> dict:
+    """Friendly, size-capped summary of a codex approval request for the card."""
+    if method in ("execCommandApproval", "item/commandExecution/requestApproval"):
+        cmd = params.get("command") or []
+        text = " ".join(str(c) for c in cmd)[:800]
+        return {"tool": "shell", "input": {"command": text, "cwd": params.get("cwd", "")}}
+    changes = params.get("fileChanges") or {}
+    paths = list(changes.keys()) if isinstance(changes, dict) else []
+    return {"tool": "edit", "input": {"files": paths[:50]}}
 
 
 def _codex_runner_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -848,6 +860,7 @@ class _AppServerProcess:
         proc: asyncio.subprocess.Process,
         run_dir: Path,
         tool_handlers: Optional[dict[str, Any]] = None,
+        approval_ctx: Optional[dict] = None,
     ) -> None:
         self._proc = proc
         self.pid = proc.pid
@@ -855,6 +868,9 @@ class _AppServerProcess:
         self.stderr = proc.stderr
         self.returncode = proc.returncode
         self._run_dir = run_dir
+        # When non-empty, interactive tool/command approvals round-trip to the
+        # backend. Empty under approval_policy="never" (no approvals asked).
+        self._approval_ctx = approval_ctx or {}
         self._responses: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self._mapped: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
@@ -945,6 +961,22 @@ class _AppServerProcess:
 
     async def _handle_server_request(self, message: dict) -> bool:
         method = message.get("method")
+        # Codex app-server asks the client to approve a command/file-change
+        # when approval_policy != "never". Round-trip to the backend →
+        # frontend and reply with the user's decision. No ctx (never policy)
+        # → not handled here (won't be asked).
+        if method in (
+            "execCommandApproval",
+            "applyPatchApproval",
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        ):
+            # Fire-and-forget: the reply is sent via self._send when the
+            # decision lands. Awaiting here would block the single stdout
+            # reader for up to the approval timeout, stalling all other
+            # responses/notifications (and turn completion).
+            asyncio.create_task(self._handle_codex_approval(message))
+            return True
         if method != "item/tool/call":
             return False
         request_id = message.get("id")
@@ -972,6 +1004,38 @@ class _AppServerProcess:
                 },
             })
         return True
+
+    async def _handle_codex_approval(self, message: dict) -> None:
+        """Reply to a codex approval ServerRequest with the user's decision.
+        No approval_ctx (approval_policy=never) → deny (fail-closed). Any
+        error still sends a denial so codex never hangs waiting for a reply
+        that will never come (fail-closed)."""
+        request_id = message.get("id")
+        try:
+            params = message.get("params") or {}
+            method = message.get("method")
+            summary = _codex_approval_summary(method, params)
+            ctx = self._approval_ctx
+            approved = False
+            if ctx:
+                approved = await asyncio.to_thread(
+                    request_tool_approval,
+                    backend_url=ctx.get("backend_url", ""),
+                    internal_token=ctx.get("internal_token", ""),
+                    app_session_id=ctx.get("app_session_id", ""),
+                    run_id=ctx.get("run_id", ""),
+                    provider_kind="codex",
+                    tool_name=summary.get("tool", ""),
+                    summary=summary,
+                )
+            decision = "approved" if approved else "denied"
+        except Exception:
+            logging.getLogger("runner_codex").exception("codex approval handler failed (denying)")
+            decision = "denied"
+        await self._send({
+            "id": request_id,
+            "result": {"decision": decision},
+        })
 
     def _map_notification(self, message: dict) -> Optional[dict]:
         method = message.get("method")
@@ -1047,6 +1111,7 @@ async def _start_app_server(
     env: Optional[dict[str, str]] = None,
     approval_policy: str = "never",
     sandbox: str = "danger-full-access",
+    approval_ctx: Optional[dict] = None,
 ) -> _AppServerProcess:
     argv = [codex_bin]
     for override in config_overrides or []:
@@ -1062,7 +1127,7 @@ async def _start_app_server(
         **_process_control().detach_spawn_kwargs(),
         limit=16 * 1024 * 1024,
     )
-    client = _AppServerProcess(proc, run_dir, tool_handlers=tool_handlers)
+    client = _AppServerProcess(proc, run_dir, tool_handlers=tool_handlers, approval_ctx=approval_ctx)
     try:
         await client.request("initialize", {
             "clientInfo": {
@@ -2416,6 +2481,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 env=run_env,
                 approval_policy=_codex_approval_policy(permission),
                 sandbox=_codex_sandbox_mode(permission),
+                approval_ctx=(
+                    {
+                        "backend_url": backend_url,
+                        "internal_token": internal_token,
+                        "app_session_id": app_session_id,
+                        "run_id": run_dir.name,
+                    }
+                    if _codex_approval_policy(permission) != "never"
+                    and backend_url and internal_token and app_session_id
+                    else None
+                ),
             )
 
             cancel_seen = asyncio.Event()
