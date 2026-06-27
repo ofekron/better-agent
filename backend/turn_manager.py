@@ -1571,7 +1571,9 @@ class TurnManager:
             continuation_active_msg_id = None
 
         def _should_preempt_context_continuation() -> bool:
-            if provider_kind != "codex":
+            import provider_manifest
+            _spec = provider_manifest.spec_for(provider_kind)
+            if not (_spec and _spec.context_continuation):
                 return False
             if not current_session_id:
                 return False

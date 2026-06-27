@@ -455,7 +455,9 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
 # Kinds whose runner writes a Claude-shaped `session_events.jsonl` and whose
 # runs therefore replay through `_replay_from_gemini_jsonl`. Includes non-
 # Gemini providers that reuse that replay path (openai: BA-owned loop).
-_GEMINI_FAMILY_KINDS = frozenset({"gemini", "agy", "copilot", "openai"})
+# Canonical source: provider_manifest (recovery_family == "gemini").
+import provider_manifest as _provider_manifest
+_GEMINI_FAMILY_KINDS = _provider_manifest.gemini_family_kinds()
 
 
 def _provider_kind(desc: dict | None) -> str:

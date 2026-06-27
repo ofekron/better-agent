@@ -62,7 +62,12 @@ def _engine_env_path():
 
 
 def _uses_claude_env(provider: dict) -> bool:
-    return (provider.get("kind") or "claude") == "claude"
+    # Claude routes creds through the .env path; every other kind uses the OS
+    # keyring. Missing kind defaults to claude (True); unknown kind is False.
+    import provider_manifest
+    kind = provider.get("kind") or "claude"
+    spec = provider_manifest.spec_for(kind)
+    return bool(spec and spec.uses_claude_env)
 
 
 KEYRING_SERVICE = PRIMARY_SERVICE

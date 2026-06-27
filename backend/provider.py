@@ -104,8 +104,11 @@ def runner_argv(run_dir: Path, *, dev_script: Path, kind: str) -> list[str]:
     frozen entrypoint which runner to dispatch to.
     """
     if getattr(sys, "frozen", False):
+        import provider_manifest
         argv = [sys.executable, "--run-dir", str(run_dir)]
-        if kind != "claude":
+        # Only the default Claude runner needs no flag; every other kind tells
+        # the frozen entrypoint which runner module to dispatch to.
+        if provider_manifest.runner_module_for(kind) != "runner":
             argv += ["--runner-kind", kind]
         return argv
     return [sys.executable, str(dev_script), "--run-dir", str(run_dir)]
@@ -730,34 +733,16 @@ _CACHE_LOCK = threading.Lock()
 
 
 def _resolve_class(kind: str) -> type[Provider]:
-    if kind == "claude":
-        # Import lazily so provider_claude can import from this module
-        # without creating a cycle at import time.
-        from provider_claude import ClaudeProvider
-        return ClaudeProvider
-    if kind == "gemini":
-        from provider_gemini import GeminiProvider
-        return GeminiProvider
-    if kind == "codex":
-        from provider_codex import CodexProvider
-        return CodexProvider
-    if kind == "fugu":
-        # Fugu is Codex with the `codex-fugu` launcher; reuses CodexProvider
-        # and runner_codex, only the binary and model catalog differ.
-        from provider_fugu import FuguProvider
-        return FuguProvider
-    if kind == "openai":
-        # BA-owned agent loop over an OpenAI Chat Completions endpoint; the
-        # runner makes HTTP calls + executes tools in-process (no external CLI).
-        from provider_openai import OpenAIProvider
-        return OpenAIProvider
-    if kind == "agy":
-        from provider_agy import AgyProvider
-        return AgyProvider
-    if kind == "copilot":
-        from provider_copilot import CopilotProvider
-        return CopilotProvider
-    raise ValueError(f"unknown provider kind: {kind!r}")
+    # Lazy import from the canonical manifest so provider_* subclasses can
+    # import from this module without a cycle at import time. Virtual kinds
+    # (claude-remote) are coordinator-side proxies, never resolved here.
+    import importlib
+    import provider_manifest
+    spec = provider_manifest.spec_for(kind)
+    if spec is None or spec.virtual:
+        raise ValueError(f"unknown provider kind: {kind!r}")
+    module = importlib.import_module(spec.module)
+    return getattr(module, spec.cls)
 
 
 def get_provider(provider_id: str) -> Provider:
