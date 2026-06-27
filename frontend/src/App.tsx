@@ -4589,6 +4589,7 @@ function AppMain({
             undefined,
             config.nodeId,
             config.main.reasoningEffort,
+            config.main.permission,
             undefined,
             config.capabilityContexts,
             config.folderId,
