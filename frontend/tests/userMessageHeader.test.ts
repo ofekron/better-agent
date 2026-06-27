@@ -40,4 +40,10 @@ describe("userMessageHeader", () => {
   it("humanizes an unknown injected source instead of falling back to User", () => {
     expect(userMessageHeader("custom-bridge_source").label).toBe("Custom Bridge Source");
   });
+
+  it("never emits a blank label for a delimiter-only source", () => {
+    const r = userMessageHeader("___");
+    expect(r.label.length).toBeGreaterThan(0);
+    expect(r.label).not.toBe("User");
+  });
 });
