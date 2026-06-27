@@ -882,8 +882,12 @@ class GeminiProvider(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
         cmd: list[str] = ["gemini", "-p", prompt, "-o", "json"]
+        if no_tools:
+            # Plan mode = read-only; the model cannot run mutating tools.
+            cmd += ["--approval-mode", "plan"]
         resume_target = resume_sid or session_id
         if resume_target:
             cmd += ["-r", resume_target]

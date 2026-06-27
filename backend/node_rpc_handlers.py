@@ -914,6 +914,7 @@ async def _rpc_run_headless(params: dict) -> dict:
         fork=bool(params.get("fork")),
         cwd=params.get("cwd"),
         timeout=timeout if isinstance(timeout, (int, float)) else None,
+        no_tools=bool(params.get("no_tools")),
     )
     return {"result": result}
 

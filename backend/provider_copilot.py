@@ -316,7 +316,13 @@ class CopilotProvider(GeminiProvider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        if no_tools:
+            # Copilot runs with --allow-all-tools; no proven disable path —
+            # fail closed when the caller demanded a text-only run.
+            logger.error("CopilotProvider.run_headless: no_tools requested but unsupported")
+            return None
         if fork:
             logger.warning("Copilot provider ignores fork flag in run_headless")
         copilot_bin = resolve_cli_binary("copilot")

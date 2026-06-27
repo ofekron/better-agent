@@ -384,6 +384,7 @@ class RemoteProviderProxy(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
         # One-shot request/response RPC: the node's own provider runs
         # `claude -p` and returns the JSON envelope. The CLI is bounded
@@ -401,6 +402,7 @@ class RemoteProviderProxy(Provider):
                 "fork": fork,
                 "cwd": cwd,
                 "timeout": timeout,
+                "no_tools": no_tools,
             },
             timeout=rpc_timeout,
         )

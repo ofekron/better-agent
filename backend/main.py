@@ -6976,6 +6976,63 @@ async def internal_ask_fork(
         )
 
 
+# Max chars accepted for a headless-generate prompt. Bounds the blast
+# radius of an over-large client-supplied prompt; generous enough for a
+# composer draft plus the extension's wrapping instruction.
+_HEADLESS_GENERATE_MAX_PROMPT = 16_000
+_HEADLESS_GENERATE_TIMEOUT = 60.0
+
+
+@app.post("/api/internal/headless-generate")
+async def internal_headless_generate(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """One-shot, tool-less, render-tree-invisible text generation seeded
+    with a session's conversation.
+
+    Forks the session's provider sid (`--fork-session`) so the user's real
+    conversation is never mutated, runs with EVERY built-in tool disabled
+    (`no_tools=True`) so a generation can only produce text, and returns
+    `{text}` synchronously. Leaves zero footprint in the session render
+    tree / events.jsonl (same primitive the rearranger uses). Backs the
+    composer-fill extension; internal-token callers only.
+    """
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    session_id = str(body.get("session_id") or "").strip()
+    prompt = str(body.get("prompt") or "").strip()
+    if not session_id or not prompt:
+        raise HTTPException(status_code=400, detail="session_id and prompt are required")
+    if len(prompt) > _HEADLESS_GENERATE_MAX_PROMPT:
+        raise HTTPException(status_code=413, detail="prompt too long")
+    session = await _session_lite(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    agent_sid = str(session.get("agent_session_id") or "").strip()
+    if not agent_sid:
+        # Fail closed: no provider sid to fork from yet (session never ran).
+        raise HTTPException(status_code=409, detail="session has no provider session yet")
+    provider = coordinator.provider_for_session(session_id)
+    # Fail closed: only providers that can fork (no real-session mutation)
+    # AND guarantee a tool-less run may serve a fill.
+    if not provider.supports_fork or not provider.supports_headless_no_tools:
+        raise HTTPException(
+            status_code=422, detail="session provider cannot run a tool-less fork",
+        )
+    result = await provider.run_headless(
+        prompt=prompt,
+        resume_sid=agent_sid,
+        fork=True,
+        no_tools=True,
+        cwd=str(session.get("cwd") or "") or None,
+        timeout=_HEADLESS_GENERATE_TIMEOUT,
+    )
+    if not result or result.get("is_error"):
+        raise HTTPException(status_code=502, detail="generation failed")
+    return {"text": str(result.get("result") or "")}
+
+
 @app.post("/api/internal/delegate-task")
 async def internal_delegate_task(
     body: dict,
