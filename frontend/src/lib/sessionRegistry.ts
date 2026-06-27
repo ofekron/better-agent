@@ -111,6 +111,17 @@ function isRunning(state: MonitoringState): boolean {
   return state !== "stopped";
 }
 
+/** The one definition of "running" for the per-project badge: a session
+ * counts as running when an agent turn is in flight OR a TestApe run is
+ * active on it. Both mean the session is doing work from the badge's
+ * point of view, so the project dot must include either. */
+function entryRunning(entry: {
+  monitoring_state: MonitoringState;
+  testape_active?: boolean;
+}): boolean {
+  return isRunning(entry.monitoring_state) || !!entry.testape_active;
+}
+
 const EMPTY_MARKERS: Record<string, MarkerInfo> = {};
 const EMPTY_SESSION: SessionMeta = {
   is_running: false,
@@ -439,12 +450,18 @@ class SessionRegistry {
     if (!d.session_id) return;
     const prev = this.sessions.get(d.session_id);
     if (!prev) return;
-    this.sessions.set(d.session_id, {
-      ...prev,
-      testape_active: d.active,
-    });
+    if ((prev.testape_active ?? false) === d.active) return; // no-op
+    const next: SessionEntry = { ...prev, testape_active: d.active };
+    this.sessions.set(d.session_id, next);
     this.version += 1;
     this.notifySession(d.session_id);
+    // testape_active feeds the project running aggregate (entryRunning).
+    // Recompute the project when the flip crosses the running boundary —
+    // e.g. a stopped session gaining/losing a TestApe run.
+    if (entryRunning(prev) !== entryRunning(next)) {
+      this.recomputeProject(prev.cwd, prev.node_id);
+      this.notifyProject(prev.cwd, prev.node_id);
+    }
   }
 
   /** Shared delta-apply path for monitoring-state + unread. The
@@ -526,7 +543,8 @@ class SessionRegistry {
     // NOT on an active↔idle↔waiting flip (still running). Skip the project
     // recompute/notify otherwise so badge re-renders don't storm.
     const projectChanged =
-      isRunning(nextState) !== isRunning(prev.monitoring_state) ||
+      entryRunning({ monitoring_state: nextState, testape_active: prev.testape_active }) !==
+        entryRunning(prev) ||
       nextUnread !== prev.unread_count ||
       routingChanged;
     if (projectChanged) {
@@ -601,7 +619,7 @@ class SessionRegistry {
         agg = { running_count: 0, unread_session_count: 0 };
         out.set(key, agg);
       }
-      if (isRunning(entry.monitoring_state)) agg.running_count += 1;
+      if (entryRunning(entry)) agg.running_count += 1;
       if (entry.unread_count > 0) agg.unread_session_count += 1;
     }
     return out;
@@ -618,7 +636,7 @@ class SessionRegistry {
     let unreadSessions = 0;
     for (const entry of this.sessions.values()) {
       if (entry.cwd !== cwd || entry.node_id !== nodeId) continue;
-      if (isRunning(entry.monitoring_state)) running += 1;
+      if (entryRunning(entry)) running += 1;
       if (entry.unread_count > 0) unreadSessions += 1;
     }
     if (running === 0 && unreadSessions === 0) {

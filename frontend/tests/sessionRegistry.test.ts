@@ -371,6 +371,19 @@ describe("sessionRegistry — project aggregates", () => {
     });
   });
 
+  it("testape_active counts toward running_count even when monitoring_state is stopped", async () => {
+    // A session with a TestApe run active (but no agent turn in flight)
+    // is "running in testape" — the project badge must show 1.
+    await bootstrapWith([
+      { id: "ta", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+    ]);
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
+    eventBus.publish("testape_session_state", { session_id: "ta", active: true });
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+    eventBus.publish("testape_session_state", { session_id: "ta", active: false });
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
+  });
+
   it("session_created is idempotent — second created for same sid is a no-op", () => {
     eventBus.publish("session_created", {
       session: { id: "dup", cwd: "/p", is_running: true, unread_count: 2 },
