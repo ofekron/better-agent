@@ -887,3 +887,18 @@ export async function ackSessionSeen(sid: string, uid?: string | null) {
     // WS reconnect.
   }
 }
+
+/** Imperative "mark as unread" — POSTs to `/api/sessions/:sid/unread`.
+ * The backend clears the seen watermark and fires
+ * `session_unread_changed{unread_count>0}` which the registry picks up
+ * via the bus, so the badge appears without waiting on the response. */
+export async function markSessionUnread(sid: string) {
+  try {
+    await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/unread`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    // Silent — the registry reconciles on the next bootstrap / WS reconnect.
+  }
+}

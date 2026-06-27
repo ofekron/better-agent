@@ -5035,6 +5035,23 @@ async def mark_session_seen(session_id: str, body: Optional[dict] = None):
     }
 
 
+@app.post("/api/sessions/{session_id}/unread")
+async def mark_session_unread(session_id: str):
+    """Frontend action: force this session into the "has new" state.
+    Clears `last_seen_event_uid` and recomputes the unread set so the
+    sidebar badge appears, persisting it. Fires `session_unread_changed`
+    (broadcast_global) so every open client converges.
+    """
+    sess = await asyncio.to_thread(session_manager.mark_unread, session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    return {
+        "session_id": session_id,
+        "last_seen_event_uid": sess.get("last_seen_event_uid"),
+        "unread_count": session_manager.get_unread_count(session_id),
+    }
+
+
 @app.get("/healthz")
 async def healthz():
     """Liveness probe used by the frontend to poll for backend availability

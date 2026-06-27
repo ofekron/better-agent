@@ -392,6 +392,7 @@
   "session.menuTitle": "إجراءات",
   "session.copyAction": "نسخ المعرّف",
   "session.detailsTitle": "التفاصيل",
+  "session.markUnreadTitle": "وضع علامة كغير مقروء",
   "session.archiveTitle": "أرشفة الجلسة",
   "session.unarchiveTitle": "إلغاء أرشفة الجلسة",
   "session.showArchived": "المؤرشفة",

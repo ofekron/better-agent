@@ -392,6 +392,7 @@
   "session.menuTitle": "Acties",
   "session.copyAction": "Id kopiëren",
   "session.detailsTitle": "Details",
+  "session.markUnreadTitle": "Markeren als ongelezen",
   "session.archiveTitle": "Sessie archiveren",
   "session.unarchiveTitle": "Sessie dearchiveren",
   "session.showArchived": "Gearchiveerd",

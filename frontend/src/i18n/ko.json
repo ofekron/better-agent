@@ -392,6 +392,7 @@
   "session.menuTitle": "작업",
   "session.copyAction": "ID 복사",
   "session.detailsTitle": "상세 정보",
+  "session.markUnreadTitle": "읽지 않음으로 표시",
   "session.archiveTitle": "세션 보관",
   "session.unarchiveTitle": "세션 보관 해제",
   "session.showArchived": "보관됨",
