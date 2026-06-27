@@ -84,6 +84,7 @@ import { scaledFontSize } from "./utils/typography";
 import { clearRefreshContext, saveRefreshContext } from "./lib/refreshContext";
 import { hardRefreshCurrentPage } from "./lib/hardRefresh";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
+import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
@@ -2258,8 +2259,7 @@ function AppMain({
     setRefreshModalOpen(false);
     setRestartError(null);
     setRestarting(true);
-    const requestId = globalThis.crypto?.randomUUID?.()
-      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestId = uuidv4();
     saveRefreshContext(requestId);
     let accepted = false;
     try {
@@ -4472,7 +4472,7 @@ function AppMain({
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
         return;
       }
-      const id = crypto.randomUUID();
+      const id = uuidv4();
       const now = new Date().toISOString();
       const clientId = `offline-create-${id}`;
       const localName = initialPrompt

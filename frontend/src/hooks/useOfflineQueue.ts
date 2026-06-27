@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { CapabilityContext, OrchestrationMode, SendMode, Session } from "../types";
 import type { ImagePayload, FilePayload } from "./useWebSocket";
+import { uuidv4 } from "../lib/uuid";
 
 export type { ImagePayload };
 export type { FilePayload };
@@ -52,10 +53,32 @@ export type OfflineQueueEntry = OfflinePromptEntry | OfflineCreateSessionEntry;
 
 const STORAGE_KEY = "better_agent_offline_queue";
 
+const CANONICAL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** A `create_session` entry persisted by older code (or minted in a context
+ * where UUID generation was broken) can carry a non-canonical `session.id`.
+ * The backend rejects it as `client_session_id` (400), so the entry would
+ * 400-loop forever on every reconnect flush. Re-mint a canonical UUID,
+ * preserving the queued prompt/config — never drop the user's intent. */
+export function normalizeQueueEntries(entries: OfflineQueueEntry[]): OfflineQueueEntry[] {
+  return entries.map((entry) => {
+    if (entry.type !== "create_session") return entry;
+    if (CANONICAL_UUID.test(entry.session.id)) return entry;
+    return { ...entry, session: { ...entry.session, id: uuidv4() } };
+  });
+}
+
 function loadQueue(): OfflineQueueEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as OfflineQueueEntry[];
+    const normalized = normalizeQueueEntries(parsed);
+    if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
+      saveQueue(normalized);
+    }
+    return normalized;
   } catch {
     return [];
   }

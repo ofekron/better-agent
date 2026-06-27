@@ -4187,12 +4187,15 @@ async def create_session(body: Any = Body(default=None)):
     client_session_id = body.get("client_session_id")
     if client_session_id is not None:
         if not isinstance(client_session_id, str):
+            logger.warning("create_session rejected: client_session_id not a string type=%s", type(client_session_id).__name__)
             raise HTTPException(status_code=400, detail="client_session_id must be a UUID string")
         try:
             parsed_client_session_id = uuid.UUID(client_session_id)
         except ValueError:
+            logger.warning("create_session rejected: client_session_id not a valid UUID value=%r", client_session_id[:80])
             raise HTTPException(status_code=400, detail="client_session_id must be a valid UUID")
         if str(parsed_client_session_id) != client_session_id:
+            logger.warning("create_session rejected: client_session_id not canonical value=%r", client_session_id[:80])
             raise HTTPException(status_code=400, detail="client_session_id must be a canonical UUID")
         existing = await asyncio.to_thread(session_manager.get, client_session_id)
         if existing is not None:
