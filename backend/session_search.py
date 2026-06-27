@@ -37,7 +37,6 @@ invariant (same class as `retrying_until`).
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import re
@@ -53,7 +52,6 @@ import provisioning
 import session_store
 import virtual_session_store
 import working_mode
-from event_shape import extract_output_text, strip_synthetic_events
 from paths import ba_home
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
 from provisioning.prompts import render_prompt
@@ -630,46 +628,26 @@ def _ask_error_message(error_code: object) -> str:
 
 
 def _ask_assistant_message_from_worker_result(result: dict) -> dict:
-    worker_events = _render_events_from_worker_result(result)
-    content = (
-        extract_output_text(strip_synthetic_events(worker_events))
-        if worker_events else ""
-    )
-    if not content:
-        content = str(result.get("reasoning") or "")
-    # The Ask bubble shows only the worker's answer text + the picker — not
-    # the worker fork's internal transcript. That transcript carries the
-    # inherited provision exchange (the "ready" priming reply) plus every
-    # grep tool_use, which leaks as noise into the Ask turn. The worker's
-    # own event log is retained in the worker panel/provenance; it must not
-    # be grafted onto the Ask message's `events`.
+    # The Ask turn is represented entirely by its inline picker footer: the
+    # reasoning lives in `ask_result.reasoning`, the matches + actions in the
+    # picker. The assistant message itself carries NO body — empty content and
+    # no events. Stamping the reasoning into `content` too would render it
+    # twice (once as the assistant bubble, once in the picker) and pad the turn
+    # with an empty indented block. The worker fork's internal transcript (the
+    # inherited "ready" provision reply + every grep tool_use) is noise and
+    # stays in the worker panel/provenance only.
     # The Ask turn never renders as a red error bubble: any worker error is
-    # surfaced inside the picker (see `_ask_error_message`). The assistant
-    # message is always a completed, non-error turn.
+    # surfaced inside the picker (see `_ask_error_message`).
     msg = {
         "id": uuid.uuid4().hex,
         "role": "assistant",
-        "content": content,
+        "content": "",
         "events": [],
         "timestamp": datetime.now().isoformat(),
         "isStreaming": False,
         "completed_at": datetime.now().isoformat(),
     }
     return msg
-
-
-def _render_events_from_worker_result(result: dict) -> list[dict]:
-    raw = result.get("_worker_events")
-    if not isinstance(raw, list):
-        return []
-    out: list[dict] = []
-    for event in raw:
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") not in ("agent_message", "manager_event"):
-            continue
-        out.append(copy.deepcopy(event))
-    return strip_synthetic_events(out)
 
 
 async def _ask_search(
@@ -708,7 +686,6 @@ async def _ask_search(
             query,
             timeout=timeout,
             max_results=max_results,
-            include_worker_events=True,
         )
 
         assistant_msg = _ask_assistant_message_from_worker_result(result)
