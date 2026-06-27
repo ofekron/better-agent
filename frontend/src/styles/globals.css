@@ -251,7 +251,14 @@ body {
   border-inline-end: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* The whole sidebar is the single scroll column: header card, tabs,
+     toolbar, and session list all scroll together. No element pins —
+     .sidebar-bottom uses margin-top:auto to sit at the bottom when the
+     content is shorter than the viewport, and scrolls with the rest
+     when it isn't. */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   flex-shrink: 0;
 }
 
@@ -299,10 +306,9 @@ body {
 }
 
 .session-list-wrapper {
-  /* height set inline via useResizable */
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   flex-shrink: 0;
 }
 
@@ -866,12 +872,12 @@ body {
 /* ======================================= */
 
 .session-list {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .sidebar-selected-anchor {
@@ -1051,8 +1057,8 @@ body {
      gutter for the scrollbar. Logical props so RTL mirrors. */
   padding: 0 0 8px;
   padding-inline-end: 8px;
-  overflow-y: auto;
-  flex: 1 1 auto;
+  overflow: visible;
+  flex: 0 0 auto;
   min-height: 0;
   /* Don't let the browser anchor scroll to a top-inserted row: a newly
      created session prepends at the top, and the auto-scroll-to-top
@@ -6955,15 +6961,39 @@ button.run-badge-clickable:focus-visible {
 /* ======================================= */
 
 .sidebar-header-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: nowrap;
+  min-width: 0;
   margin-bottom: 12px;
-  /* Wrap when the row can't fit 5 children (title, reconciling chip,
-     refresh, settings, language) — happens inside the 90vw drawer at
-     phone widths. */
-  flex-wrap: wrap;
   gap: 8px;
+}
+
+/* Action icons cluster. Never shrinks; the title flexes to push it
+   to the end. When the cluster can't fit, secondary icons collapse
+   into the kebab (config stays out, kebab sits last). */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Hidden natural-width mirror of the full row; offsetWidth vs the
+   real row's clientWidth decides overflow. visibility:hidden also
+   drops its duplicate buttons from the tab order. */
+.sidebar-header-ghost {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .sidebar-header-row .app-title {
@@ -7022,8 +7052,8 @@ button.run-badge-clickable:focus-visible {
   background: var(--bg-hover);
 }
 
-/* Mobile header overflow (kebab) menu — collapses machines/analytics/
-   refresh/extension icons so only settings + the trigger stay in the row. */
+/* Header overflow (kebab) menu — when the icons don't fit one line the
+   secondary icons collapse here; only config + the kebab stay in the row. */
 .header-overflow-wrapper {
   position: relative;
   flex-shrink: 0;
@@ -12715,29 +12745,6 @@ button.progress-inflight {
   display: none;
 }
 
-/* Short (small vertical) screens scroll the menu like mobile: the whole
-   sidebar becomes the single scroll column instead of clipping the header
-   and scrolling only .session-list-items internally. Width-independent —
-   a short-but-wide desktop window gets the same whole-drawer scroll the
-   ≤1024px mobile block applies. */
-@media (max-height: 600px) {
-  .sidebar {
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
-  .session-list-wrapper,
-  .session-list {
-    flex: 0 0 auto;
-    min-height: 0;
-    overflow: visible;
-  }
-  .session-list-items {
-    overflow: visible;
-    min-height: calc(7 * 80px);
-  }
-}
-
 @media (max-width: 1024px) {
   .mobile-topbar {
     display: flex;
@@ -12837,29 +12844,10 @@ button.progress-inflight {
     transform: translateX(0);
   }
 
-  /* On mobile the whole drawer scrolls as one column instead of
-     clipping — header, projects, and sessions all participate in the
-     same vertical scroll so nothing is cut off regardless of how many
-     project tabs or machines are listed. */
-  .sidebar {
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  /* The list grows to its natural height; no nested internal scroll
-     competing with the drawer scroll. Min-height reserves room for
-     ~7 session rows even when the list is short, so the menu always
-     shows a substantive session area. */
-  .session-list-wrapper,
-  .session-list {
-    flex: 0 0 auto;
-    min-height: 0;
-    overflow: visible;
-  }
+  /* Whole-sidebar scroll is the base behavior (see .sidebar). On mobile
+     the list additionally reserves room for ~7 session rows even when
+     short, so the drawer always shows a substantive session area. */
   .session-list-items {
-    overflow: visible;
-    /* Reserve room for ~7 session rows (~80px each incl. padding)
-       even when the list is short. The drawer scrolls if the total
-       exceeds the viewport, so this never clips. */
     min-height: calc(7 * 80px);
   }
 
