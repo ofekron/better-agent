@@ -4123,7 +4123,7 @@ function AppMain({
         setBypassPermPending({ prompt, images, files });
         return;
       }
-      sendPrompt(prompt, images, files, "queue");
+      return sendPrompt(prompt, images, files, "queue");
     },
     [sendPrompt, bypassPermAck, currentSession, currentProvider],
   );
