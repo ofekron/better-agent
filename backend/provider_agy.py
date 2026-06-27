@@ -241,7 +241,13 @@ class AgyProvider(GeminiProvider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
+        if no_tools:
+            # No proven tool-disable flag — fail closed rather than run
+            # a tool-capable CLI when the caller demanded text-only.
+            logger.error("AgyProvider.run_headless: no_tools requested but unsupported")
+            return None
         if fork:
             logger.warning("AGY provider ignores fork flag in run_headless")
         agy_bin = resolve_cli_binary("agy")

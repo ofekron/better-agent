@@ -183,6 +183,7 @@ export function InputArea({
 }: Props) {
   const { t } = useTranslation();
   const overflowMenuModules = useExtensionFrontendModules("input-overflow-menu");
+  const composerActionModules = useExtensionFrontendModules("composer-actions");
   const viewport = useViewport();
   // On touch-class viewports the soft keyboard's Enter typically
   // means newline. Sending requires the explicit Send button so the
@@ -379,6 +380,34 @@ export function InputArea({
           el.focus();
           const pos = before.length + insertion.length;
           el.setSelectionRange(pos, pos);
+        }
+      });
+    },
+    [localDraft, onDraftChange],
+  );
+
+  // Insert text into the draft at the caret (or over the selection),
+  // reusing the same setLocalDraft + pendingLocalSeq + onDraftChange path
+  // as typing so the gDSFP draft-resync above never clobbers it.
+  const insertDraftText = useCallback(
+    (text: string) => {
+      if (!text) return;
+      const el = textareaRef.current;
+      const start = el?.selectionStart ?? localDraft.length;
+      const end = el?.selectionEnd ?? localDraft.length;
+      const before = localDraft.slice(0, start);
+      const after = localDraft.slice(end);
+      const next = before + text + after;
+      setLocalDraft(next);
+      lastSyncedRef.current = next;
+      pendingLocalSeq.current++;
+      onDraftChange(next);
+      requestAnimationFrame(() => {
+        const node = textareaRef.current;
+        if (node) {
+          node.focus();
+          const pos = before.length + text.length;
+          node.setSelectionRange(pos, pos);
         }
       });
     },
@@ -720,6 +749,20 @@ export function InputArea({
           style={{ display: "none" }}
           onChange={handleAttachmentChange}
         />
+        {composerActionModules.map((module) => (
+          <ExtensionModuleSlot
+            key={`${module.extension_id}:${module.id}`}
+            module={module}
+            className="extension-module-slot--composer-actions"
+            context={{
+              sessionId,
+              draft: localDraft,
+              onInsertText: insertDraftText,
+              disabled,
+              isStreaming: _isStreaming,
+            }}
+          />
+        ))}
         <button
           onClick={handlePrimarySend}
           disabled={!canSend}

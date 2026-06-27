@@ -160,6 +160,8 @@ class ClaudeProvider(Provider):
     supports_reasoning_effort: ClassVar[bool] = True
     reasoning_effort_options: ClassVar[tuple[str, ...]] = CLAUDE_REASONING_EFFORTS
     default_reasoning_effort: ClassVar[str] = DEFAULT_REASONING_EFFORT
+    # `--tools ""` deterministically disables every built-in tool.
+    supports_headless_no_tools: ClassVar[bool] = True
 
     def __init__(self, record: dict) -> None:
         super().__init__(record)
@@ -1127,11 +1129,17 @@ class ClaudeProvider(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
         """Run `claude -p --output-format json` headless and return the
         parsed JSON envelope. Returns None on spawn / parse / timeout
         failure (logged with details). The CLI's own `is_error: true`
         is preserved in the returned dict — caller decides how to react.
+
+        `no_tools=True` passes `--tools ""` so the CLI exposes ZERO
+        built-in tools — the run can only produce text, never touch the
+        filesystem or shell. Used for pure-generation callers (composer
+        fill) that must not side-effect the user's workspace.
         """
         cmd: list[str] = [
             "claude",
@@ -1140,6 +1148,8 @@ class ClaudeProvider(Provider):
             "--permission-mode", "bypassPermissions",
             "--input-format", "text",
         ]
+        if no_tools:
+            cmd += ["--tools", ""]
         if session_id is not None:
             cmd += ["--session-id", session_id]
         if resume_sid is not None:

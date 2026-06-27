@@ -708,6 +708,7 @@ class OpenAIProvider(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
         logger.warning("OpenAIProvider.run_headless: not implemented for openai")
         return None

@@ -276,6 +276,8 @@ class CodexProvider(Provider):
     supports_steering: ClassVar[bool] = True
     supports_native_subagents: ClassVar[bool] = True
     supports_reasoning_effort: ClassVar[bool] = True
+    # `-s read-only` confines the one-shot run to a read-only sandbox.
+    supports_headless_no_tools: ClassVar[bool] = True
     reasoning_effort_options: ClassVar[tuple[str, ...]] = CODEX_REASONING_EFFORTS
     default_reasoning_effort: ClassVar[str] = DEFAULT_REASONING_EFFORT
 
@@ -1119,13 +1121,18 @@ class CodexProvider(Provider):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]:
-        cmd: list[str] = [
-            "codex", "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
-            "-s", "danger-full-access",
-        ]
+        cmd: list[str] = ["codex", "exec", "--skip-git-repo-check"]
+        if no_tools:
+            # Read-only sandbox: the model can read context but cannot
+            # write files or run mutating shell commands — pure text out.
+            cmd += ["-s", "read-only"]
+        else:
+            cmd += [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-s", "danger-full-access",
+            ]
         resume_target = resume_sid or session_id
         if resume_target:
             cmd += ["resume", resume_target, prompt]

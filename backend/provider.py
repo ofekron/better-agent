@@ -198,6 +198,12 @@ class Provider(ABC):
     supports_reasoning_effort: ClassVar[bool] = False
     reasoning_effort_options: ClassVar[tuple[str, ...]] = ()
     default_reasoning_effort: ClassVar[str] = ""
+    # Whether `run_headless(no_tools=True)` can GUARANTEE the one-shot
+    # invocation runs with every built-in tool disabled (no Bash / file
+    # writes / edits). Fail-closed default: a provider that cannot prove
+    # it disables tools advertises False, and tool-less callers (composer
+    # fill) refuse to route to it rather than risk a side-effecting run.
+    supports_headless_no_tools: ClassVar[bool] = False
 
     def __init__(self, record: dict):
         self.id: str = record["id"]
@@ -633,6 +639,7 @@ class Provider(ABC):
         fork: bool = False,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        no_tools: bool = False,
     ) -> Optional[dict]: ...
 
     # ------------------------------------------------------------------
