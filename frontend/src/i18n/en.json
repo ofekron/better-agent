@@ -165,6 +165,8 @@
   "setup.templateZaiOpenAIBlurb": "Z.AI's native OpenAI endpoint (Coding-plan key) driven by Better Agent's own agent loop. This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Needs an API key.",
   "setup.templateCustomLabel": "Custom API",
   "setup.templateCustomBlurb": "Any Anthropic-compatible endpoint. Provide URL + key yourself.",
+  "setup.templateCustomOpenAILabel": "Custom OpenAI",
+  "setup.templateCustomOpenAIBlurb": "Any OpenAI-compatible endpoint. Driven by Better Agent's own agent loop. Provide URL, key, and model.",
   "setup.backTitle": "Back",
   "setup.editProviderTitle": "Edit provider",
   "setup.providerNotFound": "Provider not found",

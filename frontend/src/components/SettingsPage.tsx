@@ -69,7 +69,7 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "ollama" | "zai" | "zai-openai" | "custom";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
 type SettingsSection =
   | "providers"
@@ -321,6 +321,20 @@ const TEMPLATES: Template[] = [
       config_dir: "",
       default_model: "",
       default_reasoning_effort: "medium",
+    },
+  },
+  {
+    id: "custom-openai",
+    label: "Custom OpenAI",
+    blurb: "Any OpenAI-compatible endpoint. Driven by Better Agent's own agent loop. Provide URL, key, and model.",
+    defaults: {
+      name: "Custom OpenAI",
+      kind: "openai",
+      mode: "api_key",
+      base_url: "",
+      config_dir: "",
+      default_model: "",
+      default_reasoning_effort: "",
     },
   },
 ];
@@ -2106,6 +2120,7 @@ function WizardTemplates({
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
     "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },
     custom: { labelKey: "setup.templateCustomLabel", blurbKey: "setup.templateCustomBlurb" },
+    "custom-openai": { labelKey: "setup.templateCustomOpenAILabel", blurbKey: "setup.templateCustomOpenAIBlurb" },
   };
   return (
     <>

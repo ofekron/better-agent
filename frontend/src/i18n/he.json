@@ -164,6 +164,8 @@
   "setup.templateZaiOpenAIBlurb": "נקודת הקצה ה-Native של Z.AI (OpenAI, מפתח Coding) מונעת על ידי לולאת הסוכן של Better Agent עצמו. כאן מדווח ה-caching האוטומטי של Z.AI, כך שזה זול יותר בהקשרים ארוכים. דורש מפתח API.",
   "setup.templateCustomLabel": "API מותאם",
   "setup.templateCustomBlurb": "כל נקודת קצה תואמת Anthropic. ספקו URL + מפתח בעצמכם.",
+  "setup.templateCustomOpenAILabel": "OpenAI מותאם",
+  "setup.templateCustomOpenAIBlurb": "כל נקודת קצה תואמת OpenAI. מונע על ידי לולאת הסוכן העצמאית של Better Agent. ספקו URL, מפתח ומודל.",
   "setup.backTitle": "חזרה",
   "setup.editProviderTitle": "ערוך ספק",
   "setup.providerNotFound": "ספק לא נמצא",
