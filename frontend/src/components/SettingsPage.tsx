@@ -12,6 +12,7 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { LanguageSelector } from "./LanguageSelector";
+import { Select } from "./Select";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
@@ -1141,13 +1142,14 @@ export function ExtensionUiSettingsSection() {
               description={t("settings.extensionsHarnessDeliveryHelp")}
             >
               <label className="extension-ui-settings-select">
-                <select
+                <Select
                   value={row.harnessDelivery}
-                  onChange={(e) => setHarnessDelivery(row.id, e.target.value === "runtime" ? "runtime" : "native")}
-                >
-                  <option value="native">{t("settings.extensionsHarnessDeliveryNative")}</option>
-                  <option value="runtime">{t("settings.extensionsHarnessDeliveryRuntime")}</option>
-                </select>
+                  onChange={(v) => setHarnessDelivery(row.id, v === "runtime" ? "runtime" : "native")}
+                  options={[
+                    { value: "native", label: t("settings.extensionsHarnessDeliveryNative") },
+                    { value: "runtime", label: t("settings.extensionsHarnessDeliveryRuntime") },
+                  ]}
+                />
               </label>
             </ExtensionConfigGroup>
             {(row.hasQuickButton || row.hasPage) && (
@@ -1330,16 +1332,11 @@ function ExtensionSettingField({
     return (
       <label className="ext-setting-field">
         <span className="ext-setting-field-label">{spec.label}</span>
-        <select
-          defaultValue={(value as string) ?? (spec.default as string) ?? ""}
-          onBlur={(e) => onChange(e.target.value)}
-        >
-          {spec.enum.map((opt) => (
-            <option key={String(opt)} value={String(opt)}>
-              {String(opt)}
-            </option>
-          ))}
-        </select>
+        <Select
+          value={(value as string) ?? (spec.default as string) ?? ""}
+          onChange={(v) => onChange(v)}
+          options={spec.enum.map((opt) => ({ value: String(opt), label: String(opt) }))}
+        />
       </label>
     );
   }
@@ -2407,27 +2404,26 @@ function ProviderForm({
           <label>{t('setup.defaultModelLabel')}</label>
           {mode === "edit" && modelOptions !== null && !customModelMode ? (
             <div style={{ display: "flex", gap: 4 }}>
-              <select
+              <Select
                 value={
                   defaultModel && modelOptions.includes(defaultModel)
                     ? defaultModel
                     : ""
                 }
-                onChange={(e) => setDefaultModel(e.target.value)}
-              >
-                {!modelOptions.includes(defaultModel) && (
-                  <option value="" disabled>
-                    {defaultModel
-                      ? t('setup.defaultModelNotInList', { model: defaultModel })
-                      : t('setup.defaultModelSelectPlaceholder')}
-                  </option>
-                )}
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => setDefaultModel(v)}
+                options={[
+                  ...(!modelOptions.includes(defaultModel)
+                    ? [{
+                        value: "",
+                        label: defaultModel
+                          ? t('setup.defaultModelNotInList', { model: defaultModel })
+                          : t('setup.defaultModelSelectPlaceholder'),
+                        disabled: true,
+                      }]
+                    : []),
+                  ...modelOptions.map((m) => ({ value: m, label: m })),
+                ]}
+              />
               <button
                 type="button"
                 className="btn-icon"
@@ -2466,16 +2462,14 @@ function ProviderForm({
         {effortOptions.length > 0 && (
           <div className="setup-field">
             <label>{t('setup.defaultReasoningEffortLabel')}</label>
-            <select
+            <Select
               value={defaultReasoningEffort}
-              onChange={(e) => setDefaultReasoningEffort(e.target.value as ReasoningEffort)}
-            >
-              {effortOptions.map((effort) => (
-                <option key={effort} value={effort}>
-                  {t(`reasoningEffort.${effort}`)}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setDefaultReasoningEffort(v as ReasoningEffort)}
+              options={effortOptions.map((effort) => ({
+                value: effort,
+                label: t(`reasoningEffort.${effort}`),
+              }))}
+            />
           </div>
         )}
 
@@ -2483,21 +2477,19 @@ function ProviderForm({
           <div className="setup-field">
             <label>{t('setup.defaultPermissionLabel')}</label>
             {Object.entries(permissionOptions).map(([axis, allowed]) => (
-              <select
+              <Select
                 key={axis}
                 className="permission-axis-select"
                 value={defaultPermission[axis] ?? allowed[0]}
-                onChange={(e) =>
-                  setDefaultPermission((prev) => ({ ...prev, [axis]: e.target.value }))
+                onChange={(v) =>
+                  setDefaultPermission((prev) => ({ ...prev, [axis]: v }))
                 }
                 title={t(`permission.axis.${axis}`)}
-              >
-                {allowed.map((value) => (
-                  <option key={value} value={value}>
-                    {t(`permission.value.${value}`, { defaultValue: value })}
-                  </option>
-                ))}
-              </select>
+                options={allowed.map((value) => ({
+                  value,
+                  label: t(`permission.value.${value}`, { defaultValue: value }),
+                }))}
+              />
             ))}
           </div>
         )}
@@ -2508,16 +2500,17 @@ function ProviderForm({
             {CAPABILITY_KEYS.map((key) => (
               <label key={key} className="context-strategy-row">
                 <span>{t(`setup.capability.${key}`)}</span>
-                <select
+                <Select
                   value={capStates[key] || "inherit"}
-                  onChange={(e) =>
-                    setCapStates((prev) => ({ ...prev, [key]: e.target.value as CapState }))
+                  onChange={(v) =>
+                    setCapStates((prev) => ({ ...prev, [key]: v as CapState }))
                   }
-                >
-                  <option value="inherit">{t('setup.capabilityInherit')}</option>
-                  <option value="on">{t('setup.capabilityOn')}</option>
-                  <option value="off">{t('setup.capabilityOff')}</option>
-                </select>
+                  options={[
+                    { value: "inherit", label: t('setup.capabilityInherit') },
+                    { value: "on", label: t('setup.capabilityOn') },
+                    { value: "off", label: t('setup.capabilityOff') },
+                  ]}
+                />
               </label>
             ))}
           </div>

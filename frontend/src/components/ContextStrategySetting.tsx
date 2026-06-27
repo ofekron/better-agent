@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 
@@ -46,14 +47,15 @@ export function ContextStrategySetting() {
     <div className="context-strategy-setting">
       <label className="context-strategy-row">
         <span>{t("settings.contextStrategy")}</span>
-        <select
+        <Select
           value={strategy}
           disabled={saving}
-          onChange={(e) => void change(e.target.value)}
-        >
-          <option value="native_compact">{t("settings.contextStrategyNative")}</option>
-          <option value="continuation">{t("settings.contextStrategyContinuation")}</option>
-        </select>
+          onChange={(v) => void change(v)}
+          options={[
+            { value: "native_compact", label: t("settings.contextStrategyNative") },
+            { value: "continuation", label: t("settings.contextStrategyContinuation") },
+          ]}
+        />
       </label>
       <div className="context-strategy-hint">
         {t("settings.contextStrategyHint")}

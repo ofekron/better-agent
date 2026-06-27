@@ -15464,3 +15464,97 @@ button.progress-inflight {
   .native-import-desc { max-width: 100%; }
   .native-import-progress-bar { max-width: 100%; }
 }
+
+/* Reusable styled dropdown (Select.tsx) — replaces native <select>. */
+.bc-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 150px;
+  width: 100%;
+  max-width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: calc(13px * var(--app-font-scale));
+  cursor: pointer;
+  text-align: start;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.bc-select-trigger:hover:not(:disabled) { background: var(--bg-hover); }
+.bc-select-trigger:focus-visible,
+.bc-select-trigger.open {
+  outline: none;
+  border-color: var(--accent);
+}
+.bc-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.bc-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bc-select-placeholder { color: var(--text-muted); }
+.bc-select-caret {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+.bc-select-trigger.open .bc-select-caret { transform: rotate(180deg); }
+
+.bc-select-menu {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  overflow-y: auto;
+  z-index: 1000;
+  animation: bc-select-in 0.1s ease;
+}
+.bc-select-menu.above { transform-origin: bottom; }
+@keyframes bc-select-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.bc-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: calc(13px * var(--app-font-scale));
+  cursor: pointer;
+  text-align: start;
+}
+.bc-select-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bc-select-option.active { background: var(--bg-hover); }
+.bc-select-option.selected { color: var(--text-primary); }
+.bc-select-option.selected .bc-select-option-label { font-weight: 600; }
+.bc-select-option .icon,
+.bc-select-option svg { color: var(--accent); flex-shrink: 0; }
+.bc-select-option.disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.bc-select-option.disabled.active { background: transparent; }
