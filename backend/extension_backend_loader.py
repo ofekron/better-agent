@@ -6,9 +6,11 @@ import concurrent.futures
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,17 +129,44 @@ async def _read_limited_body(request: Request) -> bytes:
 
 
 @dataclass
-class _BackendProc:
-    """One long-lived backend subprocess for an extension. The handle and its
-    lock are stable for the extension's lifetime; ``proc`` (a blocking
-    ``subprocess.Popen``) is replaced when the process dies and is restarted
-    under the same lock. Loop-independent: proc I/O runs in executor threads, so
-    a handle created on one event loop serves requests on any loop (TestClient
-    uses a fresh loop per request; uvicorn uses one)."""
-    extension_id: str
-    proc: Any = None
+class _Channel:
+    """One spawned subprocess plus the multiplexing state bound to it. Many
+    concurrent requests share the single stdin/stdout pipe: each request is
+    tagged with a unique id, a dedicated reader thread demuxes response lines
+    back to the waiting request's queue by id, so a slow route never
+    head-of-line-blocks another. ``lock`` guards only ``pending`` membership and
+    ``alive`` (held briefly); ``write_lock`` serializes stdin writes (one whole
+    line at a time) and is deliberately separate so a blocked write never holds
+    the lock the reader needs to deliver responses. A channel is immutable once
+    dead: on process exit the reader marks ``alive=False`` and fails every
+    in-flight waiter; the next request spawns a fresh channel."""
+    proc: Any
     lock: threading.Lock = field(default_factory=threading.Lock)
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
+    pending: dict = field(default_factory=dict)
+    alive: bool = True
 
+
+@dataclass
+class _BackendProc:
+    """Stable per-extension handle for the extension's lifetime. ``channel`` (the
+    live subprocess + its multiplex state) is replaced under ``lifecycle_lock``
+    when the process dies. Loop-independent: proc I/O runs in a reader thread and
+    requests block on a queue, so a handle created on one event loop serves
+    requests on any loop (TestClient uses a fresh loop per request; uvicorn uses
+    one)."""
+    extension_id: str
+    channel: Any = None
+    lifecycle_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+# Dedicated executor for the blocking roundtrip wait. Isolated from the event
+# loop's default executor so many long-blocking extension calls (e.g. a 900s
+# session search) cannot starve unrelated core run_in_executor work. Beyond this
+# many concurrent extension calls queue rather than running in parallel.
+_ROUNDTRIP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=64, thread_name_prefix="ext-backend"
+)
 
 # extension_id -> its persistent backend handle (lazy-started, shared across requests)
 _PERSISTENT_PROCS: dict[str, _BackendProc] = {}
@@ -200,7 +229,26 @@ def _spawn_persistent_proc(spec: dict[str, Any], base_url: str) -> Any:
     except (BrokenPipeError, OSError) as exc:
         logger.exception("extension backend subprocess failed to start: %s", spec["extension_id"])
         raise RuntimeError("Extension backend failed to start") from exc
+    # Drain stderr continuously: an undrained PIPE fills (~64KB) and blocks the
+    # subprocess, which with multiplexing would stall every in-flight request on
+    # this channel. Logged at debug only (off by default) to avoid leaking
+    # extension output into core logs in normal operation.
+    threading.Thread(
+        target=_drain_stderr, args=(str(spec["extension_id"]), proc.stderr), daemon=True
+    ).start()
     return proc
+
+
+def _drain_stderr(extension_id: str, stream: Any) -> None:
+    if stream is None:
+        return
+    try:
+        for raw in iter(stream.readline, b""):
+            text = raw.decode("utf-8", "replace").rstrip()
+            if text:
+                logger.debug("extension backend stderr [%s]: %s", extension_id, text[:500])
+    except Exception:
+        pass
 
 
 def _get_handle(spec: dict[str, Any]) -> _BackendProc:
@@ -215,46 +263,94 @@ def _get_handle(spec: dict[str, Any]) -> _BackendProc:
         return handle
 
 
-def _roundtrip(handle: _BackendProc, spec: dict[str, Any], base_url: str, request_payload: dict[str, Any]) -> bytes:
-    """Write one request line + read one response line from the persistent proc.
-    Runs in an executor thread; the handle lock serializes requests to this
-    extension's single process. Restarts the process if it died."""
-    with handle.lock:
-        proc = handle.proc
-        if proc is None or proc.poll() is not None:
-            proc = _spawn_persistent_proc(spec, base_url)
-            handle.proc = proc
+def _reader_loop(channel: _Channel) -> None:
+    """Demux response lines for one channel's subprocess. Reads whole lines from
+    stdout, routes each to the waiting request's queue by echoed id, and on
+    process exit (empty read) marks the channel dead and fails every in-flight
+    waiter so they don't hang. Late responses for an abandoned (timed-out)
+    request find no pending entry and are dropped."""
+    stdout = channel.proc.stdout
+    while True:
         try:
-            assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write(json.dumps(request_payload).encode("utf-8") + b"\n")
-            proc.stdin.flush()
-            return proc.stdout.readline()
-        except (BrokenPipeError, OSError):
-            return b""
+            line = stdout.readline()
+        except (OSError, ValueError):
+            line = b""
+        if not line:
+            break
+        try:
+            rid = json.loads(line).get("id")
+        except Exception:
+            continue
+        if not isinstance(rid, str):
+            continue
+        with channel.lock:
+            waiter = channel.pending.get(rid)
+        if waiter is not None:
+            try:
+                waiter.put_nowait(line)
+            except queue.Full:
+                pass
+    with channel.lock:
+        channel.alive = False
+        waiters = list(channel.pending.values())
+        channel.pending.clear()
+    for waiter in waiters:
+        try:
+            waiter.put_nowait(b"")
+        except queue.Full:
+            pass
 
 
-def _roundtrip_with_timeout(
+def _ensure_channel(handle: _BackendProc, spec: dict[str, Any], base_url: str) -> _Channel:
+    """Return the handle's live channel, spawning a fresh subprocess + reader
+    thread if none exists or the current one died. Serialized by
+    ``lifecycle_lock`` so a burst of first requests spawns exactly one proc."""
+    with handle.lifecycle_lock:
+        channel = handle.channel
+        if channel is not None and channel.alive and channel.proc.poll() is None:
+            return channel
+        proc = _spawn_persistent_proc(spec, base_url)
+        channel = _Channel(proc=proc)
+        handle.channel = channel
+        threading.Thread(target=_reader_loop, args=(channel,), daemon=True).start()
+        return channel
+
+
+def _roundtrip(
     handle: _BackendProc,
     spec: dict[str, Any],
     base_url: str,
     request_payload: dict[str, Any],
     timeout: float,
 ) -> bytes:
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(_roundtrip, handle, spec, base_url, request_payload)
+    """Send one id-tagged request over the multiplexed pipe and wait up to
+    ``timeout`` for its response. Concurrent calls share the subprocess without
+    serializing. Raises ``TimeoutError`` if the response does not arrive in
+    time (the request is abandoned; the subprocess is NOT killed, so other
+    in-flight requests keep running). Returns ``b""`` if the process died."""
+    rid = uuid.uuid4().hex
+    line = json.dumps({**request_payload, "id": rid}).encode("utf-8") + b"\n"
+    channel = _ensure_channel(handle, spec, base_url)
+    waiter: queue.Queue = queue.Queue(maxsize=1)
+    with channel.lock:
+        if not channel.alive:
+            return b""
+        channel.pending[rid] = waiter
     try:
-        return future.result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
-        if handle.proc is not None and handle.proc.poll() is None:
-            handle.proc.kill()
+        with channel.write_lock:
             try:
-                handle.proc.wait(timeout=1)
-            except Exception:
-                pass
-        evict_persistent_backend(spec["extension_id"])
-        return b""
+                channel.proc.stdin.write(line)
+                channel.proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                return b""
+        try:
+            response = waiter.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError("extension backend roundtrip timed out") from exc
+        return response
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        with channel.lock:
+            channel.pending.pop(rid, None)
 
 
 def evict_persistent_backend(extension_id: str) -> None:
@@ -263,8 +359,11 @@ def evict_persistent_backend(extension_id: str) -> None:
     _clear_spec_cache(extension_id)
     with _PROCS_GUARD:
         handle = _PERSISTENT_PROCS.pop(extension_id, None)
-    if handle is not None and handle.proc is not None and handle.proc.poll() is None:
-        handle.proc.kill()
+    if handle is None:
+        return
+    channel = handle.channel
+    if channel is not None and channel.proc is not None and channel.proc.poll() is None:
+        channel.proc.kill()
 
 
 def shutdown_persistent_backends() -> None:
@@ -286,8 +385,10 @@ async def _invoke_backend(
 ) -> Response:
     """Dispatch one request to the extension's persistent backend process and
     return its Response. The router is loaded once per process (amortized over
-    many requests); requests to one extension are serialized by its handle lock.
-    On timeout or crash the process is killed and the next request restarts it.
+    many requests); requests are multiplexed over the pipe so they run
+    concurrently — a slow route does not block others. On a per-route timeout
+    the request is abandoned (504) without killing the process; on process exit
+    the next request respawns it.
 
     Shared by the public ``/api/extensions/{id}/backend/*`` route (sourced from
     a FastAPI Request) and the inter-extension call endpoint (sourced from a
@@ -300,22 +401,12 @@ async def _invoke_backend(
         "body": base64.b64encode(body_bytes).decode("ascii"),
     }
     handle = _get_handle(spec)
+    timeout = _resolve_host_timeout(spec, path)
     try:
-        response_line = await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(
-                None, _roundtrip, handle, spec, base_url, request_payload
-            ),
-            timeout=_resolve_host_timeout(spec, path),
+        response_line = await asyncio.get_running_loop().run_in_executor(
+            _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
         )
     except TimeoutError as exc:
-        # Kill the stuck process so the blocked roundtrip thread unblocks and
-        # the next request restarts under the lock.
-        if handle.proc is not None and handle.proc.poll() is None:
-            handle.proc.kill()
-            try:
-                handle.proc.wait(timeout=1)
-            except Exception:
-                pass
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
     except HTTPException:
         raise
@@ -414,9 +505,12 @@ def invoke_extension_backend_sync(
         "headers": [("content-type", "application/json")] if body_bytes else [],
         "body": base64.b64encode(body_bytes).decode("ascii"),
     }
-    line = _roundtrip_with_timeout(
-        _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
-    )
+    try:
+        line = _roundtrip(
+            _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
+        )
+    except TimeoutError:
+        return 500, b""
     if not line:
         evict_persistent_backend(extension_id)
         return 500, b""
