@@ -29,7 +29,6 @@ export function LanguageSelector() {
 
   return (
     <Select
-      className="language-selector"
       value={current}
       onChange={(lng) => {
         i18n.changeLanguage(lng);

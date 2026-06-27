@@ -4696,9 +4696,6 @@ button.run-badge-clickable:focus-visible {
   display: inline-flex;
   min-width: min(220px, 100%);
 }
-.extension-ui-settings-select select {
-  width: 100%;
-}
 .extension-ui-settings-permission {
   width: 100%;
   min-width: 0;
@@ -4816,14 +4813,10 @@ button.run-badge-clickable:focus-visible {
 .ext-setting-field input[type="text"],
 .ext-setting-field input[type="number"],
 .ext-setting-field input[type="password"],
-.ext-setting-field select {
+.ext-setting-field .bc-select-trigger {
   flex: 1 1 180px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: calc(13px * var(--app-font-scale));
+  width: auto;
+  min-width: 0;
 }
 .ext-setting-clear {
   background: none;
@@ -4889,7 +4882,6 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
 }
-.appearance-setting-row select,
 .appearance-setting-row input {
   min-width: 150px;
   background: var(--bg-tertiary);
@@ -7205,16 +7197,6 @@ button.run-badge-clickable:focus-visible {
 
 .project-tab-status .project-status-running::before {
   display: none;
-}
-
-.language-selector {
-  font-size: calc(12px * var(--app-font-scale));
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 4px;
-  cursor: pointer;
 }
 
 .language-setting {
@@ -13549,10 +13531,7 @@ button.progress-inflight {
     gap: 6px;
   }
 
-  .language-setting .language-selector,
-  .appearance-setting-row select,
   .appearance-setting-row input,
-  .context-strategy-row select,
   .session-auto-delete-row input {
     width: 100%;
     min-width: 0;
@@ -14754,13 +14733,6 @@ button.progress-inflight {
 .context-strategy-row span {
   font-weight: 500;
 }
-.context-strategy-row select {
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--input-bg);
-  color: var(--text);
-}
 .context-strategy-hint {
   margin-top: 4px;
   font-size: calc(12px * var(--app-font-scale));
@@ -14790,7 +14762,7 @@ button.progress-inflight {
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 500;
 }
-.internal-llm-row .context-strategy-row select {
+.internal-llm-row .context-strategy-row .bc-select-trigger {
   flex: 1;
 }
 .capability-overrides {
@@ -14803,7 +14775,7 @@ button.progress-inflight {
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 500;
 }
-.capability-overrides .context-strategy-row select {
+.capability-overrides .context-strategy-row .bc-select-trigger {
   flex: 1;
 }
 
@@ -15522,7 +15494,9 @@ button.progress-inflight {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   padding: 4px;
   overflow-y: auto;
-  z-index: 1000;
+  /* Above the app's modal overlays (which top out at z 10000) so a Select
+     opened inside a modal renders in front of it. */
+  z-index: 10010;
   animation: bc-select-in 0.1s ease;
 }
 .bc-select-menu.above { transform-origin: bottom; }
