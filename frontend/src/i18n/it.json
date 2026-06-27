@@ -155,6 +155,8 @@
   "setup.templateAgyBlurb": "Abbonamento Google Antigravity — usa la CLI agy.",
   "setup.templateFuguLabel": "Sakana Fugu",
   "setup.templateFuguBlurb": "Sistema multi-agent Sakana Fugu tramite il launcher `codex-fugu`. Installalo prima (sakana.ai/fugu), poi aggiungilo qui.",
+  "setup.templateSakanaLabel": "Sakana Fugu (API)",
+  "setup.templateSakanaBlurb": "Sakana Fugu tramite la sua API nativa compatibile con OpenAI, gestita dal loop di agente di Better Agent. Richiede una chiave API.",
   "setup.templateCopilotLabel": "Copilot",
   "setup.templateCopilotBlurb": "Abbonamento GitHub Copilot — usa la CLI `copilot`, OAuth tramite `gh auth login`.",
   "setup.templateOllamaLabel": "Ollama",

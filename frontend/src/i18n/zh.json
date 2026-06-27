@@ -155,6 +155,8 @@
   "setup.templateAgyBlurb": "Google Antigravity 订阅 — 使用 agy CLI。",
   "setup.templateFuguLabel": "Sakana Fugu",
   "setup.templateFuguBlurb": "通过 `codex-fugu` 启动器运行 Sakana Fugu 多 agent 系统。请先安装 (sakana.ai/fugu)，然后在此添加。",
+  "setup.templateSakanaLabel": "Sakana Fugu (API)",
+  "setup.templateSakanaBlurb": "通过原生 OpenAI 兼容 API 运行 Sakana Fugu，由 Better Agent 自有的 agent 循环驱动。需要 API 密钥。",
   "setup.templateCopilotLabel": "Copilot",
   "setup.templateCopilotBlurb": "GitHub Copilot 订阅 — 使用 `copilot` CLI，通过 `gh auth login` 进行 OAuth。",
   "setup.templateOllamaLabel": "Ollama",
