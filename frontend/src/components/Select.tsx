@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -33,15 +34,19 @@ interface MenuRect {
   left: number;
   top: number;
   width: number;
+  /** Max height clamped to the space available on the chosen side. */
+  maxHeight: number;
   /** When true the menu is rendered above the trigger. */
   above: boolean;
 }
 
 const MENU_MAX_HEIGHT = 280;
+const MENU_MIN_HEIGHT = 120;
+const VIEWPORT_MARGIN = 8;
 
 /** Styled replacement for a native <select>: a button trigger plus a
- * portal-rendered listbox. Keyboard-navigable, closes on outside click /
- * Escape / scroll, and matches the app's dark theme. */
+ * portal-rendered listbox. Keyboard-navigable; repositions on scroll/resize
+ * and closes on outside click / Escape / Tab. Matches the app's dark theme. */
 export function Select<T extends string = string>({
   value,
   options,
@@ -59,6 +64,9 @@ export function Select<T extends string = string>({
   const [rect, setRect] = useState<MenuRect | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const baseId = useId();
+  const listboxId = `${baseId}-listbox`;
+  const optionId = (idx: number) => `${baseId}-opt-${idx}`;
 
   const selected = options.find((o) => o.value === value);
 
@@ -69,10 +77,12 @@ export function Select<T extends string = string>({
     const below = window.innerHeight - r.bottom;
     const above = r.top;
     const openAbove = below < Math.min(MENU_MAX_HEIGHT, 200) && above > below;
+    const avail = (openAbove ? above : below) - VIEWPORT_MARGIN;
     setRect({
       left: r.left,
       top: openAbove ? r.top : r.bottom,
       width: r.width,
+      maxHeight: Math.max(MENU_MIN_HEIGHT, Math.min(MENU_MAX_HEIGHT, avail)),
       above: openAbove,
     });
   }, []);
@@ -83,10 +93,13 @@ export function Select<T extends string = string>({
   }, []);
 
   const openMenu = useCallback(() => {
-    if (disabled) return;
+    if (disabled || options.length === 0) return;
     computeRect();
-    const idx = options.findIndex((o) => o.value === value);
-    setActiveIndex(idx >= 0 ? idx : 0);
+    // Start on the selected option, or the first enabled one; -1 (no active
+    // descendant) when every option is disabled.
+    let idx = options.findIndex((o) => o.value === value && !o.disabled);
+    if (idx < 0) idx = options.findIndex((o) => !o.disabled);
+    setActiveIndex(idx);
     setOpen(true);
   }, [disabled, computeRect, options, value]);
 
@@ -147,6 +160,9 @@ export function Select<T extends string = string>({
       e.preventDefault();
       close();
       triggerRef.current?.focus();
+    } else if (e.key === "Tab") {
+      // Let focus move naturally, but don't leave the menu floating open.
+      close();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       moveActive(1);
@@ -181,6 +197,8 @@ export function Select<T extends string = string>({
         title={title}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={open && activeIndex >= 0 ? optionId(activeIndex) : undefined}
         aria-label={ariaLabel}
         data-testid={testId}
         onClick={() => (open ? close() : openMenu())}
@@ -195,13 +213,14 @@ export function Select<T extends string = string>({
         ? createPortal(
             <div
               ref={menuRef}
+              id={listboxId}
               className={`bc-select-menu${rect.above ? " above" : ""}`}
               role="listbox"
               style={{
                 position: "fixed",
                 left: rect.left,
                 width: rect.width,
-                maxHeight: MENU_MAX_HEIGHT,
+                maxHeight: rect.maxHeight,
                 ...(rect.above
                   ? { bottom: window.innerHeight - rect.top }
                   : { top: rect.top }),
@@ -210,9 +229,11 @@ export function Select<T extends string = string>({
               {options.map((opt, idx) => (
                 <button
                   type="button"
-                  key={opt.value}
+                  key={`${opt.value}-${idx}`}
+                  id={optionId(idx)}
                   role="option"
                   aria-selected={opt.value === value}
+                  aria-disabled={opt.disabled || undefined}
                   className={
                     "bc-select-option" +
                     (opt.value === value ? " selected" : "") +
@@ -220,7 +241,9 @@ export function Select<T extends string = string>({
                     (opt.disabled ? " disabled" : "")
                   }
                   disabled={opt.disabled}
-                  onMouseEnter={() => setActiveIndex(idx)}
+                  onMouseEnter={() => {
+                    if (!opt.disabled) setActiveIndex(idx);
+                  }}
                   onClick={() => pick(idx)}
                 >
                   <span className="bc-select-option-label">{opt.label}</span>
