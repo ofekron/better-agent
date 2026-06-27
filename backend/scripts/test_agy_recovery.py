@@ -37,8 +37,8 @@ from ingestion_versions import (  # noqa: E402
     AGY_INGESTION_VERSION,
     COPILOT_INGESTION_VERSION,
 )
+from provider_manifest import gemini_family_kinds as _GEMINI_FAMILY_KINDS_FN  # noqa: E402
 from run_recovery import (  # noqa: E402
-    _GEMINI_FAMILY_KINDS,
     _provider_kind,
     _last_assistant,
     _replay_and_apply,
@@ -131,8 +131,8 @@ def test_agy_is_gemini_family() -> bool:
     if _provider_kind(desc) != "agy":
         print(f"  expected kind 'agy', got {_provider_kind(desc)!r}")
         return False
-    if "agy" not in _GEMINI_FAMILY_KINDS:
-        print("  'agy' not in _GEMINI_FAMILY_KINDS")
+    if "agy" not in _GEMINI_FAMILY_KINDS_FN():
+        print("  'agy' not in gemini_family_kinds()")
         return False
     return True
 
@@ -214,8 +214,8 @@ def test_copilot_gemini_family_parity() -> bool:
     """copilot is the same kind of provider (GeminiProvider subclass writing
     session_events.jsonl) and must share the same recovery routing + bumped
     ingestion version, or it carries the identical empty-render recovery bug."""
-    if "copilot" not in _GEMINI_FAMILY_KINDS:
-        print("  'copilot' not in _GEMINI_FAMILY_KINDS")
+    if "copilot" not in _GEMINI_FAMILY_KINDS_FN():
+        print("  'copilot' not in gemini_family_kinds()")
         return False
     v = current_ingestion_version("copilot")
     if v != COPILOT_INGESTION_VERSION or v <= 1:
