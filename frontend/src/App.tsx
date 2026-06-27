@@ -643,8 +643,28 @@ function AppMain({
   const { machines } = useMachines(authStatus);
   const showMachinesLink = builtinExtensions.machineNodes && machines.length > 1;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [mobileHeaderMenuOpen, setMobileHeaderMenuOpen] = useState(false);
-  const mobileHeaderMenuRef = useRef<HTMLDivElement>(null);
+  // Header action icons collapse into a kebab menu when they don't fit
+  // one line (width-based, not viewport-based). Config stays out always.
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
+  const [headerOverflow, setHeaderOverflow] = useState(false);
+  // Callback ref so the observer (re)attaches whenever the header row
+  // mounts — it renders only after auth/session load, so an empty-deps
+  // effect would run once on a not-yet-present node and never reconnect.
+  const headerRoRef = useRef<ResizeObserver | null>(null);
+  const headerRowRef = useCallback((row: HTMLDivElement | null) => {
+    headerRoRef.current?.disconnect();
+    headerRoRef.current = null;
+    if (!row) return;
+    const ghost = row.querySelector<HTMLElement>(".sidebar-header-ghost");
+    const measure = () =>
+      setHeaderOverflow((ghost?.offsetWidth ?? 0) > row.clientWidth);
+    const ro = new ResizeObserver(measure);
+    ro.observe(row);
+    if (ghost) ro.observe(ghost);
+    headerRoRef.current = ro;
+    measure();
+  }, []);
   const [mobileRightOpen, setMobileRightOpen] = useState(false);
   const [mobileRightFullscreen, setMobileRightFullscreen] = useState(false);
   const closeMobileRightPanel = useCallback(() => {
@@ -656,17 +676,17 @@ function AppMain({
   // close innermost-first via the hook's module-scope stack).
   useBackButtonDismiss(mobileSidebarOpen, () => setMobileSidebarOpen(false));
   useBackButtonDismiss(mobileRightOpen, closeMobileRightPanel);
-  // Close the mobile header overflow menu on outside click.
+  // Close the header overflow menu on outside click.
   useEffect(() => {
-    if (!mobileHeaderMenuOpen) return;
+    if (!headerMenuOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (!mobileHeaderMenuRef.current?.contains(e.target as Node)) {
-        setMobileHeaderMenuOpen(false);
+      if (!headerMenuRef.current?.contains(e.target as Node)) {
+        setHeaderMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [mobileHeaderMenuOpen]);
+  }, [headerMenuOpen]);
   // Drive --vv-offset only when a virtual keyboard is plausible.
   useVisualViewport(isMobile);
   // Close drawers automatically when transitioning to desktop so
@@ -5551,8 +5571,9 @@ function AppMain({
         ) : (
         <>
         <div className="sidebar-top">
-          <div className="sidebar-header-row">
-            {!isMobile && (
+          {(() => {
+            const closeMenu = () => setHeaderMenuOpen(false);
+            const minimizeBtn = !isMobile && (
               <button
                 className="setup-btn sidebar-minimize-btn"
                 onClick={() => setSidebarMinimized(true)}
@@ -5561,98 +5582,110 @@ function AppMain({
               >
                 <Icon name="chevron-left" size={18} />
               </button>
-            )}
-            <div className="app-title-brand">
-              <BetterAgentBrandMark className="sidebar-brand-mark" />
-              <h1 className="app-title">{t("app.title")}</h1>
-            </div>
-            {Object.keys(processingByRoot).length > 0 && (
-              <span
-                className="reconciling-chip"
-                title={t("app.reconcilingTitle")}
-              >
+            );
+            const brand = (
+              <div className="app-title-brand">
+                <BetterAgentBrandMark className="sidebar-brand-mark" />
+                <h1 className="app-title">{t("app.title")}</h1>
+              </div>
+            );
+            const chip = Object.keys(processingByRoot).length > 0 && (
+              <span className="reconciling-chip" title={t("app.reconcilingTitle")}>
                 {t("app.reconciling")}
               </span>
-            )}
-            {(() => {
-              const closeMenu = () => setMobileHeaderMenuOpen(false);
-              const secondary = (
-                <>
-                  {showMachinesLink && (
-                    <button
-                      className="setup-btn"
-                      onClick={() => {
-                        navigate("/machines");
-                        closeMenu();
-                      }}
-                      title={t("sidebar.machinesLink")}
-                      aria-label={t("sidebar.machinesLink")}
-                    >
-                      <Icon name="server" size={18} />
-                    </button>
-                  )}
+            );
+            const secondary = (
+              <>
+                {showMachinesLink && (
                   <button
                     className="setup-btn"
                     onClick={() => {
-                      navigate("/analytics");
+                      navigate("/machines");
                       closeMenu();
                     }}
-                    title={t("analytics.title")}
-                    aria-label={t("analytics.title")}
+                    title={t("sidebar.machinesLink")}
+                    aria-label={t("sidebar.machinesLink")}
                   >
-                    <Icon name="chart" size={18} />
+                    <Icon name="server" size={18} />
                   </button>
-                  <button
-                    className="setup-btn"
-                    onClick={() => {
-                      openRefreshModal();
-                      closeMenu();
-                    }}
-                    disabled={restarting}
-                    title={t("app.refreshButtonTitle")}
-                    aria-label={t("app.refreshButtonTitle")}
-                  >
-                    {restarting ? "…" : <Icon name="refresh" size={18} />}
-                  </button>
-                  <ExtensionPageIcons context={hookActionContext} />
-                </>
-              );
-              return isMobile ? (
-                <div
-                  className="header-overflow-wrapper"
-                  ref={mobileHeaderMenuRef}
+                )}
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/analytics");
+                    closeMenu();
+                  }}
+                  title={t("analytics.title")}
+                  aria-label={t("analytics.title")}
                 >
-                  <button
-                    className="setup-btn header-overflow-trigger"
-                    onClick={() => setMobileHeaderMenuOpen((v) => !v)}
-                    aria-label={t("app.moreActions")}
-                    aria-expanded={mobileHeaderMenuOpen}
-                    title={t("app.moreActions")}
-                  >
-                    <Icon name="more-vertical" size={18} />
-                  </button>
-                  {mobileHeaderMenuOpen && (
-                    <div
-                      className="header-overflow-menu"
-                      onClick={() => setMobileHeaderMenuOpen(false)}
-                    >
-                      {secondary}
+                  <Icon name="chart" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    openRefreshModal();
+                    closeMenu();
+                  }}
+                  disabled={restarting}
+                  title={t("app.refreshButtonTitle")}
+                  aria-label={t("app.refreshButtonTitle")}
+                >
+                  {restarting ? "…" : <Icon name="refresh" size={18} />}
+                </button>
+                <ExtensionPageIcons context={hookActionContext} />
+              </>
+            );
+            const configBtn = (
+              <button
+                className="setup-btn"
+                onClick={() => navigate("/settings")}
+                title={t("app.settingsButtonTitle")}
+                aria-label={t("app.settingsButtonTitle")}
+              >
+                <Icon name="settings" size={18} />
+              </button>
+            );
+            return (
+              <div className="sidebar-header-row" ref={headerRowRef}>
+                {minimizeBtn}
+                {brand}
+                {chip}
+                <div className="header-actions">
+                  {!headerOverflow && secondary}
+                  {configBtn}
+                  {headerOverflow && (
+                    <div className="header-overflow-wrapper" ref={headerMenuRef}>
+                      <button
+                        className="setup-btn header-overflow-trigger"
+                        onClick={() => setHeaderMenuOpen((v) => !v)}
+                        aria-label={t("app.moreActions")}
+                        aria-expanded={headerMenuOpen}
+                        title={t("app.moreActions")}
+                      >
+                        <Icon name="more-vertical" size={18} />
+                      </button>
+                      {headerMenuOpen && (
+                        <div
+                          className="header-overflow-menu"
+                          onClick={() => setHeaderMenuOpen(false)}
+                        >
+                          {secondary}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              ) : (
-                secondary
-              );
-            })()}
-            <button
-              className="setup-btn"
-              onClick={() => navigate("/settings")}
-              title={t("app.settingsButtonTitle")}
-              aria-label={t("app.settingsButtonTitle")}
-            >
-              <Icon name="settings" size={18} />
-            </button>
-          </div>
+                {/* Hidden natural-width copy; drives overflow detection. */}
+                <div className="sidebar-header-ghost" aria-hidden="true">
+                  {minimizeBtn}
+                  {brand}
+                  {chip}
+                  {secondary}
+                  {configBtn}
+                </div>
+              </div>
+            );
+          })()}
           {builtinExtensions.machineNodes && machines.length > 1 && (
             <>
               <div className="sidebar-tab-group-title">{t("machines.title")}</div>
