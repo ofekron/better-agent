@@ -326,14 +326,16 @@ def main() -> int:
         finally:
             extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
         check(response.status_code == 504, "slow extension backend request times out")
+        # Multiplexed transport abandons the timed-out request but keeps the
+        # process alive so concurrent/subsequent requests keep working.
         pid = int((package / "slow.pid").read_text(encoding="utf-8"))
         time.sleep(0.2)
         try:
             os.kill(pid, 0)
+            alive = True
         except OSError:
-            pass
-        else:
-            raise AssertionError("timed-out extension process still alive")
+            alive = False
+        check(alive, "timed-out request leaves the extension process alive (no kill)")
         old_timeout = extension_backend_loader._HOST_TIMEOUT_SECONDS  # type: ignore[attr-defined]
         extension_backend_loader._HOST_TIMEOUT_SECONDS = 1.0  # type: ignore[attr-defined]
         started = time.monotonic()
@@ -396,6 +398,30 @@ def main() -> int:
             raise AssertionError("non-positive backend_timeouts must be rejected")
         validated = extension_store._validate_backend_timeouts({"/sessions/search/": 930, "default": 30})  # type: ignore[attr-defined]
         check(validated == {"sessions/search": 930.0, "default": 30.0}, "valid backend_timeouts are slash-normalized")
+
+        # Concurrency: a fast route must return while a slow route is in flight
+        # on the SAME extension subprocess — requests are multiplexed, not
+        # serialized behind one lock. Pre-multiplex this fast call would queue
+        # behind the 2s /sleep2 and take ~2s.
+        import threading
+
+        concurrent_results: dict[str, tuple[int, float]] = {}
+
+        def _fire(key: str, route: str) -> None:
+            t0 = time.monotonic()
+            r = client.get(f"/api/extensions/ofek.backend/backend/{route}")
+            concurrent_results[key] = (r.status_code, time.monotonic() - t0)
+
+        run_start = time.monotonic()
+        bg = threading.Thread(target=_fire, args=("slow", "sleep2"))
+        bg.start()
+        time.sleep(0.4)  # let /sleep2 reach the extension and start sleeping
+        _fire("fast", "ping")
+        fast_total = time.monotonic() - run_start
+        check(concurrent_results["fast"][0] == 200, "fast route returns 200 while a slow route is in flight")
+        check(fast_total < 1.8, "fast route is not head-of-line-blocked by the in-flight slow route")
+        bg.join()
+        check(concurrent_results["slow"][0] == 200, "concurrent slow route also completes")
 
         response = client.get("/api/extensions/frontend-entrypoints")
         check(response.status_code == 200, "frontend entrypoint catalog returns")

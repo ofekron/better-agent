@@ -158,7 +158,12 @@ async def _serve_persistent() -> int:
     """Long-lived mode: read the extension spec on the first stdin line, load
     the router once, then serve newline-delimited JSON requests until stdin
     EOF. One load amortizes many requests — the precondition for moving hot
-    substrate into extensions without a per-request subprocess spawn."""
+    substrate into extensions without a per-request subprocess spawn.
+
+    Requests are multiplexed: each is handled in its own task so a slow route
+    does not block others, and each response echoes the request ``id`` so the
+    core demuxes them back to the right caller. Responses arrive in completion
+    order, not request order."""
     import asyncio
 
     loop = asyncio.get_running_loop()
@@ -176,12 +181,12 @@ async def _serve_persistent() -> int:
             {str(key): str(value) for key, value in dict(spec.get("source") or {}).items()},
         )
     )
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
-        if not line:
-            break  # stdin closed — host exits cleanly
+
+    async def _handle(line: bytes) -> None:
+        request_id = None
         try:
             payload = json.loads(line)
+            request_id = payload.get("id")
             result = await _run_asgi(app, payload)
         except Exception:
             result = {
@@ -189,8 +194,22 @@ async def _serve_persistent() -> int:
                 "headers": [["content-type", "text/plain"]],
                 "body": base64.b64encode(b"Extension backend failed").decode("ascii"),
             }
+        result["id"] = request_id
+        # No await between write and flush: the event loop will not interleave
+        # another task's write mid-line, so each response is emitted whole.
         sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
         sys.stdout.flush()
+
+    tasks: set[asyncio.Task] = set()
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+        if not line:
+            break  # stdin closed — host exits cleanly
+        task = asyncio.create_task(_handle(line))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     return 0
 
 
