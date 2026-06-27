@@ -69,7 +69,7 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "sakana" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
 type SettingsSection =
   | "providers"
@@ -262,6 +262,20 @@ const TEMPLATES: Template[] = [
       mode: "subscription",
       base_url: "",
       config_dir: "$HOME/.codex",
+      default_model: "fugu",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "sakana",
+    label: "Sakana Fugu (API)",
+    blurb: "Sakana Fugu via its native OpenAI-compatible API, driven by Better Agent's own agent loop. Needs an API key.",
+    defaults: {
+      name: "Sakana Fugu (API)",
+      kind: "openai",
+      mode: "api_key",
+      base_url: "https://api.sakana.ai/v1",
+      config_dir: "",
       default_model: "fugu",
       default_reasoning_effort: "",
     },
@@ -2116,6 +2130,7 @@ function WizardTemplates({
     copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
     agy: { labelKey: "setup.templateAgyLabel", blurbKey: "setup.templateAgyBlurb" },
     fugu: { labelKey: "setup.templateFuguLabel", blurbKey: "setup.templateFuguBlurb" },
+    sakana: { labelKey: "setup.templateSakanaLabel", blurbKey: "setup.templateSakanaBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
     "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },
