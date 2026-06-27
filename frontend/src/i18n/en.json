@@ -760,6 +760,8 @@
   "settings.nativeImportDesc": "Ingest every native CLI session (Claude, Codex) on disk into Better Agent. Runs in the background; imported sessions appear in your session list.",
   "settings.nativeImportDone": "Done — {{imported}} imported, {{skipped}} already present, {{failed}} failed.",
   "settings.nativeImportErrored": "Import job crashed — see backend logs.",
+  "settings.nativeImportLoadFailed": "Couldn't load native sessions",
+  "settings.nativeImportLoading": "Checking native sessions…",
   "settings.nativeImportNothing": "Nothing new to import",
   "settings.nativeImportPending": "{{count}} session(s) ready",
   "settings.nativeImportRunning": "Importing…",

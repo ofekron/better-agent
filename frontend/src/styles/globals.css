@@ -15393,6 +15393,11 @@ button.progress-inflight {
   font-size: 12px;
   opacity: 0.75;
 }
+.native-import-breakdown {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 4px;
+}
 .native-import-progress {
   display: flex;
   flex-direction: column;

@@ -16,18 +16,17 @@ interface JobStatus {
   errors: { key: string; error: string }[];
 }
 
-interface PreviewSession {
-  provider_id: string;
-  provider_kind: string;
-  native_id: string;
-  title: string;
-  cwd: string;
-  created_at: string;
-  already_imported: boolean;
+interface ProviderCount {
+  total: number;
+  imported: number;
+  pending: number;
 }
 
-interface Preview {
-  sessions: PreviewSession[];
+interface Summary {
+  total: number;
+  imported: number;
+  pending: number;
+  by_provider: Record<string, ProviderCount>;
 }
 
 const EMPTY_STATUS: JobStatus = {
@@ -46,7 +45,10 @@ const EMPTY_STATUS: JobStatus = {
 export function NativeImportSetting() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<JobStatus>(EMPTY_STATUS);
-  const [preview, setPreview] = useState<Preview>({ sessions: [] });
+  // `null` means the counts preview has not loaded yet (initial or after a
+  // failed fetch). The "all imported" headline is gated on a non-null
+  // summary so a failed load is never mistaken for "nothing left to import".
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState("");
   const pollRef = useRef<number | null>(null);
 
@@ -62,25 +64,27 @@ export function NativeImportSetting() {
     }
   }, []);
 
-  const fetchPreview = useCallback(async () => {
+  const fetchSummary = useCallback(async () => {
     try {
-      const { promise } = trackPromise("nativeImport:preview", () =>
-        fetch(`${API}/api/native-import/sessions`),
+      const { promise } = trackPromise("nativeImport:summary", () =>
+        fetch(`${API}/api/native-import/summary`),
       );
       const r = await promise;
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setPreview(await r.json());
+      setSummary(await r.json());
+      setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "preview failed");
+      setSummary(null);
+      setError(e instanceof Error ? e.message : "summary failed");
     }
   }, []);
 
   useEffect(() => {
     void fetchStatus();
-    void fetchPreview();
-  }, [fetchStatus, fetchPreview]);
+    void fetchSummary();
+  }, [fetchStatus, fetchSummary]);
 
-  // Poll while a job is running; stop when it finishes, then refresh preview.
+  // Poll while a job is running; stop when it finishes, then refresh counts.
   useEffect(() => {
     if (!running) {
       if (pollRef.current) {
@@ -92,7 +96,7 @@ export function NativeImportSetting() {
     pollRef.current = window.setInterval(() => {
       void fetchStatus().then(() => {
         setStatus((s) => {
-          if (s.status !== "running") void fetchPreview();
+          if (s.status !== "running") void fetchSummary();
           return s;
         });
       });
@@ -101,7 +105,7 @@ export function NativeImportSetting() {
       if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = null;
     };
-  }, [running, fetchStatus, fetchPreview]);
+  }, [running, fetchStatus, fetchSummary]);
 
   const start = async () => {
     setError("");
@@ -123,7 +127,14 @@ export function NativeImportSetting() {
 
   const completed = status.imported + status.skipped + status.failed;
   const pct = status.total > 0 ? Math.min(100, Math.round((completed / status.total) * 100)) : 0;
-  const pending = preview.sessions.filter((s) => !s.already_imported).length;
+  const loaded = summary !== null;
+  const pending = summary?.pending ?? 0;
+  const pendingByProvider = summary
+    ? Object.entries(summary.by_provider)
+        .filter(([, c]) => c.pending > 0)
+        .map(([kind, c]) => `${kind} ${c.pending}`)
+        .join(" · ")
+    : "";
 
   return (
     <div className="native-import-setting">
@@ -143,22 +154,33 @@ export function NativeImportSetting() {
         <button
           className="native-import-btn"
           onClick={() => void start()}
-          disabled={running || pending === 0}
-          title={pending === 0 ? t("settings.nativeImportNothing", "Nothing new to import") : ""}
+          disabled={running || !loaded || pending === 0}
+          title={
+            loaded && pending === 0
+              ? t("settings.nativeImportNothing", "Nothing new to import")
+              : ""
+          }
         >
           {running
             ? t("settings.nativeImportRunning", "Importing…")
             : t("settings.nativeImportBtn", "Import all native sessions")}
         </button>
         <span className="native-import-count">
-          {pending > 0
-            ? t("settings.nativeImportPending", {
-                count: pending,
-                defaultValue: "{{count}} session(s) ready",
-              })
-            : t("settings.nativeImportAllDone", "All sessions imported")}
+          {!loaded
+            ? error
+              ? t("settings.nativeImportLoadFailed", "Couldn't load native sessions")
+              : t("settings.nativeImportLoading", "Checking native sessions…")
+            : pending > 0
+              ? t("settings.nativeImportPending", {
+                  count: pending,
+                  defaultValue: "{{count}} session(s) ready",
+                })
+              : t("settings.nativeImportAllDone", "All sessions imported")}
         </span>
       </div>
+      {loaded && pending > 0 && pendingByProvider && (
+        <div className="native-import-breakdown">{pendingByProvider}</div>
+      )}
 
       {running && (
         <div className="native-import-progress">
