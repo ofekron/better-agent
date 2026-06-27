@@ -80,6 +80,9 @@ export type WSEventType =
   | "workers_changed"
   | "session_organization_changed"
   | "user_prefs_changed"
+  // Per-machine UI selection (selected project + remembered sessions)
+  // changed; payload is the full ui_selection snapshot.
+  | "ui_selection_changed"
   // Credential-broker consent list changed; refetch GET /api/credentials/pending.
   | "credential_consent_changed"
   | "projects_changed"

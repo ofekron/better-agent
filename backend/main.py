@@ -246,6 +246,7 @@ from fastapi.responses import FileResponse
 import config_store
 import shortcut_picker
 import user_prefs
+import ui_selection
 
 # Apply saved auth env vars at import time so any code path that still
 # reads `os.environ` directly (e.g. `runner.py` jsonl-path resolution)
@@ -1466,6 +1467,54 @@ async def patch_user_prefs(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.broadcast_global("user_prefs_changed", prefs)
     return prefs
+
+
+# ---- UI selection (per-machine navigation restore) ----
+
+@app.get("/api/ui-selection")
+async def get_ui_selection():
+    return await asyncio.to_thread(ui_selection.get_all)
+
+
+@app.patch("/api/ui-selection")
+async def patch_ui_selection(body: dict = Body(...)):
+    def _patch_sync() -> dict:
+        if "selected_project" in body:
+            sel = body["selected_project"]
+            if sel is None:
+                ui_selection.set_selected_project("")
+            elif isinstance(sel, dict):
+                path = sel.get("path")
+                if not isinstance(path, str):
+                    raise ValueError("selected_project.path must be a string")
+                node_id = sel.get("node_id", ui_selection.DEFAULT_NODE_ID)
+                if not isinstance(node_id, str):
+                    raise ValueError("selected_project.node_id must be a string")
+                ui_selection.set_selected_project(path, node_id)
+            else:
+                raise ValueError("selected_project must be an object or null")
+        if "remembered_session" in body:
+            rem = body["remembered_session"]
+            if not isinstance(rem, dict):
+                raise ValueError("remembered_session must be an object")
+            path = rem.get("path")
+            session_id = rem.get("session_id")
+            node_id = rem.get("node_id", ui_selection.DEFAULT_NODE_ID)
+            if not isinstance(path, str) or not path:
+                raise ValueError("remembered_session.path must be a non-empty string")
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError("remembered_session.session_id must be a non-empty string")
+            if not isinstance(node_id, str):
+                raise ValueError("remembered_session.node_id must be a string")
+            ui_selection.set_remembered_session(path, node_id, session_id)
+        return ui_selection.get_all()
+
+    try:
+        snapshot = await asyncio.to_thread(_patch_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await coordinator.broadcast_global("ui_selection_changed", snapshot)
+    return snapshot
 
 
 # ---- Shortcut responses ----
