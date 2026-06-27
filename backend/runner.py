@@ -2058,11 +2058,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 internal_token=internal_token,
             ))
         ofp_server = create_sdk_mcp_server(
-            name="open-file-panel",
+            name="ui",
             version="1.0.0",
             tools=tools,
         )
-        mcp_servers["open-file-panel"] = ofp_server
+        mcp_servers["ui"] = ofp_server
 
     # NOTE: the Ask container (ASK_SINGLETON_ID) runs NO claude turns of its
     # own — its search turns are orchestrated server-side by

@@ -139,7 +139,7 @@ _CODEX_NATIVE_TOOL_NAMES = frozenset({
 })
 
 _KNOWN_MCP_SERVER_TOOL_NAMES: dict[str, frozenset[str]] = {
-    "open-file-panel": frozenset({"open_file_panel", "request_user_input"}),
+    "ui": frozenset({"open_file_panel", "request_user_input"}),
     "open-config-panel": frozenset({"open_config_panel"}),
 }
 
