@@ -2830,6 +2830,17 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     }
   }, [expandAllTrigger]);
   const hasResponse = !!assistantMessage || !!(workerSubGroups?.some(sg => sg.assistant));
+  // Ask-flow turns are represented entirely by their inline picker footer
+  // (reasoning + matches + actions), rendered by Chat's renderGroupFooter.
+  // Their assistant message carries no events and its reasoning already
+  // lives in the picker, so rendering the assistant body would duplicate
+  // the reasoning and add an empty indented block — suppress it, and make
+  // the turn non-expandable. Delegate-approval pickers ride on real turns
+  // with their own body, so they are excluded.
+  const isAskFlowTurn =
+    !!assistantMessage?.ask_result &&
+    assistantMessage.ask_result.purpose !== "delegate_approval";
+  const canExpand = hasResponse && !isAskFlowTurn;
 
   // The last assistant message that carries meaningful content — may be a
   // supervisor sub-group response rather than the initial assistantMessage.
@@ -3004,9 +3015,9 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           <button
             type="button"
             className="message-box-header"
-            onClick={hasResponse ? toggleCollapsed : undefined}
+            onClick={canExpand ? toggleCollapsed : undefined}
             aria-expanded={!collapsed}
-            disabled={!hasResponse}
+            disabled={!canExpand}
           >
             <span className="collapse-arrow">{collapsed ? "\u25B6" : "\u25BC"}</span>
             <span className={`message-box-icon${userMessage.source ? " orchestration-icon" : ""}`}>
@@ -3138,7 +3149,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
         })()}
       </div>
       )}
-      {assistantCollapsed && (collapsedAssistantErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveAssistant?.stopped_at) && (
+      {assistantCollapsed && !isAskFlowTurn && (collapsedAssistantErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveAssistant?.stopped_at) && (
         <div
           className="message-group-children"
           data-message-id={effectiveAssistant?.id ?? userMessage.id}
@@ -3187,7 +3198,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           )}
         </div>
       )}
-      {!assistantCollapsed && (assistantMessage || (workerSubGroups && workerSubGroups.length > 0)) && (
+      {!assistantCollapsed && !isAskFlowTurn && (assistantMessage || (workerSubGroups && workerSubGroups.length > 0)) && (
         <div className="message-group-children">
           {assistantMessage && (
             <AssistantMessage

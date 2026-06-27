@@ -117,44 +117,21 @@ def test_ask_search_acks_user_message_before_worker_finishes(monkeypatch):
     ]
 
 
-def test_ask_msg_uses_worker_text_but_not_its_transcript(monkeypatch):
-    """The Ask assistant message derives its visible text from the worker's
-    answer, but must NOT graft the worker fork's internal transcript (which
-    carries the inherited provision "ready" priming + every grep tool_use)
-    onto its own `events`. That transcript leaked as noise into the Ask
-    turn; the worker's event log lives in the worker panel/provenance."""
+def test_ask_msg_has_no_body_only_picker(monkeypatch):
+    """The Ask assistant message carries NO body — empty content and no
+    events. The reasoning lives only in `ask_result.reasoning` (rendered by
+    the inline picker); stamping it into `content` too would render it twice
+    (assistant bubble + picker) and pad the turn with an empty indented block.
+    The Ask flow must also NOT request the worker fork's internal transcript
+    (it is noise that lives in the worker panel/provenance only)."""
     create_ask_session()
-    worker_events = [
-        {
-            "type": "agent_message",
-            "data": {
-                "uuid": "assistant-0",
-                "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "ready"}]},
-            },
-        },
-        {
-            "type": "agent_message",
-            "data": {
-                "uuid": "assistant-1",
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "text", "text": "matched from worker events"}
-                    ],
-                },
-            },
-        },
-        {"type": "complete", "data": {"success": True}},
-    ]
 
     async def fake_run_search(query: str, **kwargs):
-        assert kwargs["include_worker_events"] is True
+        assert "include_worker_events" not in kwargs
         return {
             "session_ids": [],
             "reasoning": f"summary for {query}",
             "error": None,
-            "_worker_events": worker_events,
         }
 
     monkeypatch.setattr(
@@ -175,9 +152,10 @@ def test_ask_msg_uses_worker_text_but_not_its_transcript(monkeypatch):
     assert "_worker_events" not in result
     messages = virtual_session_store.get(session_search.ASK_SINGLETON_ID)["messages"]
     assistant = next(m for m in messages if m.get("role") == "assistant")
-    assert assistant["content"] == "matched from worker events"
+    # Body is empty; reasoning lives on the picker payload, not in content.
+    assert assistant["content"] == ""
     assert assistant["events"] == []
-    assert "ready" not in (assistant.get("content") or "")
+    assert assistant["ask_result"]["reasoning"] == "summary for find projected turn"
     assert assistant["completed_at"]
 
 
@@ -220,13 +198,13 @@ def test_ask_search_emits_running_indicator(monkeypatch):
     assert running == [True, False]
 
 
-def test_ask_assistant_msg_drops_empty_worker_transcript():
-    """No worker events (e.g. dispatch_failed) → empty content falls back to
-    the result reasoning; events still []."""
+def test_ask_assistant_msg_has_empty_body():
+    """The assistant message body is always empty — content "" and events [].
+    Reasoning (and any error) is surfaced by the picker, never the bubble."""
     result = {"session_ids": [], "reasoning": "fallback", "error": "dispatch_failed"}
     msg = session_search._ask_assistant_message_from_worker_result(result)
     assert msg["events"] == []
-    assert msg["content"] == "fallback"
+    assert msg["content"] == ""
 
 
 def test_ask_ui_search_sessions_is_pure(monkeypatch):
