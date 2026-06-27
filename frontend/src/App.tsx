@@ -16,10 +16,13 @@ import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
 import { useMachines } from "./hooks/useMachines";
+import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { Chat } from "./components/Chat";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
+import { SettingsWindow } from "./components/SettingsWindow";
+import { openSettingsWindow } from "./lib/settingsWindow";
 import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
 import type { FileEditorHandle } from "./components/FileViewer";
@@ -81,8 +84,7 @@ import { ExtensionPageIcons, ExtensionQuickButtons } from "./components/Extensio
 import { RefreshResult } from "./components/RefreshResult";
 import { applyAppearancePrefs, type AppearancePrefs } from "./components/AppearanceSetting";
 import { scaledFontSize } from "./utils/typography";
-import { clearRefreshContext, saveRefreshContext } from "./lib/refreshContext";
-import { hardRefreshCurrentPage } from "./lib/hardRefresh";
+import { useRefreshApp } from "./hooks/useRefreshApp";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
@@ -134,18 +136,12 @@ import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
 import { API, WS_URL } from "./api";
-import { extBackendBase, extId } from "./extensionIds";
+import { extBackendBase } from "./extensionIds";
 import { eventBus, subscribeMany } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
-
-type RefreshMode = "now" | "idle";
-type RestartStatus = {
-  accepted: boolean;
-  refresh_result?: { request_id?: string } | null;
-};
 
 const rearrangerApi = () => extBackendBase("rearranger");
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
@@ -487,6 +483,14 @@ export default function App() {
     );
   }
 
+  // Settings popout mode — when the URL carries ?settings_window=1, render
+  // the dedicated chrome-less SettingsWindow instead of the workspace.
+  const settingsWindow =
+    new URLSearchParams(window.location.search).get("settings_window") === "1";
+  if (settingsWindow) {
+    return <SettingsWindow />;
+  }
+
   return (
     <>
       <AppMain
@@ -527,70 +531,6 @@ interface AppMainProps {
   authedUser: { username: string } | null;
   onLogout: () => void;
   suppressDonationWelcome: boolean;
-}
-
-const BUILTIN_FLAG_KEYS = [
-  "ask",
-  "team",
-  "supervisor",
-  "projectStructure",
-  "machineNodes",
-  "credentialBroker",
-  "providerConfigSync",
-  "canvas",
-  "rearranger",
-  "promptEngineer",
-  "browserHarness",
-  "testape",
-] as const;
-
-type BuiltinExtensionFlags = Record<(typeof BUILTIN_FLAG_KEYS)[number], boolean>;
-
-const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
-  ask: true,
-  team: true,
-  supervisor: true,
-  projectStructure: true,
-  machineNodes: true,
-  credentialBroker: true,
-  providerConfigSync: true,
-  canvas: true,
-  rearranger: true,
-  promptEngineer: true,
-  browserHarness: true,
-  testape: true,
-};
-
-function useBuiltinExtensionFlags(authStatus: "loading" | "authed"): BuiltinExtensionFlags {
-  const [flags, setFlags] = useState<BuiltinExtensionFlags>(DEFAULT_BUILTIN_EXTENSION_FLAGS);
-
-  const refresh = useCallback(async () => {
-    if (authStatus !== "authed") return;
-    try {
-      const res = await fetch(`${API}/api/extensions`, { credentials: "include" });
-      if (!res.ok) return;
-      const payload = await res.json();
-      const records = Array.isArray(payload.extensions) ? payload.extensions : [];
-      const next = { ...DEFAULT_BUILTIN_EXTENSION_FLAGS };
-      for (const key of BUILTIN_FLAG_KEYS) {
-        const record = records.find((item: any) => item?.manifest?.id === extId(key));
-        next[key] = record ? record.enabled === true : false;
-      }
-      setFlags(next);
-    } catch {
-      setFlags(DEFAULT_BUILTIN_EXTENSION_FLAGS);
-    }
-  }, [authStatus]);
-
-  useEffect(() => {
-    void refresh();
-    const off = eventBus.subscribe("extensions_changed", () => {
-      void refresh();
-    });
-    return off;
-  }, [refresh]);
-
-  return flags;
 }
 
 function AppMain({
@@ -2318,95 +2258,21 @@ function AppMain({
     rightPanelTab,
   ]);
   const retryPayloadsRef = useRef<Map<string, ImagePayload[]>>(new Map());
-  const [restarting, setRestarting] = useState(false);
-  const [refreshModalOpen, setRefreshModalOpen] = useState(false);
-  // Persistent (non-transient) surfacing of a failed in-app refresh —
-  // e.g. the backend 409 "requires the run.sh supervisor". A blocking
-  // window.alert is easy to dismiss and miss; this banner stays until
-  // the user closes it or a refresh succeeds.
-  const [restartError, setRestartError] = useState<string | null>(null);
+  // Prod-mode refresh flow (restart backend + hard-reload) lives in a shared
+  // hook so the main app and the standalone settings window drive one impl.
+  const {
+    restarting,
+    restartError,
+    dismissRestartError,
+    openRefreshModal,
+    refreshModal,
+  } = useRefreshApp();
   const [projectSettingsCwd, setProjectSettingsCwd] = useState<string | null>(null);
   // When the sidebar's AI search is active, the SessionList computes
   // its filtered list against ALL sessions (bypassing the project
   // filter) so cross-project matches surface. We dim ProjectTabs to
   // signal that selecting a project won't narrow the results.
   const [aiSearchActive, setAiSearchActive] = useState(false);
-
-  // Triggers the prod-mode refresh flow: POSTs /api/admin/restart (which
-  // SIGTERMs the backend), polls /api/build-info until the matching
-  // supervised build result is available, then hard-reloads the page
-  // so the browser pulls the new HTML+JS bundle. The supervisor waits for
-  // the new backend to become healthy before rebuilding the frontend. This
-  // full refresh is the user's only path to picking up code changes in this
-  // mode — there is no HMR and no uvicorn --reload.
-  const openRefreshModal = useCallback(() => {
-    if (restarting) return;
-    setRefreshModalOpen(true);
-  }, [restarting]);
-
-  const handleRefreshApp = useCallback(async (mode: RefreshMode) => {
-    if (restarting) return;
-    setRefreshModalOpen(false);
-    setRestartError(null);
-    setRestarting(true);
-    const requestId = uuidv4();
-    saveRefreshContext(requestId);
-    let accepted = false;
-    try {
-      const res = await fetch(`${API}/api/admin/restart`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_id: requestId, mode }),
-      });
-      if (!res.ok) {
-        clearRefreshContext();
-        setRestarting(false);
-        let detail = "";
-        try {
-          detail = ((await res.json()) as { detail?: string })?.detail ?? "";
-        } catch {
-          /* non-JSON body — fall back to the generic i18n message */
-        }
-        setRestartError(detail || t("app.refreshUnavailable"));
-        return;
-      }
-      accepted = true;
-    } catch {
-      accepted = false;
-    }
-    const deadline = Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 500));
-      try {
-        const res = await fetch(
-          `${API}/api/admin/restart-status/${encodeURIComponent(requestId)}`,
-          { cache: "no-store" },
-        );
-        const info = res.ok
-          ? await res.json() as RestartStatus
-          : null;
-        if (!accepted && info?.accepted === false) {
-          clearRefreshContext();
-          setRestarting(false);
-          setRestartError(t("app.refreshNotAccepted"));
-          return;
-        }
-        if (info?.accepted) {
-          accepted = true;
-        }
-        if (info?.refresh_result?.request_id === requestId) {
-          await hardRefreshCurrentPage(requestId);
-          return;
-        }
-      } catch {
-        // Backend still down — keep polling.
-      }
-    }
-    // Gave up waiting; surface the failure and let the user retry.
-    clearRefreshContext();
-    setRestarting(false);
-    setRestartError(t("app.refreshTimeout"));
-  }, [restarting, t]);
   // Memoized (not mapped per render) so memo(MessageGroup)'s shallow
   // compare keeps working across per-WS-frame parent re-renders; the
   // frozen module-level singleton keeps the empty case reference-stable.
@@ -5415,7 +5281,7 @@ function AppMain({
           <span className="restart-error-banner-text">{restartError}</span>
           <button
             className="restart-error-banner-close"
-            onClick={() => setRestartError(null)}
+            onClick={dismissRestartError}
             aria-label={t("startup_tasks.dismiss")}
             title={t("startup_tasks.dismiss")}
           >
@@ -5638,7 +5504,7 @@ function AppMain({
             const configBtn = (
               <button
                 className="setup-btn"
-                onClick={() => navigate("/settings")}
+                onClick={openSettingsWindow}
                 title={t("app.settingsButtonTitle")}
                 aria-label={t("app.settingsButtonTitle")}
               >
@@ -6957,61 +6823,7 @@ function AppMain({
           onCancel={() => projectSuggestion.resolve("cancel")}
         />
       )}
-      {refreshModalOpen && (
-        <div className="modal-overlay" onClick={() => setRefreshModalOpen(false)}>
-          <div
-            className="modal-content refresh-choice-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="refresh-choice-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-header">
-              <h2 id="refresh-choice-title">{t("app.refreshModalTitle")}</h2>
-              <button
-                className="modal-close"
-                onClick={() => setRefreshModalOpen(false)}
-                aria-label={t("startup_tasks.dismiss")}
-              >
-                &times;
-              </button>
-            </div>
-            <div className="modal-body refresh-choice-body">
-              <button
-                type="button"
-                className="refresh-choice-option"
-                onClick={() => void handleRefreshApp("now")}
-              >
-                <span className="refresh-choice-icon">
-                  <Icon name="refresh" size={18} />
-                </span>
-                <span>
-                  <strong>{t("app.refreshNowTitle")}</strong>
-                  <small>{t("app.refreshNowDescription")}</small>
-                </span>
-              </button>
-              <button
-                type="button"
-                className="refresh-choice-option"
-                onClick={() => void handleRefreshApp("idle")}
-              >
-                <span className="refresh-choice-icon">
-                  <Icon name="clock" size={18} />
-                </span>
-                <span>
-                  <strong>{t("app.refreshIdleTitle")}</strong>
-                  <small>{t("app.refreshIdleDescription")}</small>
-                </span>
-              </button>
-            </div>
-            <div className="modal-footer">
-              <button className="btn-secondary" onClick={() => setRefreshModalOpen(false)}>
-                {t("app.cancel")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {refreshModal}
       {detailsSessionId && (
         <SessionDetailsPanel
           open={!!detailsSessionId}
