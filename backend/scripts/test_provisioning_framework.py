@@ -42,6 +42,7 @@ from provisioning import (  # noqa: E402
     ProvisionedConfig,
     ProvisionedSessionSpec,
     dirty_reason,
+    expired_reason,
     extract_fork_text,
     register,
     resolve_config,
@@ -137,6 +138,43 @@ def test_dirty_reason() -> bool:
         jh.compute_jsonl_path = original  # type: ignore[assignment]
 
     print(f"{PASS} dirty_reason: clean / size / turn-count / leak / api-error")
+    return True
+
+
+# ── expired_reason (lifetime recycling) ───────────────────────────────
+
+def test_expired_reason() -> bool:
+    class _Fresh(ProvisionedSessionSpec):
+        lifetime_seconds = 60.0
+
+    class _NoLifetime(ProvisionedSessionSpec):
+        lifetime_seconds = None
+
+    fresh = _Fresh()
+    now = time.time()
+
+    # No lifetime configured ⇒ never expired.
+    if expired_reason({"working_mode_meta": {"provisioned_at": 0}}, _NoLifetime()):
+        print(f"{FAIL} expired: no-lifetime spec flagged expired")
+        return False
+
+    # Fresh stamp ⇒ not expired.
+    if expired_reason({"working_mode_meta": {"provisioned_at": now}}, fresh):
+        print(f"{FAIL} expired: fresh base flagged expired")
+        return False
+
+    # Old stamp ⇒ expired.
+    old = {"working_mode_meta": {"provisioned_at": now - 120.0}}
+    if not expired_reason(old, fresh):
+        print(f"{FAIL} expired: aged base not flagged")
+        return False
+
+    # Missing stamp (predates lifetime tracking) ⇒ expired so it gets re-stamped.
+    if not expired_reason({"working_mode_meta": {}}, fresh):
+        print(f"{FAIL} expired: unstamped base not flagged")
+        return False
+
+    print(f"{PASS} expired_reason: fresh / aged / unstamped / no-lifetime")
     return True
 
 
@@ -450,6 +488,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
 def main_run() -> int:
     tests = [
         test_dirty_reason,
+        test_expired_reason,
         test_spec_and_registry,
         test_resolve_config_overlay,
         test_extract_fork_text,
