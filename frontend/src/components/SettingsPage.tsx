@@ -12,6 +12,11 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { LanguageSelector } from "./LanguageSelector";
+import {
+  availableModesForForm,
+  apiEnvCopyForKind,
+  showConfigDirForKind,
+} from "./providerFormShape";
 import { Select } from "./Select";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
@@ -2246,10 +2251,12 @@ function ProviderForm({
   const { t } = useTranslation();
   const [name, setName] = useState(initial.name);
   const [kind] = useState(initial.kind || "claude");
+  const modes = availableModesForForm(kind, mode, initial.mode);
   const [mode_, setMode] = useState<Provider["mode"]>(initial.mode);
   const [baseUrl, setBaseUrl] = useState(initial.base_url);
   const [configDir, setConfigDir] = useState(initial.config_dir);
   const configDirCopy = configDirCopyForKind(kind);
+  const apiEnvCopy = apiEnvCopyForKind(kind);
   const [defaultModel, setDefaultModel] = useState(initial.default_model);
   const effortOptions = effortOptionsForKind(kind);
   const initialEffort =
@@ -2365,31 +2372,37 @@ function ProviderForm({
           />
         </div>
 
-        <div className="setup-mode-toggle">
-          <button
-            className={`setup-mode-btn ${
-              mode_ === "subscription" ? "active" : ""
-            }`}
-            onClick={() => setMode("subscription")}
-            type="button"
-          >
-            <span className="setup-mode-icon"><Icon name="star" size={14} style={{ verticalAlign: "-2px" }} /></span>
-            {t('setup.subscriptionButton')}
-          </button>
-          <button
-            className={`setup-mode-btn ${mode_ === "api_key" ? "active" : ""}`}
-            onClick={() => setMode("api_key")}
-            type="button"
-          >
-            <span className="setup-mode-icon"><Icon name="settings" size={14} style={{ verticalAlign: "-2px" }} /></span>
-            {t('setup.apiKeyButton')}
-          </button>
-        </div>
+        {modes.length > 1 && (
+          <div className="setup-mode-toggle">
+            {modes.includes("subscription") && (
+              <button
+                className={`setup-mode-btn ${
+                  mode_ === "subscription" ? "active" : ""
+                }`}
+                onClick={() => setMode("subscription")}
+                type="button"
+              >
+                <span className="setup-mode-icon"><Icon name="star" size={14} style={{ verticalAlign: "-2px" }} /></span>
+                {t('setup.subscriptionButton')}
+              </button>
+            )}
+            {modes.includes("api_key") && (
+              <button
+                className={`setup-mode-btn ${mode_ === "api_key" ? "active" : ""}`}
+                onClick={() => setMode("api_key")}
+                type="button"
+              >
+                <span className="setup-mode-icon"><Icon name="settings" size={14} style={{ verticalAlign: "-2px" }} /></span>
+                {t('setup.apiKeyButton')}
+              </button>
+            )}
+          </div>
+        )}
 
         {mode_ === "api_key" && (
           <div className="setup-fields">
             <div className="setup-field">
-              <label>{t('setup.apiKeyLabel')}</label>
+              <label>{t(apiEnvCopy.keyLabelKey)}</label>
               <input
                 type="password"
                 value={apiKey}
@@ -2397,14 +2410,14 @@ function ProviderForm({
                 placeholder={
                   initialHasKey
                     ? t('setup.apiKeyPlaceholderKeep')
-                    : t('setup.apiKeyPlaceholderEmpty')
+                    : t(apiEnvCopy.keyPlaceholderKey)
                 }
                 spellCheck={false}
               />
               <span className="setup-field-hint">{t("setup.apiKeySecurityHint")}</span>
             </div>
             <div className="setup-field">
-              <label>{t('setup.baseUrlLabel')}</label>
+              <label>{t(apiEnvCopy.urlLabelKey)}</label>
               <input
                 type="text"
                 value={baseUrl}
@@ -2416,19 +2429,21 @@ function ProviderForm({
           </div>
         )}
 
-        <div className="setup-field">
-          <label>{t(configDirCopy.labelKey)}</label>
-          <input
-            type="text"
-            value={configDir}
-            onChange={(e) => setConfigDir(e.target.value)}
-            placeholder={t(configDirCopy.placeholderKey)}
-            spellCheck={false}
-          />
-          <span className="setup-field-hint">
-            {t(configDirCopy.hintKey)}
-          </span>
-        </div>
+        {showConfigDirForKind(kind) && (
+          <div className="setup-field">
+            <label>{t(configDirCopy.labelKey)}</label>
+            <input
+              type="text"
+              value={configDir}
+              onChange={(e) => setConfigDir(e.target.value)}
+              placeholder={t(configDirCopy.placeholderKey)}
+              spellCheck={false}
+            />
+            <span className="setup-field-hint">
+              {t(configDirCopy.hintKey)}
+            </span>
+          </div>
+        )}
 
         <div className="setup-field">
           <label>{t('setup.defaultModelLabel')}</label>
