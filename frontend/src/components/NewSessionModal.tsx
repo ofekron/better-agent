@@ -9,6 +9,7 @@ import type {
   Project,
   Provider,
   ReasoningEffort,
+  Permission,
 } from "../types";
 import {
   ProviderCapabilityPicker,
@@ -41,6 +42,8 @@ interface RoleConfig {
   providerId: string;
   model: string;
   reasoningEffort: ReasoningEffort | "";
+  /** Per-session permission override. {} = inherit provider default. */
+  permission: Permission;
 }
 
 interface SessionConfig {
@@ -236,6 +239,16 @@ function resolveReasoningEffort(
   ) ?? options[0];
 }
 
+function resolvePermission(
+  saved: RoleConfig | undefined,
+  provider: Provider,
+): Permission {
+  // Carry over a previously chosen override when the provider still matches;
+  // otherwise inherit the provider default ({}).
+  const savedPerm = saved?.providerId === provider.id ? saved.permission : {};
+  return savedPerm && Object.keys(savedPerm).length > 0 ? { ...savedPerm } : {};
+}
+
 export function resolveRoleConfig(
   saved: RoleConfig | undefined,
   providers: Provider[],
@@ -246,7 +259,7 @@ export function resolveRoleConfig(
   const provider =
     providers.find((item) => item.id === saved?.providerId)
     ?? providers.find((item) => item.id === defaultProviderId);
-  if (!provider) return { providerId: "", model: "", reasoningEffort: "" };
+  if (!provider) return { providerId: "", model: "", reasoningEffort: "", permission: {} };
 
   const models = modelsByProvider[provider.id] ?? [];
   const savedModel = saved?.providerId === provider.id ? saved.model : "";
@@ -267,6 +280,7 @@ export function resolveRoleConfig(
     providerId: provider.id,
     model,
     reasoningEffort: resolveReasoningEffort(saved, provider, role),
+    permission: resolvePermission(saved, provider),
   };
 }
 
@@ -326,6 +340,7 @@ function ProviderModelPicker({
               providerId: e.target.value,
               model: p?.last_model || p?.default_model || "",
               reasoningEffort: p ? resolveReasoningEffort(undefined, p, role) : "",
+              permission: p ? resolvePermission(undefined, p) : {},
             });
           }}
         >
@@ -367,6 +382,40 @@ function ProviderModelPicker({
           </select>
         </div>
       ) : null}
+      {selectedProvider?.permission_options &&
+      Object.keys(selectedProvider.permission_options).length > 0
+        ? Object.entries(selectedProvider.permission_options).map(([axis, allowed]) => {
+            const def = selectedProvider.default_permission?.[axis];
+            const current = value.permission[axis] ?? "";
+            return (
+              <div className="ns-modal-row" key={axis}>
+                <label>
+                  {t("newSession.permission")} ({t(`permission.axis.${axis}`, { defaultValue: axis })})
+                </label>
+                <select
+                  value={current}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    const next: Permission = { ...value.permission };
+                    if (v === "") delete next[axis];
+                    else next[axis] = v;
+                    onChange({ ...value, permission: next });
+                  }}
+                >
+                  <option value="">
+                    {t("permission.inherit", { defaultValue: "Inherit default" })}
+                    {def ? ` (${def})` : ""}
+                  </option>
+                  {allowed.map((v) => (
+                    <option key={v} value={v}>
+                      {t(`permission.value.${v}`, { defaultValue: v })}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })
+        : null}
     </div>
   );
 }
@@ -458,8 +507,8 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
-  const [main, setMain] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "" });
-  const [worker, setWorker] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "" });
+  const [main, setMain] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
+  const [worker, setWorker] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [
       ...(

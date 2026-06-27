@@ -1845,6 +1845,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     model = inputs.get("model")
     reasoning_effort = claude_sdk_effort(inputs.get("reasoning_effort"))
+    permission_mode = (inputs.get("permission") or {}).get("mode") or "bypassPermissions"
     session_id = inputs.get("session_id")
     if session_id == "null":
         session_id = None
@@ -2104,7 +2105,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     options = ClaudeAgentOptions(
         mcp_servers=mcp_servers,
-        permission_mode="bypassPermissions",
+        permission_mode=permission_mode,
         cwd=cwd,
         model=model,
         effort=reasoning_effort,

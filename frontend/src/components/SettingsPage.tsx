@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import type { Project, Provider, ProvidersState, ReasoningEffort } from "../types";
+import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
 import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
@@ -2164,8 +2164,28 @@ interface FormPayload {
   config_dir: string;
   default_model: string;
   default_reasoning_effort: ReasoningEffort | "";
+  default_permission: Permission;
   api_key: string;
   capabilities?: Record<string, boolean>;
+}
+
+// Per-provider-native permission vocabularies (mirror backend/permission.py).
+// One axis for claude/gemini, two independent axes (approval + sandbox) for codex.
+const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
+  claude: { mode: ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"] },
+  codex: {
+    approval: ["untrusted", "on-request", "on-failure", "never"],
+    sandbox: ["read-only", "workspace-write", "danger-full-access"],
+  },
+  gemini: { mode: ["default", "auto_edit", "yolo", "plan"] },
+};
+const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
+  claude: { mode: "bypassPermissions" },
+  codex: { approval: "never", sandbox: "danger-full-access" },
+  gemini: { mode: "yolo" },
+};
+function permissionOptionsForKind(kind: string): Record<string, string[]> {
+  return PERMISSION_OPTIONS[kind] ?? {};
 }
 
 // Capability keys overridable per provider (kind gives the default; these
@@ -2194,9 +2214,10 @@ function ProviderForm({
    * the default_model dropdown. Undefined during the create wizard
    * (provider doesn't exist yet → free-text input). */
   providerId?: string;
-  initial: Omit<FormPayload, "api_key"> & {
+  initial: Omit<FormPayload, "api_key" | "default_permission"> & {
     api_key?: string;
     capability_overrides?: Partial<Record<string, boolean>>;
+    default_permission?: Permission;
   };
   initialHasKey: boolean;
   onClose: () => void;
@@ -2218,6 +2239,19 @@ function ProviderForm({
       : defaultEffortForKind(kind);
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | "">(initialEffort);
+  const permissionOptions = permissionOptionsForKind(kind);
+  const seedPermission = (): Permission => {
+    const opts = permissionOptions;
+    const saved = initial.default_permission;
+    const out: Permission = {};
+    for (const axis of Object.keys(opts)) {
+      const allowed = opts[axis];
+      const v = saved?.[axis];
+      out[axis] = v && allowed.includes(v) ? v : PERMISSION_DEFAULTS[kind]?.[axis] ?? allowed[0];
+    }
+    return out;
+  };
+  const [defaultPermission, setDefaultPermission] = useState<Permission>(seedPermission);
   const [apiKey, setApiKey] = useState(initial.api_key ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[] | null>(null);
@@ -2271,6 +2305,7 @@ function ProviderForm({
         config_dir: configDir,
         default_model: defaultModel,
         default_reasoning_effort: defaultReasoningEffort,
+        default_permission: defaultPermission,
         api_key:
           mode_ === "api_key"
             ? apiKey || (initialHasKey ? KEEP : "")
@@ -2449,6 +2484,29 @@ function ProviderForm({
                 </option>
               ))}
             </select>
+          </div>
+        )}
+
+        {Object.keys(permissionOptions).length > 0 && (
+          <div className="setup-field">
+            <label>{t('setup.defaultPermissionLabel')}</label>
+            {Object.entries(permissionOptions).map(([axis, allowed]) => (
+              <select
+                key={axis}
+                className="permission-axis-select"
+                value={defaultPermission[axis] ?? allowed[0]}
+                onChange={(e) =>
+                  setDefaultPermission((prev) => ({ ...prev, [axis]: e.target.value }))
+                }
+                title={t(`permission.axis.${axis}`)}
+              >
+                {allowed.map((value) => (
+                  <option key={value} value={value}>
+                    {t(`permission.value.${value}`, { defaultValue: value })}
+                  </option>
+                ))}
+              </select>
+            ))}
           </div>
         )}
 

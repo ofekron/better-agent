@@ -44,6 +44,11 @@ from reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     normalize_reasoning_effort,
 )
+from permission import (
+    clean_default_permission,
+    default_permission_for_kind,
+    permission_axes_for_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +337,7 @@ def _seed_default_state() -> dict:
                 "custom_models": [],
                 "default_model": "claude-opus-4-7[1m]",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+                "default_permission": default_permission_for_kind("claude"),
             },
             {
                 "id": codex_pid,
@@ -343,6 +349,7 @@ def _seed_default_state() -> dict:
                 "custom_models": [],
                 "default_model": "gpt-5.5",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+                "default_permission": default_permission_for_kind("codex"),
             },
         ],
     }
@@ -667,6 +674,12 @@ def _strip(provider: dict) -> dict:
     default_effort = _clean_default_reasoning_effort(
         kind, provider.get("default_reasoning_effort")
     )
+    permission_options = _kind_permission_options(kind)
+    default_perm = (
+        _clean_default_permission(kind, provider.get("default_permission"))
+        if permission_options
+        else {}
+    )
     return {
         "id": provider["id"],
         "name": provider.get("name", ""),
@@ -678,6 +691,8 @@ def _strip(provider: dict) -> dict:
         "default_model": provider.get("default_model", ""),
         "reasoning_effort_options": effort_options,
         "default_reasoning_effort": default_effort if effort_options else "",
+        "permission_options": permission_options,
+        "default_permission": default_perm,
         # Credential-broker identity pin: host patterns this provider may
         # target with a user secret. Empty list = broker rejects all
         # credential requests from this provider (fail-closed).
@@ -782,6 +797,17 @@ def _clean_default_reasoning_effort(kind: str, value: object) -> str:
     if effort and effort in options:
         return effort
     return _kind_default_reasoning_effort(kind)
+
+
+def _kind_permission_options(kind: str) -> dict[str, list[str]]:
+    """Axis → allowed-values map for the frontend permission selector(s)."""
+    return {
+        axis: list(values) for axis, values in permission_axes_for_kind(kind).items()
+    }
+
+
+def _clean_default_permission(kind: str, value: object) -> dict:
+    return clean_default_permission(kind, value)
 
 
 def list_providers() -> dict:
@@ -892,6 +918,7 @@ def add_provider(payload: dict) -> dict:
         "default_reasoning_effort": _clean_default_reasoning_effort(
             kind, payload.get("default_reasoning_effort")
         ),
+        "default_permission": _clean_default_permission(kind, payload.get("default_permission")),
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
     }
@@ -938,6 +965,14 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     elif "kind" in payload:
         target["default_reasoning_effort"] = _clean_default_reasoning_effort(
             target.get("kind", "claude"), target.get("default_reasoning_effort")
+        )
+    if "default_permission" in payload:
+        target["default_permission"] = _clean_default_permission(
+            target.get("kind", "claude"), payload.get("default_permission")
+        )
+    elif "kind" in payload:
+        target["default_permission"] = _clean_default_permission(
+            target.get("kind", "claude"), target.get("default_permission")
         )
     if "custom_models" in payload and isinstance(payload["custom_models"], list):
         target["custom_models"] = list(payload["custom_models"])

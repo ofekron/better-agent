@@ -883,6 +883,7 @@ export interface Session {
   name: string;
   model: string;
   reasoning_effort?: ReasoningEffort | "";
+  permission?: Permission;
   provider_id?: string;
   cwd: string;
   /** Multi-machine: which node the session's filesystem ops route to.
@@ -1149,6 +1150,12 @@ export interface BrowseResult {
 export type ProviderMode = "subscription" | "api_key";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini,
+ * {"approval","sandbox"} for codex. {} = inherit the provider default. */
+export type Permission = Record<string, string>;
+/** Axis → allowed-values map for the provider's permission selector(s). */
+export type PermissionOptions = Record<string, string[]>;
+
 export interface Provider {
   id: string;
   name: string;
@@ -1160,6 +1167,8 @@ export interface Provider {
   default_model: string;
   reasoning_effort_options: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | "";
+  permission_options: PermissionOptions;
+  default_permission: Permission;
   /** Last model the user chose for this provider (backend-remembered).
    * Pickers pre-choose it over `default_model` when switching provider. */
   last_model?: string;
