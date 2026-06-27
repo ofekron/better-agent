@@ -306,6 +306,13 @@ class ClaudeProvider(Provider):
         import config_store
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
+        from permission import resolve_for_run as _resolve_perm
+        _permission = _resolve_perm(
+            sess_rec=_sess_rec,
+            worker_sess_rec=_worker_sess_rec,
+            is_worker=is_worker,
+            fallback_kind=self.KIND,
+        )
         _bare = bool(_sess_rec.get("bare_config"))
         if _bare:
             # No user/project/local CLAUDE.md, settings, or memory.
@@ -329,6 +336,7 @@ class ClaudeProvider(Provider):
             "cwd": cwd,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "permission": _permission,
             "session_id": session_id,
             "mode": mode,
             "app_session_id": app_session_id,

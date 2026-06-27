@@ -2594,6 +2594,7 @@ class SessionManager:
         source: str = "web",
         provider_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        permission: Optional[dict] = None,
         browser_harness_enabled: bool = True,
         browser_harness_headless: bool = True,
         node_id: str = "primary",
@@ -2613,6 +2614,7 @@ class SessionManager:
             orchestration_mode=orchestration_mode, source=source,
             provider_id=provider_id,
             reasoning_effort=reasoning_effort,
+            permission=permission,
             browser_harness_enabled=browser_harness_enabled,
             browser_harness_headless=browser_harness_headless,
             node_id=node_id,
@@ -2706,6 +2708,7 @@ class SessionManager:
         model: Optional[str] = None,
         provider_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        permission: Optional[dict] = None,
         cwd: str = "",
         node_id: Optional[str] = None,
     ) -> dict:
@@ -2726,6 +2729,7 @@ class SessionManager:
                 model=model,
                 provider_id=provider_id,
                 reasoning_effort=reasoning_effort,
+                permission=permission,
                 cwd=cwd,
                 node_id=node_id,
             )
@@ -2928,6 +2932,7 @@ class SessionManager:
         *,
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        permission: Optional[dict] = None,
         cwd: Optional[str] = None,
         provider_id: Optional[str] = None,
         client_id: Optional[str] = None,
@@ -2969,6 +2974,12 @@ class SessionManager:
                 reasoning_effort = normalized_effort
             else:
                 reasoning_effort = ""
+        if permission is not None:
+            if not isinstance(permission, dict):
+                raise ValueError("permission must be a dict")
+            existing = self.get(sid) or {}
+            perm_provider = provider_id or existing.get("provider_id")
+            permission = session_store._session_permission(permission, perm_provider)
         if provider_id is not None:
             if not isinstance(provider_id, str) or not provider_id.strip():
                 raise ValueError(
@@ -2986,6 +2997,8 @@ class SessionManager:
                 s["model"] = model
             if reasoning_effort is not None:
                 s["reasoning_effort"] = reasoning_effort
+            if permission is not None:
+                s["permission"] = permission
             if cwd is not None:
                 s["cwd"] = cwd
             if provider_id is not None:
@@ -2996,6 +3009,7 @@ class SessionManager:
                 "kind": "selectors_set",
                 "model": model,
                 "reasoning_effort": reasoning_effort,
+                "permission": permission,
                 "cwd": cwd,
                 "provider_id": provider_id,
                 "client_id": client_id,

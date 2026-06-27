@@ -47,6 +47,7 @@ import config_store
 import perf
 from i18n import t
 from reasoning_effort import normalize_reasoning_effort
+from permission import normalize_permission, default_permission_for_kind
 # `worker_store` is imported lazily inside `list_sessions` — the
 # single call site. Keeping it lazy here lets `worker_store` and
 # `orchs/base` import `session_manager` at top level without a
@@ -172,6 +173,7 @@ def _build_summary_for_root(root: dict) -> dict:
         "name": root.get("name") or t("session.untitled"),
         "model": root.get("model", ""),
         "reasoning_effort": root.get("reasoning_effort", ""),
+        "permission": root.get("permission", {}),
         "provider_id": root.get("provider_id"),
         "cwd": cwd,
         "node_id": root.get("node_id") or "primary",
@@ -1385,6 +1387,31 @@ def _session_reasoning_effort(
     return _default_reasoning_effort_for_provider(provider_id)
 
 
+def _kind_for_provider(provider_id: Optional[str]) -> str:
+    if not provider_id:
+        return ""
+    record = config_store.get_provider(provider_id)
+    return (record or {}).get("kind", "") or ""
+
+
+def _default_permission_for_provider(provider_id: Optional[str]) -> dict:
+    record = config_store.get_provider(provider_id) if provider_id else None
+    kind = (record or {}).get("kind", "") or ""
+    default = (record or {}).get("default_permission")
+    norm = normalize_permission(kind, default)
+    return norm if norm is not None else default_permission_for_kind(kind)
+
+
+def _session_permission(value: object, provider_id: Optional[str]) -> dict:
+    """Effective permission override to persist on the session. Empty dict =
+    inherit the provider default (no per-session override)."""
+    kind = _kind_for_provider(provider_id)
+    norm = normalize_permission(kind, value)
+    if norm is not None:
+        return norm
+    return {}
+
+
 def _provider_backfill_context() -> dict:
     """Build a per-load context cached during one migration recursion.
 
@@ -2010,6 +2037,13 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
         if normalized_effort != session.get("reasoning_effort"):
             session["reasoning_effort"] = normalized_effort
             ctx["dirty"][0] = True
+    stored_permission = session.get("permission")
+    normalized_permission = _session_permission(
+        stored_permission, session.get("provider_id")
+    )
+    if normalized_permission != stored_permission:
+        session["permission"] = normalized_permission
+        ctx["dirty"][0] = True
     session.setdefault("worker_eligible", False)
     if session.get("worker_creation_policy") not in ("ask", "approve", "deny"):
         session["worker_creation_policy"] = "ask"
@@ -2261,6 +2295,7 @@ def create_session(
     source: str = "web",
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    permission: Optional[dict] = None,
     browser_harness_enabled: bool = True,
     browser_harness_headless: bool = True,
     node_id: str = "primary",
@@ -2302,6 +2337,7 @@ def create_session(
         "name": name or t("session.default_name", time=datetime.now().strftime('%H:%M')),
         "model": model,
         "reasoning_effort": resolved_reasoning_effort,
+        "permission": _session_permission(permission, provider_id),
         "cwd": cwd or str(Path.home()),
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
@@ -2901,6 +2937,7 @@ def create_sub_session(
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    permission: Optional[dict] = None,
     cwd: str = "",
     node_id: Optional[str] = None,
 ) -> dict:
@@ -2919,6 +2956,11 @@ def create_sub_session(
     resolved_effort = _session_reasoning_effort(
         reasoning_effort, resolved_provider_id,
     )
+    if permission is None:
+        permission = parent.get("permission")
+    resolved_permission = _session_permission(
+        permission, resolved_provider_id,
+    )
     now = datetime.now().isoformat()
     child = {
         "id": str(uuid.uuid4()),
@@ -2926,6 +2968,7 @@ def create_sub_session(
         "name": name or "sub-session",
         "model": resolved_model,
         "reasoning_effort": resolved_effort,
+        "permission": resolved_permission,
         "cwd": cwd or parent.get("cwd") or str(Path.home()),
         "created_at": now,
         "updated_at": now,

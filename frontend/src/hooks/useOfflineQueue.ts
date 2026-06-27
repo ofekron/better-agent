@@ -29,6 +29,7 @@ export interface OfflineCreateSessionEntry {
     | "name"
     | "model"
     | "reasoning_effort"
+    | "permission"
     | "cwd"
     | "orchestration_mode"
     | "provider_id"

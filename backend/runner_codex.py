@@ -55,8 +55,23 @@ from proc_control import process_control as _process_control
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
 DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
 
-def _codex_sandbox_policy() -> dict[str, str]:
-    return {"type": "dangerFullAccess"}
+_CODEX_SANDBOX_TO_TYPE = {
+    "read-only": "readOnly",
+    "workspace-write": "workspaceWrite",
+    "danger-full-access": "dangerFullAccess",
+}
+
+
+def _codex_sandbox_policy(sandbox: str = "danger-full-access") -> dict[str, str]:
+    return {"type": _CODEX_SANDBOX_TO_TYPE.get(sandbox, "dangerFullAccess")}
+
+
+def _codex_approval_policy(permission: Optional[dict]) -> str:
+    return (permission or {}).get("approval") or "never"
+
+
+def _codex_sandbox_mode(permission: Optional[dict]) -> str:
+    return (permission or {}).get("sandbox") or "danger-full-access"
 
 
 def _codex_runner_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -1030,6 +1045,8 @@ async def _start_app_server(
     provider_run_config: Optional[dict[str, Any]] = None,
     config_overrides: Optional[list[str]] = None,
     env: Optional[dict[str, str]] = None,
+    approval_policy: str = "never",
+    sandbox: str = "danger-full-access",
 ) -> _AppServerProcess:
     argv = [codex_bin]
     for override in config_overrides or []:
@@ -1080,8 +1097,8 @@ async def _start_app_server(
             thread_start_params = {
                 "cwd": cwd,
                 "model": model,
-                "approvalPolicy": "never",
-                "sandboxPolicy": _codex_sandbox_policy(),
+                "approvalPolicy": approval_policy,
+                "sandboxPolicy": _codex_sandbox_policy(sandbox),
                 **_codex_thread_capability_params(
                     dynamic_tools=dynamic_tools,
                     provider_run_config=provider_run_config,
@@ -1100,8 +1117,8 @@ async def _start_app_server(
             "cwd": cwd,
             "model": model,
             "effort": reasoning_effort,
-            "approvalPolicy": "never",
-            "sandboxPolicy": _codex_sandbox_policy(),
+            "approvalPolicy": approval_policy,
+            "sandboxPolicy": _codex_sandbox_policy(sandbox),
         })
     except Exception:
         if proc.returncode is None:
@@ -2180,6 +2197,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     model = inputs.get("model")
     reasoning_effort = inputs.get("reasoning_effort")
+    permission = inputs.get("permission") or {}
     session_id = inputs.get("session_id")
     fork = bool(inputs.get("fork"))
     app_session_id = inputs.get("app_session_id") or ""
@@ -2396,6 +2414,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     *_context_strategy_config_overrides(inputs),
                 ],
                 env=run_env,
+                approval_policy=_codex_approval_policy(permission),
+                sandbox=_codex_sandbox_mode(permission),
             )
 
             cancel_seen = asyncio.Event()

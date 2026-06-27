@@ -642,7 +642,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         _fail(run_dir, "gemini CLI not found on PATH")
         return 1
 
-    cmd: list[str] = [gemini_bin, "--yolo", "--skip-trust", "-p", "-", "-o", "stream-json"]
+    _permission = inputs.get("permission") or {}
+    _approval_mode = (
+        _permission.get("mode") if isinstance(_permission, dict) else None
+    ) or "yolo"
+    cmd: list[str] = [gemini_bin, "--approval-mode", _approval_mode, "--skip-trust", "-p", "-", "-o", "stream-json"]
     cmd += ["--include-directories", "/"]
     if attachment_dir:
         cmd += ["--include-directories", str(attachment_dir)]

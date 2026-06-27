@@ -825,6 +825,7 @@ class ProviderPayload(BaseModel):
     custom_models: list[str] = []
     default_model: str = ""
     default_reasoning_effort: str = ""
+    default_permission: dict = {}
     capabilities: dict[str, bool] | None = None
 
 
@@ -839,6 +840,7 @@ class ProviderPatch(BaseModel):
     custom_models: list[str] | None = None
     default_model: str | None = None
     default_reasoning_effort: str | None = None
+    default_permission: dict | None = None
     capabilities: dict[str, bool] | None = None
 
 
@@ -926,6 +928,53 @@ def _provider_reasoning_effort(
             detail=f"{name} does not support reasoning_effort={effort!r}",
         )
     return effort
+
+
+def _api_permission(value: object) -> dict | None:
+    """Coerce an incoming permission body value. None = absent (no change /
+    inherit at creation). Empty object/string = explicit "inherit default"
+    (clear any per-session override). Otherwise must be a dict."""
+    if value is None:
+        return None
+    if (isinstance(value, str) and not value.strip()) or value == {}:
+        return {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="permission must be an object")
+    return value
+
+
+def _provider_permission(
+    provider_id: str | None, value: dict | None,
+) -> dict | None:
+    """Strictly validate a permission dict against the provider's native
+    options. Returns normalized dict, {} (inherit default), or None (absent)."""
+    if value is None:
+        return None
+    if not value:
+        return {}
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if record is None:
+        active = config_store.get_default_provider()
+        record = config_store.get_provider(active["id"]) if active else None
+    name = (record or {}).get("name") or provider_id or "active provider"
+    options = (record or {}).get("permission_options") or {}
+    if not options:
+        raise HTTPException(
+            status_code=400, detail=f"{name} has no permission options"
+        )
+    norm: dict[str, str] = {}
+    for axis, allowed in options.items():
+        raw = value.get(axis)
+        if not isinstance(raw, str) or raw not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{name} permission {axis}={raw!r} is not one of: "
+                    f"{', '.join(allowed)}"
+                ),
+            )
+        norm[axis] = raw
+    return norm
 
 
 def _provider_for_required_model(provider_id: str | None) -> dict:
@@ -4189,6 +4238,11 @@ async def create_session(body: Any = Body(default=None)):
         requested_provider_id,
         _api_reasoning_effort(body.get("reasoning_effort")),
     )
+    requested_permission = await asyncio.to_thread(
+        _provider_permission,
+        requested_provider_id,
+        _api_permission(body.get("permission")),
+    )
     node_id = _resolve_session_node_id(body)
     requested_folder_id = body.get("folder_id")
     if requested_folder_id is not None and not isinstance(requested_folder_id, str):
@@ -4277,6 +4331,7 @@ async def create_session(body: Any = Body(default=None)):
         source=requested_source,
         provider_id=requested_provider_id,
         reasoning_effort=requested_effort,
+        permission=requested_permission or None,
         browser_harness_enabled=browser_harness_enabled,
         browser_harness_headless=body.get("browser_harness_headless", True),
         node_id=node_id,
@@ -4694,6 +4749,18 @@ async def update_session_selectors(session_id: str, body: dict):
         updates["reasoning_effort"] = _provider_reasoning_effort(
             provider_for_effort, requested_effort,
         )
+    if "permission" in body:
+        requested_permission = _api_permission(body.get("permission"))
+        if requested_permission is None:
+            raise HTTPException(status_code=400, detail="permission is required")
+        provider_for_permission = (
+            body.get("provider_id")
+            if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
+            else ((await _session_lite(session_id)) or {}).get("provider_id")
+        )
+        updates["permission"] = _provider_permission(
+            provider_for_permission, requested_permission,
+        )
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if "provider_id" in body and isinstance(body["provider_id"], str) and body["provider_id"].strip():
@@ -4703,13 +4770,17 @@ async def update_session_selectors(session_id: str, body: dict):
                 detail=t("error.provider_change_during_active_run"),
             )
         updates["provider_id"] = body["provider_id"].strip()
+        provider_record = await asyncio.to_thread(
+            config_store.get_provider,
+            updates["provider_id"],
+        )
         if "reasoning_effort" not in updates:
-            provider_record = await asyncio.to_thread(
-                config_store.get_provider,
-                updates["provider_id"],
-            )
             updates["reasoning_effort"] = (
                 (provider_record or {}).get("default_reasoning_effort") or ""
+            )
+        if "permission" not in updates:
+            updates["permission"] = (
+                (provider_record or {}).get("default_permission") or {}
             )
     if "orchestration_mode" in body:
         raise HTTPException(
