@@ -58,7 +58,7 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument(
         "--runner-kind", default="claude",
-        choices=["claude", "gemini", "codex", "fugu", "zai-openai", "agy"],
+        choices=["claude", "gemini", "codex", "fugu", "openai", "agy"],
     )
     args = parser.parse_args(argv)
     return ("runner", args.runner_kind, args.run_dir)
@@ -87,9 +87,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
         elif kind == "fugu":
             # Fugu reuses the codex runner; it resolves `codex-fugu`.
             from runner_codex import main as runner_main
-        elif kind == "zai-openai":
-            # Z.AI OpenAI endpoint reuses the codex runner; resolves `codex-zai`.
-            from runner_codex import main as runner_main
+        elif kind == "openai":
+            # OpenAI-compatible Chat Completions; BA owns the agent loop.
+            from runner_openai import main as runner_main
         elif kind == "agy":
             from runner_agy import main as runner_main
         else:

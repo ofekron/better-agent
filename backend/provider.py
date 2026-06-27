@@ -739,12 +739,11 @@ def _resolve_class(kind: str) -> type[Provider]:
         # and runner_codex, only the binary and model catalog differ.
         from provider_fugu import FuguProvider
         return FuguProvider
-    if kind == "zai-openai":
-        # Z.AI over its OpenAI Chat Completions endpoint (wire_api=chat), where
-        # Z.AI's automatic context caching is reported. Codex with a different
-        # profile/binary/catalog; reuses CodexProvider and runner_codex.
-        from provider_zai_openai import ZaiOpenAIProvider
-        return ZaiOpenAIProvider
+    if kind == "openai":
+        # BA-owned agent loop over an OpenAI Chat Completions endpoint; the
+        # runner makes HTTP calls + executes tools in-process (no external CLI).
+        from provider_openai import OpenAIProvider
+        return OpenAIProvider
     if kind == "agy":
         from provider_agy import AgyProvider
         return AgyProvider

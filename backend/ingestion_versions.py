@@ -32,6 +32,10 @@ AGY_INGESTION_VERSION = 2
 # session_events.jsonl. v2: recovery now replays it through the gemini-family
 # reader instead of the Claude parser, so runs reconciled under v1 re-digest.
 COPILOT_INGESTION_VERSION = 2
+# openai is a gemini-family provider: BA's own runner writes
+# session_events.jsonl (Claude-shaped), recovered via the gemini-family replay
+# reader. v1: initial shape.
+OPENAI_INGESTION_VERSION = 1
 
 
 def current_ingestion_version(provider_kind: str | None) -> int:
@@ -43,6 +47,8 @@ def current_ingestion_version(provider_kind: str | None) -> int:
         return AGY_INGESTION_VERSION
     if provider_kind == "copilot":
         return COPILOT_INGESTION_VERSION
+    if provider_kind == "openai":
+        return OPENAI_INGESTION_VERSION
     return 1
 
 
