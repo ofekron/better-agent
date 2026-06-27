@@ -791,5 +791,9 @@
   "permission.value.workspace-write": "כתיבת סביבת עבודה",
   "permission.value.danger-full-access": "סכנה: גישה מלאה",
   "permission.value.auto_edit": "אשר עריכות אוטומטית",
-  "permission.value.yolo": "YOLO (אשר הכל אוטומטית)"
+  "permission.value.yolo": "YOLO (אשר הכל אוטומטית)",
+  "bypassPermission.title": "הסשן הזה עוקף את כל ההרשאות",
+  "bypassPermission.message": "כלים ופקודות ירוצו ללא בקשת אישור ומחוץ לסנדבוקס. ניתן להקטין זאת לפי ספק בהגדרות, או לפי סשן בעת יצירתו.",
+  "bypassPermission.changeInSettings": "שנה בהגדרות",
+  "bypassPermission.sendAnyway": "שלח בכל זאת (השאר כך)"
 }
