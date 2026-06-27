@@ -2968,6 +2968,12 @@ class Coordinator:
         # refetch. PATCH /api/user-prefs raised an uncaught ValueError
         # here (500 on every pref write) until this was allowlisted.
         "user_prefs_changed",
+        # Per-machine UI navigation-restore state (selected project +
+        # last session per project×node). Authoritative state lives in
+        # ui_selection.json; payload carries the full get_all() snapshot
+        # so other tabs converge without a refetch. Tabs use it for
+        # cold-load restore, not to force-navigate an active view.
+        "ui_selection_changed",
         "session_metadata_updated",
         "todos_snapshot",
         "session_created",

@@ -112,10 +112,14 @@ import { patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileD
 import { appendPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
 import {
+  applyBackendSnapshot,
   getRememberedSessionId,
+  getSelectedProject,
   pickSessionForProject,
   setRememberedSessionId,
-} from "./utils/rememberedSession";
+  setSelectedProject,
+  type UiSelectionSnapshot,
+} from "./utils/uiSelection";
 import { buildSendPromptForm, mergeQueuedAttachments } from "./utils/sendPromptForm";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
@@ -2158,6 +2162,29 @@ function AppMain({
       })
       .catch(() => {});
   }, [authStatus, navigate]);
+  // UI navigation-restore state (selected project + remembered sessions).
+  // Backend is the source of truth; mount GET reconciles the local cache
+  // (seeding the backend from legacy localStorage on first upgrade) and, on
+  // cold load, restores the last-selected project. WS only refreshes the
+  // restore-cache — it never force-navigates this tab's active view.
+  useEffect(() => {
+    if (authStatus !== "authed") return;
+    progressTrackedFetch("uiSelection:load", `${API}/api/ui-selection`)
+      .then((r) => r.json())
+      .then((snap: UiSelectionSnapshot) => {
+        applyBackendSnapshot(snap, true);
+        const sel = getSelectedProject();
+        if (sel) {
+          setSelectedProjectPath(sel.path);
+          setSelectedProjectNodeId(sel.node_id);
+        }
+      })
+      .catch(() => {});
+    const off = eventBus.subscribe("ui_selection_changed", (p) =>
+      applyBackendSnapshot(p as UiSelectionSnapshot, false),
+    );
+    return off;
+  }, [authStatus]);
   useEffect(() => {
     const handler = (e: Event) => {
       applyAppearancePrefs((e as CustomEvent<AppearancePrefs>).detail);
@@ -3212,12 +3239,12 @@ function AppMain({
     enabled: isMobile && isPortrait && mobileRightOpen && !mobileRightFullscreen,
   });
 
+  // Persist the selected project to the backend (single source of truth)
+  // and mirror to localStorage for offline first paint. The setter dedups,
+  // so re-renders with an unchanged selection don't re-PATCH.
   useEffect(() => {
-    localStorage.setItem("better-agent-selected-project", selectedProjectPath);
-  }, [selectedProjectPath]);
-  useEffect(() => {
-    localStorage.setItem("better-agent-selected-project-node", selectedProjectNodeId);
-  }, [selectedProjectNodeId]);
+    setSelectedProject(selectedProjectPath, selectedProjectNodeId);
+  }, [selectedProjectPath, selectedProjectNodeId]);
 
   // Persist the last-viewed session per project so re-entering a project
   // reopens it (handleSelectProject reads this on switch). Guarded so a
