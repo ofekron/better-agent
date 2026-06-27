@@ -712,6 +712,7 @@ export function NewSessionModal({
         providerId: fb.id,
         model: fb.default_model,
         reasoningEffort: resolveReasoningEffort(undefined, fb, "main"),
+        permission: resolvePermission(main, fb),
       });
     }
   }, [effectiveOrchestrationMode, main.providerId, providers, managerCapableProviders]);
