@@ -282,6 +282,37 @@ def _fetch_api_models(
     return models
 
 
+def fetch_openai_models(base_url: str, api_key: str) -> list[str]:
+    """List models from an OpenAI-compatible endpoint (GET {base_url}/models).
+
+    Sync HTTP — call only from a worker thread (via asyncio.to_thread).
+    base_url is used verbatim (Sakana/Z.AI/etc. already include the /v1
+    segment), so the endpoint is `{base_url}/models`. Returns [] on any
+    failure so the catalog falls back to the configured default model.
+    """
+    if not base_url or not api_key:
+        return []
+    url = f"{base_url.rstrip('/')}/models"
+    models: list[str] = []
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            r.raise_for_status()
+            for m in r.json().get("data", []):
+                mid = m.get("id")
+                if mid:
+                    models.append(mid)
+    except httpx.HTTPStatusError as e:
+        excerpt = ((e.response.text or "")[:300]).replace("\n", " ")
+        logger.warning(
+            "OpenAI-compatible models fetch HTTP %d from %s: %s",
+            e.response.status_code, url, excerpt,
+        )
+    except Exception as e:
+        logger.warning("Failed to fetch OpenAI-compatible models from %s: %s", url, e)
+    return models
+
+
 def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     """For a provider record, return a zero-arg callable that fetches
     the live model list (sync, intended for `asyncio.to_thread`), or
@@ -313,6 +344,15 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
                 return None
             return lambda: _fetch_api_models(base_url, bearer_token=token)
         return None
+    if kind == "openai":
+        # OpenAI-compatible endpoint (sakana, z.ai, custom): list models via
+        # the standard GET {base_url}/models. BA owns the agent loop; the key
+        # is in the record (api_key mode only).
+        base_url = rec.get("base_url") or ""
+        api_key = rec.get("api_key") or ""
+        if not base_url or not api_key:
+            return None
+        return lambda: fetch_openai_models(base_url, api_key)
     if kind == "gemini":
         from provider_gemini import fetch_gemini_models
         return fetch_gemini_models
@@ -407,12 +447,16 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
 
 def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     """Cache-only read. Never makes an HTTP call. See `_read_catalog_models`
-    for per-kind semantics."""
+    for per-kind semantics. The configured `default_model` is always unioned
+    in so the selector is never empty before/without a successful fetch (e.g.
+    a fresh openai provider whose first /models fetch hasn't run yet)."""
     custom = list(provider.get("custom_models") or [])
     models, retired_ids, _has_cache = _read_catalog_models(provider)
     if include_retired:
         models = models + retired_ids
-    return models + custom
+    default_model = provider.get("default_model") or ""
+    seed = [default_model] if default_model else []
+    return _dedupe_preserve_order(models + custom + seed)
 
 
 def available_models(provider_id: Optional[str] = None) -> list[str]:
