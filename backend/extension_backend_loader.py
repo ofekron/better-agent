@@ -22,7 +22,7 @@ import extension_store
 logger = logging.getLogger(__name__)
 
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
-_HOST_TIMEOUT_SECONDS = 30
+_HOST_TIMEOUT_SECONDS = 300
 # Allowlist of request headers forwarded to an extension backend subprocess.
 # Fail-closed: anything not listed here is dropped, so a future secret header
 # (auth, cookie, internal token, entitlement, …) can never leak to extension
