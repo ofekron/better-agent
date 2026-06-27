@@ -1912,23 +1912,21 @@ function AppMain({
           });
           if (entry.type === "create_session") {
             const queued = entry.session;
-            await createSession(
-              queued.name,
-              queued.model,
-              queued.cwd,
-              queued.orchestration_mode,
-              queued.browser_harness_enabled,
-              queued.provider_id,
-              queued.browser_harness_headless,
-              false,
-              undefined,
-              queued.node_id,
-              queued.reasoning_effort,
-              queued.permission,
-              queued.id,
-              entry.capabilityContexts,
-              queued.folder_id,
-            );
+            await createSession({
+              name: queued.name,
+              model: queued.model,
+              cwd: queued.cwd,
+              orchestrationMode: queued.orchestration_mode,
+              browserHarnessEnabled: queued.browser_harness_enabled,
+              providerId: queued.provider_id,
+              browserHarnessHeadless: queued.browser_harness_headless,
+              nodeId: queued.node_id,
+              reasoningEffort: queued.reasoning_effort,
+              permission: queued.permission,
+              clientSessionId: queued.id,
+              capabilityContexts: entry.capabilityContexts,
+              folderId: queued.folder_id,
+            });
             const images = entry.images?.length ? entry.images : undefined;
             const offlineFiles = entry.files?.length ? entry.files : undefined;
             if (entry.prompt) {
@@ -4203,19 +4201,17 @@ function AppMain({
       currentSession?.orchestration_mode ?? (provider?.supports_manager_mode ? "team" : "native");
     if (!connected || !nextModel || !nextCwd) return;
 
-    const session = await createSession(
-      "",
-      nextModel,
-      nextCwd,
-      nextMode,
-      currentSession?.browser_harness_enabled ?? true,
-      nextProviderId,
-      currentSession?.browser_harness_headless ?? true,
-      false,
-      undefined,
-      currentSession?.node_id ?? "primary",
-      currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
-    );
+    const session = await createSession({
+      name: "",
+      model: nextModel,
+      cwd: nextCwd,
+      orchestrationMode: nextMode,
+      browserHarnessEnabled: currentSession?.browser_harness_enabled ?? true,
+      providerId: nextProviderId,
+      browserHarnessHeadless: currentSession?.browser_harness_headless ?? true,
+      nodeId: currentSession?.node_id ?? "primary",
+      reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
+    });
     if (session?.id) {
       navigateToCreatedSession(session);
     }
@@ -4577,23 +4573,20 @@ function AppMain({
       }));
       if (!config.fileEditEnabled) {
         try {
-          const session = await createSession(
-            "",
-            config.main.model,
-            config.cwd,
-            config.orchestrationMode,
-            config.browserHarnessEnabled,
-            config.main.providerId,
-            config.browserHarnessHeadless,
-            false,
-            undefined,
-            config.nodeId,
-            config.main.reasoningEffort,
-            config.main.permission,
-            undefined,
-            config.capabilityContexts,
-            config.folderId,
-          );
+          const session = await createSession({
+            name: "",
+            model: config.main.model,
+            cwd: config.cwd,
+            orchestrationMode: config.orchestrationMode,
+            browserHarnessEnabled: config.browserHarnessEnabled,
+            providerId: config.main.providerId,
+            browserHarnessHeadless: config.browserHarnessHeadless,
+            nodeId: config.nodeId,
+            reasoningEffort: config.main.reasoningEffort,
+            permission: config.main.permission,
+            capabilityContexts: config.capabilityContexts,
+            folderId: config.folderId,
+          });
           setNewSessionModalOpen(false);
           setInvestigationCtx(undefined);
           if (session?.id) {
@@ -4636,23 +4629,22 @@ function AppMain({
       }
       try {
 
-        const session = await createSession(
-          "",
-          config.main.model,
-          config.cwd,
-          config.orchestrationMode,
-          config.browserHarnessEnabled,
-          config.main.providerId,
-          config.browserHarnessHeadless,
-          true,
-          config.fileEditPath,
-          config.nodeId,
-          config.main.reasoningEffort,
-          config.main.permission,
-          undefined,
-          config.capabilityContexts,
-          config.folderId,
-        );
+        const session = await createSession({
+          name: "",
+          model: config.main.model,
+          cwd: config.cwd,
+          orchestrationMode: config.orchestrationMode,
+          browserHarnessEnabled: config.browserHarnessEnabled,
+          providerId: config.main.providerId,
+          browserHarnessHeadless: config.browserHarnessHeadless,
+          fileEditEnabled: true,
+          fileEditPath: config.fileEditPath,
+          nodeId: config.nodeId,
+          reasoningEffort: config.main.reasoningEffort,
+          permission: config.main.permission,
+          capabilityContexts: config.capabilityContexts,
+          folderId: config.folderId,
+        });
         setNewSessionModalOpen(false);
         setInvestigationCtx(undefined);
         if (session?.id) {
