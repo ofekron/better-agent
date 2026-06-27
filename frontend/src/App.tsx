@@ -879,9 +879,9 @@ function AppMain({
     () => `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
 
-  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate";
+  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen";
   const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
+    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
   >("better-agent-right-panel-states", {});
 
   /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
@@ -890,7 +890,7 @@ function AppMain({
       sessionId: string,
       patch: {
         open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos";
+        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen";
         addAutoReason?: AutoOpenReason;
         clearAutoReasons?: boolean;
       },
@@ -1005,6 +1005,8 @@ function AppMain({
         case "notes":
           return (currentSession.notes?.length ?? 0) > 0;
         case "canvas":
+          return false;
+        case "screen":
           return false;
         case "navigate": {
           return (
@@ -5633,7 +5635,7 @@ function AppMain({
 
         <div
           className="session-list-wrapper"
-          style={{ flex: "1 1 auto", minHeight: 0 }}
+          style={isMobile ? undefined : { flex: "1 1 auto", minHeight: 0 }}
         >
           {workersTabAvailable && sidebarTab === "workers" ? (
             <div className="sidebar-workers-panel">

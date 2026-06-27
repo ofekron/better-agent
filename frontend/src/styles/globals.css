@@ -12778,6 +12778,32 @@ button.progress-inflight {
     transform: translateX(0);
   }
 
+  /* On mobile the whole drawer scrolls as one column instead of
+     clipping — header, projects, and sessions all participate in the
+     same vertical scroll so nothing is cut off regardless of how many
+     project tabs or machines are listed. */
+  .sidebar {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* The list grows to its natural height; no nested internal scroll
+     competing with the drawer scroll. Min-height reserves room for
+     ~7 session rows even when the list is short, so the menu always
+     shows a substantive session area. */
+  .session-list-wrapper,
+  .session-list {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .session-list-items {
+    overflow: visible;
+    /* Reserve room for ~7 session rows (~80px each incl. padding)
+       even when the list is short. The drawer scrolls if the total
+       exceeds the viewport, so this never clips. */
+    min-height: calc(7 * 80px);
+  }
+
   /* Right-panel -> right drawer. */
   .right-panel {
     position: absolute;
