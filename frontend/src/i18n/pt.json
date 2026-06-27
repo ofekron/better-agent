@@ -392,6 +392,7 @@
   "session.menuTitle": "Ações",
   "session.copyAction": "Copiar id",
   "session.detailsTitle": "Detalhes",
+  "session.markUnreadTitle": "Marcar como não lida",
   "session.archiveTitle": "Arquivar sessão",
   "session.unarchiveTitle": "Desarquivar sessão",
   "session.showArchived": "Arquivadas",

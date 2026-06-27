@@ -392,6 +392,7 @@
   "session.menuTitle": "Действия",
   "session.copyAction": "Копировать id",
   "session.detailsTitle": "Подробности",
+  "session.markUnreadTitle": "Отметить как непрочитанное",
   "session.archiveTitle": "Архивировать сессию",
   "session.unarchiveTitle": "Разархивировать сессию",
   "session.showArchived": "Архив",

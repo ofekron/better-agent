@@ -3815,6 +3815,36 @@ class SessionManager:
                         },
                     )
 
+    def mark_unread(self, sid: str) -> Optional[dict]:
+        """Inverse of `mark_seen`: force the session into the "has new"
+        state. Clears the persisted `last_seen_event_uid` watermark and
+        recomputes the unread set from disk (every assistant event becomes
+        unread), then fires `unread_changed` so every open client surfaces
+        the badge. Persists, so the state survives a backend restart /
+        re-hydration (disk recompute with a null watermark yields the same
+        non-zero set). No-op for worker forks. Returns the session snapshot,
+        or None if the session is missing / not user-kind."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            sess = self._cached(sid)
+            if not self._is_user_kind(sess):
+                return None
+            sess["last_seen_event_uid"] = None
+            self._unread_counts[sid] = self._count_unread_from_disk(sess)
+            self._unread_hydrated.add(sid)
+            if rid not in self._batches:
+                self._persist_root(rid, bump=False)
+            self._fire(
+                sid,
+                {
+                    "kind": "unread_changed",
+                    "unread_count": len(self._unread_counts[sid]),
+                },
+            )
+            return copy.deepcopy(sess)
+
     def mark_seen(self, sid: str, uid: Optional[str]) -> Optional[dict]:
         """Persist `last_seen_event_uid` and zero the unread counter.
         Fires `seen_advanced` (broadcaster maps to `session_unread_changed`

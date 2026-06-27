@@ -391,6 +391,7 @@
   "session.menuTitle": "פעולות",
   "session.copyAction": "העתק id",
   "session.detailsTitle": "פרטים",
+  "session.markUnreadTitle": "סמן כלא נקרא",
   "session.archiveTitle": "העבר לארכיון",
   "session.unarchiveTitle": "הוצא מהארכיון",
   "session.showArchived": "בארכיון",

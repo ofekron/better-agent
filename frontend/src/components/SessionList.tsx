@@ -22,6 +22,7 @@ import { SearchInput } from "./SearchInput";
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
+import { markSessionUnread } from "../lib/sessionRegistry";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 
@@ -395,6 +396,12 @@ function SessionNode({
         label: t("session.detailsTitle"),
         icon: <Icon name="memo" size={14} />,
         onClick: () => onDetails(session.id),
+      },
+      {
+        id: "mark-unread",
+        label: t("session.markUnreadTitle"),
+        icon: <Icon name="circle" size={14} />,
+        onClick: () => void markSessionUnread(session.id),
       },
       {
         id: "archive",
