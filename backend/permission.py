@@ -12,7 +12,7 @@ from typing import Optional
 CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto")
 CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "on-failure", "never")
 CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
-GEMINI_APPROVAL_MODES = ("default", "auto_edit", "yolo", "plan")
+GEMINI_APPROVAL_MODES = ("auto_edit", "yolo", "plan")
 
 # Per-kind axis → allowed values. Order is the UI display order.
 _AXES: dict[str, dict[str, tuple[str, ...]]] = {

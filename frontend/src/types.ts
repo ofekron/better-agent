@@ -94,6 +94,9 @@ export type WSEventType =
   // Experimental rearranger feature (see backend/rearranger.py)
   | "rearranger_state"
   | "rearranger_updated"
+  // Interactive tool/command approval (Claude can_use_tool / Codex app-server).
+  | "tool_approval_requested"
+  | "tool_approval_resolved"
   // Per-session metadata patch (inline_tags, draft_input, fork_closed) —
   // broadcast on every REST mutation so other tabs converge.
   | "session_metadata_updated"
@@ -1155,6 +1158,16 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export type Permission = Record<string, string>;
 /** Axis → allowed-values map for the provider's permission selector(s). */
 export type PermissionOptions = Record<string, string[]>;
+
+/** A pending interactive tool/command approval from a runner mid-turn. */
+export interface ToolApproval {
+  approval_id: string;
+  app_session_id: string;
+  run_id: string;
+  provider_kind: string;
+  tool_name: string;
+  summary: Record<string, unknown>;
+}
 
 export interface Provider {
   id: string;
