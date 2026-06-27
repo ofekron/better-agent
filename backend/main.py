@@ -569,6 +569,11 @@ _AUTH_PUBLIC_ROUTES = frozenset({
     "/api/auth/qr_grant",
     "/api/auth/qr_redeem",
     "/api/auth/refresh",
+    # OTA bundle download for the Capacitor updater. The native HTTP GET
+    # cannot carry our dynamic bearer header, so the handler validates a
+    # `token` query param (same pattern as the WS endpoints) and fails
+    # closed on an invalid/missing token.
+    "/api/mobile/bundle/download",
 })
 _AUTH_PUBLIC_PREFIXES = (
     "/api/desktop/updates/",
@@ -5137,6 +5142,41 @@ async def frontend_log(request: Request):
         line += f"\n{stack}"
     frontend_logger.log(log_level, line)
     return {"ok": True}
+
+
+@app.get("/api/mobile/bundle/manifest")
+async def mobile_bundle_manifest():
+    """Current web-bundle version for the Capacitor OTA updater. Gated by
+    the normal auth middleware (the JS caller sends the bearer header)."""
+    import mobile_bundle
+    info = await asyncio.to_thread(mobile_bundle.build_bundle, frontend_dist_dir())
+    if not info:
+        raise HTTPException(status_code=503, detail="web bundle unavailable")
+    return {
+        "version": info["version"],
+        "checksum": info["checksum"],
+        "download_path": "/api/mobile/bundle/download",
+    }
+
+
+@app.get("/api/mobile/bundle/download")
+async def mobile_bundle_download(token: str = Query(default="")):
+    """Serve the current web bundle as a zip for the Capacitor updater.
+
+    Public-listed so the native GET reaches here, but fails closed: a valid
+    bearer `token` query param is required (the native HTTP GET cannot send
+    our Authorization header)."""
+    if not token or auth.verify_token(token) is None:
+        raise HTTPException(status_code=401, detail="invalid token")
+    import mobile_bundle
+    info = await asyncio.to_thread(mobile_bundle.build_bundle, frontend_dist_dir())
+    if not info:
+        raise HTTPException(status_code=503, detail="web bundle unavailable")
+    return FileResponse(
+        info["path"],
+        media_type="application/zip",
+        filename=f"{info['version']}.zip",
+    )
 
 
 @app.post("/api/admin/restart")

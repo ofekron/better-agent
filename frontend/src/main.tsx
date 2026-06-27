@@ -7,6 +7,7 @@ import { cleanupRestoredModalSentinel, getModalStackSize } from './hooks/useBack
 import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
 import { installFrontendLogger } from './lib/frontendLogger'
+import { runMobileOtaCheck } from './lib/mobileUpdater'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
 import { loadBuiltinExtensionIds } from './extensionIds'
 import './i18n'
@@ -43,6 +44,13 @@ loadBuiltinExtensionIds().finally(() => {
     </StrictMode>,
   )
 })
+
+// Capacitor OTA: after boot, check the backend for a newer web bundle and
+// apply it. No-op on web; self-guards on login state. Deferred so it never
+// blocks first paint or login.
+if (Capacitor.isNativePlatform()) {
+  setTimeout(() => { void runMobileOtaCheck() }, 3000)
+}
 
 // The workbox service worker is intentionally NOT registered. On a
 // localhost/LAN deployment the app always talks to a backend that is
