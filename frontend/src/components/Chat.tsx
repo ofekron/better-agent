@@ -97,7 +97,14 @@ function UserInputCard({
     return initial;
   });
   const [submitting, setSubmitting] = useState(false);
+  const textRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const canSubmit = request.questions.every((q) => (answers[q.id] || "").trim());
+
+  const pickOption = (questionId: string, label: string) => {
+    setAnswers((prev) => ({ ...prev, [questionId]: label }));
+    const el = textRefs.current[questionId];
+    if (el) requestAnimationFrame(() => { el.focus(); el.select(); });
+  };
 
   const submit = async () => {
     if (!canSubmit || submitting) return;
@@ -146,7 +153,7 @@ function UserInputCard({
                     type="radio"
                     name={`${request.request_id}:${q.id}`}
                     checked={answers[q.id] === option.label}
-                    onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: option.label }))}
+                    onChange={() => pickOption(q.id, option.label)}
                     disabled={submitting}
                   />
                   <span>
@@ -156,13 +163,11 @@ function UserInputCard({
                 </label>
               ))}
               <input
+                ref={(el) => { textRefs.current[q.id] = el; }}
                 className="user-input-card__text"
-                value={
-                  q.options.some((option) => option.label === answers[q.id])
-                    ? ""
-                    : answers[q.id] ?? ""
-                }
+                value={answers[q.id] ?? ""}
                 onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                onFocus={(e) => e.target.select()}
                 disabled={submitting}
                 placeholder="Other answer"
               />
