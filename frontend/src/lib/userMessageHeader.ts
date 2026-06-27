@@ -12,7 +12,6 @@ const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string }> = 
   team_message: { icon: "✉", label: "Message" },
   team_ask: { icon: "✉", label: "Ask" },
   schedule: { icon: "⏰", label: "Schedule" },
-  cli: { icon: "⌨", label: "CLI" },
   "agent-board": { icon: "📋", label: "Agent Board" },
   adv_sync: { icon: "⚖", label: "Adversarial" },
   subprocess_agent: { icon: "🤖", label: "Agent" },
@@ -34,5 +33,6 @@ export function userMessageHeader(source?: string): { icon: string; label: strin
   // Group source families like "supervisor.await_user" under the base label.
   const base = source.split(/[.]/)[0];
   if (INJECTED_SOURCE_LABELS[base]) return INJECTED_SOURCE_LABELS[base];
-  return { icon: "✉", label: humanizeSource(source) };
+  // Never emit a blank label: a delimiter-only source humanizes to "".
+  return { icon: "✉", label: humanizeSource(source) || source };
 }
