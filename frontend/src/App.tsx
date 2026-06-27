@@ -40,6 +40,8 @@ import {
   type ProviderConfigSyncFetchRoutes,
 } from "@better-agent/provider-config-sync-ui";
 import { ConfirmModal } from "./components/ConfirmModal";
+import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
+import { sessionIsBypass } from "./utils/permission";
 import {
   ProjectSuggestionModal,
   type ProjectSuggestion,
@@ -4093,11 +4095,47 @@ function AppMain({
     [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, sendCancelQueued, queuedBySession, pendingQueueTextBySession, writePendingQueueText, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate]
   );
 
-  const handleSend = useCallback(
-    (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPrompt(prompt, images, files, "queue"),
-    [sendPrompt],
+  // One-time bypass-permission warning on the first prompt send. The user
+  // either changes it in Settings (don't send) or sends anyway — sending
+  // acknowledges so the dialog never reappears. Pure UI ack (no backend state).
+  const [bypassPermAck, setBypassPermAck] = useState<boolean>(
+    () => localStorage.getItem("ba_bypass_perm_ack") === "1",
   );
+  const [bypassPermPending, setBypassPermPending] = useState<{
+    prompt: string;
+    images: import("./components/InputArea").PastedImage[];
+    files: import("./components/InputArea").FileAttachment[];
+  } | null>(null);
+
+  const handleSend = useCallback(
+    (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
+      if (
+        !bypassPermAck &&
+        currentSession &&
+        currentProvider &&
+        sessionIsBypass(currentProvider.kind, currentSession.permission, currentProvider.default_permission)
+      ) {
+        setBypassPermPending({ prompt, images, files });
+        return;
+      }
+      sendPrompt(prompt, images, files, "queue");
+    },
+    [sendPrompt, bypassPermAck, currentSession, currentProvider],
+  );
+
+  const confirmBypassAndSend = useCallback(() => {
+    const pending = bypassPermPending;
+    if (!pending) return;
+    localStorage.setItem("ba_bypass_perm_ack", "1");
+    setBypassPermAck(true);
+    setBypassPermPending(null);
+    sendPrompt(pending.prompt, pending.images, pending.files, "queue");
+  }, [bypassPermPending, sendPrompt]);
+
+  const bypassGoToSettings = useCallback(() => {
+    setBypassPermPending(null);
+    navigate("/settings");
+  }, [navigate]);
 
   const handleSteer = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
@@ -6733,6 +6771,12 @@ function AppMain({
             }}
           />
         ))}
+      <BypassPermissionDialog
+        open={bypassPermPending !== null}
+        onSendAnyway={confirmBypassAndSend}
+        onChangeInSettings={bypassGoToSettings}
+        onDismiss={() => setBypassPermPending(null)}
+      />
       {sessionToDelete && (
         <ConfirmModal
           open={!!sessionToDelete}
