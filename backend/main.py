@@ -1904,6 +1904,48 @@ def _require_project_structure_internal(x_internal_token: str) -> None:
         raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
+def _require_capabilities_internal(x_internal_token: str) -> None:
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    _require_builtin_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
+    if (
+        coordinator.principal_extension_id(x_internal_token)
+        != extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
+    ):
+        raise HTTPException(status_code=403, detail="provider-config-sync extension is required")
+
+
+@app.post("/api/internal/sessions/{sid}/capabilities")
+async def internal_session_capabilities(
+    sid: str,
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Load/release a scoped capability for a session. Core owns the write
+    (session_manager.active_capability_ids); the provider-config-sync extension
+    is the only authorized caller. Delivery follows on the next turn — the
+    capability's MCP self-gates on the active set, skills merge at assembly."""
+    _require_capabilities_internal(x_internal_token)
+    action = str((body or {}).get("action") or "").strip()
+    capability_id = str((body or {}).get("capability_id") or "").strip()
+    if action not in ("load", "release"):
+        raise HTTPException(status_code=400, detail="action must be load or release")
+    if not capability_id:
+        raise HTTPException(status_code=400, detail="capability_id is required")
+    if not extension_store.get_capability(capability_id):
+        raise HTTPException(status_code=404, detail="unknown capability")
+    if not session_manager.get(sid):
+        raise HTTPException(status_code=404, detail="unknown session")
+    if action == "load":
+        updated = session_manager.add_active_capability(sid, capability_id)
+    else:
+        updated = session_manager.remove_active_capability(sid, capability_id)
+    return {
+        "ok": True,
+        "active_capability_ids": (updated or {}).get("active_capability_ids") or [],
+    }
+
+
 @app.post("/api/internal/project-updates/count")
 async def internal_project_update_count(
     body: dict,
