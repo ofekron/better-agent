@@ -3275,9 +3275,17 @@ function AppMain({
     // (its `working_mode` excludes it from the list), so it never
     // appears in `sessions`. Exempt it from the existence gate — the
     // session-view auto-detects the id and mounts Ask extension slots.
+    // `sessions` is the SEARCH-FILTERED list — a row absent from it may
+    // simply not match the active query, not be deleted. The currently
+    // loaded tree is authoritative proof the session exists; a genuine
+    // delete nulls `currentTree` via the `session_deleted` WS handler.
+    // Without this guard, typing a search that excludes the open session
+    // ejects to `/`, and the Ask auto-select effect jumps into the top
+    // search result.
     const exists =
       route.sessionId === ASK_SINGLETON_ID ||
       route.sessionId === editSingletonId() ||
+      route.sessionId === currentTree?.id ||
       sessions.some((s) => s.id === route.sessionId) ||
       openSessionRecords[route.sessionId];
     if (!exists) {
@@ -4108,6 +4116,10 @@ function AppMain({
     prompt: string;
     images: import("./components/InputArea").PastedImage[];
     files: import("./components/InputArea").FileAttachment[];
+    // Resolves the Promise handleSend returned to InputArea.submitDraft, so
+    // submitDraft stays the single authority that clears the draft/images/
+    // files (on confirm) or restores them (on cancel/dismiss).
+    resolve: (sent: boolean) => void;
   } | null>(null);
 
   const handleSend = useCallback(
@@ -4118,27 +4130,36 @@ function AppMain({
         currentProvider &&
         sessionIsBypass(currentProvider.kind, currentSession.permission, currentProvider.default_permission)
       ) {
-        setBypassPermPending({ prompt, images, files });
-        return;
+        return new Promise<boolean>((resolve) => {
+          setBypassPermPending({ prompt, images, files, resolve });
+        });
       }
       return sendPrompt(prompt, images, files, "queue");
     },
     [sendPrompt, bypassPermAck, currentSession, currentProvider],
   );
 
-  const confirmBypassAndSend = useCallback(() => {
+  const confirmBypassAndSend = useCallback(async () => {
     const pending = bypassPermPending;
     if (!pending) return;
     localStorage.setItem("ba_bypass_perm_ack", "1");
     setBypassPermAck(true);
     setBypassPermPending(null);
-    sendPrompt(pending.prompt, pending.images, pending.files, "queue");
+    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, "queue");
+    pending.resolve(sent === true);
   }, [bypassPermPending, sendPrompt]);
 
+  const dismissBypassPending = useCallback(() => {
+    setBypassPermPending((pending) => {
+      pending?.resolve(false);
+      return null;
+    });
+  }, []);
+
   const bypassGoToSettings = useCallback(() => {
-    setBypassPermPending(null);
+    dismissBypassPending();
     navigate("/settings");
-  }, [navigate]);
+  }, [dismissBypassPending, navigate]);
 
   const handleSteer = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
@@ -6813,7 +6834,7 @@ function AppMain({
         open={bypassPermPending !== null}
         onSendAnyway={confirmBypassAndSend}
         onChangeInSettings={bypassGoToSettings}
-        onDismiss={() => setBypassPermPending(null)}
+        onDismiss={dismissBypassPending}
       />
       {sessionToDelete && (
         <ConfirmModal
