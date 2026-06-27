@@ -795,5 +795,6 @@
   "bypassPermission.title": "הסשן הזה עוקף את כל ההרשאות",
   "bypassPermission.message": "כלים ופקודות ירוצו ללא בקשת אישור ומחוץ לסנדבוקס. ניתן להקטין זאת לפי ספק בהגדרות, או לפי סשן בעת יצירתו.",
   "bypassPermission.changeInSettings": "שנה בהגדרות",
-  "bypassPermission.sendAnyway": "שלח בכל זאת (השאר כך)"
+  "bypassPermission.sendAnyway": "שלח בכל זאת (השאר כך)",
+  "emptyProject.body": "אין עדיין שיחות בפרויקט זה."
 }

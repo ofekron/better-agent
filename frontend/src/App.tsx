@@ -3110,7 +3110,10 @@ function AppMain({
         getRememberedSessionId(path, nodeId),
       );
       skipSidebarCloseOnNavRef.current = true;
-      navigate(target ? sessionPath(target.id) : "/");
+      // No session for this (machine, project) → show the empty-project
+      // surface instead of falling back to the Ask singleton. Ask is
+      // reachable only via its explicit button.
+      navigate(target ? sessionPath(target.id) : "/empty-project");
       try {
         await progressTrackedFetch(
           `project:touch:${path}`,
@@ -5379,7 +5382,8 @@ function AppMain({
           />
         </Suspense>
       )}
-      {authStatus === "authed" && route.kind === "session" && (
+      {authStatus === "authed" &&
+        (route.kind === "session" || route.kind === "emptyProject") && (
     <div className="app">
       {isMobile && (
         <header className="mobile-topbar">
@@ -5728,6 +5732,45 @@ function AppMain({
       {/* Center Panel */}
       <div className="main-panel">
         {(() => {
+          // Empty-project surface: the selected (machine, project) has no
+          // sessions. Shown instead of falling back to Ask. The New
+          // session button opens the modal pre-filled with this project.
+          if (route.kind === "emptyProject") {
+            const project = projects.find(
+              (p) =>
+                p.path === selectedProjectPath &&
+                (p.node_id || "primary") === selectedProjectNodeId,
+            );
+            const projectLabel =
+              project?.name ||
+              selectedProjectPath.replace(/\/+$/, "").split("/").pop() ||
+              selectedProjectPath;
+            const machineLabel =
+              machines.length > 1
+                ? selectedProjectNodeId === "primary"
+                  ? t("dirPicker.thisMachine")
+                  : selectedProjectNodeId
+                : null;
+            return (
+              <div className="empty-project">
+                <div className="empty-project-card">
+                  <div className="empty-project-project">{projectLabel}</div>
+                  {machineLabel && (
+                    <div className="empty-project-machine">{machineLabel}</div>
+                  )}
+                  <div className="empty-project-body">
+                    {t("emptyProject.body")}
+                  </div>
+                  <button
+                    className="empty-project-new-btn"
+                    onClick={() => setNewSessionModalOpen(true)}
+                  >
+                    {t("session.newButton")}
+                  </button>
+                </div>
+              </div>
+            );
+          }
           const streamBelongsToCurrentSession =
             !!streamingAppSessionId &&
             currentSession?.id === streamingAppSessionId;
