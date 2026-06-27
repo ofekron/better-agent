@@ -1,6 +1,7 @@
 import { Fragment, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { messageGroupPropsEqual } from "./messageGroupPropsEqual";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
+import { userMessageHeader } from "../lib/userMessageHeader";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownPreview from "@uiw/react-markdown-preview";
@@ -3009,10 +3010,10 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           >
             <span className="collapse-arrow">{collapsed ? "\u25B6" : "\u25BC"}</span>
             <span className={`message-box-icon${userMessage.source ? " orchestration-icon" : ""}`}>
-              {userMessage.source === "supervisor" ? "\uD83D\uDD0D" : userMessage.source === "worker" ? "\u2699" : userMessage.source === "team_message" || userMessage.source === "team_ask" ? "\u2709" : "\u{1F464}"}
+              {userMessageHeader(userMessage.source).icon}
             </span>
             <span className={`message-box-label${userMessage.source ? " orchestration-label" : ""}`}>
-              {userMessage.source === "supervisor" ? "Supervisor" : userMessage.source === "worker" ? "Worker" : userMessage.source === "team_message" ? "Team Message" : userMessage.source === "team_ask" ? "Team Ask" : "User"}
+              {userMessageHeader(userMessage.source).label}
             </span>
           </button>
           {onAlterUserMessage && (
@@ -3485,6 +3486,16 @@ export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onR
     const hasArtificial = hasArtificialSections(rawContent);
     return (
       <div className="message user-message" data-message-id={message.id}>
+        {message.source && (
+          <div className="message-box-header standalone-user-source">
+            <span className="message-box-icon orchestration-icon">
+              {userMessageHeader(message.source).icon}
+            </span>
+            <span className="message-box-label orchestration-label">
+              {userMessageHeader(message.source).label}
+            </span>
+          </div>
+        )}
         <div className="message-content">
           <UserImages images={message.images} sessionId={sessionId} />
           <UserFiles files={message.files} />
