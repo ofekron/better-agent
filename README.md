@@ -55,7 +55,9 @@ powerfull extensibility.
   easy to reopen, search, inspect, fork, and continue.
 - **Headless control** — use Better Agent programmatically through the Integration SDK and CLI commands, driving the orchestration layer from scripts and external tools.
 - **Extension surface** — private or marketplace extensions can add specialized
-  workflows on top of the core app without defining the core experience.
+  workflows on top of the core app without defining the core experience. See
+  [EXTENSIONS.md](EXTENSIONS.md) for how to author your own private extensions
+  and install marketplace ones.
 
 ## Integration SDK
 
