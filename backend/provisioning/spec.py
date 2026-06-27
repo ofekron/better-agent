@@ -62,6 +62,7 @@ class ProvisionedSessionSpec:
     default_cwd: str = ""               # base cwd (e.g. repo root to load a skill); "" ⇒ project cwd
     node_id: str = "primary"            # target node; "primary" runs locally, else routes via RemoteProviderProxy
     dirty_policy: DirtyPolicy = DirtyPolicy()
+    lifetime_seconds: float | None = None   # None ⇒ never recycle by age; else recycle the base after this many seconds since provisioning
 
     # ── Timing ───────────────────────────────────────────────────────
     provision_timeout: float = 24.0 * 60.0 * 60.0
