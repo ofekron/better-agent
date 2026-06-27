@@ -1071,7 +1071,7 @@ def _validate_mcp_predicate(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ExtensionError("entrypoints.mcp.predicate must be an object")
     predicate: dict[str, Any] = {}
-    for clause in ("equals", "not_equals"):
+    for clause in ("equals", "not_equals", "contains"):
         sub = raw.get(clause)
         if sub is None:
             continue
@@ -1083,7 +1083,7 @@ def _validate_mcp_predicate(raw: Any) -> dict[str, Any]:
     nonempty = raw.get("nonempty")
     if nonempty is not None:
         predicate["nonempty"] = _validate_string_list(nonempty, field="entrypoints.mcp.predicate.nonempty")
-    unknown = sorted(set(raw) - {"equals", "not_equals", "nonempty"})
+    unknown = sorted(set(raw) - {"equals", "not_equals", "contains", "nonempty"})
     if unknown:
         raise ExtensionError(f"entrypoints.mcp.predicate has unknown keys: {', '.join(unknown)}")
     return predicate
@@ -1095,6 +1095,12 @@ def _mcp_predicate_matches(predicate: dict[str, Any], inputs: dict[str, Any]) ->
             return False
     for key, forbidden in (predicate.get("not_equals") or {}).items():
         if str(inputs.get(key) or "") == forbidden:
+            return False
+    for key, needle in (predicate.get("contains") or {}).items():
+        haystack = inputs.get(key)
+        if not isinstance(haystack, (list, tuple, set)):
+            return False
+        if needle not in {str(member) for member in haystack}:
             return False
     for key in (predicate.get("nonempty") or []):
         if not inputs.get(key):

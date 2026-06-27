@@ -344,6 +344,11 @@ class ClaudeProvider(Provider):
             "app_session_id": app_session_id,
             "working_mode": (_sess_rec or {}).get("working_mode"),
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
+            "active_capability_ids": [
+                str(cid)
+                for cid in ((_sess_rec or {}).get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "disallowed_tools": list(dict.fromkeys(
                 (disallowed_tools or DEFAULT_DISALLOWED_TOOLS)
                 + list(TIMER_TOOLS)
