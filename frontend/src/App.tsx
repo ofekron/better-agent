@@ -86,6 +86,7 @@ import { hardRefreshCurrentPage } from "./lib/hardRefresh";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
+import { logDurable } from "./lib/frontendLogger";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
 import {
@@ -1400,6 +1401,19 @@ function AppMain({
   // beat it on localhost). Helper below enforces ref-then-state
   // ordering at every mutation site.
   const pendingQueueTextRef = useRef<Record<string, string>>(initialOfflineState.pendingQueueText);
+  // Catch the restart regression's other half: a queue-mode offline backlog
+  // entry that survived (was never acked) and is re-injected into the
+  // composer/pending surfaces on this mount. Logs once per mount. No content
+  // — sid + text length only.
+  useEffect(() => {
+    for (const [sid, text] of Object.entries(initialOfflineState.pendingQueueText)) {
+      logDurable("queue-diag", "offline_queue_text_reinjected_on_mount", {
+        sid,
+        text_length: text.length,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const writePendingQueueText = useCallback(
     (sid: string, value: string | null) => {
       const prev = pendingQueueTextRef.current;
@@ -1460,7 +1474,7 @@ function AppMain({
       addMessages(sessionId, [userMessage]);
       // A queued prompt being persisted means it was actually sent to the
       // agent — clear the queued banner for this session.
-      setQueuedForSession(sessionId, null);
+      setQueuedForSession(sessionId, null, "user_message_persisted");
       // The textbox-merge slot is the pre-ack mirror for this very prompt
       // — once it lands as a persisted user message, the slot has served
       // its purpose. Clear it so a later send doesn't re-merge against
@@ -1618,7 +1632,7 @@ function AppMain({
         const first = queuedPrompts[0] ?? null;
         setQueuedForSession(sessionId, first
           ? { id: first.id, preview: first.content }
-          : null);
+          : null, "session_metadata_updated");
       }
     },
     onSessionForked: appendFork,
@@ -1657,7 +1671,7 @@ function AppMain({
         preview: fullText ?? data.prompt_preview,
         ...(queuedImages?.length ? { images: queuedImages } : {}),
         ...(queuedFiles?.length ? { files: queuedFiles } : {}),
-      });
+      }, "prompt_queued");
       writePendingQueueText(data.app_session_id, null);
       // Clear stashed attachments — they've moved into queuedBySession.
       if (data.app_session_id in pendingQueueImagesRef.current) {
@@ -1718,10 +1732,10 @@ function AppMain({
       }
     },
     onTurnStarted: (appSessionId: string) => {
-      setQueuedForSession(appSessionId, null);
+      setQueuedForSession(appSessionId, null, "turn_started");
     },
     onQueueConsumed: (data) => {
-      setQueuedForSession(data.app_session_id, null);
+      setQueuedForSession(data.app_session_id, null, "queue_consumed");
     },
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
@@ -2005,6 +2019,14 @@ function AppMain({
             app_session_id: entry.sessionId,
             client_id: entry.clientId,
           });
+          // Durable: a queue-mode entry re-dispatched on reconnect is the
+          // restart regression's re-send path. Capture sid/client/mode so a
+          // recurrence shows whether the prompt was re-sent after restart.
+          logDurable("queue-diag", "offline_flush_redispatched", {
+            sid: entry.sessionId,
+            client_id: entry.clientId,
+            send_mode: entry.sendMode ?? null,
+          });
           setPendingForSession(entry.sessionId, (prev) =>
             prev.map((m) =>
               m.id === entry.clientId ? { ...m, status: "sending" as const } : m
@@ -2067,17 +2089,40 @@ function AppMain({
         ? queuedBySession[currentSession.id] ?? null
         : persistedQueuedPrompt)
     : null;
+  // Smoking-gun detector: backend says a prompt is queued (REST
+  // queued_prompts), but a local null in queuedBySession masks the banner so
+  // the user sees an empty queue. Fires only on transition (effect deps), not
+  // every render. This is the exact signature of the restart regression.
+  const sid = currentSession?.id ?? null;
+  const maskedQueueId = sid && sid in queuedBySession
+    && queuedBySession[sid] == null && persistedQueuedPrompt != null
+    ? persistedQueuedPrompt.id : null;
+  useEffect(() => {
+    if (!sid || !maskedQueueId) return;
+    logDurable("queue-diag", "banner_masked_by_local_null", {
+      sid,
+      backend_queued_id: maskedQueueId,
+    });
+  }, [sid, maskedQueueId]);
   const setQueuedForSession = useCallback(
     (
       sessionId: string,
       value:
         | QueuedBannerState
         | null
-        | ((prev: QueuedBannerState | null) => QueuedBannerState | null)
+        | ((prev: QueuedBannerState | null) => QueuedBannerState | null),
+      reason: string,
     ) => {
       setQueuedBySession((all): Record<string, QueuedBannerState> => {
         const current = all[sessionId] ?? null;
         const resolved = typeof value === "function" ? value(current) : value;
+        logDurable("queue-diag", "set_queued_banner", {
+          sid: sessionId,
+          reason,
+          from_id: current?.id ?? null,
+          to_id: resolved?.id ?? null,
+          to_null: !resolved,
+        });
         if (!resolved) {
           if (all[sessionId] === null) return all;
           return { ...all, [sessionId]: null } as Record<string, QueuedBannerState>;
@@ -4362,7 +4407,7 @@ function AppMain({
     const sent = sendPromoteQueued(currentSession.id, action);
     if (!sent) return;
     if (action === "steer") return;
-    setQueuedForSession(currentSession.id, null);
+    setQueuedForSession(currentSession.id, null, "promote");
     // Drop the textbox-merge slot too — once promoted, there's no
     // pre-ack text to merge against on a future send.
     writePendingQueueText(currentSession.id, null);
@@ -4374,7 +4419,7 @@ function AppMain({
     if (!currentSession) return;
     const sent = sendCancelQueued(currentSession.id);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, null);
+    setQueuedForSession(currentSession.id, null, "cancel");
     writePendingQueueText(currentSession.id, null);
     delete pendingQueueImagesRef.current[currentSession.id];
     delete pendingQueueFilesRef.current[currentSession.id];
@@ -4390,7 +4435,7 @@ function AppMain({
       setQueuedForSession(currentSession.id, {
         id: existing.id,
         preview: text,
-      });
+      }, "text_edit");
     },
     [currentSession, queuedBySession, setQueuedForSession, sendUpdateQueued]
   );

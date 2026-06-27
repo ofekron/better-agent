@@ -3153,6 +3153,12 @@ class SessionManager:
         if result is not None:
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
+            logger.info(
+                "queue-diag add_queued_prompt sid=%s qp_id=%s client_id=%s "
+                "-> queue_len=%d",
+                sid, prompt.get("id"), prompt.get("client_id"),
+                len(result.get("queued_prompts") or []),
+            )
         return result
 
     def update_queued_prompt(
@@ -3175,6 +3181,12 @@ class SessionManager:
         if result is not None:
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
+            logger.info(
+                "queue-diag update_queued_prompt sid=%s qp_id=%s keys=%s "
+                "-> queue_len=%d",
+                sid, queued_id, sorted(updates.keys()),
+                len(result.get("queued_prompts") or []),
+            )
         return result
 
     def remove_queued_prompt(
@@ -3200,6 +3212,11 @@ class SessionManager:
         if result is not None:
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
+            logger.info(
+                "queue-diag remove_queued_prompt sid=%s qp_id=%s "
+                "-> queue_len=%d",
+                sid, queued_id, len(result.get("queued_prompts") or []),
+            )
         return result
 
     def remove_queued_prompt_by_client_id(
@@ -3222,6 +3239,11 @@ class SessionManager:
         if result is not None:
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
+            logger.info(
+                "queue-diag remove_queued_prompt_by_client_id sid=%s "
+                "client_id=%s -> queue_len=%d",
+                sid, client_id, len(result.get("queued_prompts") or []),
+            )
         return result
 
     # ── Messages ───────────────────────────────────────────────────

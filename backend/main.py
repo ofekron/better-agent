@@ -3987,10 +3987,13 @@ async def get_session(
             last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
             logger.info(
                 "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
-                "msgs=%d last_asst_evts=%s last_asst_stub=%s timings="
+                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
+                "last_asst_stub=%s timings="
                 "max_seq=%.1fms barrier=%.1fms tree=%.1fms",
                 root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
                 msg_count,
+                len(tree.get("queued_prompts") or []),
+                len(tree.get("draft_input") or ""),
                 len(last_events) if last_events else None,
                 last_stub.get("event_count") if last_stub else None,
                 max_seq_ms, barrier_ms, tree_ms,
