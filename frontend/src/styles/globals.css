@@ -13595,22 +13595,28 @@ button.progress-inflight {
     grid-template-columns: 1fr !important;
   }
 
-  /* Session-item actions — collapse all inline toggles into a single
-     3-dot menu that opens a MobileActionSheet. Pin / worker-eligible
-     / rename / copy / archive / delete all live in the sheet on
-     mobile. */
+  /* Session-item actions — collapse inline toggles into a single
+     3-dot menu that opens a MobileActionSheet. Worker-eligible /
+     rename / copy / archive / delete all live in the sheet on mobile.
+     Pin stays as a dedicated always-visible button (see below). */
   .session-item-actions,
-  .session-item-pin,
   .session-item-worker-eligible {
     display: none !important;
   }
   .session-item-menu {
     display: block;
   }
-  /* Reserve room at the top-right for the menu trigger instead of the
-     bottom row that no longer exists. */
+  /* Pin is always visible on mobile, sitting just left of the 3-dot
+     menu trigger rather than hidden inside the sheet. Offset clears
+     the menu's 44px touch target (pointer: coarse). */
+  .session-item-pin {
+    inset-inline-end: 52px;
+    opacity: 1;
+  }
+  /* Reserve room at the top-right for the pin + menu trigger instead
+     of the bottom row that no longer exists. */
   .session-item {
-    padding: 8px 40px 8px 8px;
+    padding: 8px 100px 8px 8px;
   }
 
   /* FilePanels split — collapse to single pane visually; the toggle
