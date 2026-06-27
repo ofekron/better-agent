@@ -42,7 +42,7 @@ export function buildInlineTagsPreamble(tags: InlineTag[]): string {
 export function mergeTagsIntoPrompt(prompt: string, tags: InlineTag[]): string {
   const preamble = buildInlineTagsPreamble(tags);
   if (!preamble) return prompt;
-  if (!prompt.trim()) return preamble + "\nPlease address the user's comments.";
+  if (!prompt.trim()) return preamble;
   return preamble + "\n" + prompt;
 }
 

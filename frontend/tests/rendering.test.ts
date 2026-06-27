@@ -4,7 +4,10 @@ import React from "react";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { MessageBubble } from "../src/components/MessageBubble";
-import { buildInlineTagsPreamble } from "../src/utils/inlineTagsPrompt";
+import {
+  buildInlineTagsPreamble,
+  mergeTagsIntoPrompt,
+} from "../src/utils/inlineTagsPrompt";
 import type { InlineTag } from "../src/types/inlineTag";
 import { ASK_SINGLETON_ID } from "../src/askSession";
 
@@ -646,6 +649,37 @@ describe("message rendering", () => {
     const yesCount = (u1!.text.match(/User comment:\s*yes/g) ?? []).length;
     expect(yesCount).toBe(2);
     h.unmount();
+  });
+
+  it("mergeTagsIntoPrompt sends only the preamble when prompt is empty (no review fallback text)", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    const merged = mergeTagsIntoPrompt("   ", tags);
+    expect(merged).toBe(buildInlineTagsPreamble(tags));
+    expect(merged).not.toMatch(/address the user's comments/i);
+    expect(merged).not.toMatch(/please review/i);
+  });
+
+  it("mergeTagsIntoPrompt appends the typed prompt after the preamble", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    expect(mergeTagsIntoPrompt("do the thing", tags)).toBe(
+      buildInlineTagsPreamble(tags) + "\ndo the thing",
+    );
   });
 
   // ── FR-FILE.0.1 enforcement ────────────────────────────────────
