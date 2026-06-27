@@ -602,6 +602,55 @@ body {
   border-inline-start: none;
 }
 
+/* Empty-project surface — shown when a selected (machine, project)
+   has no sessions, instead of falling back to the Ask singleton. */
+.empty-project {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+  background: var(--bg);
+}
+.empty-project-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  max-width: 420px;
+}
+.empty-project-project {
+  font-size: calc(18px * var(--app-font-scale));
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+.empty-project-machine {
+  font-size: calc(13px * var(--app-font-scale));
+  color: var(--text-secondary);
+}
+.empty-project-body {
+  margin-top: 8px;
+  font-size: calc(14px * var(--app-font-scale));
+  color: var(--text-secondary);
+}
+.empty-project-new-btn {
+  margin-top: 16px;
+  padding: 9px 18px;
+  font-size: calc(14px * var(--app-font-scale));
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.empty-project-new-btn:hover {
+  filter: brightness(1.05);
+}
+
 /* ======================================= */
 /* App Title                               */
 /* ======================================= */

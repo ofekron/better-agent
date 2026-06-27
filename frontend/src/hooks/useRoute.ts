@@ -4,6 +4,7 @@ import { ASK_SINGLETON_ID } from "../askSession";
 /** Path patterns the app cares about. */
 export type Route =
   | { kind: "session"; sessionId: string }
+  | { kind: "emptyProject" }
   | { kind: "machines" }
   | { kind: "settings" }
   | { kind: "share" }
@@ -28,6 +29,12 @@ function parse(pathname: string): Route {
   }
   const m = pathname.match(/^\/s\/([^/]+)\/?$/);
   if (m) return { kind: "session", sessionId: decodeURIComponent(m[1]) };
+  // Selecting a (machine, project) that has no sessions lands here rather
+  // than on the Ask singleton — Ask is reachable only via its explicit
+  // button. The selected project/machine is read from the sidebar state.
+  if (pathname === "/empty-project" || pathname === "/empty-project/") {
+    return { kind: "emptyProject" };
+  }
   // `/` (and any unknown path) lands on the Ask singleton — the app's
   // entry point. We don't 404 client-side; the backend serves the SPA
   // on every path so the SPA gets a chance to route.
