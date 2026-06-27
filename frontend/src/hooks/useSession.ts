@@ -24,6 +24,24 @@ import { subscribeMany } from "../lib/eventBus";
 
 export { sortSessionsForList };
 
+export interface CreateSessionOptions {
+  name: string;
+  model: string;
+  cwd: string;
+  orchestrationMode?: OrchestrationMode;
+  browserHarnessEnabled?: boolean;
+  providerId?: string;
+  browserHarnessHeadless?: boolean;
+  fileEditEnabled?: boolean;
+  fileEditPath?: string;
+  nodeId?: string;
+  reasoningEffort?: string;
+  permission?: Record<string, string>;
+  clientSessionId?: string;
+  capabilityContexts?: CapabilityContext[];
+  folderId?: string | null;
+}
+
 export type SessionMetadataPatch = {
   inline_tags?: InlineTag[];
   adv_sync_overlays?: Session["adv_sync_overlays"];
@@ -803,23 +821,24 @@ export function useSession(authStatus?: string) {
   }, []);
 
   const createSession = useCallback(
-    async (
-      name: string,
-      model: string,
-      cwd: string,
-      orchestrationMode: OrchestrationMode = "team",
-      browserHarnessEnabled: boolean = true,
-      providerId?: string,
-      browserHarnessHeadless: boolean = true,
-      fileEditEnabled: boolean = false,
-      fileEditPath?: string,
-      nodeId: string = "primary",
-      reasoningEffort?: string,
-      permission?: Record<string, string>,
-      clientSessionId?: string,
-      capabilityContexts?: CapabilityContext[],
-      folderId?: string | null,
-    ) => {
+    async (opts: CreateSessionOptions) => {
+      const {
+        name,
+        model,
+        cwd,
+        orchestrationMode = "team",
+        browserHarnessEnabled = true,
+        providerId,
+        browserHarnessHeadless = true,
+        fileEditEnabled = false,
+        fileEditPath,
+        nodeId = "primary",
+        reasoningEffort,
+        permission,
+        clientSessionId,
+        capabilityContexts,
+        folderId,
+      } = opts;
       startOp("session:create");
       try {
         const res = await fetchWithTimeout(`${API}/api/sessions`, {
@@ -848,7 +867,6 @@ export function useSession(authStatus?: string) {
           throw await responseError(res);
         }
         const session = await res.json();
-        const filters = sessionListFiltersRef.current;
         // Dedup: the backend's `session_created` WS broadcast can land
         // on this same tab before this POST `await` resolves, in which
         // case `appendSessionIfNew` already inserted it. Without this
@@ -1981,7 +1999,6 @@ export function useSession(authStatus?: string) {
    * out backend-side). */
   const appendSessionIfNew = useCallback((session: Session) => {
     if (!isSidebarVisibleSession(session)) return;
-    const filters = sessionListFiltersRef.current;
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
       return sortForList([session, ...prev]);
