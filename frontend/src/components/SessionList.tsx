@@ -311,15 +311,21 @@ function SessionNode({
     onSetTags(session.id, Array.from(current));
   };
 
-  const buildSessionActions = (): ActionItem[] => {
+  // `includePin` is true only for the desktop right-click context menu;
+  // mobile and the action sheet rely on the always-visible pin button.
+  const buildSessionActions = (includePin = false): ActionItem[] => {
     const copyTarget = session.file_path || session.id;
     return [
-      {
-        id: "pin",
-        label: session.pinned ? t("session.unpinTitle") : t("session.pinTitle"),
-        icon: <Icon name="pin" size={14} />,
-        onClick: () => onPin(session.id, !session.pinned),
-      },
+      ...(includePin
+        ? [
+            {
+              id: "pin",
+              label: session.pinned ? t("session.unpinTitle") : t("session.pinTitle"),
+              icon: <Icon name="pin" size={14} />,
+              onClick: () => onPin(session.id, !session.pinned),
+            },
+          ]
+        : []),
       ...(session.pinned
         ? [
             {
@@ -531,7 +537,7 @@ function SessionNode({
           if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
             return;
           }
-          const items = buildSessionActions();
+          const items = buildSessionActions(true);
           if (items.length === 0) return;
           menuAnchorRef.current = (e.currentTarget as HTMLElement).getBoundingClientRect();
           onContextMenuOpen(e, items);
