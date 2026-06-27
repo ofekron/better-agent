@@ -58,7 +58,9 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
         "BETTER_CLAUDE_FILE_EDITING": "1" if inputs.get("working_mode") == "file_editing" else "0",
     })
     if user_facing and app_session_id and backend_url and internal_token:
-        if provider_kind != "codex":
+        import provider_manifest
+        _spec = provider_manifest.spec_for(provider_kind)
+        if _spec is None or _spec.hosts_ui_mcp:
             servers["ui"] = _open_file_panel_server_config(base_env)
         servers["open-config-panel"] = _open_config_panel_server_config(base_env)
 

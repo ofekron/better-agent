@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from continuation import build_continuation_prompt
+import provider_manifest
 
-
-_RECALL_TOOL_PROVIDER_KINDS = {"claude", "claude-remote", "codex"}
+_RECALL_TOOL_PROVIDER_KINDS = provider_manifest.recall_kinds()
 
 
 @dataclass(frozen=True)

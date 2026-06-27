@@ -95,7 +95,8 @@ INSTALLERS: dict[str, ProviderInstaller] = {
 
 
 def supported_provider_kinds() -> list[str]:
-    return sorted(INSTALLERS)
+    import provider_manifest
+    return provider_manifest.installable_kinds()
 
 
 def installer_for(kind: str) -> ProviderInstaller:

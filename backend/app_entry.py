@@ -54,11 +54,12 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
     if "--run-dir" not in argv:
         return ("server", None, None)
     import argparse
+    import provider_manifest
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument(
         "--runner-kind", default="claude",
-        choices=["claude", "gemini", "codex", "fugu", "openai", "agy"],
+        choices=provider_manifest.runner_kinds(),
     )
     args = parser.parse_args(argv)
     return ("runner", args.runner_kind, args.run_dir)
@@ -80,20 +81,14 @@ def _main(argv: Optional[list[str]] = None) -> int:
         index = (sys.argv[1:] if argv is None else argv).index("--extension-mcp")
         return extension_mcp_main((sys.argv[1:] if argv is None else argv)[index + 1:])
     if mode == "runner":
-        if kind == "gemini":
-            from runner_gemini import main as runner_main
-        elif kind == "codex":
-            from runner_codex import main as runner_main
-        elif kind == "fugu":
-            # Fugu reuses the codex runner; it resolves `codex-fugu`.
-            from runner_codex import main as runner_main
-        elif kind == "openai":
-            # OpenAI-compatible Chat Completions; BA owns the agent loop.
-            from runner_openai import main as runner_main
-        elif kind == "agy":
-            from runner_agy import main as runner_main
-        else:
-            from runner import main as runner_main
+        # Runner module per kind comes from the canonical manifest; "runner"
+        # is the default Claude runner. (codex + fugu both resolve to
+        # runner_codex; the launcher binary differs, not the runner.)
+        import importlib
+        import provider_manifest
+        runner_main = importlib.import_module(
+            provider_manifest.runner_module_for(kind)
+        ).main
         return runner_main(run_dir)
     import uvicorn
     if mode == "node_server":
