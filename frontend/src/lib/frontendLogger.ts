@@ -35,6 +35,21 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
   }).catch(() => {});
 }
 
+/** Durable diagnostic channel: ships a structured line to the backend
+ * `frontend.log` regardless of console wiring. Use for transient frontend
+ * state transitions that must survive a backend restart for post-hoc
+ * forensics (queue banner / offline backlog / reconnect). Never pass prompt
+ * content — ids and lengths only. */
+export function logDurable(source: string, stage: string, data: Record<string, unknown>): void {
+  let message: string;
+  try {
+    message = `${stage} ${JSON.stringify(data)}`;
+  } catch {
+    message = `${stage} <unserializable>`;
+  }
+  postFrontendLog("warn", source, message);
+}
+
 export function installFrontendLogger(): void {
   if (installed) return;
   installed = true;
