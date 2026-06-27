@@ -53,9 +53,13 @@ def test_copilot_dispatchable_in_frozen_app():
     assert pm.runner_module_for("copilot") == "runner_copilot"
 
 
-def test_gemini_family_matches():
-    import run_recovery
-    assert pm.gemini_family_kinds() == run_recovery._GEMINI_FAMILY_KINDS
+def test_recovery_families():
+    # Lock the recovery-reader mapping. gemini-family = runners writing a
+    # Claude-shaped session_events.jsonl; codex = rollout reader; fugu
+    # currently uses the claude reader (pre-existing, flagged in the manifest).
+    assert pm.gemini_family_kinds() == frozenset({"gemini", "agy", "copilot", "openai"})
+    assert {k for k, s in pm.SPECS.items() if s.recovery_family == "codex"} == {"codex"}
+    assert pm.spec_for("fugu").recovery_family == "claude"
 
 
 def test_recall_kinds_match():
@@ -90,7 +94,7 @@ def test_codex_only_gates():
 if __name__ == "__main__":
     test_resolve_class_matches_manifest()
     test_runner_modules_importable()
-    test_gemini_family_matches()
+    test_recovery_families()
     test_recall_kinds_match()
     test_installable_matches_installers()
     test_uses_claude_env_matches()

@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -452,12 +453,41 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
 
 # Providers whose runner normalizes its turn into session_events.jsonl
 # (Claude-shaped envelopes). They share the same recovery replay reader.
-# Kinds whose runner writes a Claude-shaped `session_events.jsonl` and whose
-# runs therefore replay through `_replay_from_gemini_jsonl`. Includes non-
-# Gemini providers that reuse that replay path (openai: BA-owned loop).
-# Canonical source: provider_manifest (recovery_family == "gemini").
 import provider_manifest as _provider_manifest
-_GEMINI_FAMILY_KINDS = _provider_manifest.gemini_family_kinds()
+
+
+@dataclass
+class RecoveryReplay:
+    """Result of replaying a run's native stream for crash recovery. Each
+    reader carries its own extras — codex a context_window, claude the
+    unmatched orphan-subagent list — so they are NOT flattened to a bare
+    event list."""
+    events: list[dict]
+    context_window: Optional[int] = None
+    unmatched: list[dict] = field(default_factory=list)
+
+
+def _recovery_family(desc: dict | None) -> str:
+    """Recovery replay reader family ("claude"/"codex"/"gemini") for a run,
+    from the canonical manifest. Unknown kinds fall back to the claude
+    reader, matching the historical else-branch."""
+    spec = _provider_manifest.spec_for(_provider_kind(desc))
+    return spec.recovery_family if spec else "claude"
+
+
+def _replay_for_family(family: str, run_dir: Path) -> RecoveryReplay:
+    """Single recovery-replay dispatch, keyed off the manifest recovery
+    family — the one place that maps a run to its native reader. gemini-family
+    runners write a Claude-shaped session_events.jsonl; codex carries a
+    context_window; claude surfaces the unmatched orphan-subagent list."""
+    if family == "gemini":
+        return RecoveryReplay(events=_replay_from_gemini_jsonl(run_dir))
+    if family == "codex":
+        events, ctx = _replay_from_codex_rollout(run_dir)
+        return RecoveryReplay(events=events, context_window=ctx)
+    unmatched: list[dict] = []
+    events = _replay_from_claude_jsonl(run_dir, unmatched_out=unmatched)
+    return RecoveryReplay(events=events, unmatched=unmatched)
 
 
 def _provider_kind(desc: dict | None) -> str:
@@ -1454,17 +1484,13 @@ def _replay_and_apply(
         except Exception:
             pass
 
-    # Check provider kind to decide which native jsonl to replay.
-    # We resolve it robustly via the provider_id in backend_state.json.
-    kind = _provider_kind(desc)
-    unmatched: list[dict] = []
-    context_window: Optional[int] = None
-    if kind in _GEMINI_FAMILY_KINDS:
-        all_events = _replay_from_gemini_jsonl(run_dir)
-    elif kind == "codex":
-        all_events, context_window = _replay_from_codex_rollout(run_dir)
-    else:
-        all_events = _replay_from_claude_jsonl(run_dir, unmatched_out=unmatched)
+    # Replay the run's native stream through the reader for its recovery
+    # family (resolved from the manifest via the provider_id in
+    # backend_state.json). Single dispatch — see _replay_for_family.
+    _replay = _replay_for_family(_recovery_family(desc), run_dir)
+    all_events = _replay.events
+    context_window = _replay.context_window
+    unmatched = _replay.unmatched
 
     # Real last-activity timestamp carried by the events being re-ingested
     # (claude jsonl lines keep a top-level `timestamp`; codex stamps one).
@@ -1590,8 +1616,9 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
         # Gemini-specific: "invalid session" is NOT a rate limit, but
         # might want its own recovery later. For now, keep it to 429s.
 
-    # Slow path: check event text for rate limit markers. Detect the
-    # gemini-family runners (gemini, agy, ...) by their resolved provider kind.
+    # Slow path: check event text for rate limit markers. Replay through the
+    # run's recovery-family reader (same dispatch as full recovery, so codex
+    # runs use the rollout reader here too — not the claude fallback).
     desc = None
     bs_path = run_dir / "backend_state.json"
     if bs_path.exists():
@@ -1599,10 +1626,7 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
             desc = json.loads(bs_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    if _provider_kind(desc) in _GEMINI_FAMILY_KINDS:
-        events = _replay_from_gemini_jsonl(run_dir)
-    else:
-        events = _replay_from_claude_jsonl(run_dir)
+    events = _replay_for_family(_recovery_family(desc), run_dir).events
     return _is_rate_limit_attempt(error, events)
 
 
