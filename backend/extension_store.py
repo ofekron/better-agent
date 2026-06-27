@@ -685,6 +685,81 @@ def _validate_skills(value: Any) -> list[dict[str, str]]:
     return items
 
 
+_CAPABILITY_SCOPES = {"global", "project", "session", "turn", "runtime"}
+_CAPABILITY_GATES = {"internal", "external"}
+
+
+def _validate_capability_release(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {"timeout_s": None, "after_task": False}
+    if not isinstance(raw, dict):
+        raise ExtensionError("entrypoints.capabilities.release must be an object")
+    timeout = raw.get("timeout_s")
+    if timeout is not None and (
+        not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0
+    ):
+        raise ExtensionError("entrypoints.capabilities.release.timeout_s must be a positive integer")
+    unknown = sorted(set(raw) - {"timeout_s", "after_task"})
+    if unknown:
+        raise ExtensionError(
+            f"entrypoints.capabilities.release has unknown keys: {', '.join(unknown)}"
+        )
+    return {"timeout_s": timeout, "after_task": bool(raw.get("after_task"))}
+
+
+def _validate_capabilities(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
+    """A capability is a scoped bundle of contributions the session can load at
+    runtime. Delivery reuses existing channels: ``mcp`` items self-gate on the
+    per-session active set via a ``contains`` predicate, ``skill`` items are
+    merged into the turn's skill set at assembly. Catalog metadata (scope, gate,
+    bare_allowed, release policy) drives load validation and the release sweep."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtensionError("entrypoints.capabilities must be a list")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ExtensionError("entrypoints.capabilities items must be objects")
+        cid = str(item.get("id") or "").strip()
+        if not _ID_RE.fullmatch(cid):
+            raise ExtensionError("entrypoints.capabilities.id contains invalid characters")
+        if cid in seen:
+            raise ExtensionError(f"entrypoints.capabilities contains duplicate id: {cid}")
+        seen.add(cid)
+        scope = str(item.get("scope") or "").strip()
+        if scope not in _CAPABILITY_SCOPES:
+            raise ExtensionError(
+                f"entrypoints.capabilities.scope must be one of {sorted(_CAPABILITY_SCOPES)}"
+            )
+        gate = str(item.get("scope_gate") or "internal").strip()
+        if gate not in _CAPABILITY_GATES:
+            raise ExtensionError(
+                f"entrypoints.capabilities.scope_gate must be one of {sorted(_CAPABILITY_GATES)}"
+            )
+        mcp = (
+            _validate_string_list(item.get("mcp"), field="entrypoints.capabilities.mcp")
+            if item.get("mcp") is not None
+            else []
+        )
+        skill = (
+            _validate_string_list(item.get("skill"), field="entrypoints.capabilities.skill")
+            if item.get("skill") is not None
+            else []
+        )
+        items.append({
+            "id": cid,
+            "scope": scope,
+            "bare_allowed": bool(item.get("bare_allowed")),
+            "scope_gate": gate,
+            "release": _validate_capability_release(item.get("release")),
+            "mcp": mcp,
+            "skill": skill,
+        })
+    return items
+
+
 def _validate_team_definitions(value: Any) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -1395,6 +1470,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             extension_instructions.instruction_items_from_entrypoints(entrypoints_raw)
         ),
         "skills": _validate_skills(entrypoints_raw.get("skills")),
+        "capabilities": _validate_capabilities(
+            entrypoints_raw.get("capabilities"), extension_id=extension_id
+        ),
         "team_definitions": _validate_team_definitions(entrypoints_raw.get("team_definitions")),
         "frontend_modules": _validate_frontend_modules(
             entrypoints_raw.get("frontend_modules"),
@@ -2872,6 +2950,38 @@ def _active_records() -> list[dict[str, Any]]:
 def get_extension(extension_id: str) -> dict[str, Any] | None:
     data = _load()
     return data["extensions"].get(extension_id)
+
+
+def _stored_capability_entrypoints(record: dict[str, Any]) -> list[dict[str, Any]]:
+    manifest = record.get("manifest") or {}
+    entrypoints = manifest.get("entrypoints") or {}
+    raw = entrypoints.get("capabilities") or []
+    if not isinstance(raw, list):
+        raise ExtensionError("stored extension entrypoints.capabilities must be a list")
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def capability_catalog() -> dict[str, dict[str, Any]]:
+    """Full-id (``<extension_id>:<cap_id>``) -> descriptor for every active
+    extension. Single source for load/release validation, scope gating, and the
+    post-turn release sweep."""
+    catalog: dict[str, dict[str, Any]] = {}
+    for record in _active_records():
+        extension_id = record["manifest"]["id"]
+        for item in _stored_capability_entrypoints(record):
+            cid = str(item.get("id") or "").strip()
+            if not cid:
+                continue
+            catalog[f"{extension_id}:{cid}"] = {
+                **item,
+                "id": f"{extension_id}:{cid}",
+                "extension_id": extension_id,
+            }
+    return catalog
+
+
+def get_capability(full_id: str) -> dict[str, Any] | None:
+    return capability_catalog().get(str(full_id or "").strip())
 
 
 def is_extension_active(extension_id: str) -> bool:

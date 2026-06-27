@@ -5017,6 +5017,36 @@ class SessionManager:
             sid, _do, {"kind": "bare_config_set", "bare_config": bool(bare)},
         )
 
+    def add_active_capability(self, sid: str, capability_id: str) -> Optional[dict]:
+        cid = str(capability_id or "").strip()
+        if not cid:
+            return self.get(sid)
+
+        def _do(s: dict) -> None:
+            current = [
+                str(x) for x in (s.get("active_capability_ids") or []) if str(x or "").strip()
+            ]
+            if cid not in current:
+                current.append(cid)
+            s["active_capability_ids"] = current
+
+        return self._run(
+            sid, _do, {"kind": "active_capability_added", "capability_id": cid},
+        )
+
+    def remove_active_capability(self, sid: str, capability_id: str) -> Optional[dict]:
+        cid = str(capability_id or "").strip()
+
+        def _do(s: dict) -> None:
+            current = [
+                str(x) for x in (s.get("active_capability_ids") or []) if str(x or "").strip()
+            ]
+            s["active_capability_ids"] = [x for x in current if x != cid]
+
+        return self._run(
+            sid, _do, {"kind": "active_capability_removed", "capability_id": cid},
+        )
+
     def set_backend_url(self, sid: str, backend_url: str) -> Optional[dict]:
         def _do(s: dict) -> None:
             s["backend_url"] = backend_url
