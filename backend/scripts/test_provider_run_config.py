@@ -768,7 +768,7 @@ def t_codex_builtin_tool_schemas_do_not_invite_null_defaults() -> None:
 def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
     owned = runner_codex._codex_existing_tool_names({
         "mcp_servers": {
-            "open-file-panel": {},
+            "ui": {},
             "custom": {"tool_names": ["custom_owned_tool"]},
         },
     })
@@ -920,7 +920,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "better-agent-coordination",
         "better-agent-session-bridge",
         "credential-broker",
-        "open-file-panel",
+        "ui",
         "scheduler",
         "provider-config-sync",
         "better-agent-requirements",
@@ -937,8 +937,8 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "built-in MCP carries Better Agent session id")
     check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "built-in MCP carries provider id")
     check(
-        servers["open-file-panel"]["args"][-1].endswith("open_file_panel_mcp.py"),
-        "built-in MCP config points open-file-panel at its MCP server",
+        servers["ui"]["args"][-1].endswith("open_file_panel_mcp.py"),
+        "built-in MCP config points ui server at its MCP server",
     )
 
 
@@ -956,7 +956,7 @@ def t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp() -> None:
         "model": "m",
     }, {})
     servers = config["mcp_servers"]
-    check("open-file-panel" not in servers, "Codex omits open-file-panel MCP to avoid request_user_input collision")
+    check("ui" not in servers, "Codex omits ui MCP to avoid request_user_input collision")
     check("open-config-panel" in servers, "Codex keeps open-config-panel MCP")
     check("better-agent-coordination" in servers, "Codex keeps extension MCP servers")
 
@@ -975,7 +975,7 @@ def t_builtin_manager_mcp_servers_exclude_session_bridge() -> None:
     servers = config["mcp_servers"]
     check("better-agent-session-bridge" not in servers, "manager runs do not get session-bridge")
     check("better-agent-coordination" in servers, "manager runs get coordination")
-    check("open-file-panel" in servers, "manager user-facing runs get open-file-panel")
+    check("ui" in servers, "manager user-facing runs get ui server")
     check("scheduler" in servers, "manager user-facing runs still get scheduler")
     check("better-agent-requirements" in servers, "manager runs get requirements from private extension")
 

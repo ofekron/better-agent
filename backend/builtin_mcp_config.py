@@ -59,7 +59,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     })
     if user_facing and app_session_id and backend_url and internal_token:
         if provider_kind != "codex":
-            servers["open-file-panel"] = _open_file_panel_server_config(base_env)
+            servers["ui"] = _open_file_panel_server_config(base_env)
         servers["open-config-panel"] = _open_config_panel_server_config(base_env)
 
     for name, server_config in extension_store.runtime_mcp_server_configs(

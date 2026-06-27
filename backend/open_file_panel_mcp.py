@@ -137,7 +137,7 @@ def start_file_discussion_response(
 
 def build_server() -> FastMCP:
     server = FastMCP(
-        "open-file-panel",
+        "ui",
         instructions=(
             "Communicate with the user from an active Better Agent session. "
             "Open files in the UI or ask bounded questions when user input is required."
