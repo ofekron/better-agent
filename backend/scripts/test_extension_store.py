@@ -3569,13 +3569,15 @@ def test_required_marketplace_extension_auto_installs_from_private_repo() -> Non
         raise AssertionError("marketplace extension is not enabled")
 
 
-def test_required_marketplace_extension_is_hidden_from_public_extension_list() -> None:
+def test_required_marketplace_extension_is_listed_in_public_extension_list() -> None:
+    # The marketplace ships as a first-party packaged UI (settings slot + backend
+    # bridge), surfaced by default. It is NOT hidden from the extension list.
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     if record is None:
         raise AssertionError("marketplace extension was not auto-installed")
     listed_ids = {item["manifest"]["id"] for item in extension_store.list_extensions()}
-    if extension_store.MARKETPLACE_EXTENSION_ID in listed_ids:
-        raise AssertionError("marketplace extension should not be shown as an installable extension")
+    if extension_store.MARKETPLACE_EXTENSION_ID not in listed_ids:
+        raise AssertionError("marketplace extension should be listed")
 
 
 def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> None:
@@ -4232,7 +4234,7 @@ if __name__ == "__main__":
         test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record()
         test_list_extensions_reports_builtin_reconciliation_once()
         test_required_marketplace_extension_auto_installs_from_private_repo()
-        test_required_marketplace_extension_is_hidden_from_public_extension_list()
+        test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
         test_required_marketplace_artifact_record_upgrades_when_metadata_changes()
         test_required_marketplace_extension_installs_local_package_without_private_repo()
