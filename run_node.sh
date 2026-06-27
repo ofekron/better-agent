@@ -25,10 +25,10 @@
 #     the script generates one interactively.
 #   - BETTER_AGENT_NODE_ID → this node's id (default: hostname). Must
 #     differ from the primary's id or main_node refuses to start.
-#   - BETTER_AGENT_NODE_TOKEN → optional; only when this node is listed
-#     statically in topology.yaml. Otherwise the node self-generates a
-#     secret at $BETTER_AGENT_HOME/node_identity.json and is approved by
-#     an operator in the primary UI on first connect.
+#   - BETTER_AGENT_NODE_TOKEN → optional per-node secret pin. If unset,
+#     the node self-generates one at $BETTER_AGENT_HOME/node_identity.json.
+#     Either way the node is approved by an operator in the primary UI on
+#     first connect (per-node secret, argon2-verified — no shared token).
 #   - BETTER_AGENT_NODE_PORT → local port to bind (default: 8002).
 
 set -e

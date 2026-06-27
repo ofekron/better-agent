@@ -1,24 +1,23 @@
-"""Disk-backed registry of APPROVED dynamic worker-nodes (primary-side).
+"""Disk-backed registry of APPROVED worker-nodes (primary-side).
 
-Two ways a node can be known to primary:
+EVERY node — whether pre-declared in `topology.yaml` or discovered
+dynamically — authenticates the same way: it generates a random secret
+once (or pins one via `BETTER_CLAUDE_NODE_TOKEN` on the node), presents
+it on every dial, and the FIRST time an authenticated human approves it
+we persist `argon2(secret)` here. On every later reconnect we verify
+the presented secret against that hash. There is NO shared token.
 
-  1. **Static** — declared in `topology.yaml` (the pre-existing path).
-     Authenticated by the shared `BETTER_CLAUDE_NODE_TOKEN`.
-  2. **Dynamic** — a node that dialed in, presented a self-generated
-     secret, and was approved by the logged-in user via the
-     registration popup. Its spec + a hash of its secret live HERE.
+`topology.yaml` is the MANIFEST (allowlist of permitted ids + each
+declared node's `cwd_roots` policy). It is deliberately separate from
+this store (it is repo-checked-in and must not carry per-deployment
+secrets) and from `node_store.py` (which holds only transient live-WS
+state, no authority). The per-node secret hashes live HERE, never in
+topology.yaml.
 
-This store is the canonical record for case 2. It's deliberately
-separate from `topology.yaml` (which is repo-checked-in and must not
-carry per-deployment secrets) and from `node_store.py` (which holds
-only transient live-WS state, no authority).
-
-Trust model (trust-on-first-approve, à la SSH known_hosts): the node
-generates a random secret once and presents it on every dial. The
-FIRST time, an authenticated human approves it, and we persist
-`argon2(secret)`. On every later reconnect we verify the presented
-secret against that hash — so a third party can't later impersonate the
-node_id without the secret, and no shared token has to be copied around.
+Trust model (trust-on-first-approve, à la SSH known_hosts): a third
+party can't impersonate a node_id without its secret, and no shared
+secret is copied between machines — so one compromised node can't
+impersonate another.
 
 Storage: one JSON file per node at
 ~/.better-claude/node_registry/<node_id>.json:
