@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { trackedFetch } from "../progress/store";
 import { API } from "../api";
 
@@ -27,11 +28,10 @@ export function LanguageSelector() {
   const current = i18n.language;
 
   return (
-    <select
+    <Select
       className="language-selector"
       value={current}
-      onChange={(e) => {
-        const lng = e.target.value;
+      onChange={(lng) => {
         i18n.changeLanguage(lng);
         trackedFetch(
           "language:save",
@@ -45,12 +45,7 @@ export function LanguageSelector() {
         ).catch(() => {});
       }}
       aria-label={t("language.label", "Language")}
-    >
-      {LANGUAGES.map((lang) => (
-        <option key={lang.code} value={lang.code}>
-          {lang.autonym}
-        </option>
-      ))}
-    </select>
+      options={LANGUAGES.map((lang) => ({ value: lang.code, label: lang.autonym }))}
+    />
   );
 }

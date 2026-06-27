@@ -39,6 +39,7 @@ TRANSLATIONS: dict[str, str] = {
     "error.orchestration_mode_must_be_manager_or_native": "orchestration_mode חייב להיות team או native",
     "error.init_turn_failed": "תור האתחול נכשל: {e}",
     "error.init_turn_no_session_id": "תור האתחול לא ייצר מזהה סשן (כנראה בוטל)",
+    "error.session_already_initializing": "סשן כבר נמצא בתהליך אתחול",
     "error.cwd_plus_session_id_required": "נדרש cwd + agent_session_id",
     "error.bc_session_not_found": "סשן Better Agent לא נמצא",
     "error.bc_session_cwd_mismatch": "ה-cwd של סשן Better Agent ({agent_cwd}) לא תואם ל-{cwd}",
@@ -70,7 +71,6 @@ TRANSLATIONS: dict[str, str] = {
     "delegation.justification_required": "`justification` נדרש בבקשת עובד חדש. הסבירו במשפט אחד או שניים למה אף עובד קיים לא מתאים.",
     "delegation.orchestration_mode_required": "`orchestration_mode` נדרש בבקשת עובד חדש (חייב להיות 'team' או 'native').",
     "delegation.user_denied_creation": "המשתמש דחה יצירת עובד חדש. המשיכו עובד קיים מ-<known_workers>, סקרו מחדש את ההאצלה הקודמת (למשל Grep ב-jsonl של העובד לשגיאות), או עצרו.",
-    "delegation.worker_not_registered": "עובד {worker_session_id} לא רשום ל-cwd {cwd}. בדקו בפאנל העובדים.",
     "delegation.worker_bc_deleted": "סשן Better Agent של העובד {worker_session_id} כבר לא קיים. הרישום בוטל.",
     "delegation.worker_no_claude_session": "לסשן Better Agent של העובד {worker_session_id} אין סשן claude בסיסי עדיין — הוא מעולם לא ביצע תור במצב {mode}. פתחו אותו בממשק ושלחו פרומפט אחד לאתחול לפני האצלה.",
     "delegation.instructions_worker_description_required": "שגיאה: 'instructions' ו-'worker_description' נדרשים.",
@@ -108,6 +108,8 @@ TRANSLATIONS: dict[str, str] = {
     "runner.delegate_non_json": "האצלה: תגובה לא-JSON: {e}: {raw}",
     "runner.cancelled": "בוטל",
     "runner.failed_read_input": "נכשל לקרוא input.json: {e}",
+    "runner.mssg_non_json": "mssg: תגובה שאינה JSON: {e}: {raw}",
+    "runner.open_file_panel_non_json": "open-file-panel: תגובה שאינה JSON: {e}: {raw}",
 
     # --- Orchestrator ---
     "orchestrator.session_not_found": "סשן לא נמצא",

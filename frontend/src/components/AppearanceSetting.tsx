@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import { DEFAULT_APP_FONT_SIZE, fontScaleForSize } from "../utils/typography";
@@ -80,17 +81,15 @@ export function AppearanceSetting() {
     <div className="appearance-setting">
       <label className="appearance-setting-row">
         <span>{t("settings.fontFamily")}</span>
-        <select
+        <Select<FontFamilyId>
           value={prefs.font_family}
           disabled={saving}
-          onChange={(e) => void save({ font_family: e.target.value as FontFamilyId })}
-        >
-          {FONT_OPTIONS.map((option) => (
-            <option key={option} value={option}>
-              {t(`settings.fontFamily.${option}`)}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => void save({ font_family: v })}
+          options={FONT_OPTIONS.map((option) => ({
+            value: option,
+            label: t(`settings.fontFamily.${option}`),
+          }))}
+        />
       </label>
       <label className="appearance-setting-row">
         <span>{t("settings.fontSize")}</span>

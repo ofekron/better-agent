@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
@@ -110,49 +111,40 @@ export function InternalLLMSetting() {
             <div className="internal-llm-task">{taskLabel(task)}</div>
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmProvider")}</span>
-              <select
+              <Select
                 value={a.provider_id || INHERIT}
                 disabled={saving}
-                onChange={(e) => void change(task, "provider_id", e.target.value)}
-              >
-                <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => void change(task, "provider_id", v)}
+                options={[
+                  { value: INHERIT, label: t("settings.internalLlmInherit") },
+                  ...providers.map((p) => ({ value: p.id, label: p.name })),
+                ]}
+              />
             </label>
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmModel")}</span>
-              <select
+              <Select
                 value={a.model || INHERIT}
                 disabled={saving}
-                onChange={(e) => void change(task, "model", e.target.value)}
-              >
-                <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => void change(task, "model", v)}
+                options={[
+                  { value: INHERIT, label: t("settings.internalLlmInherit") },
+                  ...modelOptions.map((m) => ({ value: m, label: m })),
+                ]}
+              />
             </label>
             {effortOptions.length > 0 && (
               <label className="context-strategy-row">
                 <span>{t("settings.internalLlmEffort")}</span>
-                <select
+                <Select
                   value={a.reasoning_effort || INHERIT}
                   disabled={saving}
-                  onChange={(e) => void change(task, "reasoning_effort", e.target.value)}
-                >
-                  <option value={INHERIT}>{t("settings.internalLlmInherit")}</option>
-                  {effortOptions.map((e2) => (
-                    <option key={e2} value={e2}>
-                      {e2}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => void change(task, "reasoning_effort", v)}
+                  options={[
+                    { value: INHERIT, label: t("settings.internalLlmInherit") },
+                    ...effortOptions.map((e2) => ({ value: e2, label: e2 })),
+                  ]}
+                />
               </label>
             )}
           </div>

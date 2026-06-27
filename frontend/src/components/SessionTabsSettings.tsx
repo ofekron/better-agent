@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 
@@ -72,18 +73,19 @@ export function SessionTabsSettings() {
       </label>
       <label className="context-strategy-row">
         <span>{t("settings.sessionTabsSort")}</span>
-        <select
+        <Select<SortValue>
           value={sort}
           disabled={saving || !visible}
-          onChange={(e) => {
-            const next = normalize(e.target.value);
+          onChange={(v) => {
+            const next = normalize(v);
             void patch({ sessions_tabs_sort: next }, () => setSort(next));
           }}
-        >
-          <option value="last_opened_at">{t("session.sortByOpened")}</option>
-          <option value="updated_at">{t("session.sortByModified")}</option>
-          <option value="last_user_prompt_at">{t("session.sortByUserPrompt")}</option>
-        </select>
+          options={[
+            { value: "last_opened_at", label: t("session.sortByOpened") },
+            { value: "updated_at", label: t("session.sortByModified") },
+            { value: "last_user_prompt_at", label: t("session.sortByUserPrompt") },
+          ]}
+        />
       </label>
       <label className="context-strategy-row" title={t("session.groupByStatusHint")}>
         <span>{t("session.groupByStatus")}</span>
