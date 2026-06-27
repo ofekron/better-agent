@@ -314,10 +314,17 @@ GEMINI_SUBSCRIPTION_UNSUPPORTED = (
     "supported Gemini API-key provider instead."
 )
 
+OPENAI_SUBSCRIPTION_UNSUPPORTED = (
+    "OpenAI-compatible providers run on Better Agent's own agent loop over "
+    "an API key; there is no subscription auth. Use api_key mode."
+)
+
 
 def _reject_unsupported_provider_config(kind: str, mode: str) -> None:
     if kind == "gemini" and mode == "subscription":
         raise ValueError(GEMINI_SUBSCRIPTION_UNSUPPORTED)
+    if kind == "openai" and mode == "subscription":
+        raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
 
 
 def _seed_default_state() -> dict:
