@@ -94,6 +94,10 @@ def _seed_extension() -> Path:
                 "        (context.install_path / 'slow.pid').write_text(str(os.getpid()), encoding='utf-8')",
                 "        time.sleep(10)",
                 "        return {'ok': True}",
+                "    @router.get('/sleep2')",
+                "    def sleep2():",
+                "        time.sleep(2)",
+                "        return {'ok': True}",
                 "    @router.get('/boom')",
                 "    def boom():",
                 "        raise RuntimeError('secret path /tmp/better-agent-secret')",
@@ -116,6 +120,7 @@ def _seed_extension() -> Path:
             "entrypoints": {
                 "backend": "backend/routes.py",
                 "frontend": "ui/index.js",
+                "backend_timeouts": {"sleep2": 5},
                 "mcp": [],
                 "provider_capabilities": [],
             },
@@ -343,6 +348,59 @@ def main() -> int:
             extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
         check(status == 500, "sync extension backend timeout fails closed")
         check(time.monotonic() - started < 3.0, "sync extension backend timeout does not block caller")
+
+        # Per-route backend timeout: with the global host gate at 1s, a route
+        # that sleeps 2s would 504 — but its manifest backend_timeouts entry
+        # (sleep2 -> 5s) must override the default and let it complete.
+        old_timeout = extension_backend_loader._HOST_TIMEOUT_SECONDS  # type: ignore[attr-defined]
+        extension_backend_loader._HOST_TIMEOUT_SECONDS = 1.0  # type: ignore[attr-defined]
+        try:
+            response = client.get("/api/extensions/ofek.backend/backend/sleep2")
+            check(response.status_code == 200, "per-route backend_timeouts overrides the host default")
+            check(response.json()["ok"] is True, "per-route timed route returns its body")
+            # A route with no per-route entry still uses the (patched 1s) default.
+            response = client.get("/api/extensions/ofek.backend/backend/slow")
+            check(response.status_code == 504, "route without per-route timeout keeps the host default")
+        finally:
+            extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
+
+        # Resolver unit checks: longest-prefix match, default fallback, cap clamp.
+        spec = {"backend_timeouts": {"a/b": 7, "a": 3, "default": 2}}
+        check(extension_backend_loader._resolve_host_timeout(spec, "a/b") == 7.0, "exact route match wins")  # type: ignore[attr-defined]
+        check(extension_backend_loader._resolve_host_timeout(spec, "a/b/c") == 7.0, "longest segment-prefix wins")  # type: ignore[attr-defined]
+        check(extension_backend_loader._resolve_host_timeout(spec, "a/x") == 3.0, "shorter prefix matches when longer does not")  # type: ignore[attr-defined]
+        check(extension_backend_loader._resolve_host_timeout(spec, "z") == 2.0, "default applies with no prefix match")  # type: ignore[attr-defined]
+        check(
+            extension_backend_loader._resolve_host_timeout({}, "anything")  # type: ignore[attr-defined]
+            == extension_backend_loader._HOST_TIMEOUT_SECONDS,  # type: ignore[attr-defined]
+            "no backend_timeouts falls back to host default",
+        )
+        check(
+            extension_backend_loader._resolve_host_timeout({"backend_timeouts": {"x": 10 ** 9}}, "x")  # type: ignore[attr-defined]
+            == float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS),
+            "oversized per-route timeout is clamped to the cap",
+        )
+        check(
+            extension_backend_loader._resolve_host_timeout({"backend_timeouts": {"default": 10 ** 9}}, "unmatched")  # type: ignore[attr-defined]
+            == float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS),
+            "oversized default timeout is clamped to the cap",
+        )
+
+        # Manifest validation: reject bad backend_timeouts, accept good ones.
+        try:
+            extension_store._validate_backend_timeouts({"x": "nope"})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("non-numeric backend_timeouts must be rejected")
+        try:
+            extension_store._validate_backend_timeouts({"x": extension_store.MAX_BACKEND_TIMEOUT_SECONDS + 1})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("over-cap backend_timeouts must be rejected")
+        validated = extension_store._validate_backend_timeouts({"/sessions/search/": 930, "default": 30})  # type: ignore[attr-defined]
+        check(validated == {"sessions/search": 930.0, "default": 30.0}, "valid backend_timeouts are slash-normalized")
 
         response = client.get("/api/extensions/frontend-entrypoints")
         check(response.status_code == 200, "frontend entrypoint catalog returns")

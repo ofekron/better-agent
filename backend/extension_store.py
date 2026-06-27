@@ -33,6 +33,12 @@ import extension_mcp
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
 
+# Upper bound on a per-route extension-backend call timeout (seconds). The host
+# kills the extension subprocess when a roundtrip exceeds the resolved timeout;
+# this cap bounds how long a single request may pin core + the subprocess so a
+# buggy/hostile manifest cannot declare an effectively unbounded hold.
+MAX_BACKEND_TIMEOUT_SECONDS = 3600
+
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -1325,6 +1331,31 @@ def _validate_hooks(value: Any, *, has_backend: bool) -> dict[str, Any]:
     return hooks
 
 
+def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
+    """Per-route extension-backend call timeouts (seconds). Keys are backend
+    route subpaths (the path after ``/backend/``, slash-normalized) or the
+    special ``default`` applied to any route without an explicit entry. Values
+    are positive numbers capped at ``MAX_BACKEND_TIMEOUT_SECONDS``. Fail closed:
+    a malformed entry rejects the whole manifest rather than silently dropping
+    to the 30s host default."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ExtensionError("entrypoints.backend_timeouts must be an object")
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        route = "default" if key == "default" else str(key).strip().strip("/")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a number")
+        if value <= 0 or value > MAX_BACKEND_TIMEOUT_SECONDS:
+            raise ExtensionError(
+                f"entrypoints.backend_timeouts['{key}'] must be between 0 and "
+                f"{MAX_BACKEND_TIMEOUT_SECONDS} seconds"
+            )
+        result[route] = float(value)
+    return result
+
+
 def validate_manifest(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ExtensionError("Manifest must be a JSON object")
@@ -1384,6 +1415,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "applied_config": _validate_applied_config(
             entrypoints_raw.get("applied_config"), extension_id=extension_id
         ),
+        "backend_timeouts": _validate_backend_timeouts(entrypoints_raw.get("backend_timeouts")),
     }
     if entrypoints["frontend"] and len(Path(entrypoints["frontend"]).parts) < 2:
         raise ExtensionError("entrypoints.frontend must live under a dedicated asset directory")
@@ -3876,6 +3908,7 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
         "install_path": str(install_root),
         "entrypoint": entrypoint,
         "entrypoint_kind": entrypoint_kind,
+        "backend_timeouts": dict(entrypoints.get("backend_timeouts") or {}),
         "prefix": f"/api/extensions/{manifest['id']}/backend",
         "permissions": dict(manifest.get("permissions") or {}),
         "effective_permissions": effective_permissions(record),

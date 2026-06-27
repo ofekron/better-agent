@@ -43,6 +43,32 @@ _BLOCKED_RESPONSE_HEADERS = {
 }
 
 
+def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
+    """Per-route timeout for one extension-backend roundtrip. Looks up the
+    request subpath in the manifest-declared ``backend_timeouts`` (exact match,
+    then longest segment-prefix, then ``default``), falling back to the global
+    ``_HOST_TIMEOUT_SECONDS``. Clamped to ``MAX_BACKEND_TIMEOUT_SECONDS`` as
+    defense-in-depth in case a spec carries an unvalidated value."""
+    timeouts = spec.get("backend_timeouts")
+    if not isinstance(timeouts, dict) or not timeouts:
+        return _HOST_TIMEOUT_SECONDS
+    p = path.strip("/")
+    chosen = timeouts.get(p)
+    if not isinstance(chosen, (int, float)) or isinstance(chosen, bool):
+        best_len = -1
+        for key, value in timeouts.items():
+            if key == "default" or isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            k = str(key).strip("/")
+            if (p == k or p.startswith(k + "/")) and len(k) > best_len:
+                best_len, chosen = len(k), value
+        if best_len < 0:
+            chosen = timeouts.get("default")
+    if isinstance(chosen, (int, float)) and not isinstance(chosen, bool) and chosen > 0:
+        return min(float(chosen), float(extension_store.MAX_BACKEND_TIMEOUT_SECONDS))
+    return _HOST_TIMEOUT_SECONDS
+
+
 def _host_env() -> dict[str, str]:
     env = {
         "PYTHONIOENCODING": "utf-8",
@@ -213,11 +239,12 @@ def _roundtrip_with_timeout(
     spec: dict[str, Any],
     base_url: str,
     request_payload: dict[str, Any],
+    timeout: float,
 ) -> bytes:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(_roundtrip, handle, spec, base_url, request_payload)
     try:
-        return future.result(timeout=_HOST_TIMEOUT_SECONDS)
+        return future.result(timeout=timeout)
     except concurrent.futures.TimeoutError:
         if handle.proc is not None and handle.proc.poll() is None:
             handle.proc.kill()
@@ -279,7 +306,7 @@ async def _invoke_backend(
             asyncio.get_running_loop().run_in_executor(
                 None, _roundtrip, handle, spec, base_url, request_payload
             ),
-            timeout=_HOST_TIMEOUT_SECONDS,
+            timeout=_resolve_host_timeout(spec, path),
         )
     except TimeoutError as exc:
         # Kill the stuck process so the blocked roundtrip thread unblocks and
@@ -388,7 +415,9 @@ def invoke_extension_backend_sync(
         "headers": [("content-type", "application/json")] if body_bytes else [],
         "body": base64.b64encode(body_bytes).decode("ascii"),
     }
-    line = _roundtrip_with_timeout(_get_handle(spec), spec, base_url, request_payload)
+    line = _roundtrip_with_timeout(
+        _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
+    )
     if not line:
         evict_persistent_backend(extension_id)
         return 500, b""
