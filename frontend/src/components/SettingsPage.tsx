@@ -166,14 +166,6 @@ function configDirCopyForKind(kind: string): {
       hintKey: "setup.configDirHintCodex",
     };
   }
-  if (kind === "zai-openai") {
-    // Z.AI (OpenAI) runs through Codex with a `zai-openai` profile in ~/.codex.
-    return {
-      labelKey: "setup.configDirLabelCodex",
-      placeholderKey: "setup.configDirPlaceholderCodex",
-      hintKey: "setup.configDirHintCodex",
-    };
-  }
   if (kind === "gemini") {
     return {
       labelKey: "setup.configDirLabelGemini",
@@ -305,15 +297,15 @@ const TEMPLATES: Template[] = [
   {
     id: "zai-openai",
     label: "Z.AI (OpenAI)",
-    blurb: "Z.AI's native OpenAI endpoint via the `codex-zai` launcher (codex -p zai-openai). This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Install the launcher + profile first (docs), then add it here.",
+    blurb: "Z.AI's native OpenAI endpoint (Coding plan key) driven by Better Agent's own agent loop. This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Needs an API key.",
     defaults: {
       name: "Z.AI (OpenAI)",
-      kind: "zai-openai",
+      kind: "openai",
       mode: "api_key",
-      base_url: "",
-      config_dir: "$HOME/.codex",
+      base_url: "https://api.z.ai/api/coding/paas/v4",
+      config_dir: "",
       default_model: "glm-5.2",
-      default_reasoning_effort: "medium",
+      default_reasoning_effort: "",
     },
   },
   {
@@ -2177,7 +2169,7 @@ const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
     approval: ["untrusted", "on-request", "on-failure", "never"],
     sandbox: ["read-only", "workspace-write", "danger-full-access"],
   },
-  gemini: { mode: ["default", "auto_edit", "yolo", "plan"] },
+  gemini: { mode: ["auto_edit", "yolo", "plan"] },
 };
 const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
   claude: { mode: "bypassPermissions" },

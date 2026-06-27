@@ -452,8 +452,10 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
 
 # Providers whose runner normalizes its turn into session_events.jsonl
 # (Claude-shaped envelopes). They share the same recovery replay reader.
-# All are GeminiProvider subclasses.
-_GEMINI_FAMILY_KINDS = frozenset({"gemini", "agy", "copilot"})
+# Kinds whose runner writes a Claude-shaped `session_events.jsonl` and whose
+# runs therefore replay through `_replay_from_gemini_jsonl`. Includes non-
+# Gemini providers that reuse that replay path (openai: BA-owned loop).
+_GEMINI_FAMILY_KINDS = frozenset({"gemini", "agy", "copilot", "openai"})
 
 
 def _provider_kind(desc: dict | None) -> str:

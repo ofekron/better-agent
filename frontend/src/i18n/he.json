@@ -161,7 +161,7 @@
   "setup.templateZaiLabel": "Z.AI (Claude)",
   "setup.templateZaiBlurb": "API תואם Anthropic של Z.AI דרך ה-`claude` CLI. דורש מפתח API.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
-  "setup.templateZaiOpenAIBlurb": "נקודת הקצה ה-Native של Z.AI (OpenAI) דרך הלאנצ'ר `codex-zai` (codex -p zai-openai). כאן מדווח ה-caching האוטומטי של Z.AI, כך שזה זול יותר בהקשרים ארוכים. התקן קודם את הלאנצ'ר + הפרופיל (דוקס), ואז הוסף כאן.",
+  "setup.templateZaiOpenAIBlurb": "נקודת הקצה ה-Native של Z.AI (OpenAI, מפתח Coding) מונעת על ידי לולאת הסוכן של Better Agent עצמו. כאן מדווח ה-caching האוטומטי של Z.AI, כך שזה זול יותר בהקשרים ארוכים. דורש מפתח API.",
   "setup.templateCustomLabel": "API מותאם",
   "setup.templateCustomBlurb": "כל נקודת קצה תואמת Anthropic. ספקו URL + מפתח בעצמכם.",
   "setup.backTitle": "חזרה",
@@ -796,5 +796,9 @@
   "bypassPermission.message": "כלים ופקודות ירוצו ללא בקשת אישור ומחוץ לסנדבוקס. ניתן להקטין זאת לפי ספק בהגדרות, או לפי סשן בעת יצירתו.",
   "bypassPermission.changeInSettings": "שנה בהגדרות",
   "bypassPermission.sendAnyway": "שלח בכל זאת (השאר כך)",
-  "emptyProject.body": "אין עדיין שיחות בפרויקט זה."
+  "emptyProject.body": "אין עדיין שיחות בפרויקט זה.",
+  "toolApproval.title": "נדרש אישור",
+  "toolApproval.tool": "כלי: {{tool}}",
+  "toolApproval.approve": "אשר",
+  "toolApproval.deny": "דחה"
 }
