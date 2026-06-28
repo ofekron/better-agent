@@ -95,6 +95,7 @@ _sessions_list_response_cache: dict[
     tuple[float, bytes],
 ] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
+_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.25
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 
@@ -3500,6 +3501,8 @@ def _build_local_sessions_page_for_list(
             content_scores = session_store.grep_session_scores(
                 search_query,
                 selected_search_fields,
+                content_limit=max(offset + limit, 1),
+                content_max_wait_seconds=_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS,
             )
         with perf.timed("sessions.list.search_local"):
             out = _local_session_summaries_by_ids_for_sidebar(list(content_scores))
@@ -3572,6 +3575,22 @@ def _build_local_sessions_page_for_list(
             for session in page
         ]
     return page, total
+
+
+async def _sidebar_search_scores(
+    search_query: str,
+    search_fields: str | None,
+    *,
+    content_limit: int,
+) -> dict[str, int]:
+    selected_search_fields = _split_session_search_fields(search_fields)
+    return await asyncio.to_thread(
+        session_store.grep_session_scores,
+        search_query,
+        selected_search_fields,
+        content_limit=content_limit,
+        content_max_wait_seconds=_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS,
+    )
 
 
 @app.get("/api/sessions")
@@ -3675,12 +3694,11 @@ async def get_sessions(
 
     content_scores: dict[str, int] = {}
     if search_query:
-        selected_search_fields = _split_session_search_fields(search_fields)
         with perf.timed("sessions.list.search_scores"):
-            content_scores = await asyncio.to_thread(
-                session_store.grep_session_scores,
+            content_scores = await _sidebar_search_scores(
                 search_query,
-                selected_search_fields,
+                search_fields,
+                content_limit=max(offset + limit, 1),
             )
         with perf.timed("sessions.list.search_local"):
             out = await asyncio.to_thread(

@@ -98,15 +98,24 @@ def main_test() -> bool:
             json={"query": "title-only-needle", "limit": 5, "fields": ["content"]},
             headers=HEADERS,
         )
-        list_response = client.get(
-            "/api/sessions?search=content-only-needle&search_fields=content",
-            headers=HEADERS,
-        )
+        list_response = None
+        list_sessions = []
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            list_response = client.get(
+                "/api/sessions?search=content-only-needle&search_fields=content",
+                headers=HEADERS,
+            )
+            list_sessions = list_response.json().get("sessions") if list_response.status_code == 200 else []
+            if list_sessions:
+                break
+            time.sleep(0.05)
     content_results = content_response.json().get("results") if content_response.status_code == 200 else []
     title_results = title_response.json().get("results") if title_response.status_code == 200 else []
     prompt_results = prompt_response.json().get("results") if prompt_response.status_code == 200 else []
     excluded_results = excluded_response.json().get("results") if excluded_response.status_code == 200 else []
-    list_sessions = list_response.json().get("sessions") if list_response.status_code == 200 else []
+    if list_response is None:
+        raise AssertionError("list response was not attempted")
     ok = (
         content_response.status_code == 200
         and title_response.status_code == 200
@@ -195,7 +204,7 @@ def grep_sessions_passes_bounded_limit_test() -> bool:
     seen: list[int] = []
     original_search = session_search_index.search
 
-    def fake_search(query: str, limit: int = 50):
+    def fake_search(query: str, limit: int = 50, *, max_wait_seconds=None):
         seen.append(limit)
         return []
 
@@ -206,6 +215,56 @@ def grep_sessions_passes_bounded_limit_test() -> bool:
         session_search_index.search = original_search
     ok = seen == [7]
     print(f"{PASS if ok else FAIL} grep_sessions bounds content index query -- limits={seen}")
+    return ok
+
+
+def bounded_search_returns_while_cache_fills_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def slow_candidate_scores(_conn, _query, _limit):
+        time.sleep(0.2)
+        return [("sid-bounded", 4)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = slow_candidate_scores
+    started = time.monotonic()
+    try:
+        first = session_search_index.search(
+            "bounded-query",
+            limit=5,
+            max_wait_seconds=0.01,
+        )
+        elapsed = time.monotonic() - started
+        deadline = time.monotonic() + 1.0
+        second = []
+        while time.monotonic() < deadline:
+            second = session_search_index.search(
+                "bounded-query",
+                limit=5,
+                max_wait_seconds=0.01,
+            )
+            if second:
+                break
+            time.sleep(0.02)
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_inflight.clear()
+    ok = elapsed < 0.08 and first == [] and second == [{"session_id": "sid-bounded", "score": 4}]
+    print(
+        f"{PASS if ok else FAIL} bounded search returns while cache fills "
+        f"-- elapsed={elapsed:.3f}s first={first} second={second}",
+    )
     return ok
 
 
@@ -288,6 +347,7 @@ if __name__ == "__main__":
         ok = index_event_nonblocking_test()
         ok = search_does_not_wait_for_pending_index_test() and ok
         ok = grep_sessions_passes_bounded_limit_test() and ok
+        ok = bounded_search_returns_while_cache_fills_test() and ok
         ok = identical_searches_coalesce_test() and ok
         ok = content_search_caps_matched_rows_test() and ok
         ok = main_test() and ok
