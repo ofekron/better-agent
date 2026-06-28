@@ -860,145 +860,147 @@ async def run_delegation_locked(
             # and uuid-dedups. Mirrors the rule that the primary
             # `msg.events` only mutates via `apply_event`.
 
-                if event.type == "session_discovered":
-                    perf.record_lag("delegate.to_session_discovered", run_started)
-                    disc = event.data.get("session_id")
-                    if disc:
-                        if run_mode == "direct" and fork_agent_sid is None:
-                            fork_agent_sid = disc
-                            try:
-                                session_manager.set_agent_sid(
-                                    worker_agent_session_id,
-                                    mode=worker_orchestration_mode,
-                                    agent_sid=disc,
-                                )
-                                if session_is_registered_worker:
-                                    worker_store.upsert_worker(
-                                        cwd=cwd,
-                                        agent_session_id=worker_agent_session_id,
-                                        orchestration_mode=worker_orchestration_mode,
+                with perf.timed("delegate.event_process"):
+                    if event.type == "session_discovered":
+                        perf.record_lag("delegate.to_session_discovered", run_started)
+                        disc = event.data.get("session_id")
+                        if disc:
+                            if run_mode == "direct" and fork_agent_sid is None:
+                                fork_agent_sid = disc
+                                try:
+                                    session_manager.set_agent_sid(
+                                        worker_agent_session_id,
+                                        mode=worker_orchestration_mode,
                                         agent_sid=disc,
-                                        node_id=(worker_session_for_path or {}).get("node_id") or "primary",
                                     )
-                            except Exception:
-                                logger.exception("direct worker sid persist failed")
-                        if needs_fork and fork_agent_sid is None:
-                            fork_agent_sid = disc
-                            # ORDER MATTERS — the panel mutation below is what
-                            # makes the fork discoverable to native_files_manager
-                            # via cold-seed (any WS subscriber attaching at this
-                            # point will read the panel and open a tailer at the
-                            # CURRENT prep-skip cursor). Therefore the prep-skip
-                            # MUST be written BEFORE the panel exposes the fork.
-                            # Skip parent-inherited lines (the worker's
-                            # one-time prep turn) so the per-pair fork's
-                            # tailer doesn't re-emit them — the prep is
-                            # surfaced live via worker_prep_event frames
-                            # instead, rendered in a collapsible block.
-                            if parent_line_count_now > 0:
+                                    if session_is_registered_worker:
+                                        worker_store.upsert_worker(
+                                            cwd=cwd,
+                                            agent_session_id=worker_agent_session_id,
+                                            orchestration_mode=worker_orchestration_mode,
+                                            agent_sid=disc,
+                                            node_id=(worker_session_for_path or {}).get("node_id") or "primary",
+                                        )
+                                except Exception:
+                                    logger.exception("direct worker sid persist failed")
+                            if needs_fork and fork_agent_sid is None:
+                                fork_agent_sid = disc
+                                # ORDER MATTERS — the panel mutation below is what
+                                # makes the fork discoverable to native_files_manager
+                                # via cold-seed (any WS subscriber attaching at this
+                                # point will read the panel and open a tailer at the
+                                # CURRENT prep-skip cursor). Therefore the prep-skip
+                                # MUST be written BEFORE the panel exposes the fork.
+                                # Skip parent-inherited lines (the worker's
+                                # one-time prep turn) so the per-pair fork's
+                                # tailer doesn't re-emit them — the prep is
+                                # surfaced live via worker_prep_event frames
+                                # instead, rendered in a collapsible block.
+                                if parent_line_count_now > 0:
+                                    try:
+                                        session_manager.advance_processed_lines(
+                                            fork_agent_session_id, disc,
+                                            int(parent_line_count_now),
+                                            bump_updated_at=False,
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "advance_processed_lines on fork BC failed"
+                                        )
                                 try:
-                                    session_manager.advance_processed_lines(
-                                        fork_agent_session_id, disc,
-                                        int(parent_line_count_now),
-                                        bump_updated_at=False,
+                                    session_manager.set_agent_sid(
+                                        fork_agent_session_id,
+                                        mode=worker_orchestration_mode,
+                                        agent_sid=disc,
                                     )
                                 except Exception:
-                                    logger.exception(
-                                        "advance_processed_lines on fork BC failed"
+                                    logger.exception("set_agent_sid on fork BC failed")
+                                # Now expose the fork on the parent panel.
+                                try:
+                                    # Use the read-path helper so remote-pinned
+                                    # forks resolve to the shadow path on primary.
+                                    jp_now = await _compute_jsonl_read_path_off_loop(
+                                        cwd, disc, fork_bc
                                     )
-                            try:
-                                session_manager.set_agent_sid(
-                                    fork_agent_session_id,
-                                    mode=worker_orchestration_mode,
-                                    agent_sid=disc,
-                                )
-                            except Exception:
-                                logger.exception("set_agent_sid on fork BC failed")
-                            # Now expose the fork on the parent panel.
-                            try:
-                                # Use the read-path helper so remote-pinned
-                                # forks resolve to the shadow path on primary.
-                                jp_now = await _compute_jsonl_read_path_off_loop(
-                                    cwd, disc, fork_bc
-                                )
-                                delegation_status_store.write_status(
-                                    delegation_id,
-                                    status="running",
-                                    fork_agent_sid=disc,
-                                    fork_agent_session_id=fork_agent_session_id,
-                                    jsonl_path=str(jp_now) if jp_now else None,
-                                    new_byte_offset=pre_run_fork_bytes + 1,
-                                )
-                                panel["fork_agent_sid"] = disc
-                                panel["fork_agent_session_id"] = fork_agent_session_id
-                                panel["jsonl_path"] = (
-                                    str(jp_now) if jp_now else None
-                                )
-                                panel["new_byte_offset"] = pre_run_fork_bytes + 1
-                            except Exception:
-                                logger.exception("eager panel jsonl meta failed")
-                            # Publish the fork as a tail target. Both the cold-
-                            # seed path (reads panel) and the live path (reads
-                            # this event) see the post-prep-skip cursor on the
-                            # fork BC record.
-                            if panel.get("jsonl_path"):
-                                try:
-                                    await bus.publish(BusEvent(
-                                        type="native_files.fork_target",
-                                        root_id=session_manager._root_id_for(
-                                            app_session_id) or "",
-                                        sid=app_session_id,
-                                        payload={
-                                            "parent_app_session_id": app_session_id,
-                                            "fork_agent_sid": disc,
-                                            "fork_agent_session_id": fork_agent_session_id,
-                                            "jsonl_path": panel["jsonl_path"],
-                                        },
-                                        persist=False,
-                                    ))
-                                except Exception:
-                                    logger.exception("fork_target publish failed")
-                            if not ephemeral:
-                                try:
-                                    session_fork_store.set_fork(
-                                        cwd=cwd,
-                                        caller_agent_session_id=app_session_id,
-                                        session_agent_session_id=worker_agent_session_id,
+                                    delegation_status_store.write_status(
+                                        delegation_id,
+                                        status="running",
+                                        fork_agent_sid=disc,
                                         fork_agent_session_id=fork_agent_session_id,
+                                        jsonl_path=str(jp_now) if jp_now else None,
+                                        new_byte_offset=pre_run_fork_bytes + 1,
                                     )
+                                    panel["fork_agent_sid"] = disc
+                                    panel["fork_agent_session_id"] = fork_agent_session_id
+                                    panel["jsonl_path"] = (
+                                        str(jp_now) if jp_now else None
+                                    )
+                                    panel["new_byte_offset"] = pre_run_fork_bytes + 1
                                 except Exception:
-                                    logger.exception("eager fork persist failed")
-                        elif run_mode == "direct" and disc == fork_agent_sid:
-                            try:
-                                jp_now = await _compute_jsonl_read_path_off_loop(
-                                    cwd, disc, fork_bc
+                                    logger.exception("eager panel jsonl meta failed")
+                                # Publish the fork as a tail target. Both the cold-
+                                # seed path (reads panel) and the live path (reads
+                                # this event) see the post-prep-skip cursor on the
+                                # fork BC record.
+                                if panel.get("jsonl_path"):
+                                    try:
+                                        await bus.publish(BusEvent(
+                                            type="native_files.fork_target",
+                                            root_id=session_manager._root_id_for(
+                                                app_session_id) or "",
+                                            sid=app_session_id,
+                                            payload={
+                                                "parent_app_session_id": app_session_id,
+                                                "fork_agent_sid": disc,
+                                                "fork_agent_session_id": fork_agent_session_id,
+                                                "jsonl_path": panel["jsonl_path"],
+                                            },
+                                            persist=False,
+                                        ))
+                                    except Exception:
+                                        logger.exception("fork_target publish failed")
+                                if not ephemeral:
+                                    try:
+                                        session_fork_store.set_fork(
+                                            cwd=cwd,
+                                            caller_agent_session_id=app_session_id,
+                                            session_agent_session_id=worker_agent_session_id,
+                                            fork_agent_session_id=fork_agent_session_id,
+                                        )
+                                    except Exception:
+                                        logger.exception("eager fork persist failed")
+                            elif run_mode == "direct" and disc == fork_agent_sid:
+                                try:
+                                    jp_now = await _compute_jsonl_read_path_off_loop(
+                                        cwd, disc, fork_bc
+                                    )
+                                    delegation_status_store.write_status(
+                                        delegation_id,
+                                        status="running",
+                                        fork_agent_sid=disc,
+                                        fork_agent_session_id=fork_agent_session_id,
+                                        jsonl_path=str(jp_now) if jp_now else None,
+                                        new_byte_offset=pre_run_fork_bytes + 1,
+                                    )
+                                    panel["fork_agent_sid"] = disc
+                                    panel["fork_agent_session_id"] = fork_agent_session_id
+                                    panel["jsonl_path"] = (
+                                        str(jp_now) if jp_now else None
+                                    )
+                                    panel["new_byte_offset"] = pre_run_fork_bytes + 1
+                                except Exception:
+                                    logger.exception("direct panel jsonl meta failed")
+                            elif not needs_fork and disc != fork_agent_sid:
+                                logger.warning(
+                                    "delegation: resume sid mismatch — expected %s, "
+                                    "got %s",
+                                    fork_agent_sid, disc,
                                 )
-                                delegation_status_store.write_status(
-                                    delegation_id,
-                                    status="running",
-                                    fork_agent_sid=disc,
-                                    fork_agent_session_id=fork_agent_session_id,
-                                    jsonl_path=str(jp_now) if jp_now else None,
-                                    new_byte_offset=pre_run_fork_bytes + 1,
-                                )
-                                panel["fork_agent_sid"] = disc
-                                panel["fork_agent_session_id"] = fork_agent_session_id
-                                panel["jsonl_path"] = (
-                                    str(jp_now) if jp_now else None
-                                )
-                                panel["new_byte_offset"] = pre_run_fork_bytes + 1
-                            except Exception:
-                                logger.exception("direct panel jsonl meta failed")
-                        elif not needs_fork and disc != fork_agent_sid:
-                            logger.warning(
-                                "delegation: resume sid mismatch — expected %s, "
-                                "got %s",
-                                fork_agent_sid, disc,
-                            )
-                await ws_callback({"type": "worker_event", "data": {
-                    "delegation_id": delegation_id,
-                    "event": event_dict,
-                }})
+                with perf.timed("delegate.worker_event_callback"):
+                    await ws_callback({"type": "worker_event", "data": {
+                        "delegation_id": delegation_id,
+                        "event": event_dict,
+                    }})
 
                 if event.type in ("complete", "error"):
                     perf.record_lag("delegate.to_terminal_event", run_started)
