@@ -526,8 +526,7 @@ export function InputArea({
       if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
         onPromoteQueued();
       } else {
-        if (canSteer && onSteer && _isStreaming) handleSteer();
-        else handleSend();
+        handleSend();
       }
     }
   };

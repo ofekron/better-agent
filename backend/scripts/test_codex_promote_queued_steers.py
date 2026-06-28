@@ -23,6 +23,13 @@ from provider import _resolve_class  # noqa: E402
 from orchestrator import Coordinator, build_semantic_alter_prompt  # noqa: E402
 
 
+def _new_coord() -> Coordinator:
+    coord = Coordinator.__new__(Coordinator)
+    coord._active_prompt_client_ids = {}
+    coord._prompt_client_id_by_item = {}
+    return coord
+
+
 def _configure_project_structure_runtime() -> None:
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
@@ -84,7 +91,7 @@ class _Provider:
 
 
 async def _test_steer_active_turn_saves_in_turn_event() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     saved: list[dict] = []
     dispatched: list[tuple[str, dict]] = []
     provider = _Provider()
@@ -150,7 +157,7 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
 
 
 async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     saved: list[dict] = []
     dispatched: list[tuple[str, dict]] = []
     provider = _Provider(transient_failures=1)
@@ -192,7 +199,7 @@ async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:
 
 
 async def _test_promote_queued_steers_first_item() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
     coord._queued_ids = {"sid": ["q1", "q2"]}
     await coord._prompt_queues["sid"].put({
@@ -239,7 +246,7 @@ async def _test_promote_queued_steers_first_item() -> None:
 
 
 async def _test_promote_queued_steers_persisted_item_when_memory_queue_empty() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     coord._prompt_queues = {}
     coord._queued_ids = {}
     fake_session_manager = _SessionManager()
@@ -279,7 +286,7 @@ async def _test_promote_queued_steers_persisted_item_when_memory_queue_empty() -
 
 
 async def _test_promote_queued_interrupts_first_item() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
     coord._queued_ids = {"sid": ["q1"]}
     await coord._prompt_queues["sid"].put({
@@ -320,7 +327,7 @@ async def _test_promote_queued_interrupts_first_item() -> None:
 
 
 async def _test_update_latest_queued_alters_last_item_only() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
     await coord._prompt_queues["sid"].put({
         "_queued_id": "q1",
@@ -366,7 +373,7 @@ async def _test_update_latest_queued_alters_last_item_only() -> None:
 
 
 async def _test_alter_rewind_runs_before_replacement_prompt() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
     coord._queued_ids = {"sid": ["q1"]}
     coord._cancelled_ids = {}
@@ -443,7 +450,7 @@ async def _test_alter_rewind_runs_before_replacement_prompt() -> None:
 
 
 async def _test_rewind_files_supports_simulated_provider_without_agent_uuid() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     calls: list[tuple[str, object]] = []
 
     class _SimulatedRewindProvider:
@@ -500,7 +507,7 @@ async def _test_rewind_files_supports_simulated_provider_without_agent_uuid() ->
 
 
 async def _test_rewind_files_keeps_agent_identity_provider_strict() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     calls: list[tuple[str, object]] = []
 
     class _AgentIdentityProvider:
@@ -554,7 +561,7 @@ async def _test_rewind_files_keeps_agent_identity_provider_strict() -> None:
 
 
 async def _test_rewind_files_fails_closed_when_provider_does_not_support_rewind() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     calls: list[tuple[str, object]] = []
 
     class _UnsupportedRewindProvider:
@@ -608,7 +615,7 @@ async def _test_rewind_files_fails_closed_when_provider_does_not_support_rewind(
 
 
 async def _test_rewind_files_allows_semantic_alter_without_provider_rewind() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     calls: list[tuple[str, object]] = []
 
     class _SemanticAlterProvider:
@@ -694,7 +701,7 @@ def _test_real_provider_rewind_identity_defaults() -> None:
 
 async def _test_project_structure_queue_routes_to_maintainer() -> None:
     _configure_project_structure_runtime()
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     sid = project_structure_edit_session.EDIT_SINGLETON_ID
     coord._prompt_queues = {sid: asyncio.Queue()}
     coord._queued_ids = {sid: ["q1"]}
@@ -729,6 +736,9 @@ async def _test_project_structure_queue_routes_to_maintainer() -> None:
         def clear_in_flight_lifecycle_msg_id(self, *_args) -> None:
             pass
 
+        def _clear_sent(self, *_args) -> None:
+            pass
+
     async def dispatch_raw(app_session_id: str, event: dict) -> None:
         calls.append(("dispatch", event.get("type")))
 
@@ -753,10 +763,12 @@ async def _test_project_structure_queue_routes_to_maintainer() -> None:
 
     fake_session_manager = _SessionManager()
     original_session_manager = orchestrator.session_manager
+    original_runtime_ready = project_structure_edit_session.extension_store.runtime_not_ready_message
     original_get_cwd = project_structure_edit_session.get_singleton_project_cwd
     original_find = project_structure_edit_session.find_user_message_by_client_id
     original_submit = project_structure_edit_session.submit_user_prompt
     orchestrator.session_manager = fake_session_manager  # type: ignore[assignment]
+    project_structure_edit_session.extension_store.runtime_not_ready_message = lambda _id: None
     project_structure_edit_session.get_singleton_project_cwd = lambda fallback: "/repo"
     project_structure_edit_session.find_user_message_by_client_id = lambda _client_id: None
     project_structure_edit_session.submit_user_prompt = submit_user_prompt
@@ -770,6 +782,7 @@ async def _test_project_structure_queue_routes_to_maintainer() -> None:
         except asyncio.CancelledError:
             pass
         orchestrator.session_manager = original_session_manager
+        project_structure_edit_session.extension_store.runtime_not_ready_message = original_runtime_ready
         project_structure_edit_session.get_singleton_project_cwd = original_get_cwd
         project_structure_edit_session.find_user_message_by_client_id = original_find
         project_structure_edit_session.submit_user_prompt = original_submit
@@ -787,7 +800,7 @@ async def _test_project_structure_queue_routes_to_maintainer() -> None:
 
 async def _test_project_structure_queue_duplicate_acks_existing_message() -> None:
     _configure_project_structure_runtime()
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     sid = project_structure_edit_session.EDIT_SINGLETON_ID
     coord._prompt_queues = {sid: asyncio.Queue()}
     coord._queued_ids = {sid: ["q1"]}
@@ -821,6 +834,9 @@ async def _test_project_structure_queue_duplicate_acks_existing_message() -> Non
         def clear_in_flight_lifecycle_msg_id(self, *_args) -> None:
             pass
 
+        def _clear_sent(self, *_args) -> None:
+            pass
+
     async def dispatch_raw(_sid: str, event: dict) -> None:
         events.append(event)
         if event.get("type") == "user_message_persisted":
@@ -839,10 +855,12 @@ async def _test_project_structure_queue_duplicate_acks_existing_message() -> Non
 
     fake_session_manager = _SessionManager()
     original_session_manager = orchestrator.session_manager
+    original_runtime_ready = project_structure_edit_session.extension_store.runtime_not_ready_message
     original_find = project_structure_edit_session.find_user_message_by_client_id
     original_submit = project_structure_edit_session.submit_user_prompt
     orchestrator.session_manager = fake_session_manager  # type: ignore[assignment]
     existing = {"id": "user-existing", "role": "user", "client_id": "client-dupe"}
+    project_structure_edit_session.extension_store.runtime_not_ready_message = lambda _id: None
     project_structure_edit_session.find_user_message_by_client_id = (
         lambda _client_id: existing
     )
@@ -857,6 +875,7 @@ async def _test_project_structure_queue_duplicate_acks_existing_message() -> Non
         except asyncio.CancelledError:
             pass
         orchestrator.session_manager = original_session_manager
+        project_structure_edit_session.extension_store.runtime_not_ready_message = original_runtime_ready
         project_structure_edit_session.find_user_message_by_client_id = original_find
         project_structure_edit_session.submit_user_prompt = original_submit
 
@@ -866,7 +885,7 @@ async def _test_project_structure_queue_duplicate_acks_existing_message() -> Non
 
 
 async def _test_unregistered_virtual_session_prompt_is_not_special() -> None:
-    coord = Coordinator.__new__(Coordinator)
+    coord = _new_coord()
     events: list[dict] = []
 
     async def dispatch_ws(event: dict) -> None:

@@ -163,7 +163,8 @@ describe("steer prompt events", () => {
     await h.flush();
     await typeAndSteer(h, "steer before run_state");
 
-    expect(h.outbound.find((f) => f.type === "send_message")).toMatchObject({
+    const sent = await waitForOutboundSend(h, "steer before run_state");
+    expect(sent).toMatchObject({
       send_mode: "steer",
     });
   });
