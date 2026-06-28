@@ -350,6 +350,9 @@ def add_project(
             # Backfill git_remote for existing primary projects
             if "git_remote" not in p and node_id == "primary":
                 p["git_remote"] = ensure_git_remote(norm)
+            if node_id == "primary":
+                import provider_runtime
+                provider_runtime.grant_project_access_if_enabled(p)
             _write_file(projects)
             return p
 
@@ -362,6 +365,9 @@ def add_project(
         "created_at": now,
         "last_used": now,
     }
+    if node_id == "primary":
+        import provider_runtime
+        provider_runtime.grant_project_access_if_enabled(record)
     projects.append(record)
     _write_file(projects)
     return record
