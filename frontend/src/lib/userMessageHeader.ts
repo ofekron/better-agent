@@ -14,6 +14,7 @@ const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string }> = 
   schedule: { icon: "⏰", label: "Schedule" },
   "agent-board": { icon: "📋", label: "Agent Board" },
   adv_sync: { icon: "⚖", label: "Adversarial" },
+  provisioning: { icon: "⚙", label: "Provisioning" },
   subprocess_agent: { icon: "🤖", label: "Agent" },
   assistant: { icon: "🤖", label: "Assistant" },
 };
