@@ -9,10 +9,32 @@ async function typeAndSteer(h: Awaited<ReturnType<typeof renderApp>>, text: stri
   const input = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement | null;
   if (!input) throw new Error("input textarea not present");
   fireEvent.change(input, { target: { value: text } });
-  for (let i = 0; i < 30 && !h.$('[data-testid="steer-btn"]'); i++) {
+  for (let i = 0; i < 30 && !h.$('[data-testid="send-btn"]'); i++) {
     await h.flush();
   }
-  await h.click('[data-testid="steer-btn"]');
+  await h.click('[data-testid="send-btn"]');
+}
+
+async function typeAndQueue(h: Awaited<ReturnType<typeof renderApp>>, text: string) {
+  const input = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement | null;
+  if (!input) throw new Error("input textarea not present");
+  fireEvent.change(input, { target: { value: text } });
+  for (
+    let i = 0;
+    i < 30 && !h.$('[data-testid="queue-btn"]') && h.$('[data-testid="send-btn"]')?.textContent !== "Queue";
+    i++
+  ) {
+    await h.flush();
+  }
+  if (h.$('[data-testid="queue-btn"]')) {
+    await h.click('[data-testid="queue-btn"]');
+    return;
+  }
+  if (h.$('[data-testid="send-btn"]')?.textContent === "Queue") {
+    await h.click('[data-testid="send-btn"]');
+    return;
+  }
+  throw new Error("queue action not present");
 }
 
 async function waitForNoSendingMessages(h: Awaited<ReturnType<typeof renderApp>>) {
@@ -55,8 +77,13 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.emit({
+      type: "run_state",
+      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
+    });
+    await h.flush();
 
-    await h.typeAndSend("first queued");
+    await typeAndQueue(h, "first queued");
     h.emit({
       type: "prompt_queued",
       data: {
@@ -70,7 +97,7 @@ describe("steer prompt events", () => {
     });
     await h.flush();
 
-    await h.typeAndSend("second queued");
+    await typeAndQueue(h, "second queued");
     const sends = h.outbound.filter((frame) => frame.type === "send_message");
     h.emit({
       type: "prompt_queued",
@@ -109,9 +136,14 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.emit({
+      type: "run_state",
+      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
+    });
+    await h.flush();
 
     expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
-    await h.typeAndSend("draft steer");
+    await typeAndQueue(h, "draft steer");
 
     expect(await waitForOutboundSend(h, "draft steer")).toMatchObject({
       type: "send_message",

@@ -526,7 +526,8 @@ export function InputArea({
       if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
         onPromoteQueued();
       } else {
-        handleSend();
+        if (canSteer && onSteer && _isStreaming) handleSteer();
+        else handleSend();
       }
     }
   };
@@ -604,10 +605,14 @@ export function InputArea({
   // When nothing is streaming, the button is a plain "Send" — queue
   // is irrelevant. Only expose that distinction while a turn is active.
   const somethingRunning = _isStreaming;
-  const canShowSteerAction = somethingRunning && canSteer && !!onSteer;
-  const primarySendLabel = somethingRunning
-    ? t("input.queueSendButton")
-    : t("input.sendButton");
+  const steerIsPrimary = somethingRunning && canSteer && !!onSteer;
+  const handlePrimarySend = steerIsPrimary ? handleSteer : handleSend;
+  const primarySendLabel = steerIsPrimary
+    ? t("input.steerButton")
+    : somethingRunning
+      ? t("input.queueSendButton")
+      : t("input.sendButton");
+  const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
 
   return (
     <div className="input-area" data-testid="input-area">
@@ -756,22 +761,22 @@ export function InputArea({
           />
         ))}
         <button
-          onClick={handleSend}
+          onClick={handlePrimarySend}
           disabled={!canSend}
-          className={`send-btn${somethingRunning ? " queue" : ""}`}
+          className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
           data-testid="send-btn"
+          title={primarySendTitle}
         >
           {primarySendLabel}
         </button>
-        {canShowSteerAction && !compactActionMenus && (
+        {steerIsPrimary && !compactActionMenus && (
           <button
-            onClick={handleSteer}
+            onClick={handleSend}
             disabled={!canSend}
-            className="send-btn steer"
-            data-testid="steer-btn"
-            title={t("input.steerTitle")}
+            className="send-btn queue"
+            data-testid="queue-btn"
           >
-            {t("input.steerButton")}
+            {t("input.queueSendButton")}
           </button>
         )}
         {somethingRunning && onInterrupt && !compactActionMenus && (
@@ -813,15 +818,14 @@ export function InputArea({
                   {overflowPanelNode}
                 </div>
               ) : null}
-              {compactActionMenus && canShowSteerAction && (
+              {compactActionMenus && steerIsPrimary && (
                 <button
                   className="overflow-menu-item"
-                  data-testid="steer-btn"
-                  onClick={() => { setMenuOpen(false); handleSteer(); }}
+                  data-testid="queue-btn"
+                  onClick={() => { setMenuOpen(false); handleSend(); }}
                   disabled={!canSend}
-                  title={t("input.steerTitle")}
                 >
-                  {t("input.steerButton")}
+                  {t("input.queueSendButton")}
                 </button>
               )}
               {compactActionMenus && somethingRunning && onInterrupt && (
