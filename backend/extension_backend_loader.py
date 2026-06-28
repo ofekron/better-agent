@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 from fastapi.responses import Response
+from starlette.requests import ClientDisconnect
 
 from env_compat import dual_env_many
 import extension_store
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 _HOST_TIMEOUT_SECONDS = 300
+_CLIENT_CLOSED_REQUEST_STATUS = 499
 # Allowlist of request headers forwarded to an extension backend subprocess.
 # Fail-closed: anything not listed here is dropped, so a future secret header
 # (auth, cookie, internal token, entitlement, …) can never leak to extension
@@ -120,11 +122,17 @@ def _safe_request_headers(request: Request) -> list[tuple[str, str]]:
 async def _read_limited_body(request: Request) -> bytes:
     chunks: list[bytes] = []
     total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > _MAX_REQUEST_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="Extension request body is too large")
-        chunks.append(chunk)
+    try:
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > _MAX_REQUEST_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="Extension request body is too large")
+            chunks.append(chunk)
+    except ClientDisconnect as exc:
+        raise HTTPException(
+            status_code=_CLIENT_CLOSED_REQUEST_STATUS,
+            detail="Client disconnected while reading extension request body",
+        ) from exc
     return b"".join(chunks)
 
 
