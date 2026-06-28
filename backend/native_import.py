@@ -963,6 +963,10 @@ def _run_import(
 ) -> None:
     imported_keys = already_imported_keys()
     sessions = enumerate_native_sessions(provider_ids, project_paths)
+    # Import newest first so the most recent conversations land first and a
+    # `limit` cap keeps the most recent N. created_at is ISO-8601 (sorts
+    # chronologically); unknown ("") timestamps fall to the end.
+    sessions.sort(key=lambda s: s.created_at or "", reverse=True)
     status.total = len(sessions)
     _persist_job(status)
     try:
