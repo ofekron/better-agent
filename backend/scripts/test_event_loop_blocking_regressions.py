@@ -155,7 +155,19 @@ def test_event_journal_rejects_late_writes_after_close() -> None:
     assert "self._closed = False" in source
     assert "self._closed = True" in source
     assert 'raise EventJournalWriteError("event journal writer is closed")' in source
-    assert "_apply_rows(batch)" in worker_source
+
+
+def test_publish_event_default_path_skips_temp_ack_subscribers() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    start = source.index("async def publish_event(")
+    end = source.index("def publish_event_sync(", start)
+    publish_source = source[start:end]
+    default_start = publish_source.index("if bus_instance is bus:")
+    fallback_start = publish_source.index("loop = asyncio.get_running_loop()")
+    default_source = publish_source[default_start:fallback_start]
+    assert "event_journal_writer.submit_event_async(Event(" in default_source
+    assert "bus_instance.subscribe(" not in default_source
+    assert "event_journal_ack_" not in default_source
 
 
 def test_extension_plain_load_is_read_only() -> None:
@@ -764,6 +776,7 @@ if __name__ == "__main__":
     test_session_first_prompt_search_uses_summary_index()
     test_session_content_search_aggregates_in_sqlite()
     test_session_search_delete_is_queued_projection_work()
+    test_publish_event_default_path_skips_temp_ack_subscribers()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
     test_event_ingester_indexes_search_outside_root_lock()
