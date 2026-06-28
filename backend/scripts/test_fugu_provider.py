@@ -57,9 +57,11 @@ def test_registry_and_capabilities() -> None:
     check(FuguProvider.supports_manager_mode is True, "fugu inherits codex team mode")
     check(FuguProvider.supports_steering is True, "fugu inherits codex steering")
     check(FuguProvider.supports_native_subagents is True, "fugu inherits codex subagents")
-    # Fugu orchestrates its own model pool; a per-turn effort dial is not real.
-    check(FuguProvider.supports_reasoning_effort is False, "fugu hides the reasoning-effort dial")
-    check(FuguProvider.reasoning_effort_options == (), "fugu exposes no effort options")
+    # Sakana's catalog advertises exactly high + xhigh for Fugu/Fugu Ultra;
+    # the launcher forwards args to codex unchanged, so the effort dial works.
+    check(FuguProvider.supports_reasoning_effort is True, "fugu exposes the reasoning-effort dial")
+    check(FuguProvider.reasoning_effort_options == ("high", "xhigh"), "fugu offers high + xhigh only")
+    check(FuguProvider.default_reasoning_effort == "high", "fugu defaults to high")
 
 
 def test_models_catalog() -> None:
