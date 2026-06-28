@@ -183,6 +183,8 @@ _requirement_tags_lock = threading.Lock()
 # session_manager mutators, rebuilt on demand.
 _markers_by_session: dict[str, dict[str, dict]] = {}
 _markers_lock = threading.Lock()
+_summary_projection_repair_lock = threading.Lock()
+_summary_projection_repair_running = False
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
 # the inner lock of a cycle. The build runs under THIS lock — never under
@@ -425,45 +427,55 @@ def _has_projection_snapshot() -> bool:
 
 
 def _start_summary_projection_repair() -> None:
+    global _summary_projection_repair_running
+    with _summary_projection_repair_lock:
+        if _summary_projection_repair_running:
+            return
+        _summary_projection_repair_running = True
+
     def _repair() -> None:
-        global _summary_index_version
-        while True:
-            with _summary_index_lock:
-                pending = list(_summary_index.items())
-            originals = dict(pending)
-            updates: dict[str, dict] = {}
-            retry = False
-            for sid, summary in pending:
-                tags = _requirement_tags_for_session(sid)
-                marker = _markers_for_session(sid)
-                tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
-                if (
-                    summary.get("requirement_tags") == tags
-                    and summary.get("markers") == marker
-                    and summary.get("tag_filter_ids") == tag_filter_ids
-                ):
-                    continue
-                updates[sid] = {
-                    **summary,
-                    "requirement_tags": tags,
-                    "markers": marker,
-                    "tag_filter_ids": tag_filter_ids,
-                }
-            if not updates:
-                return
-            changed = False
-            with _summary_index_lock:
-                for sid, updated in updates.items():
-                    current = _summary_index.get(sid)
-                    if current is not originals.get(sid):
-                        retry = True
+        global _summary_index_version, _summary_projection_repair_running
+        try:
+            while True:
+                with _summary_index_lock:
+                    pending = list(_summary_index.items())
+                originals = dict(pending)
+                updates: dict[str, dict] = {}
+                retry = False
+                for sid, summary in pending:
+                    tags = _requirement_tags_for_session(sid)
+                    marker = _markers_for_session(sid)
+                    tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
+                    if (
+                        summary.get("requirement_tags") == tags
+                        and summary.get("markers") == marker
+                        and summary.get("tag_filter_ids") == tag_filter_ids
+                    ):
                         continue
-                    _summary_index[sid] = updated
-                    changed = True
-                if changed:
-                    _summary_index_version += 1
-            if not retry:
-                return
+                    updates[sid] = {
+                        **summary,
+                        "requirement_tags": tags,
+                        "markers": marker,
+                        "tag_filter_ids": tag_filter_ids,
+                    }
+                if not updates:
+                    return
+                changed = False
+                with _summary_index_lock:
+                    for sid, updated in updates.items():
+                        current = _summary_index.get(sid)
+                        if current is not originals.get(sid):
+                            retry = True
+                            continue
+                        _summary_index[sid] = updated
+                        changed = True
+                    if changed:
+                        _summary_index_version += 1
+                if not retry:
+                    return
+        finally:
+            with _summary_projection_repair_lock:
+                _summary_projection_repair_running = False
 
     threading.Thread(
         target=_repair,
