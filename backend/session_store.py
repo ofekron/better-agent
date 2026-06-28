@@ -407,6 +407,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
     affected session ids."""
     global _summary_index_version
     affected: list[str] = []
+    current_by_sid: dict[str, dict[str, dict]] = {}
     with _markers_lock:
         for sid in list(_markers_by_session):
             per = _markers_by_session[sid]
@@ -415,9 +416,22 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
                 affected.append(sid)
                 if not per:
                     _markers_by_session.pop(sid, None)
+                    current_by_sid[sid] = {}
+                else:
+                    current_by_sid[sid] = {k: dict(v) for k, v in per.items()}
     if affected:
         with _summary_index_lock:
-            _summary_index_version += 1
+            for sid in affected:
+                summary = _summary_index.get(sid)
+                if summary is None:
+                    continue
+                marker = current_by_sid.get(sid, {})
+                if summary.get("markers") == marker:
+                    continue
+                _summary_index[sid] = {**summary, "markers": marker}
+                _summary_index_version += 1
+            if not _summary_index_loaded:
+                _summary_index_version += 1
     return affected
 
 
