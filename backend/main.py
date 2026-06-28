@@ -287,6 +287,7 @@ import file_editor
 import project_config
 import session_search
 import session_bridge
+import assistant_ui
 import coordination
 import session_recall
 import project_update_store
@@ -2700,13 +2701,17 @@ def _session_status_rank(
     unread_by_sid: dict[str, int],
 ) -> int:
     """Status bucket for the status-sort option (higher sorts first under
-    reverse=True): 4 running, 3 needs-user-decision, 2 has-new, 1
-    all-tasks-done, 0 none. Highest applicable bucket wins."""
+    reverse=True): 5 waiting-for-approval, 4 running, 3 needs-user-decision,
+    2 has-new, 1 all-tasks-done, 0 none. Highest applicable bucket wins."""
     sid = session.get("id") or ""
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
     # aren't in the local snapshot.
     state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    # A pending approval blocks everything else — it sorts above even a
+    # running turn so the user sees it first.
+    if state == "blocked_on_user":
+        return 5
     if state in _RUNNING_STATES:
         return 4
     markers = session.get("markers") or {}
@@ -2715,7 +2720,7 @@ def _session_status_rank(
         for m in markers.values()
         if isinstance(m, dict)
     }
-    if state == "blocked_on_user" or _MARKER_TAG_NEEDS_DECISION in tags:
+    if _MARKER_TAG_NEEDS_DECISION in tags:
         return 3
     unread = unread_by_sid.get(sid)
     if unread is None:
@@ -3748,6 +3753,60 @@ async def internal_ask_ui_ensure(
 ):
     _require_ask_internal(x_internal_token)
     return await session_search.ensure_ask_session()
+
+
+def _require_assistant_internal(x_internal_token: str) -> None:
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    _require_builtin_runtime_extension(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID)
+
+
+@app.post("/api/internal/assistant-ui/ensure")
+async def internal_assistant_ui_ensure(
+    body: dict | None = None,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    sess = await asyncio.to_thread(assistant_ui.ensure_singleton)
+    return {"id": sess["id"], "name": sess.get("name"), "cwd": sess.get("cwd")}
+
+
+@app.post("/api/internal/assistant-ui/search")
+async def internal_assistant_ui_search(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    return await assistant_ui.search(
+        str(body.get("query") or ""),
+        max_results=int(body.get("max_results") or 10),
+        timeout=float(body.get("timeout") or 120.0),
+    )
+
+
+@app.post("/api/internal/assistant-ui/delegate")
+async def internal_assistant_ui_delegate(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    target = str(body.get("target_session_id") or "").strip()
+    prompt = str(body.get("prompt") or "").strip()
+    if not target or not prompt:
+        raise HTTPException(status_code=400, detail="target_session_id and prompt are required")
+    return await assistant_ui.delegate(target, prompt)
+
+
+@app.post("/api/internal/assistant-ui/last-turn")
+async def internal_assistant_ui_last_turn(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await asyncio.to_thread(assistant_ui.last_turn, sid)
 
 
 def _strip_synthetic_events_from_tree(tree: dict) -> None:
