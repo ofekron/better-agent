@@ -1619,6 +1619,17 @@ class SessionManager:
                 return None
             return node.get(field)
 
+    def get_file_ref_context(self, sid: str) -> tuple[str | None, str]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None, "primary"
+        with self._lock_for_root(rid):
+            root = self._load_root(sid, hydrate_events=False)
+            node = session_store._find_in_tree(root, sid) if root else None
+            if node is None:
+                return None, "primary"
+            return node.get("cwd"), node.get("node_id") or "primary"
+
     def get_lite(self, sid: str) -> Optional[dict]:
         """Return a deep copy with `msg.events` and
         `msg.workers[*].events` STRIPPED (replaced with empty lists).
