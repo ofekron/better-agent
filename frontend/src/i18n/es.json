@@ -513,6 +513,7 @@
   "tokens.stats": "Estadísticas",
   "tokens.connected": "Conectado",
   "tokens.disconnected": "Desconectado",
+  "tokens.noUsage": "Aún sin uso",
   "tokens.input": "Entrada",
   "tokens.output": "Salida",
   "tokens.cache": "Caché",

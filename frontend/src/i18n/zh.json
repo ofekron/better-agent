@@ -513,6 +513,7 @@
   "tokens.stats": "统计",
   "tokens.connected": "已连接",
   "tokens.disconnected": "已断开",
+  "tokens.noUsage": "暂无使用",
   "tokens.input": "输入",
   "tokens.output": "输出",
   "tokens.cache": "缓存",

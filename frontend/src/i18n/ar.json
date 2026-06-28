@@ -513,6 +513,7 @@
   "tokens.stats": "إحصاءات",
   "tokens.connected": "متصل",
   "tokens.disconnected": "غير متصل",
+  "tokens.noUsage": "لا يوجد استخدام بعد",
   "tokens.input": "الدخل",
   "tokens.output": "الخرج",
   "tokens.cache": "التخزين المؤقت",

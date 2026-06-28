@@ -513,6 +513,7 @@
   "tokens.stats": "Statistieken",
   "tokens.connected": "Verbonden",
   "tokens.disconnected": "Niet verbonden",
+  "tokens.noUsage": "Nog geen gebruik",
   "tokens.input": "Invoer",
   "tokens.output": "Uitvoer",
   "tokens.cache": "Cache",

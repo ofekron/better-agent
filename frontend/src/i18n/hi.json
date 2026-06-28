@@ -513,6 +513,7 @@
   "tokens.stats": "आँकड़े",
   "tokens.connected": "कनेक्टेड",
   "tokens.disconnected": "डिस्कनेक्टेड",
+  "tokens.noUsage": "अभी तक कोई उपयोग नहीं",
   "tokens.input": "इनपुट",
   "tokens.output": "आउटपुट",
   "tokens.cache": "कैश",

@@ -1,5 +1,3 @@
-import { useState } from "react";
-import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type { RearrangerStats, TokenUsage as TokenUsageType } from "../types";
 
@@ -8,10 +6,7 @@ interface Props {
   /** Last turn's token usage (not cumulative) — used for context fill bar. */
   usageLast?: TokenUsageType | null;
   rearrangerStats?: RearrangerStats | null;
-  connected: boolean;
   contextWindow?: number | null;
-  /** When true (mobile), the block renders collapsed with an expand toggle. */
-  collapsible?: boolean;
 }
 
 function formatNum(n: number): string {
@@ -103,9 +98,8 @@ function ContextFillBar({ used, capacity }: { used: number; capacity: number }) 
   );
 }
 
-export function TokenUsageDisplay({ usage, usageLast, rearrangerStats, connected, contextWindow, collapsible }: Props) {
+export function TokenUsageDisplay({ usage, usageLast, rearrangerStats, contextWindow }: Props) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
   const hasUsage = usage && (usage.input_tokens > 0 || usage.output_tokens > 0);
   const hasRearranger =
     !!rearrangerStats && (rearrangerStats.call_count ?? 0) > 0;
@@ -119,48 +113,15 @@ export function TokenUsageDisplay({ usage, usageLast, rearrangerStats, connected
   const showContextFill =
     contextWindow && contextWindow > 0 && usageLast && hasUsage;
 
-  const summaryCost = hasUsage && usage ? formatCost(estimateCost(usage)) : null;
-
-  // Collapsible (mobile): a compact title row doubles as the connection
-  // indicator; details are hidden until expanded. Desktop keeps the flat
-  // layout with the connection label always visible.
-  const header = collapsible ? (
-    <button
-      type="button"
-      className={`token-usage-toggle${expanded ? "" : " collapsed"}`}
-      onClick={() => setExpanded((e) => !e)}
-      aria-expanded={expanded}
-    >
-      <div className={`connection-dot ${connected ? "connected" : ""}`} />
-      <span className="token-usage-title">{t("tokens.stats")}</span>
-      <span className="token-usage-toggle-right">
-        {!expanded && summaryCost && (
-          <span className="token-usage-toggle-summary">{summaryCost}</span>
-        )}
-        <span className="collapse-arrow">{expanded ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}</span>
-      </span>
-    </button>
-  ) : (
-    <div className="token-usage-row">
-      <div className={`connection-dot ${connected ? "connected" : ""}`} />
-      <span className="connection-label">
-        {connected ? t("tokens.connected") : t("tokens.disconnected")}
-      </span>
-    </div>
-  );
-
-  const showDetails = !collapsible || expanded;
-
   return (
     <div className="token-usage">
-      {header}
-      {showDetails && showContextFill && (
+      {showContextFill && (
         <ContextFillBar
           used={contextFillTokens(usageLast)}
           capacity={contextWindow}
         />
       )}
-      {showDetails && hasUsage && usage && (
+      {hasUsage && usage && (
         <>
           <div className="token-usage-row">
             <div className="token-stat">
@@ -185,7 +146,12 @@ export function TokenUsageDisplay({ usage, usageLast, rearrangerStats, connected
           </div>
         </>
       )}
-      {showDetails && hasRearranger && rearrangerStats && (
+      {!hasUsage && (
+        <div className="token-usage-row token-usage-empty">
+          {t("tokens.noUsage")}
+        </div>
+      )}
+      {hasRearranger && rearrangerStats && (
         <div className="token-breakdown">
           <div className="token-breakdown-title">{t("tokens.breakdown")}</div>
           {chatUsage && tokensTotal(chatUsage) > 0 && (
