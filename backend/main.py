@@ -3332,6 +3332,57 @@ def _filter_sort_sessions_for_list(
     return out
 
 
+def _filter_sessions_for_list_preserving_order(
+    sessions: list[dict],
+    *,
+    project_path: str | None,
+    search: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    content_scores: dict[str, int],
+) -> list[dict]:
+    return [
+        session for session in sessions
+        if _session_matches_list_filters(
+            session,
+            project_path=project_path,
+            search=search,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            tag_ids=tag_ids,
+            provider_ids=provider_ids,
+            model_ids=model_ids,
+            modes=modes,
+            sources=sources,
+            content_scores=content_scores,
+        )
+    ]
+
+
+def _can_preserve_summary_order(
+    *,
+    search_query: str,
+    virtual_sessions: list[dict],
+    folder_view: bool,
+    sort_by: str,
+    status_sort: bool,
+) -> bool:
+    return (
+        not search_query
+        and not virtual_sessions
+        and not folder_view
+        and sort_by == "updated_at"
+        and not status_sort
+    )
+
+
 def _build_local_sessions_page_for_list(
     *,
     offset: int,
@@ -3353,6 +3404,7 @@ def _build_local_sessions_page_for_list(
 ) -> tuple[list[dict], int]:
     content_scores: dict[str, int] = {}
     search_query = (search or "").strip()
+    virtual_sessions: list[dict] = []
     if search_query:
         selected_search_fields = _split_session_search_fields(search_fields)
         with perf.timed("sessions.list.search_scores"):
@@ -3373,23 +3425,45 @@ def _build_local_sessions_page_for_list(
             if session.get("id") != session_search.ASK_SINGLETON_ID
         )
     with perf.timed("sessions.list.filter_sort"):
-        out = _filter_sort_sessions_for_list(
-            out,
-            project_path=project_path,
-            search=search,
-            show_archived=show_archived,
-            file_edit_mode=file_edit_mode,
-            folder_ids=folder_ids,
+        if _can_preserve_summary_order(
+            search_query=search_query,
+            virtual_sessions=virtual_sessions,
             folder_view=folder_view,
-            tag_ids=tag_ids,
-            provider_ids=provider_ids,
-            model_ids=model_ids,
-            modes=modes,
-            sources=sources,
-            content_scores=content_scores,
             sort_by=sort_by,
             status_sort=status_sort,
-        )
+        ):
+            out = _filter_sessions_for_list_preserving_order(
+                out,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=folder_ids,
+                tag_ids=tag_ids,
+                provider_ids=provider_ids,
+                model_ids=model_ids,
+                modes=modes,
+                sources=sources,
+                content_scores=content_scores,
+            )
+        else:
+            out = _filter_sort_sessions_for_list(
+                out,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=folder_ids,
+                folder_view=folder_view,
+                tag_ids=tag_ids,
+                provider_ids=provider_ids,
+                model_ids=model_ids,
+                modes=modes,
+                sources=sources,
+                content_scores=content_scores,
+                sort_by=sort_by,
+                status_sort=status_sort,
+            )
     total = len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
