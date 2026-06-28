@@ -67,7 +67,7 @@ def test_build_env_clears_anthropic() -> bool:
 
 def test_models_static_seed() -> bool:
     seeded = models._static_cold_start({"kind": "copilot"})
-    return bool(seeded) and "gpt-5.2-codex" in seeded
+    return bool(seeded) and "auto" in seeded and "gpt-5.4" in seeded
 
 
 def test_models_refresh_dispatch() -> bool:
@@ -81,7 +81,50 @@ def test_models_fetch_parses_real_cli() -> bool:
     if not shutil.which("copilot"):
         return True
     parsed = provider_copilot.fetch_copilot_models()
-    return bool(parsed) and "gpt-5.2-codex" in parsed and len(parsed) >= 5
+    return (
+        bool(parsed)
+        and "auto" in parsed
+        and "gpt-5.4" in parsed
+        and len(parsed) >= 5
+    )
+
+
+def test_parses_config_help_models() -> bool:
+    sample = """
+Configuration Settings:
+
+  `model`: AI model to use for Copilot CLI; can be changed with /model command or --model flag option.
+    - "claude-sonnet-4.6"
+    - "gpt-5.4"
+    - "gpt-5.3-codex"
+    - "gpt-5-mini"
+
+  `contextTier`: context window tier for tiered-pricing models.
+"""
+    return provider_copilot._parse_copilot_config_models(sample) == [
+        "auto",
+        "claude-sonnet-4.6",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5-mini",
+        "mai-code-1-flash-picker",
+    ]
+
+
+def test_parses_legacy_help_choices() -> bool:
+    sample = """
+Options:
+  --model <model>  Set the AI model (choices: "gpt-5.4", "claude-sonnet-4.6", "gemma-3")
+"""
+    return provider_copilot._parse_copilot_help_choices(sample) == [
+        "auto",
+        "gpt-5.4",
+        "claude-sonnet-4.6",
+    ]
+
+
+def test_retired_model_fallbacks_to_auto() -> bool:
+    return provider_copilot._normalize_copilot_model("gpt-5.2-codex") == "auto"
 
 
 def test_setup_installer() -> bool:
@@ -123,7 +166,7 @@ def test_runner_normalizes_event_types() -> bool:
     ]
     for event, role, block_type, payload in cases:
         out = runner_copilot.normalize_copilot_event(
-            event, session_id=sid, parent_uuid=sid, model="gpt-5.2-codex",
+            event, session_id=sid, parent_uuid=sid, model="gpt-5.4",
         )
         if out is None or out["type"] != "agent_message":
             return False
@@ -170,6 +213,9 @@ TESTS = [
     ("models_static_seed", test_models_static_seed),
     ("models_refresh_dispatch", test_models_refresh_dispatch),
     ("models_fetch_parses_real_cli", test_models_fetch_parses_real_cli),
+    ("parses_config_help_models", test_parses_config_help_models),
+    ("parses_legacy_help_choices", test_parses_legacy_help_choices),
+    ("retired_model_fallbacks_to_auto", test_retired_model_fallbacks_to_auto),
     ("setup_installer", test_setup_installer),
     ("runner_normalizes_event_types", test_runner_normalizes_event_types),
     ("runner_normalizer_skips_bookkeeping", test_runner_normalizer_skips_bookkeeping),

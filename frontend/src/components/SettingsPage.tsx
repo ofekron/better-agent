@@ -253,7 +253,7 @@ const TEMPLATES: Template[] = [
       mode: "subscription",
       base_url: "",
       config_dir: "",
-      default_model: "gpt-5.2-codex",
+      default_model: "auto",
       default_reasoning_effort: "",
     },
   },
