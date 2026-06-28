@@ -826,6 +826,7 @@ def _build_ensure_named_worker_tool(
             "model": args.get("model"),
             "reasoning_effort": args.get("reasoning_effort"),
             "node_id": node_id,
+            "tags": [name],
         }
         payload = {"cwd": cwd, "workers": [spec]}
         try:

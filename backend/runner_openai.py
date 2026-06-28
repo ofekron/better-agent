@@ -1099,6 +1099,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
             "model": args.get("model"),
             "reasoning_effort": args.get("reasoning_effort"),
             "node_id": node_id,
+            "tags": [name],
         }
         try:
             result = await asyncio.to_thread(

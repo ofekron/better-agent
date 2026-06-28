@@ -270,6 +270,7 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
     assert spec["role_key"] == "testape"
     assert spec["orchestration_mode"] == "team"
     assert spec["provision_prompt"] == "seed"
+    assert spec["tags"] == ["testape"]
 
 
 def test_ensure_named_worker_schema_requires_team_orchestration() -> None:

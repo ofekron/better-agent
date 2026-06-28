@@ -16,6 +16,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -96,6 +97,26 @@ def _run() -> bool:
     results.append(
         (f"median write_session_full < 15ms", median < 15.0,
          f"got median={median:.2f}ms samples={[f'{s:.1f}' for s in samples]}"))
+
+    msg = root["messages"][-1]
+    ctx = ApplyEventCtx(root_id=sid, run_id="run-heavy")
+    get_strategy("native").apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event=_native_event("u-new", "new-output"),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    session_store.write_session_full(root, bump_updated_at=False)
+    disk = json.loads(session_store._session_path(sid).read_text(encoding="utf-8"))
+    disk_msg = disk["messages"][-1]
+    results.append(
+        (
+            "dirty assistant content refreshes before persist",
+            disk_msg.get("content") == "new-output" and "_content_dirty" not in disk_msg,
+            f"content={disk_msg.get('content')!r} dirty={disk_msg.get('_content_dirty')!r}",
+        )
+    )
 
     # Concurrent contention: alternating writer + reader on the same
     # session. Writer goes through `set_pinned` which acquires

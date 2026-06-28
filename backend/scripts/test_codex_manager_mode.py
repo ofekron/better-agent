@@ -239,6 +239,51 @@ async def _exercise_create_worker_handler(failures: list[str]) -> None:
     check("model" not in payload, "create_worker does not pass model unless requested", failures)
 
 
+async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
+    captured = {}
+    original = runner_codex._post_loopback_sync
+
+    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+        captured["payload"] = payload
+        captured["url_path"] = kwargs.get("url_path")
+        return {
+            "workers": [{
+                "agent_session_id": "worker-1",
+                "name": "worker:testape",
+                "created": True,
+                "orchestration_mode": "team",
+                "registry_cwd": "/repo",
+            }]
+        }
+
+    runner_codex._post_loopback_sync = fake_post
+    try:
+        handler = runner_codex._build_ensure_named_worker_tool_handler(
+            backend_url="http://backend",
+            internal_token="tok",
+        )
+        result = await handler({
+            "arguments": {
+                "name": "testape",
+                "cwd": "/repo",
+                "orchestration_mode": "team",
+                "provision_prompt": "seed",
+            }
+        })
+    finally:
+        runner_codex._post_loopback_sync = original
+
+    check(result["success"] is True, "ensure_named_worker dynamic handler reports success", failures)
+    check(captured["url_path"] == "/api/internal/workers/provision", "ensure_named_worker uses endpoint", failures)
+    payload = captured["payload"]
+    check(payload["cwd"] == "/repo", "ensure_named_worker payload has cwd", failures)
+    spec = payload["workers"][0]
+    check(spec["role_key"] == "testape", "ensure_named_worker payload has singleton key", failures)
+    check(spec["orchestration_mode"] == "team", "ensure_named_worker payload has mode", failures)
+    check(spec["provision_prompt"] == "seed", "ensure_named_worker payload has seed", failures)
+    check(spec["tags"] == ["testape"], "ensure_named_worker payload has pool tag", failures)
+
+
 async def _exercise_delegate_task_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
@@ -372,6 +417,7 @@ def main() -> int:
     asyncio.run(_exercise_ask_direct_handler(failures))
     asyncio.run(_exercise_ask_fork_handler(failures))
     asyncio.run(_exercise_create_worker_handler(failures))
+    asyncio.run(_exercise_ensure_named_worker_handler(failures))
     asyncio.run(_exercise_delegate_task_handler(failures))
     asyncio.run(_exercise_create_session_handler(failures))
     asyncio.run(_exercise_create_sub_session_handler(failures))

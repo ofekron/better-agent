@@ -814,7 +814,7 @@ def _index_tree(
     *,
     file_signature: Optional[tuple[int, int]] = None,
     force: bool = False,
-) -> None:
+) -> bool:
     """Populate `_fork_index` for every fork in `root`. Holds
     `_index_lock` so concurrent forks/deletes can't race a reader's
     `_fork_index` walk (CPython dict ops are not all GIL-atomic — a
@@ -827,19 +827,23 @@ def _index_tree(
             file_signature is not None
             and _root_index_signatures.get(rid) == file_signature
         ):
-            return
+            return False
         stale = _root_forks.get(rid, set())
+        current: set[str] = {
+            fork["id"]
+            for fork in _walk_forks(root)
+            if isinstance(fork, dict) and isinstance(fork.get("id"), str)
+        }
+        topology_changed = stale != current
         for fid in stale:
             _fork_index.pop(fid, None)
-        current: set[str] = set()
-        for fork in _walk_forks(root):
-            fork_id = fork["id"]
+        for fork_id in current:
             _fork_index[fork_id] = rid
-            current.add(fork_id)
         _root_forks[rid] = current
         if file_signature is not None:
             _root_index_signatures[rid] = file_signature
         _negative_root_resolve_cache.clear()
+        return topology_changed
 
 
 def _index_set(fork_id: str, root_id: str) -> None:
@@ -2651,6 +2655,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     events_lists: list[tuple[dict, list]] = []
     uid_idxs: list[tuple[dict, dict]] = []
     drafts: list[tuple[dict, dict]] = []
+    content_dirty: list[tuple[dict, bool]] = []
     _DRAFT_KEYS = ("draft_input", "draft_input_seq", "draft_images")
 
     def _pop_drafts(node: dict) -> None:
@@ -2677,13 +2682,18 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         _pop_drafts(node)
         for m in node.get("messages", []):
             if m.get("role") == "assistant":
-                try:
-                    from render_stub import message_output_text
-                    content = message_output_text(m)
-                except Exception:
-                    content = ""
-                if content:
-                    m["content"] = content
+                dirty = bool(m.get("_content_dirty")) or not m.get("content")
+                if dirty:
+                    try:
+                        from render_stub import message_output_text
+                        content = message_output_text(m)
+                    except Exception:
+                        content = ""
+                    if content:
+                        m["content"] = content
+                if "_content_dirty" in m:
+                    content_dirty.append((m, False))
+                    del m["_content_dirty"]
             if "isStreaming" in m:
                 isstreaming.append((m, m["isStreaming"]))
                 del m["isStreaming"]
@@ -2703,6 +2713,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         "events_lists": events_lists,
         "uid_idxs": uid_idxs,
         "drafts": drafts,
+        "content_dirty": content_dirty,
     }
 
 
@@ -2718,6 +2729,8 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner["_uid_idx"] = idx
     for node, fields in popped.get("drafts", []):
         node.update(fields)
+    for m, value in popped.get("content_dirty", []):
+        m["_content_dirty"] = value
 
 
 @perf.timed_fn("store.session.write_full")
@@ -2745,7 +2758,7 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
         )
     if bump_updated_at:
         root["updated_at"] = datetime.now().isoformat()
-    _index_tree(root)
+    fork_topology_changed = _index_tree(root)
     path = _sessions_dir() / f"{root['id']}.json"
     # Bootstrap writer: often the first write into a fresh home (new session,
     # no prior index warm-up), so the sessions/ dir may not exist yet.
@@ -2793,7 +2806,7 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
             index_loaded = _index_loaded
     else:
         index_loaded = False
-    if index_loaded:
+    if index_loaded and fork_topology_changed:
         _persist_index_sidecar_if_loaded()
     # INVARIANT: update summary index AFTER the durable write (post
     # `os.replace`). A summary update before the replace would let a

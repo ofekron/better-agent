@@ -247,6 +247,37 @@ def test_worker_list_projects_pools_from_tags():
     assert len(pools["build"]["workers"]) == 1
 
 
+def test_existing_named_worker_backfills_pool_tags():
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    cwd = "/tmp/pool-backfill"
+
+    first = _post_team_ui_provision(client, {
+        "cwd": cwd,
+        "workers": [{"role_key": "testape", "orchestration_mode": "team"}],
+    })
+    assert first.status_code == 200, first.text
+
+    second = _post_team_ui_provision(client, {
+        "cwd": cwd,
+        "workers": [{"role_key": "testape", "orchestration_mode": "team", "tags": ["testape"]}],
+    })
+    assert second.status_code == 200, second.text
+    worker = second.json()["workers"][0]
+    assert worker["created"] is False
+    assert worker["tags"] == ["testape"]
+
+    listed = client.post(
+        "/api/internal/workers/list",
+        json={"cwd": cwd},
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert listed.status_code == 200, listed.text
+    pools = {pool["tag"]: pool for pool in listed.json()["pools"]}
+    assert [worker["name"] for worker in pools["testape"]["workers"]] == ["worker:testape"]
+
+
 def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
     dispatched = []
 
@@ -625,6 +656,7 @@ if __name__ == "__main__":
     test_provision_workers_remains_idempotent_after_session_title_changes()
     test_provision_workers_allows_per_worker_cwd()
     test_worker_list_projects_pools_from_tags()
+    test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()

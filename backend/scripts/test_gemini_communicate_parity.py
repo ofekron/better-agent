@@ -267,6 +267,7 @@ def test_ensure_named_worker_routes_to_provision_with_singleton_key():
     assert spec["role_key"] == "testape"
     assert spec["orchestration_mode"] == "team"
     assert spec["provision_prompt"] == "seed"
+    assert spec["tags"] == ["testape"]
     assert payload["cwd"] == "/Users/ofekron/testape"
 
 
@@ -283,6 +284,7 @@ def test_ensure_named_worker_drops_empty_optionals():
     assert "provision_prompt" not in spec
     assert "provider_id" not in spec
     assert "model" not in spec
+    assert spec["tags"] == ["testape"]
     assert "reasoning_effort" not in spec
     # description defaults to worker:<name> so the session is named correctly.
     assert spec["description"] == "worker:testape"
