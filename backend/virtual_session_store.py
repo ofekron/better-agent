@@ -32,6 +32,10 @@ def _now() -> str:
 
 
 def _load() -> dict[str, Any]:
+    return deepcopy(_load_shared_locked())
+
+
+def _load_shared_locked() -> dict[str, Any]:
     global _cache_data, _cache_signature
     path = _path()
     try:
@@ -42,7 +46,7 @@ def _load() -> dict[str, Any]:
         return {"version": 1, "sessions": {}}
     signature = (st.st_mtime_ns, st.st_size)
     if _cache_signature == signature and _cache_data is not None:
-        return deepcopy(_cache_data)
+        return _cache_data
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -58,7 +62,7 @@ def _load() -> dict[str, Any]:
         data["sessions"] = {}
     _cache_signature = signature
     _cache_data = deepcopy(data)
-    return deepcopy(data)
+    return _cache_data
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -296,7 +300,7 @@ def _materialize(stored: dict[str, Any], *, include_messages: bool) -> dict[str,
 def list_all() -> list[dict[str, Any]]:
     global _summary_cache, _summary_cache_signature
     with _lock:
-        data = _load()
+        data = _load_shared_locked()
         signature = _cache_signature
         if (
             signature is not None

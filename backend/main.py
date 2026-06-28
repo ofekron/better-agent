@@ -110,6 +110,16 @@ async def _cached_git_status(node_id: str, cwd: str) -> dict:
         if cached and now - cached[0] <= _GIT_STATUS_TTL_SECONDS:
             return dict(cached[1])
         task = _git_status_inflight.get(key)
+        if cached:
+            if task is None:
+                task = asyncio.create_task(_file_op(node_id, "get_git_status", {"cwd": cwd}))
+                _git_status_inflight[key] = task
+                task.add_done_callback(
+                    lambda done, key=key: asyncio.create_task(
+                        _store_git_status_refresh(key, done),
+                    ),
+                )
+            return dict(cached[1])
         if task is None:
             task = asyncio.create_task(_file_op(node_id, "get_git_status", {"cwd": cwd}))
             _git_status_inflight[key] = task
@@ -126,6 +136,21 @@ async def _cached_git_status(node_id: str, cwd: str) -> dict:
             _git_status_cache[key] = (time.monotonic(), dict(result))
         return dict(result)
     return result
+
+
+async def _store_git_status_refresh(
+    key: tuple[str, str],
+    task: asyncio.Task,
+) -> None:
+    try:
+        result = task.result()
+    except Exception:
+        result = None
+    async with _git_status_cache_lock:
+        if _git_status_inflight.get(key) is task:
+            _git_status_inflight.pop(key, None)
+        if isinstance(result, dict):
+            _git_status_cache[key] = (time.monotonic(), dict(result))
 
 
 def _shutdown_kill_runners_flag() -> Path:
@@ -1770,7 +1795,7 @@ def _decorate_local_sidebar_sessions(sessions: list[dict]) -> list[dict]:
                 "is_running": sid in running_sids,
                 "monitoring_state": monitoring_by_sid.get(sid, "stopped"),
                 "unread_count": unread_by_sid.get(sid, 0),
-                "has_error": session_manager.has_unseen_error(sid),
+                "has_error": bool(s.get("unseen_error")),
                 "file_path": f"{sessions_dir}/{sid}.json",
             })
     return local

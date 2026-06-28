@@ -186,6 +186,7 @@ def _build_summary_for_root(root: dict) -> dict:
         "token_usage_total": root.get("token_usage_total"),
         "token_usage_last": root.get("token_usage_last"),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
+        "unseen_error": root.get("unseen_error"),
         "orchestration_mode": _normalize_orchestration_mode(
             root.get("orchestration_mode")
         ),
