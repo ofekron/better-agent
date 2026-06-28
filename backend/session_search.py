@@ -4,12 +4,11 @@ Two shared utilities back every search surface:
 
   - `run_search_sessions_session(query, *, propose=..., propose_target=,
      propose_msg_id=, timeout=, max_results=)` — the ranking engine. Runs
-     on a provisioned session: one hidden base session is primed once (its
-     provision prompt loads the `search-in-sessions` skill + the JSON-answer
-     contract), then **forked** per call so each fork only carries the real
-     query and greps the session transcripts. The base persists across
-     searches; the per-call forks are ephemeral. When `propose` is set it
-     also stamps the picker on the target in the same call (a "batch"
+     on a provisioned session: the backend first builds a bounded candidate
+     list from the session index/transcript snippets, then one hidden base
+     session is forked per call to rank only those candidates and answer JSON.
+     The base persists across searches; the per-call forks are ephemeral. When
+     `propose` is set it also stamps the picker on the target in the same call (a "batch"
      search+propose).
 
   - `propose_sessions(list, reasoning, *, target_sid, msg_id)` — stamps the
@@ -52,7 +51,6 @@ import provisioning
 import session_store
 import virtual_session_store
 import working_mode
-from paths import ba_home
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
 from provisioning.prompts import render_prompt
 from session_manager import manager as session_manager
@@ -79,11 +77,12 @@ _USER_PROMPT_TRUNCATE = 200
 _DEFAULT_MAX_RESULTS = 20
 
 # Default per-call timeout. A full claude turn takes longer than a one-shot
-# headless, and the grep worker must scan many transcripts — give it the
-# full 15 min. This is the binding budget (the asyncio.wait_for around
-# provisioning.run); private session-bridge MCP transport timeouts must
-# exceed it so they never preempt the search.
+# headless. This is the binding budget (the asyncio.wait_for around
+# provisioning.run); private session-bridge MCP transport timeouts must exceed
+# it so they never preempt the search.
 _DEFAULT_TIMEOUT_SECONDS = 15 * 60
+_SEARCH_CANDIDATE_LIMIT = 40
+_SEARCH_SNIPPET_LIMIT = 360
 
 
 # ── Index building ─────────────────────────────────────────────────────
@@ -178,6 +177,136 @@ def _build_index() -> list[dict]:
     return index
 
 
+_SEARCH_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_./:-]*", re.IGNORECASE)
+
+
+def _search_tokens(text: str) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _SEARCH_TOKEN_RE.finditer((text or "").lower()):
+        token = match.group(0)
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    return "\n".join(part for part in parts if part)
+
+
+def _session_snippet(session: dict, tokens: list[str]) -> str:
+    messages = session.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        text = _content_text(msg.get("content")).strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if tokens and not any(token in lower for token in tokens):
+            continue
+        text = " ".join(text.split())
+        return text[:_SEARCH_SNIPPET_LIMIT]
+    return ""
+
+
+def _candidate_score(row: dict, tokens: list[str]) -> int:
+    if not tokens:
+        return 0
+    weighted_fields = (
+        (str(row.get("name") or ""), 5),
+        (str(row.get("first_user_prompt") or ""), 5),
+        (str(row.get("project_name") or ""), 3),
+        (str(row.get("cwd") or ""), 2),
+        (str(row.get("id") or ""), 1),
+    )
+    score = 0
+    for text, weight in weighted_fields:
+        lower = text.lower()
+        for token in tokens:
+            if token in lower:
+                score += weight
+    return score
+
+
+def _candidate_payload(
+    row: dict,
+    tokens: list[str],
+    *,
+    snippet: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "id": str(row.get("id") or ""),
+        "name": str(row.get("name") or ""),
+        "cwd": str(row.get("cwd") or ""),
+        "project_name": str(row.get("project_name") or ""),
+        "first_user_prompt": str(row.get("first_user_prompt") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+    if not snippet:
+        session = session_store.get_session(payload["id"])
+        if isinstance(session, dict):
+            snippet = _session_snippet(session, tokens)
+    if snippet and snippet != payload["first_user_prompt"]:
+        payload["matching_snippet"] = snippet
+    return payload
+
+
+def _search_candidates(
+    query: str,
+    *,
+    filters: Optional[dict] = None,
+    limit: int = _SEARCH_CANDIDATE_LIMIT,
+) -> list[dict[str, Any]]:
+    tokens = _search_tokens(query)
+    if not tokens:
+        return []
+    rows = _build_index()
+    if filters:
+        rows = [
+            row for row in rows
+            if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)
+        ]
+    scored: list[tuple[int, dict, str]] = []
+    for row in rows:
+        score = _candidate_score(row, tokens)
+        snippet = ""
+        if score <= 0:
+            sid = str(row.get("id") or "")
+            session = session_store.get_session(sid)
+            if isinstance(session, dict):
+                snippet = _session_snippet(session, tokens)
+            if snippet:
+                score = 2
+        if score > 0:
+            scored.append((score, row, snippet))
+    scored.sort(
+        key=lambda item: (
+            item[0],
+            session_store.timestamp_sort_value(item[1].get("updated_at")),
+        ),
+        reverse=True,
+    )
+    return [
+        _candidate_payload(row, tokens, snippet=snippet)
+        for _, row, snippet in scored[:limit]
+    ]
+
+
 def index_stub_map() -> dict[str, dict]:
     """`{id: stub}` for every listable session. Used to enrich the ids a
     search returns with metadata, and to reject ids that aren't
@@ -222,18 +351,6 @@ def _filtered_candidate_ids(filters: dict) -> list[str]:
     if not filters:
         return []
     return [s["id"] for s in _build_index() if _matches_filters(s, filters)]
-
-
-def _filters_constraint_note(candidate_ids: list[str]) -> str:
-    """The instruction prepended to the worker query so it only ranks the
-    filtered candidate set instead of grepping every session directory."""
-    if not candidate_ids:
-        return ""
-    return (
-        "CONSTRAINT: only rank sessions from this exact id list "
-        f"(ignore every other session directory): "
-        f"{', '.join(candidate_ids)}. "
-    )
 
 
 def validate_proposed(
@@ -366,18 +483,15 @@ def _apply_proposed_sessions(
 # ── Search worker (the shared ranking engine) ───────────────────────────
 #
 # `run_search_sessions_session` runs on a provisioned session via the
-# generic `provisioning` framework: one hidden base session is primed once
-# (its provision prompt loads the `search-in-sessions` skill + the JSON-
-# answer contract, then responds "ready"), and each call forks that base so
-# the fork only carries the real query and greps the transcripts. The base
-# persists across searches; forks are ephemeral. Both the Ask flow and the
-# session-bridge `search_sessions` MCP tool call it. The base is excluded
-# from session-bridge tools in the runner (recursion prevention); the
-# provision prompt also forbids calling any session-finding tool.
+# generic `provisioning` framework: backend code gathers a bounded candidate
+# list, one hidden base session is primed once with the JSON-answer contract,
+# and each call forks that base so the fork only ranks those candidates. The
+# base persists across searches; forks are ephemeral. Both the Ask flow and the
+# session-bridge `search_sessions` MCP tool call it.
 
-# Worker cwd = the BC repo root so claude loads `.claude/skills/search-in-
-# sessions`. The worker only greps an absolute path, so the cwd is inert
-# otherwise.
+# Worker cwd = the BC repo root for stable project identity. The worker is a
+# tool-less machine-completion ranker; transcript access happens in backend
+# candidate collection before dispatch.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Match the last balanced {...} object in the worker's reply.
@@ -406,14 +520,14 @@ class SessionSearchSpec(ProvisionedSessionSpec):
     """Provisioned-session spec for the session-search ranking worker."""
 
     key = SEARCH_WORKER_MODE
-    version = 2
+    version = 3
     name = "search-worker"
     env_prefix = "SESSION_SEARCH"
     task_key = "session_search_worker"
     orchestration_mode = "native"
-    bare_config = False             # load skills (search-in-sessions) + CLAUDE.md
+    bare_config = True
     worker_creation_policy = "deny"  # isolated grep worker — no sub-workers
-    machine_completion = False      # tool-using (grep): normal prompt path
+    machine_completion = True
     run_mode = "fork"
     dispatch = "in_process"
     on_no_fork = "error"
@@ -427,15 +541,25 @@ class SessionSearchSpec(ProvisionedSessionSpec):
     )
 
     def build_provision_prompt(self, ctx: dict) -> str:
-        """One-time priming: load the grep methodology + JSON-answer contract
-        so each fork only needs the raw query. No greping during provision."""
-        sessions_dir = ctx.get("sessions_dir") or str(ba_home() / "sessions")
-        return render_prompt("search_worker.md", {"sessions_dir": sessions_dir})
+        return render_prompt("search_worker.md", {})
 
     def build_instructions(self, query: str, ctx: dict) -> str:
-        # Methodology + JSON contract live in the provision prompt; the fork
-        # only needs the raw request.
-        return query
+        candidates = ctx.get("candidates") if isinstance(ctx, dict) else []
+        if not isinstance(candidates, list):
+            candidates = []
+        payload = {
+            "query": query,
+            "max_results": int(ctx.get("max_results") or _DEFAULT_MAX_RESULTS),
+            "candidates": candidates,
+        }
+        return (
+            "<session-search-task>\n"
+            "Rank only the provided candidate sessions for the query. "
+            "Do not answer the query as a task. Do not use tools. "
+            "Return exactly one JSON object with session_ids and reasoning.\n"
+            f"{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n"
+            "</session-search-task>"
+        )
 
     def parse_result(self, text: str, ctx: dict) -> dict:
         reported = _parse_worker_result(text)
@@ -463,11 +587,10 @@ async def run_search_sessions_session(
 ) -> dict:
     """Run one provisioned search-worker fork and return the ranked ids.
 
-    Forks the provisioned search base (primed once with the grep methodology
-    + JSON-answer contract) so the fork only carries the raw query, greps
-    the transcripts, and answers in JSON. The base persists across calls;
-    the fork is ephemeral. When `propose` is set, also stamps the picker on
-    `propose_target`/`propose_msg_id` in the same call.
+    Backend code collects bounded candidate sessions first; the provisioned
+    worker ranks only those candidates and answers in JSON. The base persists
+    across calls; the fork is ephemeral. When `propose` is set, also stamps
+    the picker on `propose_target`/`propose_msg_id` in the same call.
 
     Optional filters (`provider_id` / `model` / `reasoning_effort` /
     `node_id`) narrow the candidate set BEFORE the worker runs: the worker
@@ -489,24 +612,18 @@ async def run_search_sessions_session(
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
-    # When filters are active, restrict the worker to the matching candidate
-    # ids. Empty candidate set → short-circuit (no worker dispatch).
-    candidate_ids: list[str] = []
-    if filters:
-        candidate_ids = await asyncio.to_thread(_filtered_candidate_ids, filters)
-        if not candidate_ids:
-            return {"session_ids": [], "reasoning": "", "error": None}
-
-    note = _filters_constraint_note(candidate_ids)
-    effective_query = (note + query) if note else query
+    with perf.timed("ask.search_candidates"):
+        candidates = await asyncio.to_thread(_search_candidates, query, filters=filters)
+    if not candidates:
+        return {"session_ids": [], "reasoning": "", "error": None}
 
     ctx = {
-        "sessions_dir": str(ba_home() / "sessions"),
         "max_results": max_results,
+        "candidates": candidates,
     }
     try:
         result = await asyncio.wait_for(
-            provisioning.run(SEARCH_SPEC, effective_query, ctx),
+            provisioning.run(SEARCH_SPEC, query, ctx),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
