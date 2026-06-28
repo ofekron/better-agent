@@ -234,6 +234,12 @@ class SessionManager:
             collections.OrderedDict()
         )
         self._since_cache_max = 128
+        self._tree_stub_cache: collections.OrderedDict[
+            tuple[str, int, Optional[int], tuple, int],
+            dict,
+        ] = collections.OrderedDict()
+        self._tree_stub_cache_max = 32
+        self._queued_prompt_counts_by_sid: dict[str, int] = {}
         # Per-root generation counter bumped after each reconcile.
         self._reconcile_gen: dict[str, int] = {}
         # Per-root seq cursor: highest seq that reconcile has processed.
@@ -1961,6 +1967,69 @@ class SessionManager:
             self._since_cache.popitem(last=False)
         return snapshot
 
+    def _tree_stub_cache_key(
+        self,
+        root: dict,
+        rid: str,
+        msg_limit: int,
+        exchange_count: Optional[int],
+    ) -> tuple[str, int, Optional[int], tuple, int]:
+        from event_ingester import event_ingester
+
+        node_keys = []
+
+        def _visit(node: dict) -> None:
+            node_sid = str(node.get("id") or "")
+            if node_sid:
+                event_shape = []
+                for msg in node.get("messages") or []:
+                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                        continue
+                    events = msg.get("events") or []
+                    event_shape.append((
+                        msg.get("id"),
+                        bool(msg.get("isStreaming")),
+                        len(events),
+                        tuple(
+                            event.get("uuid") or event.get("id")
+                            for event in events[-3:]
+                            if isinstance(event, dict)
+                        ),
+                    ))
+                node_keys.append((
+                    node_sid,
+                    int(node.get("next_seq") or 0),
+                    node.get("updated_at"),
+                    node.get("draft_input") or "",
+                    tuple(
+                        item.get("id")
+                        for item in (node.get("queued_prompts") or [])
+                        if isinstance(item, dict)
+                    ),
+                    bool(node.get("is_running")),
+                    bool(node.get("right_panel_open")),
+                    int(event_ingester.render_seq_for_sid(rid, node_sid)),
+                    int(self._reconcile_gen.get(rid, 0)),
+                    tuple(event_shape),
+                ))
+            for child in node.get("forks") or []:
+                if isinstance(child, dict):
+                    _visit(child)
+
+        _visit(root)
+        root_events_version = int(
+            getattr(event_ingester, "_root_events_version", {}).get(rid, 0)
+            or 0
+        )
+        recovering_key = tuple(sorted(self._recovering_msg_ids))
+        return (
+            rid,
+            msg_limit,
+            exchange_count,
+            tuple(node_keys) + (recovering_key,),
+            root_events_version,
+        )
+
     def _build_stubbed_tree(
         self,
         root: dict,
@@ -1970,6 +2039,16 @@ class SessionManager:
     ) -> Optional[dict]:
         """Build a full tree copy with per-node stubbed messages from cache.
         Caller MUST hold the per-root lock."""
+        cache_key = self._tree_stub_cache_key(
+            root, rid, msg_limit, exchange_count,
+        )
+        cached = self._tree_stub_cache.get(cache_key)
+        if cached is not None:
+            perf.record("session.stubbed_tree_cache.hit", 1.0)
+            self._tree_stub_cache.move_to_end(cache_key)
+            return copy.deepcopy(cached)
+        perf.record("session.stubbed_tree_cache.miss", 1.0)
+
         def _copy_node(node: dict) -> dict:
             out = {k: v for k, v in node.items() if k != "messages"}
             out["messages"] = []
@@ -2034,11 +2113,14 @@ class SessionManager:
                 _attach(f_src, f_dst)
         _attach(root, tree)
         self._stamp_recovering_tree(tree)
-        if root_events_ms >= 20 or attached > 1:
+        if root_events_ms >= 20:
             logger.info(
                 "stubbed_tree %s: nodes=%d root_events_sids=%d root_events=%.1fms",
                 rid[:8], attached, len(root_events_by_sid), root_events_ms,
             )
+        self._tree_stub_cache[cache_key] = copy.deepcopy(tree)
+        if len(self._tree_stub_cache) > self._tree_stub_cache_max:
+            self._tree_stub_cache.popitem(last=False)
         return tree
 
     def _compute_messages_snapshot(
@@ -2294,6 +2376,25 @@ class SessionManager:
         nesting."""
         for node in session_store.iter_all_sessions():
             yield copy.deepcopy(node)
+
+    def has_any_queued_prompts(self) -> bool:
+        return any(count > 0 for count in self._queued_prompt_counts_by_sid.values())
+
+    def rebuild_queued_prompt_counts(self) -> None:
+        counts: dict[str, int] = {}
+        for node in session_store.iter_all_sessions():
+            sid = node.get("id")
+            queued_count = len(node.get("queued_prompts") or [])
+            if sid and queued_count:
+                counts[sid] = queued_count
+        self._queued_prompt_counts_by_sid = counts
+
+    def _record_queued_prompt_count(self, sid: str, session: dict) -> None:
+        queued_count = len(session.get("queued_prompts") or [])
+        if queued_count:
+            self._queued_prompt_counts_by_sid[sid] = queued_count
+            return
+        self._queued_prompt_counts_by_sid.pop(sid, None)
 
     # ── Batch ──────────────────────────────────────────────────────
 
@@ -3214,9 +3315,10 @@ class SessionManager:
             },
         )
         if result is not None:
+            self._record_queued_prompt_count(sid, result)
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
-            logger.info(
+            logger.debug(
                 "queue-diag add_queued_prompt sid=%s qp_id=%s client_id=%s "
                 "-> queue_len=%d",
                 sid, prompt.get("id"), prompt.get("client_id"),
@@ -3242,9 +3344,10 @@ class SessionManager:
             },
         )
         if result is not None:
+            self._record_queued_prompt_count(sid, result)
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
-            logger.info(
+            logger.debug(
                 "queue-diag update_queued_prompt sid=%s qp_id=%s keys=%s "
                 "-> queue_len=%d",
                 sid, queued_id, sorted(updates.keys()),
@@ -3273,9 +3376,10 @@ class SessionManager:
             },
         )
         if result is not None:
+            self._record_queued_prompt_count(sid, result)
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
-            logger.info(
+            logger.debug(
                 "queue-diag remove_queued_prompt sid=%s qp_id=%s "
                 "-> queue_len=%d",
                 sid, queued_id, len(result.get("queued_prompts") or []),
@@ -3300,9 +3404,10 @@ class SessionManager:
             },
         )
         if result is not None:
+            self._record_queued_prompt_count(sid, result)
             import session_queue_projection
             session_queue_projection.upsert_from_session(result)
-            logger.info(
+            logger.debug(
                 "queue-diag remove_queued_prompt_by_client_id sid=%s "
                 "client_id=%s -> queue_len=%d",
                 sid, client_id, len(result.get("queued_prompts") or []),
