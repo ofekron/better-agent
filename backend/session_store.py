@@ -757,18 +757,39 @@ def _do_build_summary_index_unsafe() -> None:
             for sid, per in _markers_by_session.items()
         }
 
-    # Final unified pass for eng pointers across the WHOLE index
-    # (Pass 1 + Pass 2). Acquired under the index lock so all updates
-    # land atomically with the `_summary_index_loaded = True` flip.
     with _summary_index_lock:
-        # Collect Pass 1 eng pointers we couldn't gather during the
-        # incremental publish loop above (Pass 1 didn't track them).
-        for sid, summary in list(_summary_index.items()):
-            if summary.get("working_mode"):
-                meta = summary.get("working_mode_meta") or {}
-                pid = meta.get("parent_session_id")
-                if pid:
-                    eng_by_parent[pid] = sid
+        summary_items = list(_summary_index.items())
+
+    for sid, summary in summary_items:
+        if summary.get("working_mode"):
+            meta = summary.get("working_mode_meta") or {}
+            pid = meta.get("parent_session_id")
+            if pid:
+                eng_by_parent[pid] = sid
+
+    projected_updates: dict[str, dict] = {}
+    for sid, summary in summary_items:
+        tags = requirement_tags.get(sid, [])
+        marker = markers.get(sid, {})
+        tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
+        if (
+            summary.get("requirement_tags") == tags
+            and summary.get("markers") == marker
+            and summary.get("tag_filter_ids") == tag_filter_ids
+        ):
+            continue
+        projected_updates[sid] = {
+            **summary,
+            "requirement_tags": tags,
+            "markers": marker,
+            "tag_filter_ids": tag_filter_ids,
+        }
+
+    # Final unified pass for eng pointers across the WHOLE index
+    # (Pass 1 + Pass 2). Keep only the mutation phase under the index
+    # lock so `/api/sessions` does not wait behind per-summary projection
+    # comparison work during warm completion.
+    with _summary_index_lock:
         for pid, eng_sid in eng_by_parent.items():
             if pid in _summary_index:
                 _summary_index[pid] = {
@@ -776,22 +797,10 @@ def _do_build_summary_index_unsafe() -> None:
                     "pending_eng_session_id": eng_sid,
                 }
                 _summary_index_version += 1
-        for sid, summary in list(_summary_index.items()):
-            tags = requirement_tags.get(sid, [])
-            marker = markers.get(sid, {})
-            tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
-            if (
-                summary.get("requirement_tags") == tags
-                and summary.get("markers") == marker
-                and summary.get("tag_filter_ids") == tag_filter_ids
-            ):
+        for sid, summary in projected_updates.items():
+            if sid not in _summary_index:
                 continue
-            _summary_index[sid] = {
-                **summary,
-                "requirement_tags": tags,
-                "markers": marker,
-                "tag_filter_ids": tag_filter_ids,
-            }
+            _summary_index[sid] = summary
             _summary_index_version += 1
         _summary_index_loaded = True
 
