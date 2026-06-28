@@ -4,7 +4,7 @@
 every loopback handler unwraps its input via `_args(params)` (i.e. it reads
 `params["arguments"]`). If the dispatcher hands the handler the bare args dict
 instead of `{"arguments": args}`, the handler sees empty args and rejects every
-valid call ("target_session_id and message are required", "name is required",
+valid call ("one target and message are required", "name is required",
 ...). That regression forced the model to fall back from
 ask/mssg/create_sub_session onto create_session — and that, too, failed — so adv
 review ended up spawning standalone/provisioned sessions.
@@ -197,7 +197,7 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
     assert captured[0][1]["message"] == "review"
 
 
-def test_real_async_communicate_handler_accepts_dispatched_args() -> None:
+def test_real_async_handler_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
     original_post = runner_openai._post_loopback_sync
 
@@ -219,9 +219,9 @@ def test_real_async_communicate_handler_accepts_dispatched_args() -> None:
         emitter = _make_emitter()
         call = {
             "id": "call_async",
-            "name": "async_communicate",
+            "name": "async",
             "arguments": json.dumps(
-                {"target_session_id": "w1", "message": "run async"}
+                {"target_worker_pool": "testape", "message": "run async"}
             ),
         }
         result = asyncio.run(
@@ -243,10 +243,10 @@ def test_real_async_communicate_handler_accepts_dispatched_args() -> None:
 
     parsed = json.loads(result)
     assert parsed["expects_response"] is True
-    assert captured, "async_communicate handler never posted to backend"
+    assert captured, "async handler never posted to backend"
     assert captured[0][0] == "/api/internal/async-communicate"
     assert captured[0][1]["sender_session_id"] == "sender-1"
-    assert captured[0][1]["target_session_id"] == "w1"
+    assert captured[0][1]["target_worker_pool"] == "testape"
     assert captured[0][1]["message"] == "run async"
 
 
