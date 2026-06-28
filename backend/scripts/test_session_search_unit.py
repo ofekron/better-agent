@@ -75,6 +75,10 @@ def _write_session(
     archived: bool = False,
     working_mode_value: str | None = None,
     updated_at: str = "2026-05-01T00:00:00",
+    provider_id: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    node_id: str | None = None,
 ) -> None:
     """Write a minimal root session JSON to the tempdir's sessions dir."""
     sessions_dir = Path(_TMP_HOME) / "sessions"
@@ -90,6 +94,14 @@ def _write_session(
     if working_mode_value is not None:
         payload["working_mode"] = working_mode_value
         payload["working_mode_meta"] = {}
+    if provider_id is not None:
+        payload["provider_id"] = provider_id
+    if model is not None:
+        payload["model"] = model
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
+    if node_id is not None:
+        payload["node_id"] = node_id
     (sessions_dir / f"{sid}.json").write_text(json.dumps(payload))
 
 
@@ -189,6 +201,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
     expected_keys = {
         "id", "name", "cwd", "project_name", "first_user_prompt",
         "updated_at", "message_count",
+        "provider_id", "model", "reasoning_effort", "node_id",
     }
     if set(auth.keys()) != expected_keys:
         print(f"{FAIL} build_index fields: got {set(auth.keys())}")
@@ -453,6 +466,188 @@ def test_ask_error_message_mapping() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Provider / model / node filters
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_build_index_exposes_filter_fields() -> bool:
+    """The index now carries provider/model/reasoning_effort/node_id so
+    filters can match against them (node_id defaults to "primary")."""
+    _reset_home()
+    _write_session(
+        sid="s-openai",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="openai",
+        model="gpt-4o",
+        reasoning_effort="high",
+        node_id="laptop",
+    )
+    _write_session(
+        sid="s-default",
+        messages=[{"role": "user", "content": "x"}],
+    )
+    by_id = {s["id"]: s for s in session_search._build_index()}
+    if by_id["s-openai"]["provider_id"] != "openai":
+        print(f"{FAIL} index provider_id: {by_id['s-openai']['provider_id']!r}")
+        return False
+    if by_id["s-openai"]["model"] != "gpt-4o":
+        print(f"{FAIL} index model: {by_id['s-openai']['model']!r}")
+        return False
+    if by_id["s-openai"]["reasoning_effort"] != "high":
+        print(f"{FAIL} index reasoning_effort: {by_id['s-openai']['reasoning_effort']!r}")
+        return False
+    if by_id["s-openai"]["node_id"] != "laptop":
+        print(f"{FAIL} index node_id: {by_id['s-openai']['node_id']!r}")
+        return False
+    # node_id defaults to "primary" when not explicitly set on the session.
+    if by_id["s-default"]["node_id"] != "primary":
+        print(f"{FAIL} index default node_id: {by_id['s-default']['node_id']!r}")
+        return False
+    print(f"{PASS} _build_index exposes provider/model/effort/node fields")
+    return True
+
+
+def test_validate_proposed_applies_filters() -> bool:
+    """validate_proposed keeps only ids whose index entry matches every
+    non-empty filter; filtered-out ids are dropped even when they exist."""
+    _reset_home()
+    _write_session(
+        sid="claude-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="claude",
+        model="claude-sonnet-4-5",
+    )
+    _write_session(
+        sid="openai-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="openai",
+        model="gpt-4o",
+    )
+    # provider filter narrows to claude only
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "claude"},
+    )
+    if out != ["claude-1"]:
+        print(f"{FAIL} filter provider_id: got {out!r}")
+        return False
+    # model filter narrows to openai only
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"model": "gpt-4o"},
+    )
+    if out != ["openai-1"]:
+        print(f"{FAIL} filter model: got {out!r}")
+        return False
+    # combined filter: provider + model that nothing matches
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "claude", "model": "gpt-4o"},
+    )
+    if out != []:
+        print(f"{FAIL} filter combined no-match: got {out!r}")
+        return False
+    # empty filter values are ignored (acts like no filter)
+    out = session_search.validate_proposed(
+        ["claude-1", "openai-1"],
+        filters={"provider_id": "", "model": None},
+    )
+    if set(out) != {"claude-1", "openai-1"}:
+        print(f"{FAIL} filter empty-ignored: got {out!r}")
+        return False
+    print(f"{PASS} validate_proposed applies provider/model filters")
+    return True
+
+
+def test_run_search_sessions_filter_short_circuits_empty_candidates() -> bool:
+    """When a filter matches zero sessions, run_search_sessions_session
+    returns an empty result WITHOUT dispatching the worker."""
+    _reset_home()
+    _write_session(
+        sid="claude-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="claude",
+    )
+    dispatched: list = []
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        dispatched.append((spec, query, ctx))
+        return None
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session(
+                "anything", provider_id="nonexistent-provider",
+            )
+        )
+    finally:
+        session_search.provisioning.run = original
+    if dispatched:
+        print(f"{FAIL} short-circuit: worker was dispatched {dispatched!r}")
+        return False
+    if out.get("session_ids") != [] or out.get("error") is not None:
+        print(f"{FAIL} short-circuit: got {out!r}")
+        return False
+    print(f"{PASS} empty filter candidate set short-circuits (no dispatch)")
+    return True
+
+
+def test_run_search_sessions_filter_constrains_and_postvalidates() -> bool:
+    """With an active filter the worker query is prefixed with a CONSTRAINT
+    listing the matching candidate ids, and the worker's output is post-
+    validated so any filtered-out id it returns is dropped."""
+    _reset_home()
+    _write_session(
+        sid="match-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="claude",
+    )
+    _write_session(
+        sid="other-1",
+        messages=[{"role": "user", "content": "x"}],
+        provider_id="openai",
+    )
+
+    captured: dict = {}
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        captured["query"] = query
+        # Worker (mis)behaves: returns a filtered-out id alongside a match.
+        return type("_R", (), {
+            "value": {
+                "session_ids": ["other-1", "match-1"],
+                "reasoning": "r",
+            },
+        })()
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session(
+                "query", provider_id="claude",
+            )
+        )
+    finally:
+        session_search.provisioning.run = original
+    # Constraint note prepended and lists the single matching candidate.
+    if "CONSTRAINT" not in captured.get("query", "") or "match-1" not in captured.get("query", ""):
+        print(f"{FAIL} constraint note: {captured.get('query')!r}")
+        return False
+    if "other-1" in captured.get("query", ""):
+        print(f"{FAIL} constraint leaked filtered-out id into note")
+        return False
+    # Post-validation dropped the filtered-out id the worker returned.
+    if out.get("session_ids") != ["match-1"]:
+        print(f"{FAIL} post-validate: got {out.get('session_ids')!r}")
+        return False
+    print(f"{PASS} filter constrains worker query + post-validates output")
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────
 
@@ -461,10 +656,14 @@ def main_run() -> int:
     tests = [
         test_extract_first_user_prompt_shapes,
         test_build_index_filters_hidden_and_archived,
+        test_build_index_exposes_filter_fields,
         test_validate_proposed_drops_unknown,
+        test_validate_proposed_applies_filters,
         test_run_search_sessions_uses_provisioned_worker,
         test_run_search_sessions_worker_parse_failed,
         test_run_search_sessions_worker_timeout,
+        test_run_search_sessions_filter_short_circuits_empty_candidates,
+        test_run_search_sessions_filter_constrains_and_postvalidates,
         test_empty_query_returns_empty_query_error,
         test_parse_failed_is_not_an_error_bubble,
         test_ask_error_message_mapping,
