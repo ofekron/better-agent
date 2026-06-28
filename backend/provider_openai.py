@@ -23,7 +23,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -712,6 +712,43 @@ class OpenAIProvider(Provider):
     ) -> Optional[dict]:
         logger.warning("OpenAIProvider.run_headless: not implemented for openai")
         return None
+
+    # ------------------------------------------------------------------
+    # Rate-limit parsing — unblocks the orchestrator's rate-limit retry
+    # loop (turn_manager). Without this, a 429 from the Chat Completions
+    # endpoint raises AttributeError at turn_manager's parse_rate_limit
+    # call site and aborts the turn instead of retrying.
+    # ------------------------------------------------------------------
+    _OPENAI_RATE_LIMIT_KEYWORDS = (
+        "rate limit", "quota exceeded", "resource exhausted",
+        "status: 429", "error 429", "too many requests",
+        "usage limit", "capacity", "subscription window",
+    )
+    # Long-reset quota exhaustion (e.g. Sakana's "Subscription window is
+    # exceeded") vs a short per-minute throttle: the orchestrator clamps
+    # the wait to 600s either way, but the reset time is surfaced to the
+    # UI as retrying_until, so keep it honest.
+    _OPENAI_RATE_LIMIT_LONG_KEYWORDS = (
+        "subscription window", "quota exceeded", "usage limit",
+    )
+
+    def parse_rate_limit(
+        self, error: Optional[str], events: list[dict],
+    ) -> Optional[datetime]:
+        texts: list[str] = []
+        if error:
+            texts.append(error[-2000:] if len(error) > 2000 else error)
+        extracted = self._extract_text_for_rate_limit(events)
+        if extracted:
+            texts.append(extracted)
+        corpus = "\n".join(texts).lower()
+        if not corpus:
+            return None
+        if not any(kw in corpus for kw in self._OPENAI_RATE_LIMIT_KEYWORDS):
+            return None
+        if any(kw in corpus for kw in self._OPENAI_RATE_LIMIT_LONG_KEYWORDS):
+            return self._fallback_rate_limit(hours=1)
+        return datetime.now(timezone.utc) + timedelta(minutes=1)
 
     # ------------------------------------------------------------------
     # rewind — we simulate rewind by clearing the session_id so the

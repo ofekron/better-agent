@@ -35,6 +35,7 @@ import asyncio
 import copy
 import logging
 import os
+import random
 import threading
 import time as _time
 import uuid
@@ -57,6 +58,7 @@ from runs_dir import pid_alive as _pid_alive, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
 from turn_helpers import (
+    _RATE_LIMIT_MAX_ATTEMPTS,
     _TRANSIENT_BASE_WAIT_S,
     _TRANSIENT_MAX_ATTEMPTS,
     _TRANSIENT_MAX_WAIT_S,
@@ -1202,6 +1204,21 @@ class TurnManager:
 
             persist_id = session["id"]
             new_sid = primary_result.get("session_id")
+            if is_fork_first_turn and new_sid and session_id_field != "supervisor_agent_session_id":
+                try:
+                    parent_lines = int(session.get("parent_line_count_at_fork") or 0)
+                except (TypeError, ValueError):
+                    parent_lines = 0
+                if parent_lines > 0:
+                    try:
+                        session_manager.advance_processed_lines(
+                            persist_id,
+                            new_sid,
+                            parent_lines,
+                            bump_updated_at=False,
+                        )
+                    except Exception:
+                        logger.exception("advance_processed_lines on first-turn fork failed")
             if (
                 new_sid
                 and new_sid != session.get(session_id_field)
@@ -1560,6 +1577,7 @@ class TurnManager:
             *run_capability_contexts,
         ]
         transient_attempt = 0
+        rate_limit_attempt = 0
         in_flight_msg = self.current_assistant_msgs.get(app_session_id)
         if in_flight_msg:
             transient_attempt = int(
@@ -2004,7 +2022,10 @@ class TurnManager:
                     self._pop_run_id(app_session_id, run_id)
                     continue  # Retry loop → fresh start_run with no session_id
 
-            if not success and _is_rate_limit_attempt(error, attempt_events):
+            if (not success
+                    and _is_rate_limit_attempt(error, attempt_events)
+                    and rate_limit_attempt < _RATE_LIMIT_MAX_ATTEMPTS):
+                rate_limit_attempt += 1
                 in_flight = self.current_assistant_msgs.get(app_session_id)
                 assistant_msg_id = in_flight.get("id") if in_flight else None
                 reset_dt = provider.parse_rate_limit(error, attempt_events)
@@ -2013,6 +2034,9 @@ class TurnManager:
                         (reset_dt.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
                 else:
                     wait_s = 5.0
+                # ±25% jitter so N concurrent rate-limited runs on the same
+                # provider window don't re-collide on identical backoff.
+                wait_s *= random.uniform(0.75, 1.25)
                 retry_at = (datetime.now(timezone.utc) + timedelta(seconds=wait_s)).isoformat()
                 if assistant_msg_id:
                     session_manager.set_msg_retrying_until(
@@ -2055,6 +2079,8 @@ class TurnManager:
                         _TRANSIENT_BASE_WAIT_S * (2 ** (transient_attempt - 1)),
                         _TRANSIENT_MAX_WAIT_S,
                     )
+                    # ±25% jitter — same rationale as the rate-limit branch.
+                    wait_s *= random.uniform(0.75, 1.25)
                     logger.warning(
                         "Transient error on attempt %d/%d for %s, retrying in %.0fs: %s",
                         transient_attempt, _TRANSIENT_MAX_ATTEMPTS,
