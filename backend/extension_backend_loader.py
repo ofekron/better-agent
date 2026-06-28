@@ -456,14 +456,15 @@ async def dispatch_extension_backend_request(
     if spec is None:
         raise HTTPException(status_code=404, detail="Extension is not installed")
 
+    method = str(getattr(request, "method", "POST") or "POST").upper()
     body = (
         await _read_limited_body(request)
-        if request.method.upper() in _METHODS_WITH_REQUEST_BODY
+        if method in _METHODS_WITH_REQUEST_BODY
         else b""
     )
     return await _invoke_backend(
         spec,
-        method=request.method,
+        method=method,
         path=path,
         body_bytes=body,
         query_b64=base64.b64encode(request.scope.get("query_string", b"")).decode("ascii"),

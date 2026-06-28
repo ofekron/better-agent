@@ -128,6 +128,13 @@ async def dispatch_backend_extension_base(extension_id: str, request: Request):
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def dispatch_backend_extension(extension_id: str, path: str, request: Request):
+    core_response = await _dispatch_core_builtin_backend(
+        extension_id,
+        path,
+        request,
+    )
+    if core_response is not None:
+        return core_response
     backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
     core_response = await _dispatch_core_builtin_backend(
         extension_id,
@@ -153,14 +160,14 @@ async def _dispatch_core_builtin_backend(
     backend_spec: dict[str, Any] | None = None,
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
+    if extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
+        return None
     if backend_spec is not None:
         return None
     record = extension_store.get_extension(extension_id)
     if not record or record.get("enabled") is not True:
         return None
-    if extension_id == extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
-        return await _dispatch_machine_nodes_core_backend(clean_path, request)
-    return None
+    return await _dispatch_machine_nodes_core_backend(clean_path, request)
 
 
 async def _dispatch_machine_nodes_core_backend(

@@ -671,8 +671,24 @@ def test_extension_backend_get_skips_body_stream() -> None:
     dispatch_start = source.index("async def dispatch_extension_backend_request(")
     dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
     dispatch_source = source[dispatch_start:dispatch_end]
-    assert "if request.method.upper() in _METHODS_WITH_REQUEST_BODY" in dispatch_source
+    assert 'method = str(getattr(request, "method", "POST") or "POST").upper()' in dispatch_source
+    assert "if method in _METHODS_WITH_REQUEST_BODY" in dispatch_source
     assert "else b\"\"" in dispatch_source
+
+
+def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
+    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
+    dispatch_start = source.index("async def dispatch_backend_extension(")
+    dispatch_end = source.index("async def _dispatch_core_builtin_backend(", dispatch_start)
+    dispatch_source = source[dispatch_start:dispatch_end]
+    assert dispatch_source.index("_dispatch_core_builtin_backend(") < dispatch_source.index(
+        "backend_entrypoint_spec_cached("
+    )
+    core_start = source.index("async def _dispatch_core_builtin_backend(")
+    core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
+    core_source = source[core_start:core_end]
+    assert "extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in core_source
+    assert "extension_store.get_extension(extension_id)" in core_source
 
 
 if __name__ == "__main__":
@@ -721,4 +737,5 @@ if __name__ == "__main__":
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
+    test_builtin_extension_core_dispatch_precedes_backend_spec_lookup()
     print("PASS event loop blocking regressions")
