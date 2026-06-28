@@ -218,8 +218,13 @@ def test_provision_workers_allows_per_worker_cwd():
 
 
 def test_internal_provision_workers_requires_internal_token():
+    broadcasts = []
+
+    async def fake_broadcast(cwd):
+        broadcasts.append(cwd)
+
     main.coordinator._init_target_agent_session = _fake_init_target_agent_session
-    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    main.coordinator.broadcast_workers_changed = fake_broadcast
     client = _client()
     payload = {
         "cwd": "/tmp/internal-project",
@@ -239,11 +244,17 @@ def test_internal_provision_workers_requires_internal_token():
     assert worker["role_key"] == "device-worker"
     assert worker["registry_cwd"] == "/tmp/internal-project"
     assert worker["created"] is True
+    assert broadcasts == [None]
 
 
 def test_bare_provision_workers_returns_pending_without_init_turn():
+    broadcasts = []
+
+    async def fake_broadcast(cwd):
+        broadcasts.append(cwd)
+
     main.coordinator._init_target_agent_session = _fail_init_target_agent_session
-    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    main.coordinator.broadcast_workers_changed = fake_broadcast
     client = _client()
     payload = {
         "cwd": "/tmp/bare-project",
@@ -259,6 +270,7 @@ def test_bare_provision_workers_returns_pending_without_init_turn():
     assert worker["agent_sid"] is None
     assert worker["initialized"] is False
     assert worker["created"] is True
+    assert broadcasts == [None]
 
 
 def test_coordinator_target_init_proxy_accepts_ws_callback():
@@ -424,7 +436,7 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
             if (name, cwd) in created_names else None
         )
 
-    async def fake_create(b):
+    async def fake_create(b, *_args, **_kwargs):
         create_order.append(b["name"])
         # Yield so a second unlocked coroutine can also enter create before
         # either records the worker — this is the race window. With the lock

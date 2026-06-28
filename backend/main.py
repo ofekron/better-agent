@@ -9947,6 +9947,7 @@ async def _provision_workers_from_body(body: dict):
     if not isinstance(specs, list):
         raise HTTPException(status_code=400, detail="workers must be a list")
     results = []
+    created_any = False
     for raw in specs:
         spec = raw if isinstance(raw, dict) else {}
         key = str(spec.get("role_key") or spec.get("description") or "").strip()
@@ -9984,10 +9985,13 @@ async def _provision_workers_from_body(body: dict):
                     create_body,
                 )
             else:
-                created = await _create_worker_from_body(create_body)
+                created = await _create_worker_from_body(create_body, broadcast=False)
+            created_any = True
             result = {**created, "created": True, "role_key": key, "registry_cwd": created.get("cwd") or worker_cwd}
             _register_provisioned_team_member(team_store, body, spec, result, key)
             results.append(result)
+    if created_any:
+        await coordinator.broadcast_workers_changed(None)
     return {"workers": results}
 
 
@@ -10112,7 +10116,7 @@ def _create_pending_worker_from_body(body: dict):
     }
 
 
-async def _create_worker_from_body(body: dict):
+async def _create_worker_from_body(body: dict, broadcast: bool = True):
     from stores import worker_store as _ws
 
     cwd = body.get("cwd")
@@ -10175,7 +10179,8 @@ async def _create_worker_from_body(body: dict):
         name=body.get("name"),
         role_key=body.get("role_key"),
     )
-    await coordinator.broadcast_workers_changed(None)
+    if broadcast:
+        await coordinator.broadcast_workers_changed(None)
     return {
         "agent_session_id": bc["id"],
         "name": body.get("name") or bc["name"],
