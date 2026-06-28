@@ -49,6 +49,7 @@ from typing import Any, Callable, Optional
 
 import extension_store
 from env_compat import get_env
+from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
@@ -1447,16 +1448,12 @@ def _build_propose_sessions_tool(
     return propose_sessions
 
 
-# ============================================================================
-# Usage aggregation
-# ============================================================================
-def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
-    out: dict[str, int] = {}
-    for d in ((a or {}), (b or {})):
-        for k, v in (d or {}).items():
-            if isinstance(v, (int, float)):
-                out[k] = int(out.get(k, 0)) + int(v)
-    return out
+def _message_id(message: object) -> Optional[str]:
+    if isinstance(message, dict):
+        value = message.get("message_id") or message.get("id")
+    else:
+        value = getattr(message, "message_id", None) or getattr(message, "id", None)
+    return str(value) if value else None
 
 
 def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
@@ -1679,6 +1676,8 @@ async def _run_one_turn(
 
     discovered_sid: Optional[str] = None
     total_usage: dict = {}
+    assistant_usage_snapshots: list[tuple[Optional[str], object]] = []
+    result_usage: object = None
     success = False
     error: Optional[str] = None
     cancelled = False
@@ -1842,7 +1841,7 @@ async def _run_one_turn(
                             used_tools.add(tname)
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    total_usage = _sum_usage(total_usage, usage)
+                    assistant_usage_snapshots.append((_message_id(msg), usage))
                 # API-level error surfaced by the SDK on the assistant
                 # message (e.g. `rate_limit`, `auth`, etc.). Capture it
                 # NOW — Z.AI's `ResultMessage.subtype` mislabels these
@@ -1873,7 +1872,7 @@ async def _run_one_turn(
                         error = "timeout"
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    total_usage = _sum_usage(total_usage, usage)
+                    result_usage = usage
                 # Extract context window from model usage metadata.
                 # model_usage is {"model_name": {contextWindow, ...}, ...}
                 mu = getattr(msg, "model_usage", None)
@@ -1907,6 +1906,11 @@ async def _run_one_turn(
     cancelled = cancelled_cell[0]
     if cancelled and not error:
         error = t("runner.cancelled")
+
+    total_usage = (
+        aggregate_claude_turn_usage(assistant_usage_snapshots, result_usage)
+        or {}
+    )
 
     overflow_error = _context_overflow_error(last_stop_reason)
     if overflow_error:
