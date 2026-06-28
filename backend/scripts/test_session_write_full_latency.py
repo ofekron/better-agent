@@ -75,6 +75,19 @@ def _build_heavy_session(n: int) -> str:
 
 def _run() -> bool:
     results: list[tuple[str, bool, str]] = []
+    source = open(session_store.__file__, "r", encoding="utf-8").read()
+    upsert_start = source.index("def _upsert_summary(")
+    upsert_end = source.index("def _drafts_path(", upsert_start)
+    upsert_source = source[upsert_start:upsert_end]
+    for timer in (
+        "store.session.summary.build",
+        "store.session.summary.index",
+        "store.session.summary.sidecar_stat",
+        "store.session.summary.sidecar_write",
+    ):
+        if timer not in upsert_source:
+            raise AssertionError(f"missing summary write timer {timer}")
+
     sid = _build_heavy_session(3000)
 
     # Force an explicit write and measure.
