@@ -344,6 +344,15 @@ def _tag_filter_ids(session_tags: list[dict], requirement_tags: list[dict]) -> l
     return sorted(ids)
 
 
+def _summary_has_projection(summary: dict) -> bool:
+    if summary.get("requirement_tags") or summary.get("markers"):
+        return True
+    return any(
+        isinstance(tag_id, str) and tag_id.startswith("req:")
+        for tag_id in (summary.get("tag_filter_ids") or [])
+    )
+
+
 def set_requirement_tags_projection(tags_by_session: dict[str, list[dict]]) -> None:
     global _summary_index_version
     clean: dict[str, list[dict]] = {}
@@ -821,6 +830,7 @@ def _do_build_summary_index_unsafe() -> None:
     # locks release so the next start hits the Pass-1 fast path.
     dirty_trees: list[dict] = []
     stale_summaries: list[tuple[str, dict]] = []
+    summary_projection_present = False
 
     # Pass 1: load from summary files where available + fresh
     # (summary mtime must be >= session file mtime — a crash between
@@ -837,6 +847,8 @@ def _do_build_summary_index_unsafe() -> None:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
                         summary, cleaned = _sanitize_summary(summary)
+                        if _summary_has_projection(summary):
+                            summary_projection_present = True
                         seen_cursors = read_seen_cursors(sid)
                         if sid in seen_cursors:
                             summary = {
@@ -844,6 +856,11 @@ def _do_build_summary_index_unsafe() -> None:
                                 "last_seen_event_uid": seen_cursors[sid],
                             }
                             cleaned = True
+                        if summary.get("working_mode"):
+                            meta = summary.get("working_mode_meta") or {}
+                            pid = meta.get("parent_session_id")
+                            if pid:
+                                eng_by_parent[pid] = sid
                         needs_fork_backfill = (
                             "fork_ids" not in summary
                             and int(summary.get("fork_count") or 0) > 0
@@ -893,28 +910,10 @@ def _do_build_summary_index_unsafe() -> None:
 
     projection_snapshots = _projection_snapshots_if_any()
 
-    with _summary_index_lock:
-        summary_items = list(_summary_index.items())
-
-    summary_projection_present = False
-    for sid, summary in summary_items:
-        if summary.get("working_mode"):
-            meta = summary.get("working_mode_meta") or {}
-            pid = meta.get("parent_session_id")
-            if pid:
-                eng_by_parent[pid] = sid
-        if (
-            summary.get("requirement_tags")
-            or summary.get("markers")
-            or any(
-                isinstance(tag_id, str) and tag_id.startswith("req:")
-                for tag_id in (summary.get("tag_filter_ids") or [])
-            )
-        ):
-            summary_projection_present = True
-
     projected_updates: dict[str, dict] = {}
     if projection_snapshots is not None or summary_projection_present:
+        with _summary_index_lock:
+            summary_items = list(_summary_index.items())
         if projection_snapshots is None:
             requirement_tags, markers = {}, {}
         else:
