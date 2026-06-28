@@ -46,6 +46,7 @@ import logging
 import os
 import random
 import sys
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1004,6 +1005,9 @@ class OwnedClaudeJsonlTailer:
         self._refcount = 0
         self._tailer: Optional[ClaudeJsonlTailer] = None
         self._task: Optional[asyncio.Task] = None
+        self._cursor_persisted = self.start_offset
+        self._cursor_pending = self.start_offset
+        self._cursor_persisted_at = time.monotonic()
 
     @perf.timed_fn("tailer.dispatch")
     async def _dispatch(self, enriched: dict) -> None:
@@ -1099,6 +1103,16 @@ class OwnedClaudeJsonlTailer:
         """Persist `processed_line_by_sid[agent_sid] = line_count` so a
         subsequent acquire (e.g. after backend restart) starts past the
         already-ingested prefix instead of re-reading the whole file."""
+        n = int(line_count)
+        self._cursor_pending = max(self._cursor_pending, n)
+        if (
+            self._cursor_pending - self._cursor_persisted < 32
+            and time.monotonic() - self._cursor_persisted_at < 1.0
+        ):
+            return
+        self._persist_cursor(self._cursor_pending)
+
+    def _persist_cursor(self, line_count: int) -> None:
         try:
             session_manager.advance_processed_lines(
                 self.app_session_id,
@@ -1106,6 +1120,8 @@ class OwnedClaudeJsonlTailer:
                 int(line_count),
                 bump_updated_at=False,
             )
+            self._cursor_persisted = max(self._cursor_persisted, int(line_count))
+            self._cursor_persisted_at = time.monotonic()
         except Exception:
             logger.exception(
                 "OwnedClaudeJsonlTailer: cursor persist failed for %s",
@@ -1134,6 +1150,8 @@ class OwnedClaudeJsonlTailer:
         self._refcount = max(0, self._refcount - 1)
         if self._refcount == 0 and self._tailer is not None:
             self._tailer.stop()
+            if self._cursor_pending > self._cursor_persisted:
+                self._persist_cursor(self._cursor_pending)
             t = self._task
             self._tailer = None
             self._task = None

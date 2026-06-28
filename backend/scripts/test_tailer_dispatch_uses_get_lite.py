@@ -112,6 +112,39 @@ async def _run() -> bool:
         f"get() called {counts['get']}x on the hot path (expected 0)",
     ))
 
+    cursor_tailer = OwnedClaudeJsonlTailer(
+        root_id="root-t",
+        app_session_id="app-t",
+        agent_sid="worker-fork-sid",
+        jsonl_path=Path(_TMP_HOME) / "dummy.jsonl",
+        start_offset=0,
+    )
+    persisted: list[int] = []
+    cursor_tailer._persist_cursor = persisted.append  # type: ignore[method-assign]
+    for n in range(1, 10):
+        cursor_tailer._on_cursor(n)
+    results.append((
+        "small cursor advances are coalesced",
+        persisted == [],
+        f"persisted={persisted!r}",
+    ))
+
+    class _FakeTailer:
+        def stop(self) -> None:
+            return None
+
+    cursor_tailer._refcount = 1
+    cursor_tailer._tailer = _FakeTailer()  # type: ignore[assignment]
+    cursor_tailer._task = asyncio.create_task(asyncio.sleep(0))
+    task = cursor_tailer.release()
+    if task is not None:
+        await task
+    results.append((
+        "release flushes pending cursor",
+        persisted == [9],
+        f"persisted={persisted!r}",
+    ))
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL
