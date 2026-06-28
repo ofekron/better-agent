@@ -47,6 +47,7 @@ from typing import Any, Callable, ClassVar, Optional
 from event_bus import BusEvent, bus
 from env_compat import get_env
 from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
+import provider_runtime
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 
@@ -401,8 +402,10 @@ class ClaudeProvider(Provider):
                 user_facing=bool(open_file_panel_enabled) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = subprocess.Popen(
+            popen = provider_runtime.popen_runner(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="claude"),
+                run_dir=run_dir,
+                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,

@@ -17,7 +17,9 @@ import provider_runtime  # noqa: E402
 
 def _sudo_runner(argv):
     command = tuple(argv)
-    if os.geteuid() == 0:
+    if command and command[0] == "sudo":
+        run_argv = command
+    elif os.geteuid() == 0:
         run_argv = command
     else:
         sudo = shutil.which("sudo")
