@@ -4871,6 +4871,7 @@ async def create_session(body: Any = Body(default=None)):
                 content=result["user_ask"],
                 source="file_editor",
             )
+            session = await _session_lite(result["session_id"]) or session
         elif result.get("meta_prompt") is not None:
             await synthetic_messages.inject(
                 coordinator,
