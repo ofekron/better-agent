@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "このサーバーにはビルドされていません",
   "settings.desktopStatusFailed": "デスクトップのダウンロード状態を読み込めませんでした。",
   "sidebar.machinesLink": "マシン",
-  "sidebar.tools": "ファイル",
   "sidebar.toolsTitle": "プロジェクトファイルを参照",
   "sidebar.sessionsTab": "セッション",
   "sidebar.workersTab": "ワーカー",

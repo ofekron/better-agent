@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "Not built on this server",
   "settings.desktopStatusFailed": "Could not load desktop download status.",
   "sidebar.machinesLink": "Machines",
-  "sidebar.tools": "Files",
   "sidebar.toolsTitle": "Browse project files",
   "sidebar.sessionsTab": "Sessions",
   "sidebar.workersTab": "Workers",

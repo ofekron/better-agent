@@ -541,27 +541,6 @@ body {
   margin-top: auto;
 }
 
-.sidebar-tools-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 7px 10px;
-  margin-bottom: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: calc(13px * var(--app-font-scale));
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.sidebar-tools-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--accent);
-}
-
 .main-panel {
   flex: 1;
   min-width: 0;

@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "Non compilato su questo server",
   "settings.desktopStatusFailed": "Impossibile caricare lo stato del download desktop.",
   "sidebar.machinesLink": "Macchine",
-  "sidebar.tools": "File",
   "sidebar.toolsTitle": "Sfoglia i file del progetto",
   "sidebar.sessionsTab": "Sessioni",
   "sidebar.workersTab": "Worker",

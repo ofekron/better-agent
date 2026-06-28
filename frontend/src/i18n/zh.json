@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "此服务器未构建",
   "settings.desktopStatusFailed": "无法加载桌面下载状态。",
   "sidebar.machinesLink": "机器",
-  "sidebar.tools": "文件",
   "sidebar.toolsTitle": "浏览项目文件",
   "sidebar.sessionsTab": "会话",
   "sidebar.workersTab": "Worker",

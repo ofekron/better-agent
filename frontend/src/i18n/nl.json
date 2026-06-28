@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "Niet gebouwd op deze server",
   "settings.desktopStatusFailed": "Kon de downloadstatus van de desktop niet laden.",
   "sidebar.machinesLink": "Machines",
-  "sidebar.tools": "Bestanden",
   "sidebar.toolsTitle": "Projectbestanden doorbladeren",
   "sidebar.sessionsTab": "Sessies",
   "sidebar.workersTab": "Workers",
