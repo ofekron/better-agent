@@ -40,6 +40,7 @@ from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from continuation import normalize_context_overflow_error
 import extension_store
+from runs_dir import atomic_write_json
 from env_compat import get_env
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
@@ -1300,12 +1301,6 @@ def _resolve_codex_cli(inputs: Optional[dict[str, Any]] = None) -> Optional[str]
 
     binary = (inputs or {}).get("codex_binary") or "codex"
     return resolve_cli_binary(binary)
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _materialize_image_attachments(run_dir: Path, images: list) -> list[Path]:
@@ -2674,17 +2669,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             state["rollout_path"] = str(rollout_path) if rollout_path else None
                             if not initial_byte_offset:
                                 state["pre_query_byte_offset"] = _file_size(rollout_path)
-                            _atomic_write_json(state_path, state)
+                            atomic_write_json(state_path, state)
                         continue
 
                     if event_type == "turn.started":
                         state["turn_id"] = raw_event.get("turn_id")
-                        _atomic_write_json(state_path, state)
+                        atomic_write_json(state_path, state)
                         continue
 
                     if event_type == "turn.completed":
                         state["turn_id"] = None
-                        _atomic_write_json(state_path, state)
+                        atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         success = True
                         usage_data = raw_event.get("usage", {})
@@ -2702,7 +2697,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
                     if event_type == "turn.failed":
                         state["turn_id"] = None
-                        _atomic_write_json(state_path, state)
+                        atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         err_data = raw_event.get("error", {})
                         error = (
@@ -2807,7 +2802,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if discovered_sid and not state.get("session_id"):
         state["session_id"] = discovered_sid
     try:
-        _atomic_write_json(state_path, state)
+        atomic_write_json(state_path, state)
     except Exception:
         log.exception("failed to finalize state.json")
 
