@@ -474,7 +474,7 @@ PY
   # on EOF when uvicorn exits.
   : > "$BACKEND_LOG"
   echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BACKEND_PORT ---" >> "$BACKEND_LOG"
-  (cd "$DIR/backend" && source .venv/bin/activate && exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT") > >(tee -a "$BACKEND_LOG") 2>&1 &
+  (cd "$DIR/backend" && source .venv/bin/activate && exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers) > >(tee -a "$BACKEND_LOG") 2>&1 &
   BACKEND_PID=$!
 }
 

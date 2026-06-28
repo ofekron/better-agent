@@ -16,5 +16,5 @@ echo Opening browser...
 start "" "chrome.exe" "http://127.0.0.1:8000" 2>nul || start "" "http://127.0.0.1:8000"
 
 echo Starting Better Agent backend on http://127.0.0.1:8000 ...
-".venv\Scripts\uvicorn.exe" main:app --host 127.0.0.1 --port 8000
+".venv\Scripts\uvicorn.exe" main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 pause
