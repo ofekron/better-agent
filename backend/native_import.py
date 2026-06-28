@@ -165,9 +165,13 @@ def _ba_managed_native_ids() -> set[str]:
     try:
         import session_store
         for s in session_store.list_sessions():
+            # Only provider native sids that list_sessions() actually projects.
+            # (caller_agent_session_id is a BA app-session id, not a native sid;
+            # forked_from_supervisor_agent_sid isn't in the summary — both would
+            # be dead/wrong here. The prior supervisor sid is captured anyway via
+            # its run dir / the durable ledger.)
             for k in ("agent_session_id", "supervisor_agent_session_id",
-                      "forked_from_agent_sid", "forked_from_supervisor_agent_sid",
-                      "caller_agent_session_id"):
+                      "forked_from_agent_sid"):
                 v = s.get(k)
                 if isinstance(v, str) and v:
                     ids.add(v)

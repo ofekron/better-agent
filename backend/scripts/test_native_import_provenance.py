@@ -75,6 +75,17 @@ def test_reap_harvests() -> None:
     check("reap-sid" in spawn_ledger.all_sids(), "reap harvested sid into ledger")
 
 
+def test_reap_harvests_from_backend_state() -> None:
+    # When state.json is absent, harvest falls back to backend_state.json —
+    # same sid key the live run-dir scan uses, so the ledger mirrors it.
+    rd = Path(_TMP_HOME) / "runs" / "run-bs"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "backend_state.json").write_text(json.dumps({"session_id": "bs-sid"}), encoding="utf-8")
+    runs_dir.reap_run_dir(rd)
+    check(not rd.exists() and "bs-sid" in spawn_ledger.all_sids(),
+          "reap harvests from backend_state.json fallback")
+
+
 def test_managed_unions_ledger() -> None:
     spawn_ledger.add("managed-via-ledger")
     check("managed-via-ledger" in ni._ba_managed_native_ids(),
@@ -127,6 +138,7 @@ def test_enumerate_drops_junk() -> None:
 def main() -> None:
     test_ledger()
     test_reap_harvests()
+    test_reap_harvests_from_backend_state()
     test_managed_unions_ledger()
     test_is_junk_session()
     test_enumerate_drops_junk()
