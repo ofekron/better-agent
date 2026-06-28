@@ -35,6 +35,9 @@ changing desktop startup, setup, update, packaging, or distribution behavior,
 apply the equivalent macOS and Windows behavior in the same turn, or stop and
 ask if true parity is not possible.
 
+Every encountered issue that involves a project we maintain in Better Agent
+must be looked at by delegating it to a task.
+
 When committing and pushing changes that affect Provider Config Sync integration,
 update the provider-config-sync checkout in the same session before reporting the
 work as complete.
