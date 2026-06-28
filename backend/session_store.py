@@ -316,6 +316,17 @@ def _requirement_tags_snapshot() -> dict[str, list[dict]]:
         }
 
 
+def _requirement_tags_for_sessions(session_ids: Iterable[str]) -> dict[str, list[dict]]:
+    wanted = set(session_ids)
+    if not wanted:
+        return {}
+    with _requirement_tags_lock:
+        return {
+            sid: list(_requirement_tags_by_session.get(sid, []))
+            for sid in wanted
+        }
+
+
 def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -> None:
     """Set or clear one extension's marker on a session. ``marker=None``
     drops the key. Bumps the summary version so list snapshots refresh."""
@@ -344,6 +355,17 @@ def _markers_snapshot() -> dict[str, dict[str, dict]]:
         return {
             sid: {k: dict(v) for k, v in per.items()}
             for sid, per in _markers_by_session.items()
+        }
+
+
+def _markers_for_sessions(session_ids: Iterable[str]) -> dict[str, dict[str, dict]]:
+    wanted = set(session_ids)
+    if not wanted:
+        return {}
+    with _markers_lock:
+        return {
+            sid: {k: dict(v) for k, v in _markers_by_session.get(sid, {}).items()}
+            for sid in wanted
         }
 
 
@@ -2855,8 +2877,8 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    requirement_tags = _requirement_tags_snapshot()
-    markers = _markers_snapshot()
+    requirement_tags = _requirement_tags_for_sessions(ids)
+    markers = _markers_for_sessions(ids)
     with _summary_index_lock:
         summaries = [
             _summary_index[sid]

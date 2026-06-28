@@ -340,6 +340,17 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     assert "requirement_tags.get(summary.get(\"id\", \"\"), [])" in list_source
 
 
+def test_search_summary_lookup_uses_bounded_projection_copy() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def get_session_summaries_by_ids(")
+    end = source.index("def iter_all_sessions()", start)
+    lookup_source = source[start:end]
+    assert "_requirement_tags_for_sessions(ids)" in lookup_source
+    assert "_markers_for_sessions(ids)" in lookup_source
+    assert "_requirement_tags_snapshot()" not in lookup_source
+    assert "_markers_snapshot()" not in lookup_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source
