@@ -114,11 +114,25 @@ async def append_assistant_message(
         raise ValueError("session not found")
 
     now = datetime.now().isoformat()
+    event_uuid = str(uuid.uuid4())
     msg = {
         "id": str(uuid.uuid4()),
         "role": "assistant",
         "content": content,
-        "events": [],
+        "events": [
+            {
+                "type": "agent_message",
+                "data": {
+                    "type": "assistant",
+                    "uuid": event_uuid,
+                    "timestamp": now,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": content}],
+                    },
+                },
+            }
+        ],
         "timestamp": now,
         "isStreaming": False,
         "completed_at": now,
@@ -131,4 +145,14 @@ async def append_assistant_message(
     )
     if result is None:
         raise ValueError("session not found")
+    from event_journal import publish_event
+    await publish_event(
+        session_id=session_id,
+        context_id=session_id,
+        event_type="agent_message",
+        data=msg["events"][0]["data"],
+        source=source,
+        message_id=msg["id"],
+        event_id=event_uuid,
+    )
     return {"success": True, "session_id": session_id, "message": msg}
