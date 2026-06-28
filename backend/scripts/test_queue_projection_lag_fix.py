@@ -131,22 +131,21 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
     sid = _make_session()
     original_max_seq = main.event_ingester.max_seq_by_sid
     original_cursor = main.event_ingester.cursor
+    original_render_seq = main.event_ingester.render_seq_by_sid
     original_tree = session_manager.get_root_tree_stubbed
-    from event_journal import event_journal_reader
-    original_context = event_journal_reader.max_seq_by_context
 
-    main.event_ingester.max_seq_by_sid = lambda _root_id: {sid: 1}
     main.event_ingester.cursor = lambda _root_id: 1
     session_manager.get_root_tree_stubbed = (
         lambda _sid, msg_limit=50, exchange_count=None: {"id": sid, "messages": []}
     )
 
-    def slow_context(_root_id: str) -> dict[str, int]:
+    def slow_max_seq(_root_id: str) -> dict[str, int]:
         import time
         time.sleep(0.2)
         return {sid: 1}
 
-    event_journal_reader.max_seq_by_context = slow_context
+    main.event_ingester.max_seq_by_sid = slow_max_seq
+    main.event_ingester.render_seq_by_sid = lambda _root_id: {sid: 1}
     ticks = 0
 
     async def heartbeat() -> None:
@@ -162,8 +161,8 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
         task.cancel()
         main.event_ingester.max_seq_by_sid = original_max_seq
         main.event_ingester.cursor = original_cursor
+        main.event_ingester.render_seq_by_sid = original_render_seq
         session_manager.get_root_tree_stubbed = original_tree
-        event_journal_reader.max_seq_by_context = original_context
         try:
             await task
         except asyncio.CancelledError:

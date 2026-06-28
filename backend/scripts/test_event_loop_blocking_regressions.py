@@ -533,6 +533,17 @@ def test_session_list_does_not_prewarm_snapshots() -> None:
     assert "get_root_tree_paginated" not in route_source
 
 
+def test_session_list_warms_event_meta_off_path() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _schedule_session_event_meta_warm(" in source
+    assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "_schedule_session_event_meta_warm(page)" in route_source
+    assert "_session_event_meta(" not in route_source
+
+
 def test_sidebar_summary_omits_worker_refs() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def _build_summary_for_root(")
