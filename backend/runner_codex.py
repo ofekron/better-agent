@@ -47,10 +47,12 @@ from orchestration_tool_descriptions import (
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+    ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
 )
 from prompt_templates import render_prompt
 from provider_run_config import toml_literal, write_skill_tree
@@ -292,6 +294,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "ensure_named_worker",
     "mssg",
 })
 
@@ -429,6 +432,86 @@ def _build_create_worker_tool_handler(
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return create_worker
+
+
+def _build_ensure_named_worker_dynamic_tool() -> dict:
+    return {
+        "name": "ensure_named_worker",
+        "description": _ENSURE_NAMED_WORKER_DESCRIPTION,
+        "inputSchema": _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    }
+
+
+def _build_ensure_named_worker_tool_handler(
+    *,
+    backend_url: str,
+    internal_token: str,
+):
+    async def ensure_named_worker(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "ensure_named_worker arguments must be an object",
+                success=False,
+            )
+        name = str(args.get("name") or "").strip()
+        cwd = str(args.get("cwd") or "").strip()
+        orchestration_mode = str(args.get("orchestration_mode") or "").strip()
+        if not name or not cwd or not orchestration_mode:
+            return _dynamic_tool_text_result(
+                "name, cwd and orchestration_mode are required",
+                success=False,
+            )
+        if orchestration_mode == "manager":
+            orchestration_mode = "team"
+        if orchestration_mode not in ("team", "native"):
+            return _dynamic_tool_text_result(
+                "orchestration_mode must be 'team' or 'native'",
+                success=False,
+            )
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        spec = {
+            "role_key": name,
+            "description": args.get("description") or f"worker:{name}",
+            "orchestration_mode": orchestration_mode,
+            "provision_prompt": args.get("provision_prompt"),
+            "provider_id": args.get("provider_id"),
+            "model": args.get("model"),
+            "reasoning_effort": args.get("reasoning_effort"),
+            "node_id": node_id,
+        }
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {"cwd": cwd, "workers": [spec]},
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/workers/provision",
+            )
+        except Exception as e:
+            logger.exception("ensure_named_worker dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"ensure_named_worker failed: {e}", success=False)
+        workers = (result or {}).get("workers") or []
+        if not workers:
+            return _dynamic_tool_text_result(
+                "ensure_named_worker provision returned no worker",
+                success=False,
+            )
+        worker = workers[0]
+        return _dynamic_tool_json_result(
+            {
+                "agent_session_id": worker.get("agent_session_id"),
+                "name": worker.get("name"),
+                "created": bool(worker.get("created")),
+                "orchestration_mode": worker.get("orchestration_mode"),
+                "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+            },
+            success=True,
+        )
+
+    return ensure_named_worker
 
 
 def _build_open_file_panel_dynamic_tool() -> dict:
@@ -2365,6 +2448,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     app_session_id=app_session_id or "",
                     model=model,
                     cwd=cwd,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "ensure_named_worker" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_ensure_named_worker_dynamic_tool(),
+                _build_ensure_named_worker_tool_handler(
                     backend_url=backend_url,
                     internal_token=internal_token,
                 ),

@@ -55,10 +55,12 @@ from orchestration_tool_descriptions import (
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+    ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
 )
 
 # internal_token mtime-cache. The in-process MCP server callbacks
@@ -360,6 +362,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "ensure_named_worker",
     "mssg",
 })
 
@@ -790,6 +793,76 @@ def _build_create_worker_tool(
         return _tool_success_result(result)
 
     return create_worker
+
+
+def _build_ensure_named_worker_tool(
+    *,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_ensure_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/workers/provision",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="ensure-named-worker POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("ensure_named_worker", _ENSURE_NAMED_WORKER_DESCRIPTION, _ENSURE_NAMED_WORKER_INPUT_SCHEMA)
+    async def ensure_named_worker(args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args.get("name") or "").strip()
+        cwd = str(args.get("cwd") or "").strip()
+        orchestration_mode = str(args.get("orchestration_mode") or "").strip()
+        if not name or not cwd or not orchestration_mode:
+            return {
+                "content": [{"type": "text", "text": "name, cwd and orchestration_mode are required"}],
+                "is_error": True,
+            }
+        if orchestration_mode == "manager":
+            orchestration_mode = "team"
+        if orchestration_mode not in ("team", "native"):
+            return {
+                "content": [{"type": "text", "text": "orchestration_mode must be 'team' or 'native'"}],
+                "is_error": True,
+            }
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        spec = {
+            "role_key": name,
+            "description": args.get("description") or f"worker:{name}",
+            "orchestration_mode": orchestration_mode,
+            "provision_prompt": args.get("provision_prompt"),
+            "provider_id": args.get("provider_id"),
+            "model": args.get("model"),
+            "reasoning_effort": args.get("reasoning_effort"),
+            "node_id": node_id,
+        }
+        payload = {"cwd": cwd, "workers": [spec]}
+        try:
+            result = await asyncio.to_thread(_post_ensure_sync, payload)
+        except Exception as e:
+            return _tool_error_response("ensure_named_worker", e)
+        workers = (result or {}).get("workers") or []
+        if not workers:
+            return _tool_error_response(
+                "ensure_named_worker",
+                RuntimeError("provision returned no worker"),
+            )
+        worker = workers[0]
+        return _tool_success_result({
+            "agent_session_id": worker.get("agent_session_id"),
+            "name": worker.get("name"),
+            "created": bool(worker.get("created")),
+            "orchestration_mode": worker.get("orchestration_mode"),
+            "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+        })
+
+    return ensure_named_worker
 
 
 # ============================================================================
@@ -2002,6 +2075,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 app_session_id=app_session_id or "",
                 model=model,
                 cwd=cwd,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "ensure_named_worker" not in disabled_builtin_tools:
+            communicate_tools.append(_build_ensure_named_worker_tool(
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))

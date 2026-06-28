@@ -39,6 +39,10 @@ SPEC = {
     "create_session": (otd.CREATE_SESSION_DESCRIPTION, ["STANDALONE", "create_worker"]),
     "create_sub_session": (otd.CREATE_SUB_SESSION_DESCRIPTION, ["hidden"]),
     "create_worker": (otd.CREATE_WORKER_DESCRIPTION, ["TEAM", "approval"]),
+    "ensure_named_worker": (
+        otd.ENSURE_NAMED_WORKER_DESCRIPTION,
+        ["Idempotently", "singleton", "STABLE, REUSABLE"],
+    ),
 }
 
 # The `_`-prefixed alias each runner imports must BE the same object (no fork).
@@ -49,6 +53,7 @@ _CLAUDE_ALIASES = {
     "create_session": runner._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner._CREATE_WORKER_DESCRIPTION,
+    "ensure_named_worker": runner._ENSURE_NAMED_WORKER_DESCRIPTION,
 }
 _CODEX_ALIASES = {
     "mssg": runner_codex._MSSG_DESCRIPTION,
@@ -57,6 +62,7 @@ _CODEX_ALIASES = {
     "create_session": runner_codex._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner_codex._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner_codex._CREATE_WORKER_DESCRIPTION,
+    "ensure_named_worker": runner_codex._ENSURE_NAMED_WORKER_DESCRIPTION,
 }
 
 

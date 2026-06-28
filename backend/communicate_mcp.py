@@ -17,6 +17,7 @@ from orchestration_tool_descriptions import (
     CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION,
 )
 
@@ -44,6 +45,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "ensure_named_worker",
     "mssg",
 })
 
@@ -211,6 +213,58 @@ def create_worker_response(
     }, timeout=_LONG_TIMEOUT)
 
 
+def ensure_named_worker_response(
+    name: str,
+    cwd: str,
+    orchestration_mode: str,
+    provision_prompt: str = "",
+    description: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    node_id: str = "",
+) -> dict[str, Any]:
+    name = (name or "").strip()
+    cwd = (cwd or "").strip()
+    mode = (orchestration_mode or "").strip()
+    if not name or not cwd or not mode:
+        return {"success": False, "error": "name, cwd and orchestration_mode are required"}
+    if mode == "manager":
+        mode = "team"
+    if mode not in ("team", "native"):
+        return {"success": False, "error": "orchestration_mode must be 'team' or 'native'"}
+    spec: dict[str, Any] = {
+        "role_key": name,
+        "description": (description or "").strip() or f"worker:{name}",
+        "orchestration_mode": mode,
+        "node_id": node_id.strip() or None,
+    }
+    if (provision_prompt or "").strip():
+        spec["provision_prompt"] = provision_prompt.strip()
+    if (provider_id or "").strip():
+        spec["provider_id"] = provider_id.strip()
+    if (model or "").strip():
+        spec["model"] = model.strip()
+    if (reasoning_effort or "").strip():
+        spec["reasoning_effort"] = reasoning_effort.strip()
+    result = _post_json("/api/internal/workers/provision", {
+        "cwd": cwd,
+        "workers": [spec],
+    }, timeout=_LONG_TIMEOUT)
+    workers = (result or {}).get("workers") or []
+    if not workers:
+        return {"success": False, "error": "provision returned no worker"}
+    worker = workers[0]
+    return {
+        "success": True,
+        "agent_session_id": worker.get("agent_session_id"),
+        "name": worker.get("name"),
+        "created": bool(worker.get("created")),
+        "orchestration_mode": worker.get("orchestration_mode"),
+        "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+    }
+
+
 def create_session_response(
     name: str,
     orchestration_mode: str = "native",
@@ -364,6 +418,24 @@ def build_server() -> FastMCP:
         return _safe_result(create_worker_response)(
             worker_description, justification, orchestration_mode, node_id,
         )
+
+    if "ensure_named_worker" not in disabled_tools:
+        @server.tool(description=ENSURE_NAMED_WORKER_DESCRIPTION)
+        def ensure_named_worker(
+            name: str,
+            cwd: str,
+            orchestration_mode: str,
+            provision_prompt: str = "",
+            description: str = "",
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+            node_id: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(ensure_named_worker_response)(
+                name, cwd, orchestration_mode, provision_prompt, description,
+                provider_id, model, reasoning_effort, node_id,
+            )
 
     return server
 
