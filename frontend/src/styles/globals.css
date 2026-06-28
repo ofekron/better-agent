@@ -5544,6 +5544,30 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
 }
 
+.input-overflow-panel {
+  padding: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.input-overflow-panel .session-selector-controls {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: min(300px, calc(100vw - 40px));
+}
+
+.input-overflow-panel .session-selector-control {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.input-overflow-panel .session-selector-control select,
+.input-overflow-panel .session-selector-control--model select {
+  width: min(190px, 52vw);
+  max-width: none;
+}
+
 .overflow-menu-item {
   display: flex;
   align-items: center;

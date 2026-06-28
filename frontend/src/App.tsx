@@ -6162,23 +6162,25 @@ function AppMain({
               }
               onShowNotes={() => openRightPanelWithTab("notes")}
               onShowComments={() => openRightPanelWithTab("comments")}
+              composerOverflowNode={
+                currentSession && !isAskView ? (
+                  <SessionSelectorControls
+                    session={currentSession}
+                    providers={providers}
+                    disabled={!!currentSession.offline_pending}
+                    clientId={clientId}
+                    onChange={(updates) => {
+                      applySessionMetadata(currentSession.id, updates);
+                      if (typeof updates.model === "string") {
+                        setModel(updates.model);
+                      }
+                    }}
+                    onSaved={refreshSessions}
+                  />
+                ) : null
+              }
               toolbarActionsNode={
                 <>
-                  {currentSession && !isAskView ? (
-                    <SessionSelectorControls
-                      session={currentSession}
-                      providers={providers}
-                      disabled={!!currentSession.offline_pending}
-                      clientId={clientId}
-                      onChange={(updates) => {
-                        applySessionMetadata(currentSession.id, updates);
-                        if (typeof updates.model === "string") {
-                          setModel(updates.model);
-                        }
-                      }}
-                      onSaved={refreshSessions}
-                    />
-                  ) : null}
                   <ExtensionQuickButtons context={hookActionContext} variant="toolbar" />
                   {builtinExtensions.ask && !isAskView && !isMobile
                     ? sessionToolbarModules.map((module) => (

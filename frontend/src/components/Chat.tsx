@@ -377,6 +377,7 @@ interface Props {
    * above the first group. Used by the Ask view for its greeting box. */
   headerNode?: import("react").ReactNode;
   composerHeaderNode?: import("react").ReactNode;
+  composerOverflowNode?: import("react").ReactNode;
   /** Optional node rendered BELOW each message group (per turn). Used by
    * the Ask view to inject the inline session picker for any turn whose
    * assistant message carries an `ask_result` — rendered outside the
@@ -477,6 +478,7 @@ export function Chat({
   onSelectTab,
   headerNode,
   composerHeaderNode,
+  composerOverflowNode,
   renderGroupFooter,
   getGroupClassName,
   hideToolbar,
@@ -1389,6 +1391,7 @@ export function Chat({
               currentNodeId={currentNodeId}
               machines={machines}
               headerNode={composerHeaderNode}
+              overflowPanelNode={composerOverflowNode}
             />
           </>
         );

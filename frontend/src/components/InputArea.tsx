@@ -135,6 +135,7 @@ interface Props {
   /** Machine snapshots for resolving node_id → display name. */
   machines?: NodeSnapshot[];
   headerNode?: ReactNode;
+  overflowPanelNode?: ReactNode;
 }
 
 export function InputArea({
@@ -180,6 +181,7 @@ export function InputArea({
   currentNodeId = "primary",
   machines = [],
   headerNode,
+  overflowPanelNode,
 }: Props) {
   const { t } = useTranslation();
   const overflowMenuModules = useExtensionFrontendModules("input-overflow-menu");
@@ -816,6 +818,11 @@ export function InputArea({
           </button>
           {menuOpen && (
             <div className="input-overflow-menu">
+              {overflowPanelNode ? (
+                <div className="input-overflow-panel">
+                  {overflowPanelNode}
+                </div>
+              ) : null}
               {compactActionMenus && somethingRunning && canSteer && onSteer && (
                 <button
                   className="overflow-menu-item"
