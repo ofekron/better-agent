@@ -879,7 +879,7 @@ function AppMain({
       sessionId: string,
       patch: {
         open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes";
+        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board";
         addAutoReason?: AutoOpenReason;
         clearAutoReasons?: boolean;
       },
@@ -2209,7 +2209,7 @@ function AppMain({
   }, []);
   const [viewingFile, setViewingFile] = useState<ViewingFile | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<
-    "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes"
+    "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "board"
   >("files");
   useEffect(() => {
     if (!builtinExtensions.canvas && rightPanelTab === "canvas") {
@@ -3363,6 +3363,21 @@ function AppMain({
     if (!currentSession) return;
     if (lastTabSyncedSidRef.current === currentSession.id) return;
     lastTabSyncedSidRef.current = currentSession.id;
+    // The assistant board lives in the right-panel "Board" tab — when entering
+    // the assistant session, default to that tab and open the panel (unless the
+    // user persisted a different tab or an explicit open/closed choice).
+    if (currentSession.name === "Assistant") {
+      const persistedState = localRightPanelStates[currentSession.id];
+      if (persistedState?.tab && persistedState.tab !== "board") {
+        setRightPanelTab(persistedState.tab);
+      } else {
+        setRightPanelTab("board");
+        if (!isMobile && persistedState?.open === undefined) {
+          patchRightPanel(currentSession.id, { open: true, tab: "board" });
+        }
+      }
+      return;
+    }
     const persisted = localRightPanelStates[currentSession.id]?.tab;
     if (
       persisted &&
@@ -5882,25 +5897,9 @@ function AppMain({
                 ? <div className="ask-hero-wrap">{askGreetingSlots}</div>
                 : askGreetingSlots
               : undefined;
-          const isAssistantView = !isAskView && currentSession?.name === "Assistant";
-          const assistantSummarySlots = isAssistantView
-            ? assistantSummaryModules.map((module) => (
-                <ExtensionModuleSlot
-                  key={`${module.extension_id}:${module.id}`}
-                  module={module}
-                  context={{
-                    sessionId: currentSession?.id ?? "",
-                    sessionName: currentSession?.name ?? "",
-                    isAssistantSession: true,
-                    allSessions: sessions,
-                  }}
-                />
-              ))
-            : null;
-          const headerNode =
-            askDescriptionNode || assistantSummarySlots
-              ? <>{askDescriptionNode}{assistantSummarySlots}</>
-              : undefined;
+          // The assistant board renders in the right-panel "Board" tab, not the
+          // header (see assistantSummaryModules usage in the right panel).
+          const headerNode = askDescriptionNode || undefined;
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
@@ -6532,6 +6531,18 @@ function AppMain({
                   ? `${t("rightPanel.files")} (${currentSession?.open_file_panels?.length})`
                   : t("rightPanel.files")}
               </button>
+              {currentSession?.name === "Assistant" && (
+                <button
+                  className={`right-panel-tab ${rightPanelTab === "board" ? "active" : ""}`}
+                  onClick={() => {
+                    setRightPanelTab("board");
+                    if (currentSession && !isMobile)
+                      patchRightPanel(currentSession.id, { tab: "board", clearAutoReasons: true });
+                  }}
+                >
+                  {t("rightPanel.board", "Board")}
+                </button>
+              )}
               <button
                 className={`right-panel-tab ${rightPanelTab === "todos" ? "active" : ""}`}
                 onClick={() => {
@@ -6608,7 +6619,25 @@ function AppMain({
                 {t("rightPanel.changes", "Changes")}
               </button>
             </div>
-            {rightPanelTab === "comments" ? (
+            {rightPanelTab === "board" ? (
+              currentSession?.name === "Assistant" ? (
+                assistantSummaryModules.map((module) => (
+                  <ExtensionModuleSlot
+                    key={`${module.extension_id}:${module.id}`}
+                    module={module}
+                    className="extension-module-slot--right-panel-fill"
+                    context={{
+                      sessionId: currentSession?.id ?? "",
+                      sessionName: currentSession?.name ?? "",
+                      isAssistantSession: true,
+                      allSessions: sessions,
+                    }}
+                  />
+                ))
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : rightPanelTab === "comments" ? (
               <CommentsPanel
                 tags={tags}
                 onRemove={handleRemoveTag}
