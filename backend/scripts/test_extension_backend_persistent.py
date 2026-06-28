@@ -101,7 +101,7 @@ def main() -> None:
 
         # Crash recovery: kill the live process, next request restarts it.
         handle = L._PERSISTENT_PROCS["ofek.persist"]
-        handle.proc.kill()
+        handle.channel.proc.kill()
         r4 = client.get("/api/extensions/ofek.persist/backend/pid")
         check(r4.status_code == 200, "request succeeds after process crash (auto-restart)")
     finally:

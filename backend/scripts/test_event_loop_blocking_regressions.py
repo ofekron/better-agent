@@ -664,6 +664,16 @@ def test_run_recovery_summarizes_repeated_skip_logs() -> None:
     assert "integrate_recovered_runs: skipped %d run(s): %s%s" in source
 
 
+def test_extension_backend_get_skips_body_stream() -> None:
+    source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
+    assert '_METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}' in source
+    dispatch_start = source.index("async def dispatch_extension_backend_request(")
+    dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
+    dispatch_source = source[dispatch_start:dispatch_end]
+    assert "if request.method.upper() in _METHODS_WITH_REQUEST_BODY" in dispatch_source
+    assert "else b\"\"" in dispatch_source
+
+
 if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
     test_ownership_projection_uses_dedicated_executor()
@@ -709,4 +719,5 @@ if __name__ == "__main__":
     test_sessions_route_does_not_runtime_check_machine_nodes()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
+    test_extension_backend_get_skips_body_stream()
     print("PASS event loop blocking regressions")

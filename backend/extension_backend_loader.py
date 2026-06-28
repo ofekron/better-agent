@@ -45,6 +45,7 @@ _BLOCKED_RESPONSE_HEADERS = {
     "set-cookie",
     "transfer-encoding",
 }
+_METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
@@ -455,7 +456,11 @@ async def dispatch_extension_backend_request(
     if spec is None:
         raise HTTPException(status_code=404, detail="Extension is not installed")
 
-    body = await _read_limited_body(request)
+    body = (
+        await _read_limited_body(request)
+        if request.method.upper() in _METHODS_WITH_REQUEST_BODY
+        else b""
+    )
     return await _invoke_backend(
         spec,
         method=request.method,
