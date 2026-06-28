@@ -52,6 +52,10 @@ SUPPORTED_LANGUAGES: tuple[str, ...] = (
 DEFAULT_FIRST_RUN_WIZARD_DONE = False
 DEFAULT_FOLDER_VIEW_ENABLED = True
 DEFAULT_NETWORK_BIND_ADDRESS: NetworkBindAddress = "127.0.0.1"
+# Auto-restart the backend+frontend (via the run.sh supervisor) every time
+# the system transitions from busy to idle. Off by default — restarting a
+# running server is opt-in.
+DEFAULT_AUTO_RESTART_ON_IDLE = False
 DEFAULT_SHORTCUT_RESPONSES = [
     "TLDR",
     "Didn't read, but I trust you go ahead",
@@ -407,6 +411,22 @@ def set_last_reasoning_effort(provider_id: str, reasoning_effort: str) -> bool:
     return True
 
 
+def get_auto_restart_on_idle() -> bool:
+    """Whether the backend auto-fires a supervisor restart every time the
+    system goes idle after work (to pick up code changes). Default OFF."""
+    val = _load().get("auto_restart_on_idle", DEFAULT_AUTO_RESTART_ON_IDLE)
+    return val if isinstance(val, bool) else DEFAULT_AUTO_RESTART_ON_IDLE
+
+
+def set_auto_restart_on_idle(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid auto_restart_on_idle: {enabled!r}")
+    prefs = _load()
+    prefs["auto_restart_on_idle"] = enabled
+    _save(prefs)
+    return enabled
+
+
 def get_all() -> dict:
     prefs = _load()
     return {
@@ -429,6 +449,7 @@ def get_all() -> dict:
         "sessions_tabs_status_sort": get_session_tabs_status_sort(),
         "sessions_tabs_visible": get_session_tabs_visible(),
         "voice_close_on_background": get_voice_close_on_background(),
+        "auto_restart_on_idle": get_auto_restart_on_idle(),
     }
 
 

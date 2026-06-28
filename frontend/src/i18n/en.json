@@ -269,6 +269,8 @@
   "session.newButton": "+ New",
   "settings.crossSessionDelegateAuto": "Auto-approve cross-session delegation (fork only)",
   "settings.crossSessionDelegateAutoHint": "When on, delegate_to_session can fork another session and run without the confirmation picker. Continue-mode always asks. Off by default.",
+  "settings.autoRestartOnIdle": "Auto-restart when idle",
+  "settings.autoRestartOnIdleHint": "When on, the server and frontend rebuild and restart automatically every time the system finishes work and goes idle, picking up code changes without a manual refresh. Only active under the run.sh supervisor. Off by default.",
   "settings.contextStrategy": "Context window strategy",
   "settings.sessionTabsVisible": "Show session tabs bar",
   "settings.sessionTabsSort": "Session tabs order",
