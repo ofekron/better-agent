@@ -77,6 +77,9 @@ LEGACY_KEYRING_USERNAME = "anthropic-api-key"  # pre-providers-refactor
 # Sentinel returned from the frontend to mean "keep the existing key".
 KEEP_SENTINEL = "__keep__"
 
+SAKANA_FUGU_API_BASE_URLS = ("https://api.sakana.ai/v1",)
+SAKANA_FUGU_REASONING_EFFORTS = ("high", "xhigh")
+
 
 # ----------------------------------------------------------------------------
 # Keychain helpers (per-provider)
@@ -681,10 +684,12 @@ def _strip(provider: dict) -> dict:
     # Effort options only exist where the (possibly overridden) capability
     # says reasoning effort is supported.
     effort_options = (
-        _kind_reasoning_effort_options(kind) if caps.get("supports_reasoning_effort") else []
+        reasoning_effort_options_for_provider(provider)
+        if caps.get("supports_reasoning_effort")
+        else []
     )
-    default_effort = _clean_default_reasoning_effort(
-        kind, provider.get("default_reasoning_effort")
+    default_effort = clean_default_reasoning_effort_for_provider(
+        provider, provider.get("default_reasoning_effort")
     )
     permission_options = _kind_permission_options(kind)
     default_perm = (
@@ -787,6 +792,24 @@ def _kind_reasoning_effort_options(kind: str) -> list[str]:
         return list(ALL_REASONING_EFFORTS)
 
 
+def _normalized_base_url(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().rstrip("/").lower()
+
+
+def _is_sakana_fugu_api(provider: dict) -> bool:
+    if provider.get("kind") != "openai":
+        return False
+    return _normalized_base_url(provider.get("base_url")) in SAKANA_FUGU_API_BASE_URLS
+
+
+def reasoning_effort_options_for_provider(provider: dict) -> list[str]:
+    if _is_sakana_fugu_api(provider):
+        return list(SAKANA_FUGU_REASONING_EFFORTS)
+    return _kind_reasoning_effort_options(provider.get("kind", "claude"))
+
+
 def _kind_default_reasoning_effort(kind: str) -> str:
     try:
         from provider import _resolve_class
@@ -801,6 +824,12 @@ def _kind_default_reasoning_effort(kind: str) -> str:
     return options[0] if options else ""
 
 
+def _provider_default_reasoning_effort(provider: dict) -> str:
+    if _is_sakana_fugu_api(provider):
+        return SAKANA_FUGU_REASONING_EFFORTS[0]
+    return _kind_default_reasoning_effort(provider.get("kind", "claude"))
+
+
 def _clean_default_reasoning_effort(kind: str, value: object) -> str:
     options = _kind_reasoning_effort_options(kind)
     if not options:
@@ -809,6 +838,16 @@ def _clean_default_reasoning_effort(kind: str, value: object) -> str:
     if effort and effort in options:
         return effort
     return _kind_default_reasoning_effort(kind)
+
+
+def clean_default_reasoning_effort_for_provider(provider: dict, value: object) -> str:
+    options = reasoning_effort_options_for_provider(provider)
+    if not options:
+        return ""
+    effort = normalize_reasoning_effort(value)
+    if effort and effort in options:
+        return effort
+    return _provider_default_reasoning_effort(provider)
 
 
 def _kind_permission_options(kind: str) -> dict[str, list[str]]:
@@ -927,13 +966,13 @@ def add_provider(payload: dict) -> dict:
         "config_dir": (payload.get("config_dir") or "").strip(),
         "custom_models": list(payload.get("custom_models") or []),
         "default_model": (payload.get("default_model") or "").strip(),
-        "default_reasoning_effort": _clean_default_reasoning_effort(
-            kind, payload.get("default_reasoning_effort")
-        ),
         "default_permission": _clean_default_permission(kind, payload.get("default_permission")),
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
     }
+    provider["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
+        provider, payload.get("default_reasoning_effort")
+    )
     if mode == "api_key":
         api_key = payload.get("api_key", "")
         if api_key and api_key != KEEP_SENTINEL:
@@ -971,12 +1010,12 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     if "default_model" in payload:
         target["default_model"] = (payload.get("default_model") or "").strip()
     if "default_reasoning_effort" in payload:
-        target["default_reasoning_effort"] = _clean_default_reasoning_effort(
-            target.get("kind", "claude"), payload.get("default_reasoning_effort")
+        target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
+            target, payload.get("default_reasoning_effort")
         )
-    elif "kind" in payload:
-        target["default_reasoning_effort"] = _clean_default_reasoning_effort(
-            target.get("kind", "claude"), target.get("default_reasoning_effort")
+    elif "kind" in payload or "base_url" in payload:
+        target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
+            target, target.get("default_reasoning_effort")
         )
     if "default_permission" in payload:
         target["default_permission"] = _clean_default_permission(
