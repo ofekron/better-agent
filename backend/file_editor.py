@@ -1,28 +1,26 @@
-"""File-editing mode — Better Agent sessions that interactively edit a SET of
-real project files with AI assistance.
+"""File-editing mode — Better Agent sessions that interactively edit real
+project files with AI assistance.
 
 Lifecycle:
-  start    -> one session per project cwd. Idempotent: creates a
-              file-editor session for the cwd if none exists, otherwise
-              JOINS the existing one (adds the file to its set and
-              continues the same agent conversation).
-  cleanup  -> caller cancels runners + rearranger first, then delegates
-              here to drop the session record. Idempotent. Tears down
-              the whole set (every file).
+  start/start_empty -> warm one generic file-editing base for the project
+                       cwd/provider/model, then create a fresh user-facing
+                       provider fork for this new editor session. Sessions
+                       are no longer reused by cwd or by file path.
+  cleanup           -> caller cancels runners + rearranger first, then
+                       delegates here to drop the session record.
 
-Unlike prompt engineering, file-editor sessions edit the REAL files
-in-place (no temp copies). The meta-prompt tells Claude to read, edit,
-and iterate on the files based on user instructions.
+Unlike prompt engineering, file-editor sessions edit the REAL files in-place.
+The generic provisioned base learns the editing workflow once (without any
+specific file); every user-facing file-editor session forks from that warm
+base and receives only its own selected file set / user prompt.
 
-`persistent` is an upgrade-only flag on the single per-cwd session:
-the new-session-modal flavor creates it persistent (sidebar-visible,
-no Done button); the project-tree "AI Edit" flavor creates it temporal
-(sidebar-hidden, has Done). Whichever exists first for a cwd is the
-one subsequent opens join; a temporal session is upgraded to
-persistent if a persistent open later targets the same cwd, never
-downgraded.
+`persistent` is now a plain per-session creation flag: persistent sessions are
+sidebar-visible; temporal sessions are sidebar-hidden and show the Done button.
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -33,19 +31,54 @@ from session_manager import manager as session_manager
 import config_store
 import working_mode
 from prompt_templates import render_prompt
+from provisioning import DirtyPolicy, ProvisionedConfig, ProvisionedSessionSpec, register
+from reasoning_effort import normalize_reasoning_effort
+import provisioning.manager as provisioning_manager
 
 logger = logging.getLogger(__name__)
 
 MODE = "file_editing"
+BASE_MODE = "file_editing_base"
 
 _META_PROMPT = render_prompt("file_editor/bootstrap.md")
-
-_ADD_FILE_PROMPT = render_prompt("file_editor/add_file.md")
+_PROVISION_PROMPT = render_prompt("file_editor/provision.md")
 
 _EMPTY_SESSION_ASK = (
     "Which file or files do you want to edit? You can pick files with the "
     "file chooser, ask me to create a new file, or describe the files here."
 )
+
+
+class FileEditBaseSpec(ProvisionedSessionSpec):
+    """Warm base used only as the provider-level fork source for file editing."""
+
+    key = BASE_MODE
+    version = 1
+    name = "file-editing-base"
+    env_prefix = "FILE_EDITING_BASE"
+    task_key = "default_session"
+    orchestration_mode = "native"
+    bare_config = False
+    worker_creation_policy = "deny"
+    machine_completion = False
+    run_mode = "fork"
+    ephemeral_forks = True
+    dispatch = "in_process"
+    on_no_fork = "error"
+    lifetime_seconds = 6 * 60 * 60
+    provision_timeout = 24.0 * 60.0 * 60.0
+    retry_attempts = 1
+    dirty_policy = DirtyPolicy(
+        max_base_bytes=1_000_000,
+        max_user_turns=1,
+        max_assistant_turns=1,
+    )
+
+    def build_provision_prompt(self, ctx: dict) -> str:
+        return _PROVISION_PROMPT
+
+
+FILE_EDIT_BASE_SPEC = register(FileEditBaseSpec())
 
 
 def _format_file_list(paths: list) -> str:
@@ -65,20 +98,6 @@ def _assert_multifile_meta(meta: dict, sid: str) -> None:
             "delete legacy file_editing sessions from "
             "~/.better-claude/sessions/ to start fresh."
         )
-
-
-def _resume_payload(session: dict) -> dict:
-    """Shared response shape for a pure resume (no file added)."""
-    meta = session.get("working_mode_meta") or {}
-    _assert_multifile_meta(meta, session["id"])
-    return {
-        "session_id": session["id"],
-        "file_paths": list(meta.get("file_paths") or []),
-        "original_contents": dict(meta.get("original_contents") or {}),
-        "meta_prompt": None,
-        "session": session,
-        "resumed": True,
-    }
 
 
 async def _baseline(
@@ -109,82 +128,156 @@ async def _project_cwd(node_id: str, cwd: str) -> dict:
     )
 
 
-async def _join_file_set_atomic(
-    sid: str,
-    node_id: str,
-    resolved: str,
-    persistent: bool,
-) -> tuple[bool, dict]:
-    """Add *resolved* to the session's file set + apply the upgrade-only
-    persistent flag, atomically under the per-root session lock.
-
-    The read-modify-write of ``working_mode_meta`` MUST happen inside a
-    single locked mutation: doing find→read→append→write across separate
-    lock acquisitions lets two concurrent opens for the same cwd each
-    read the old set and last-writer-wins drop a file silently.
-
-    The baseline read for the newly-added file happens BEFORE the lock
-    (one RPC round-trip on a remote node) so the locked region stays
-    short and pure-in-memory.
-
-    Returns ``(added, session)`` — *added* is False when the file was
-    already in the set (pure resume).
-    """
-    # Probe first under the lock so we don't pay an RPC roundtrip just
-    # to discover the file is already in the set.
-    probe: dict = {}
-
-    def _probe(s: dict) -> None:
-        meta = dict(s.get("working_mode_meta") or {})
-        _assert_multifile_meta(meta, s["id"])
-        probe["already_in_set"] = resolved in (meta.get("file_paths") or [])
-
-    session_manager._run(sid, _probe, {"kind": "working_mode_probed", "mode": MODE})
-
-    if probe["already_in_set"]:
-        # Pure resume — apply persistent upgrade only.
-        outcome: dict = {"added": False}
-        def _upgrade(s: dict) -> None:
-            meta = dict(s.get("working_mode_meta") or {})
-            if persistent and not meta.get("persistent"):
-                meta["persistent"] = True
-                s["working_mode_meta"] = meta
-        sess = session_manager._run(
-            sid, _upgrade, {"kind": "working_mode_marked", "mode": MODE}
-        )
-        return outcome["added"], (sess or session_manager.get(sid) or {})
-
-    # Fetch baseline content for the newly-added file (local or remote).
-    try:
-        baseline = await _baseline(node_id, resolved)
-        orig = baseline["original_content"]
-    except Exception:
-        orig = ""
-
-    outcome = {"added": True}
-
-    def _do(s: dict) -> None:
-        meta = dict(s.get("working_mode_meta") or {})
-        _assert_multifile_meta(meta, s["id"])
-        file_paths = list(meta.get("file_paths") or [])
-        if persistent and not meta.get("persistent"):
-            meta["persistent"] = True
-        if resolved in file_paths:
-            # Lost a race with another concurrent add — treat as pure
-            # resume; the other writer already populated original_contents.
-            outcome["added"] = False
-        else:
-            file_paths.append(resolved)
-            contents = dict(meta.get("original_contents") or {})
-            contents[resolved] = orig
-            meta["original_contents"] = contents
-        meta["file_paths"] = file_paths
-        s["working_mode_meta"] = meta
-
-    sess = session_manager._run(
-        sid, _do, {"kind": "working_mode_marked", "mode": MODE}
+def _provider_record(provider_id: Optional[str]) -> dict:
+    resolved_provider_id = provider_id or config_store.default_session_provider_id()
+    provider = (
+        config_store.get_provider(resolved_provider_id)
+        if resolved_provider_id else
+        config_store.get_default_provider()
     )
-    return outcome["added"], (sess or session_manager.get(sid) or {})
+    if resolved_provider_id and not provider:
+        raise ValueError("provider not found")
+    if not provider:
+        raise ValueError("no active provider configured")
+    return provider
+
+
+def _require_fork_support(provider_id: str) -> None:
+    try:
+        from provider import get_provider
+        provider = get_provider(provider_id)
+    except KeyError as exc:
+        raise ValueError("provider not found") from exc
+    if not getattr(provider, "supports_fork", True):
+        raise ValueError(
+            f"file-editing sessions require fork support; "
+            f"provider {getattr(provider, 'KIND', provider_id)!r} does not support fork."
+        )
+
+
+def _file_edit_config(
+    *,
+    project_cwd: str,
+    model: Optional[str],
+    provider_id: Optional[str],
+    reasoning_effort: Optional[str],
+    node_id: str,
+) -> ProvisionedConfig:
+    provider = _provider_record(provider_id)
+    resolved_provider_id = str(provider.get("id") or provider_id or "")
+    if not resolved_provider_id:
+        raise ValueError("provider not found")
+    _require_fork_support(resolved_provider_id)
+    resolved_model = str(model or provider.get("default_model") or "").strip()
+    if not resolved_model:
+        resolved_model = config_store.default_session_model()
+    if not resolved_model:
+        name = provider.get("name") or resolved_provider_id
+        raise ValueError(f"{name} has no default model configured")
+    resolved_effort = normalize_reasoning_effort(reasoning_effort) or ""
+    if not resolved_effort and provider.get("supports_reasoning_effort"):
+        options = provider.get("reasoning_effort_options") or []
+        default_effort = normalize_reasoning_effort(
+            provider.get("default_reasoning_effort")
+        )
+        if default_effort and default_effort in options:
+            resolved_effort = default_effort
+    return ProvisionedConfig(
+        cwd=project_cwd,
+        model=resolved_model,
+        provider_id=resolved_provider_id,
+        reasoning_effort=resolved_effort,
+        run_mode="fork",
+        dispatch="in_process",
+        on_no_fork="error",
+        node_id=node_id or "primary",
+        backend_url="http://localhost:8000",
+        internal_token="",
+        provisioned_session_id=None,
+        caller_session_id=None,
+        worker_description=FILE_EDIT_BASE_SPEC.name,
+    )
+
+
+async def _ensure_file_edit_base(cfg: ProvisionedConfig) -> str:
+    """Return a warmed generic file-editing base session id.
+
+    Kept as a small wrapper so deterministic tests can monkeypatch it without
+    launching a real provider subprocess.
+    """
+    return await provisioning_manager.ensure_warm_base(
+        FILE_EDIT_BASE_SPEC,
+        cfg,
+        {},
+    )
+
+
+def _base_line_count(project_cwd: str, base_session: dict, base_agent_sid: str) -> int:
+    """Line-count snapshot for the warm base jsonl.
+
+    Stamped on the child so its first provider fork can skip inherited
+    provision lines before native tailing exposes the session to the UI.
+    """
+    try:
+        from orchs.jsonl_helpers import compute_jsonl_read_path, count_jsonl_lines
+        path = compute_jsonl_read_path(project_cwd, base_agent_sid, base_session)
+        return count_jsonl_lines(path) if path else 0
+    except Exception:
+        logger.debug("file-edit base line-count failed", exc_info=True)
+        return 0
+
+
+async def _create_interactive_fork(
+    *,
+    project_cwd: str,
+    file_paths: list[str],
+    original_contents: dict[str, str],
+    persistent: bool,
+    name: str,
+    cfg: ProvisionedConfig,
+) -> dict:
+    base_session_id = await _ensure_file_edit_base(cfg)
+    base_session = session_manager.get(base_session_id) or {}
+    base_agent_sid = str(base_session.get("agent_session_id") or "").strip()
+    if not base_agent_sid:
+        raise RuntimeError("file-editing base did not initialize")
+    parent_lines = _base_line_count(project_cwd, base_session, base_agent_sid)
+
+    session = session_manager.create(
+        name=name,
+        model=cfg.model,
+        cwd=project_cwd,
+        orchestration_mode="native",
+        source="web",
+        provider_id=cfg.provider_id,
+        reasoning_effort=cfg.reasoning_effort or None,
+        node_id=cfg.node_id,
+    )
+    session_manager.set_forked_from(session["id"], base_agent_sid)
+    if parent_lines > 0:
+        session_manager._run(
+            session["id"],
+            lambda s: s.__setitem__("parent_line_count_at_fork", parent_lines),
+            {"kind": "fork_parent_line_count_set"},
+            bump_updated_at=False,
+        )
+    working_mode.mark_working_mode(
+        session["id"],
+        mode=MODE,
+        meta={
+            "project_cwd": project_cwd,
+            "file_paths": list(file_paths),
+            "original_contents": dict(original_contents),
+            "persistent": persistent,
+            "base_session_id": base_session_id,
+        },
+    )
+    # The session was just created as a normal user session, then marked as
+    # working-mode. Force the debounced summary write through before returning
+    # so a simultaneous `/api/sessions` snapshot doesn't briefly surface a
+    # temporal file-editor session in the sidebar without its working_mode meta.
+    await asyncio.to_thread(session_manager.flush_pending_persists)
+    return session_manager.get(session["id"]) or session
 
 
 async def start_empty(
@@ -201,49 +294,24 @@ async def start_empty(
 
     project = await _project_cwd(node_id, cwd)
     project_cwd = project["cwd_resolved"]
-
-    existing = working_mode.find_working_session(MODE, project_cwd=project_cwd)
-    if existing:
-        if persistent:
-            def _upgrade(s: dict) -> None:
-                meta = dict(s.get("working_mode_meta") or {})
-                _assert_multifile_meta(meta, s["id"])
-                if not meta.get("persistent"):
-                    meta["persistent"] = True
-                    s["working_mode_meta"] = meta
-
-            existing = session_manager._run(
-                existing["id"],
-                _upgrade,
-                {"kind": "working_mode_marked", "mode": MODE},
-            ) or existing
-        return _resume_payload(existing)
-
-    name = f"✏️ Edit — {Path(project_cwd).name}"
-    session = session_manager.create(
-        name=name,
+    cfg = _file_edit_config(
+        project_cwd=project_cwd,
         model=model,
-        cwd=project_cwd,
-        orchestration_mode="native",
-        source="web",
         provider_id=provider_id,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
-    working_mode.mark_working_mode(
-        session["id"],
-        mode=MODE,
-        meta={
-            "project_cwd": project_cwd,
-            "file_paths": [],
-            "original_contents": {},
-            "persistent": persistent,
-        },
-    )
 
-    full_session = session_manager.get(session["id"])
+    full_session = await _create_interactive_fork(
+        project_cwd=project_cwd,
+        file_paths=[],
+        original_contents={},
+        persistent=persistent,
+        name=f"✏️ Edit — {Path(project_cwd).name}",
+        cfg=cfg,
+    )
     return {
-        "session_id": session["id"],
+        "session_id": full_session["id"],
         "file_paths": [],
         "original_contents": {},
         "meta_prompt": None,
@@ -263,28 +331,21 @@ async def start(
     persistent: bool = False,
     node_id: str = "primary",
 ) -> dict:
-    """Create (or join) the file-editing session for *cwd* and ensure
-    *file_path* is in its set.
+    """Create a fresh file-editing session for *file_path*.
 
     Async because baseline reads (file existence, content) route through
     `node_rpc_handlers.call_local_or_remote` so file_editing works on
     any node the session targets — not just the primary.
 
-    One session per canonical project ``cwd``:
-      - No session for the cwd  -> create one, set = {file_path}.
-      - Session exists, file already in set -> pure resume.
-      - Session exists, file NOT in set -> add it to the set and return
-        an add-file meta-prompt (submitted on the SAME claude session,
-        continuing the conversation).
-
-    `persistent=True` upgrades the session's persistent flag in place
-    (never downgrades).
+    Every call creates a new user-facing Better Agent session backed by a
+    provider fork of the warmed file-editing base. There is intentionally no
+    cwd/file-path reuse or join path.
 
     Returns: {
       "session_id": str,
       "file_paths": list[str],
       "original_contents": dict[str, str],
-      "meta_prompt": str | None,   # None on pure resume
+      "meta_prompt": str | None,
       "session": dict,
       "resumed": bool,
     }
@@ -296,45 +357,24 @@ async def start(
     resolved = baseline["file_path_resolved"]
     project_cwd = baseline["cwd_resolved"]
     orig = baseline["original_content"]
-
-    existing = working_mode.find_working_session(MODE, project_cwd=project_cwd)
-    if existing:
-        added, sess = await _join_file_set_atomic(
-            existing["id"], node_id, resolved, persistent,
-        )
-        payload = _resume_payload(sess)
-        if added:
-            payload["meta_prompt"] = _ADD_FILE_PROMPT.format(
-                path=resolved,
-                file_list=_format_file_list(payload["file_paths"]),
-            )
-        return payload
-
-    name = f"✏️ Edit — {Path(resolved).name}"
-    session = session_manager.create(
-        name=name,
+    cfg = _file_edit_config(
+        project_cwd=project_cwd,
         model=model,
-        cwd=project_cwd,
-        orchestration_mode="native",
-        source="web",
         provider_id=provider_id,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
-    working_mode.mark_working_mode(
-        session["id"],
-        mode=MODE,
-        meta={
-            "project_cwd": project_cwd,
-            "file_paths": [resolved],
-            "original_contents": {resolved: orig},
-            "persistent": persistent,
-        },
-    )
 
-    full_session = session_manager.get(session["id"])
+    full_session = await _create_interactive_fork(
+        project_cwd=project_cwd,
+        file_paths=[resolved],
+        original_contents={resolved: orig},
+        persistent=persistent,
+        name=f"✏️ Edit — {Path(resolved).name}",
+        cfg=cfg,
+    )
     return {
-        "session_id": session["id"],
+        "session_id": full_session["id"],
         "file_paths": [resolved],
         "original_contents": {resolved: orig},
         "meta_prompt": _META_PROMPT.format(
@@ -343,7 +383,6 @@ async def start(
         "session": full_session,
         "resumed": False,
     }
-
 
 def cleanup(session_id: str) -> bool:
     """Delete the file-editor session record. No temp dirs to clean up —

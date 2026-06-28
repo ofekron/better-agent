@@ -419,6 +419,92 @@ def test_lifecycle_lock_timeout_surfaces() -> bool:
         lock.release()
 
 
+def test_ensure_warm_base_initializes_once() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "warm_base_test"
+        env_prefix = "WARM_BASE_TEST"
+        name = "worker:warm-base"
+        orchestration_mode = "native"
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+    spec = _S()
+    cfg = ProvisionedConfig(
+        cwd="/repo",
+        model="model",
+        provider_id="provider",
+        reasoning_effort="",
+        run_mode="fork",
+        dispatch="http",
+        on_no_fork="error",
+        node_id="primary",
+        backend_url="http://localhost:8000",
+        internal_token="token",
+        provisioned_session_id=None,
+        caller_session_id=None,
+        worker_description="worker:warm-base",
+    )
+
+    original_ensure_session = prov_manager.ensure_session
+    original_session_manager = sys.modules.get("session_manager")
+    original_main = sys.modules.get("main")
+    calls = 0
+    sessions = {"base": {"id": "base", "agent_session_id": None}}
+
+    class FakeSessionManager:
+        def get(self, sid):
+            return sessions.get(sid)
+
+        def set_agent_sid(self, sid, mode, agent_sid, **_kwargs):
+            sessions[sid]["agent_session_id"] = agent_sid
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.init_cancel_events = {}
+
+        async def _init_target_agent_session(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            if kwargs.get("provision_prompt") != "provision":
+                raise AssertionError("wrong provision prompt")
+            return "agent-sid"
+
+    fake_sm_mod = type(sys)("session_manager")
+    fake_sm_mod.manager = FakeSessionManager()
+    fake_main_mod = type(sys)("main")
+    fake_main_mod.coordinator = FakeCoordinator()
+
+    try:
+        prov_manager.ensure_session = lambda _spec, _cfg: "base"
+        sys.modules["session_manager"] = fake_sm_mod
+        sys.modules["main"] = fake_main_mod
+        first = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
+        second = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        if original_session_manager is not None:
+            sys.modules["session_manager"] = original_session_manager
+        else:
+            sys.modules.pop("session_manager", None)
+        if original_main is not None:
+            sys.modules["main"] = original_main
+        else:
+            sys.modules.pop("main", None)
+
+    if first != "base" or second != "base":
+        print(f"{FAIL} warm_base: wrong base ids {first!r}/{second!r}")
+        return False
+    if calls != 1:
+        print(f"{FAIL} warm_base: expected one init call, got {calls}")
+        return False
+    if sessions["base"].get("agent_session_id") != "agent-sid":
+        print(f"{FAIL} warm_base: sid not persisted")
+        return False
+    print(f"{PASS} ensure_warm_base initializes only unwarmed bases")
+    return True
+
+
 def test_run_sync_times_out_stuck_dispatch() -> bool:
     class _S(ProvisionedSessionSpec):
         key = "dispatch_timeout_test"
@@ -494,6 +580,7 @@ def main_run() -> int:
         test_extract_fork_text,
         test_run_serializes_lifecycle_creation,
         test_lifecycle_lock_timeout_surfaces,
+        test_ensure_warm_base_initializes_once,
         test_run_sync_times_out_stuck_dispatch,
     ]
     results = []
