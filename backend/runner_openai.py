@@ -56,6 +56,9 @@ from orchestration_tool_descriptions import (
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
+from orchestration_tool_schemas import (
+    DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+)
 from prompt_templates import render_prompt
 from tool_approval_client import describe_tool_call, request_tool_approval
 
@@ -720,20 +723,6 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         "message": {"type": "string"},
     },
     "required": ["target_session_id", "message"],
-    "additionalProperties": False,
-}
-
-_DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "task": {"type": "string"},
-        "target_session_id": {"type": "string"},
-        "provider_id": {"type": "string"},
-        "model": {"type": "string"},
-        "reasoning_effort": {"type": "string"},
-        "sub_session": {"type": "boolean"},
-    },
-    "required": ["task"],
     "additionalProperties": False,
 }
 
