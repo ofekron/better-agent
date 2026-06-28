@@ -68,6 +68,12 @@ def _load() -> dict[str, Any]:
     return copy.deepcopy(data)
 
 
+def version_token() -> tuple[int, int] | None:
+    with _lock:
+        _load_shared()
+        return _cache_signature
+
+
 def _save(data: dict[str, Any]) -> None:
     global _cache_data, _cache_signature
     path = _path()
