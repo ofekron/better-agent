@@ -1025,21 +1025,17 @@ def _validate_provider_model(
 
 
 def _validate_provider_default_reasoning_effort(
-    kind: str | None, effort: str | None,
+    provider_record: dict, effort: str | None,
 ) -> str:
     parsed = _api_reasoning_effort(effort)
     if not parsed:
         return ""
-    try:
-        from provider import _resolve_class
-        cls = _resolve_class(kind or "claude")
-        options = list(getattr(cls, "reasoning_effort_options", ()) or [])
-    except Exception:
-        options = ["none", "minimal", "low", "medium", "high", "xhigh"]
+    options = config_store.reasoning_effort_options_for_provider(provider_record)
     if parsed not in options:
+        name = provider_record.get("name") or provider_record.get("kind") or "provider"
         raise HTTPException(
             status_code=400,
-            detail=f"{kind or 'provider'} does not support reasoning_effort={parsed!r}",
+            detail=f"{name} does not support reasoning_effort={parsed!r}",
         )
     return parsed
 
@@ -1106,7 +1102,7 @@ async def get_providers():
         if last:
             record["last_model"] = last
         last_effort = last_efforts.get(record.get("id"))
-        if last_effort:
+        if last_effort and last_effort in (record.get("reasoning_effort_options") or []):
             record["last_reasoning_effort"] = last_effort
     return state
 
@@ -1115,7 +1111,7 @@ async def get_providers():
 async def create_provider(payload: ProviderPayload):
     body = payload.model_dump()
     body["default_reasoning_effort"] = _validate_provider_default_reasoning_effort(
-        body.get("kind"), body.get("default_reasoning_effort"),
+        body, body.get("default_reasoning_effort"),
     )
     try:
         record = await asyncio.to_thread(config_store.add_provider, body)
@@ -1132,8 +1128,10 @@ async def patch_provider(provider_id: str, payload: ProviderPatch):
         current = await asyncio.to_thread(config_store.get_provider, provider_id)
         if current is None:
             raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+        candidate = dict(current)
+        candidate.update(body)
         body["default_reasoning_effort"] = _validate_provider_default_reasoning_effort(
-            body.get("kind") or current.get("kind"), body.get("default_reasoning_effort"),
+            candidate, body.get("default_reasoning_effort"),
         )
     try:
         record = await asyncio.to_thread(config_store.update_provider, provider_id, body)

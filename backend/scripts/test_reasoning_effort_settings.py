@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import auth  # noqa: E402
 import config_store  # noqa: E402
 import user_prefs  # noqa: E402
 from paths import ba_home  # noqa: E402
@@ -43,6 +44,18 @@ def _add_gemini_api_provider(name: str = "Gemini API") -> dict:
         "kind": "gemini",
         "mode": "api_key",
         "default_model": "gemini-2.5-pro",
+        "custom_models": ["gemini-3-pro"],
+    })
+
+
+def _add_sakana_api_provider(name: str = "Sakana Fugu API") -> dict:
+    return config_store.add_provider({
+        "name": name,
+        "kind": "openai",
+        "mode": "api_key",
+        "base_url": "https://api.sakana.ai/v1",
+        "default_model": "fugu-ultra-20260615",
+        "default_reasoning_effort": "",
     })
 
 
@@ -60,6 +73,107 @@ def test_default_provider_capabilities(client: TestClient) -> bool:
         return False
     if codex["default_reasoning_effort"] != "medium":
         print(f"  codex default mismatch: {codex['default_reasoning_effort']!r}")
+        return False
+    return True
+
+
+def test_sakana_api_provider_uses_fugu_efforts(client: TestClient) -> bool:
+    sakana = _add_sakana_api_provider()
+    if sakana["reasoning_effort_options"] != ["high", "xhigh"]:
+        print(f"  sakana options mismatch: {sakana['reasoning_effort_options']!r}")
+        return False
+    if sakana["default_reasoning_effort"] != "high":
+        print(f"  sakana default mismatch: {sakana['default_reasoning_effort']!r}")
+        return False
+    r = client.post(
+        "/api/sessions",
+        json={
+            "cwd": "/tmp",
+            "provider_id": sakana["id"],
+            "orchestration_mode": "native",
+            "reasoning_effort": "medium",
+        },
+    )
+    if r.status_code != 400:
+        print(f"  sakana accepted medium: {r.status_code} {r.text}")
+        return False
+    r = client.post(
+        "/api/sessions",
+        json={
+            "cwd": "/tmp",
+            "provider_id": sakana["id"],
+            "orchestration_mode": "native",
+            "reasoning_effort": "high",
+        },
+    )
+    if r.status_code != 200:
+        print(f"  sakana rejected high: {r.status_code} {r.text}")
+        return False
+    user_prefs.set_last_reasoning_effort(sakana["id"], "medium")
+    sakana_from_api = next(
+        p for p in _providers(client)["providers"] if p["id"] == sakana["id"]
+    )
+    if "last_reasoning_effort" in sakana_from_api:
+        print(f"  sakana exposed stale last effort: {sakana_from_api['last_reasoning_effort']!r}")
+        return False
+    user_prefs.set_last_reasoning_effort(sakana["id"], "high")
+    sakana_from_api = next(
+        p for p in _providers(client)["providers"] if p["id"] == sakana["id"]
+    )
+    if sakana_from_api.get("last_reasoning_effort") != "high":
+        print(f"  sakana hid valid last effort: {sakana_from_api.get('last_reasoning_effort')!r}")
+        return False
+    return True
+
+
+def test_sakana_api_default_rejects_medium(client: TestClient) -> bool:
+    r = client.post(
+        "/api/providers",
+        json={
+            "name": "Sakana Medium",
+            "kind": "openai",
+            "mode": "api_key",
+            "base_url": "https://api.sakana.ai/v1",
+            "default_model": "fugu-ultra-20260615",
+            "default_reasoning_effort": "medium",
+        },
+    )
+    if r.status_code != 400:
+        print(f"  create accepted medium default: {r.status_code} {r.text}")
+        return False
+    sakana = _add_sakana_api_provider("Sakana Patch")
+    r = client.patch(
+        f"/api/providers/{sakana['id']}",
+        json={"default_reasoning_effort": "medium"},
+    )
+    if r.status_code != 400:
+        print(f"  patch accepted medium default: {r.status_code} {r.text}")
+        return False
+    r = client.patch(
+        f"/api/providers/{sakana['id']}",
+        json={"default_reasoning_effort": "xhigh"},
+    )
+    if r.status_code != 200 or r.json().get("default_reasoning_effort") != "xhigh":
+        print(f"  patch rejected xhigh default: {r.status_code} {r.text}")
+        return False
+    return True
+
+
+def test_generic_openai_keeps_generic_efforts(client: TestClient) -> bool:
+    provider = config_store.add_provider({
+        "name": "Generic OpenAI",
+        "kind": "openai",
+        "mode": "api_key",
+        "base_url": "https://example.test/v1",
+        "default_model": "model",
+        "default_reasoning_effort": "medium",
+    })
+    expected = ["none", "minimal", "low", "medium", "high", "xhigh"]
+    if provider["reasoning_effort_options"] != expected:
+        print(f"  generic options mismatch: {provider['reasoning_effort_options']!r}")
+        return False
+    if provider["default_reasoning_effort"] != "medium":
+        print(f"  generic default mismatch: {provider['default_reasoning_effort']!r}")
         return False
     return True
 
@@ -221,6 +335,9 @@ def test_claude_sdk_effort_mapping(client: TestClient) -> bool:
 
 TESTS = [
     ("default provider capabilities", test_default_provider_capabilities),
+    ("Sakana API provider uses Fugu efforts", test_sakana_api_provider_uses_fugu_efforts),
+    ("Sakana API default rejects medium", test_sakana_api_default_rejects_medium),
+    ("generic OpenAI keeps generic efforts", test_generic_openai_keeps_generic_efforts),
     ("provider default persists and new session inherits", test_provider_default_persists_and_new_session_inherits),
     ("explicit create and selector patch record last effort", test_explicit_create_and_selector_patch_record_last_effort),
     ("provider switch to unsupported clears effort", test_provider_switch_to_unsupported_clears_effort),
@@ -232,6 +349,7 @@ TESTS = [
 
 def main_run() -> int:
     with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
+        client.headers.update({"Authorization": f"Bearer {auth.create_token('test')}"})
         failed = 0
         try:
             for name, fn in TESTS:
