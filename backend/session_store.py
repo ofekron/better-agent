@@ -3378,6 +3378,8 @@ DEFAULT_SEARCH_FIELDS = frozenset({
     SEARCH_FIELD_TITLE,
     SEARCH_FIELD_FIRST_PROMPT,
 })
+_METADATA_SEARCH_CACHE_MAX = 128
+_metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
 
 
 def _normalize_search_fields(fields: Iterable[str] | None) -> set[str]:
@@ -3434,27 +3436,38 @@ def _first_user_prompt(root: dict) -> str:
 
 def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
     query_lower = query.lower()
-    scores: dict[str, int] = {}
-    if SEARCH_FIELD_TITLE not in fields and SEARCH_FIELD_FIRST_PROMPT not in fields:
-        return scores
+    metadata_fields = tuple(
+        field for field in (SEARCH_FIELD_TITLE, SEARCH_FIELD_FIRST_PROMPT)
+        if field in fields
+    )
+    if not metadata_fields:
+        return {}
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
+        cache_key = (query_lower, metadata_fields, _summary_index_version)
+        cached = _metadata_search_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         summaries = list(_summary_index.values())
-    if SEARCH_FIELD_TITLE in fields:
+    scores: dict[str, int] = {}
+    if SEARCH_FIELD_TITLE in metadata_fields:
         for summary in summaries:
             sid = summary.get("id")
             score = _match_count(summary.get("name"), query_lower)
             if sid and score > 0:
                 scores[str(sid)] = scores.get(str(sid), 0) + score
-    if SEARCH_FIELD_FIRST_PROMPT not in fields:
-        return scores
-    for summary in summaries:
-        sid = summary.get("id")
-        if not sid:
-            continue
-        score = _match_count(summary.get("first_prompt"), query_lower)
-        if score > 0:
-            scores[str(sid)] = scores.get(str(sid), 0) + score
+    if SEARCH_FIELD_FIRST_PROMPT in metadata_fields:
+        for summary in summaries:
+            sid = summary.get("id")
+            if not sid:
+                continue
+            score = _match_count(summary.get("first_prompt"), query_lower)
+            if score > 0:
+                scores[str(sid)] = scores.get(str(sid), 0) + score
+    with _summary_index_lock:
+        _metadata_search_cache[cache_key] = dict(scores)
+        if len(_metadata_search_cache) > _METADATA_SEARCH_CACHE_MAX:
+            _metadata_search_cache.pop(next(iter(_metadata_search_cache)))
     return scores
 
 

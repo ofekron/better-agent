@@ -386,6 +386,18 @@ def test_session_timestamp_sort_value_is_cached() -> None:
     assert "return _timestamp_sort_value_str(value)" in helper_source
 
 
+def test_metadata_session_search_is_summary_version_cached() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_metadata_search_cache" in source
+    start = source.index("def _metadata_search_scores(")
+    end = source.index("def grep_session_scores(", start)
+    search_source = source[start:end]
+    assert "cache_key = (query_lower, metadata_fields, _summary_index_version)" in search_source
+    assert "cached = _metadata_search_cache.get(cache_key)" in search_source
+    assert "return dict(cached)" in search_source
+    assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source
+
+
 def test_search_summary_lookup_uses_maintained_projection() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def get_session_summaries_by_ids(")
