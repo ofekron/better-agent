@@ -40,6 +40,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -207,14 +208,19 @@ def _replace_summary_projection_field(
         _summary_index_version += 1
 
 
-def timestamp_sort_value(value: object) -> float:
-    if not isinstance(value, str) or not value:
-        return 0.0
+@lru_cache(maxsize=4096)
+def _timestamp_sort_value_str(value: str) -> float:
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
         return datetime.fromisoformat(normalized).timestamp()
     except ValueError:
         return 0.0
+
+
+def timestamp_sort_value(value: object) -> float:
+    if not isinstance(value, str) or not value:
+        return 0.0
+    return _timestamp_sort_value_str(value)
 
 
 def _newer_timestamp(left: str, right: str) -> str:

@@ -361,6 +361,16 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     assert "_markers_snapshot()" not in list_source
 
 
+def test_session_timestamp_sort_value_is_cached() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "from functools import lru_cache" in source
+    assert "@lru_cache(maxsize=4096)\ndef _timestamp_sort_value_str" in source
+    start = source.index("def timestamp_sort_value(")
+    end = source.index("def _newer_timestamp(", start)
+    helper_source = source[start:end]
+    assert "return _timestamp_sort_value_str(value)" in helper_source
+
+
 def test_search_summary_lookup_uses_maintained_projection() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def get_session_summaries_by_ids(")
