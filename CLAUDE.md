@@ -11,6 +11,16 @@ Config Sync's unified capability form first, then apply that capability to the
 other configured providers. Do not edit only one provider-native config when
 the capability has equivalents in Claude, Codex, or Gemini.
 
+In multi-agent work, lock files before editing them. As soon as the files to
+touch are known, call `lock_ops` with `keys=["file_edit:<absolute-path>", ...]`
+and a reasonable `timeout_seconds`; do not edit files whose locks were not
+acquired. If more files become necessary later, acquire their locks before
+writing. Release file locks immediately after the edit/test/commit phase no
+longer needs them, and always release them before the final response when the
+runtime is still available. Use short leases so interrupted turns or tool
+errors do not block other agents for long; after any resume or interruption,
+re-check current state and reacquire locks before continuing writes.
+
 Never RESTART an already-running backend server or frontend dev server
 without explicit approval from the user, for ANY provider (Claude, Codex,
 Gemini, or any other). STARTING a server that is not running is fine and
