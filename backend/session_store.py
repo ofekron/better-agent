@@ -430,7 +430,9 @@ def _start_summary_projection_repair() -> None:
         while True:
             with _summary_index_lock:
                 pending = list(_summary_index.items())
-            changed = 0
+            originals = dict(pending)
+            updates: dict[str, dict] = {}
+            retry = False
             for sid, summary in pending:
                 tags = _requirement_tags_for_session(sid)
                 marker = _markers_for_session(sid)
@@ -441,20 +443,26 @@ def _start_summary_projection_repair() -> None:
                     and summary.get("tag_filter_ids") == tag_filter_ids
                 ):
                     continue
-                with _summary_index_lock:
+                updates[sid] = {
+                    **summary,
+                    "requirement_tags": tags,
+                    "markers": marker,
+                    "tag_filter_ids": tag_filter_ids,
+                }
+            if not updates:
+                return
+            changed = False
+            with _summary_index_lock:
+                for sid, updated in updates.items():
                     current = _summary_index.get(sid)
-                    if current is not summary:
-                        changed += 1
+                    if current is not originals.get(sid):
+                        retry = True
                         continue
-                    _summary_index[sid] = {
-                        **summary,
-                        "requirement_tags": tags,
-                        "markers": marker,
-                        "tag_filter_ids": tag_filter_ids,
-                    }
+                    _summary_index[sid] = updated
+                    changed = True
+                if changed:
                     _summary_index_version += 1
-                    changed += 1
-            if changed == 0:
+            if not retry:
                 return
 
     threading.Thread(

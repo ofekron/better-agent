@@ -560,6 +560,11 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     assert "def _has_projection_snapshot()" in source
     assert "def _summary_has_projection(" in source
     assert "def _start_summary_projection_repair(" in source
+    repair_start = source.index("def _start_summary_projection_repair()")
+    repair_end = source.index("def summary_version()", repair_start)
+    repair_source = source[repair_start:repair_end]
+    assert "updates: dict[str, dict] = {}" in repair_source
+    assert repair_source.count("_summary_index_version += 1") == 1
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
