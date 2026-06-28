@@ -667,11 +667,21 @@ export function Chat({
     refetchCredentials();
   }, [streamingEvents, refetchCredentials]);
   const [pendingUserInputs, setPendingUserInputs] = useState<UserInputRequest[]>([]);
+  const pendingUserInputsSessionRef = useRef<string | null>(null);
+  const pendingUserInputsFetchSeqRef = useRef(0);
+  pendingUserInputsSessionRef.current = session?.id ?? null;
+  useEffect(() => {
+    // <Chat> is a long-lived singleton across session switches. Clear
+    // immediately so a pending card from the previously viewed session never
+    // paints in the newly selected session while its REST snapshot loads.
+    setPendingUserInputs([]);
+  }, [session?.id]);
   const removePendingUserInput = useCallback((requestId: string) => {
     setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
   }, []);
   const refetchUserInputs = useCallback(async () => {
     const sid = session?.id;
+    const fetchSeq = ++pendingUserInputsFetchSeqRef.current;
     if (!sid) {
       setPendingUserInputs([]);
       return;
@@ -683,7 +693,9 @@ export function Chat({
       );
       if (!res.ok) return;
       const data = await res.json();
-      setPendingUserInputs(Array.isArray(data.requests) ? data.requests : []);
+      if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
+      const fetched = Array.isArray(data.requests) ? (data.requests as UserInputRequest[]) : [];
+      setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
     } catch {
       // ignore
     }
@@ -694,7 +706,8 @@ export function Chat({
   useEffect(() => {
     const onRequested = (e: Event) => {
       const detail = (e as CustomEvent<UserInputRequest>).detail;
-      if (detail?.app_session_id !== session?.id) return;
+      const sid = pendingUserInputsSessionRef.current;
+      if (!sid || detail?.app_session_id !== sid) return;
       setPendingUserInputs((prev) => {
         const rest = prev.filter((req) => req.request_id !== detail.request_id);
         return [...rest, detail];
@@ -702,7 +715,8 @@ export function Chat({
     };
     const onResolved = (e: Event) => {
       const detail = (e as CustomEvent<{ request_id?: string; app_session_id?: string }>).detail;
-      if (detail?.app_session_id !== session?.id || !detail.request_id) return;
+      const sid = pendingUserInputsSessionRef.current;
+      if (!sid || detail?.app_session_id !== sid || !detail.request_id) return;
       removePendingUserInput(detail.request_id);
     };
     window.addEventListener("user_input_requested", onRequested);
@@ -711,7 +725,11 @@ export function Chat({
       window.removeEventListener("user_input_requested", onRequested);
       window.removeEventListener("user_input_resolved", onResolved);
     };
-  }, [session?.id, removePendingUserInput]);
+  }, [removePendingUserInput]);
+  const visiblePendingUserInputs = useMemo(() => {
+    const sid = session?.id;
+    return sid ? pendingUserInputs.filter((req) => req.app_session_id === sid) : [];
+  }, [pendingUserInputs, session?.id]);
   // Interactive tool/command approvals (Claude can_use_tool / Codex app-server).
   // Backend holds them in-memory with a fail-closed timeout; rehydrate on
   // mount/reconnect so a missed WS event doesn't silently become a denial.
@@ -981,7 +999,7 @@ export function Chat({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [displayGroups, stickToBottom, pendingMessages, streamingEvents, pendingUserInputs, justPrepended]);
+  }, [displayGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
 
   const latestGroup = groups[groups.length - 1];
   const latestGroupRunning =
@@ -1316,7 +1334,7 @@ export function Chat({
               context={chatInlineActionContext}
             />
           ))}
-        {pendingUserInputs.map((request) => (
+        {visiblePendingUserInputs.map((request) => (
           <UserInputCard
             key={request.request_id}
             request={request}

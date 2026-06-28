@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import { useSessionMeta } from "../lib/sessionRegistry";
 import Icon from "./Icon";
 
-/** Single source for "this session is running" + "this session has N
- * unseen events after the turn ended" badges. Used wherever a session
+/** Single source for "this session needs attention" / running / unread
+ * badges. Used wherever a session
  * row is rendered — sidebar, home sessions list, browser tab title.
  *
  * State is pulled from `sessionRegistry` (which subscribes to the
@@ -24,14 +24,23 @@ export function SessionStatusBadge({
   showUnreadCount?: boolean;
 }) {
   const { t } = useTranslation();
-  const { is_running, unread_count, markers, testape_active, monitoring_state, has_error } =
-    useSessionMeta(sid);
+  const {
+    is_running,
+    unread_count,
+    pending_user_input_count,
+    markers,
+    testape_active,
+    monitoring_state,
+    has_error,
+  } = useSessionMeta(sid);
   const debouncedRunning = useDebouncedFlag(is_running, 100);
   const markerEntries = Object.entries(markers);
   const awaitingApproval = monitoring_state === "blocked_on_user";
+  const awaitingUserInput = pending_user_input_count > 0;
 
   if (
     !has_error &&
+    !awaitingUserInput &&
     !awaitingApproval &&
     !debouncedRunning &&
     unread_count === 0 &&
@@ -47,6 +56,14 @@ export function SessionStatusBadge({
           className="session-status-error"
           title={t("session.error")}
           data-testid="session-error-dot"
+          data-session-id={sid}
+        />
+      )}
+      {awaitingUserInput && (
+        <span
+          className="session-status-user-input"
+          title={t("session.inputNeeded")}
+          data-testid="session-user-input-dot"
           data-session-id={sid}
         />
       )}

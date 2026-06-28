@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -130,6 +131,41 @@ def test_sidebar_decoration_exposes_pending_count() -> bool:
     return len(rows) == 1 and rows[0].get("pending_user_input_count") == 1
 
 
+def test_request_payload_is_session_scoped() -> bool:
+    sid = _new_session()
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Secret?", "options": []}],
+        timeout_seconds=60,
+    )
+    direct: list[tuple[str, dict]] = []
+    global_events: list[tuple[str, dict]] = []
+    original_dispatch = main.coordinator.dispatch_raw
+    original_global = main.coordinator.broadcast_global
+
+    async def fake_dispatch(target_sid: str, payload: dict) -> None:
+        direct.append((target_sid, payload))
+
+    async def fake_global(event_type: str, payload: dict) -> None:
+        global_events.append((event_type, payload))
+
+    main.coordinator.dispatch_raw = fake_dispatch
+    main.coordinator.broadcast_global = fake_global
+    try:
+        asyncio.run(main._broadcast_user_input("user_input_requested", req))
+        asyncio.run(main._broadcast_user_input_state(sid))
+    finally:
+        main.coordinator.dispatch_raw = original_dispatch
+        main.coordinator.broadcast_global = original_global
+    return (
+        direct == [(sid, {"type": "user_input_requested", "data": req})]
+        and len(global_events) == 1
+        and global_events[0][0] == "session_user_input_changed"
+        and global_events[0][1].get("pending_user_input_count") == 1
+        and "questions" not in global_events[0][1]
+    )
+
+
 def test_pending_counts_are_cached_after_warmup() -> bool:
     sid = _new_session()
     user_input_store.create_request(
@@ -162,6 +198,7 @@ def run() -> int:
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
+        ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
         ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
     ]
     failures: list[str] = []

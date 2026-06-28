@@ -3043,6 +3043,15 @@ class Coordinator:
         "message_ask_choice_changed",
         "user_input_requested",
         "user_input_resolved",
+        # Per-session unrecoverable-error state. Authoritative state lives on
+        # the assistant message/session manager projection; SessionStatusBadge
+        # renders the error dot from this live convergence payload.
+        "session_error_changed",
+        # Per-session pending request_user_input count. Authoritative state
+        # is user_input_store; the sidebar/session registry uses this to
+        # render the "input needed" dot without leaking the full request body
+        # onto unrelated session rows.
+        "session_user_input_changed",
         # Per-session running-flag transition. Authoritative state is
         # computed live by `coordinator.is_running(sid)` (walks
         # `_run_state[sid]` + checks pid liveness). Frontend

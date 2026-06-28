@@ -466,6 +466,7 @@
   "session.noMatch": "Geen overeenkomende sessies",
   "session.running": "Actief",
   "session.awaitingApproval": "Wacht op goedkeuring",
+  "session.inputNeeded": "Invoer nodig",
   "session.error": "Laatste beurt mislukt",
   "session.unread_1": "1 nieuwe gebeurtenis",
   "session.unread_other": "{{count}} nieuwe gebeurtenissen",

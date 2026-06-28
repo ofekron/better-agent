@@ -791,6 +791,7 @@ export function useSession(authStatus?: string) {
       ["session_monitoring_changed", onDelta],
       ["session_running_changed", onDelta],
       ["session_unread_changed", onDelta],
+      ["session_user_input_changed", onDelta],
       ["session_marker_changed", onDelta],
     ]);
     return () => {

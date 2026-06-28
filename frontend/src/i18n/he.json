@@ -467,6 +467,7 @@
   "session.noMatch": "אין סשנים תואמים",
   "session.running": "פועל",
   "session.awaitingApproval": "ממתין לאישור",
+  "session.inputNeeded": "נדרש קלט",
   "session.error": "הפעולה האחרונה נכשלה",
   "session.unread_1": "אירוע חדש אחד",
   "session.unread_other": "{{count}} אירועים חדשים",

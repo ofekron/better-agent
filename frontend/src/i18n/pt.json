@@ -466,6 +466,7 @@
   "session.noMatch": "Nenhuma sessão correspondente",
   "session.running": "Em execução",
   "session.awaitingApproval": "Aguardando aprovação",
+  "session.inputNeeded": "Entrada necessária",
   "session.error": "O último turno falhou",
   "session.unread_1": "1 novo evento",
   "session.unread_other": "{{count}} novos eventos",

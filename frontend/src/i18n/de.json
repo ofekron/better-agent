@@ -466,6 +466,7 @@
   "session.noMatch": "Keine passenden Sitzungen",
   "session.running": "Läuft",
   "session.awaitingApproval": "Wartet auf Freigabe",
+  "session.inputNeeded": "Eingabe erforderlich",
   "session.error": "Letzter Durchlauf fehlgeschlagen",
   "session.unread_1": "1 neues Ereignis",
   "session.unread_other": "{{count}} neue Ereignisse",
