@@ -2878,12 +2878,15 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
         )
     if bump_updated_at:
         root["updated_at"] = datetime.now().isoformat()
-    fork_topology_changed = _index_tree(root)
-    path = _sessions_dir() / f"{root['id']}.json"
+    with perf.timed("store.session.write_full.index_tree"):
+        fork_topology_changed = _index_tree(root)
+    with perf.timed("store.session.write_full.path"):
+        path = _sessions_dir() / f"{root['id']}.json"
     # Bootstrap writer: often the first write into a fresh home (new session,
     # no prior index warm-up), so the sessions/ dir may not exist yet.
     # mkstemp(dir=path.parent) below requires the parent to already exist.
-    _ensure_dir()
+    with perf.timed("store.session.write_full.ensure_dir"):
+        _ensure_dir()
     # INVARIANT: atomic write — serialize to a temp file in the same
     # directory then `os.replace` into place. A crash between the
     # `write` and the `replace` leaves the canonical file unchanged.
@@ -2897,11 +2900,12 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
     #
     # `indent` dropped — session JSON is not human-edited and `indent=2`
     # is ~30-40% slower for large trees.
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{root['id']}.",
-        suffix=".json.tmp",
-        dir=path.parent,
-    )
+    with perf.timed("store.session.write_full.mkstemp"):
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{root['id']}.",
+            suffix=".json.tmp",
+            dir=path.parent,
+        )
     with perf.timed("store.session.write_full.strip"):
         popped = _strip_volatile_from_tree(root)
     try:
@@ -2920,14 +2924,16 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
         raise
     finally:
         _restore_volatile_to_tree(popped)
-    if file_signature is not None:
-        with _index_lock:
-            _root_index_signatures[root["id"]] = file_signature
-            index_loaded = _index_loaded
-    else:
-        index_loaded = False
+    with perf.timed("store.session.write_full.index_signature"):
+        if file_signature is not None:
+            with _index_lock:
+                _root_index_signatures[root["id"]] = file_signature
+                index_loaded = _index_loaded
+        else:
+            index_loaded = False
     if index_loaded and fork_topology_changed:
-        _persist_index_sidecar_if_loaded()
+        with perf.timed("store.session.write_full.index_sidecar"):
+            _persist_index_sidecar_if_loaded()
     # INVARIANT: update summary index AFTER the durable write (post
     # `os.replace`). A summary update before the replace would let a
     # concurrent `list_sessions` observe the new summary while the
