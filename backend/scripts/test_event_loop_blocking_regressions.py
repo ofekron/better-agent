@@ -319,6 +319,16 @@ def test_session_organization_facets_are_version_cached() -> None:
     assert "_local_session_summaries_for_sidebar()" in facets_source
 
 
+def test_session_organization_query_builds_tag_sets_only_for_tag_filter() -> None:
+    source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
+    start = source.index("def query_sessions(")
+    end = len(source)
+    query_source = source[start:end]
+    tag_branch = query_source.index("if tag_set:")
+    session_tags = query_source.index("session_tags = {")
+    assert tag_branch < session_tags
+
+
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     start = main_source.index("def _decorate_local_sidebar_sessions(")
