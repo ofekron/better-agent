@@ -651,6 +651,34 @@ describe("message rendering", () => {
     h.unmount();
   });
 
+  it("inline-tag preamble is expanded by default", () => {
+    const tags: InlineTag[] = [
+      {
+        id: "t1",
+        messageId: "m1",
+        selectedText: "ephemeral",
+        comment: "yes",
+        timestamp: "2026-04-30T15:01:27.976Z",
+      },
+    ];
+    const content = buildInlineTagsPreamble(tags) + "\nPlease address.";
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message: makeUserMsg({ id: "u-inline-tags", content }),
+        orchestrationMode: "native",
+      }),
+    );
+
+    const chip = container.querySelector(".artificial-section-inline-tags");
+    expect(chip?.classList.contains("expanded")).toBe(true);
+    expect(
+      chip?.querySelector(".artificial-section-header")?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(chip?.textContent).toContain("ephemeral");
+    expect(chip?.textContent).toContain("yes");
+    unmount();
+  });
+
   it("mergeTagsIntoPrompt sends only the preamble when prompt is empty (no review fallback text)", () => {
     const tags: InlineTag[] = [
       {
