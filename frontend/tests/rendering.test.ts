@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
@@ -420,6 +420,7 @@ describe("message rendering", () => {
       }),
     );
 
+    await waitFor(() => expect(container.querySelector(".tool-call")).not.toBeNull());
     const tool = container.querySelector(".tool-call");
     expect(tool).not.toBeNull();
     expect(tool!.textContent ?? "").toContain("WebSearch");
@@ -496,7 +497,8 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("renders an explicit WebSearch tool_result when present", async () => {
+  it("renders an explicit Bash tool_result once when present", async () => {
+    const marker = "BASH_RESULT_VISIBLE_ONCE";
     const message = makeAssistantMsg({
       id: "a",
       content: "",
@@ -509,9 +511,9 @@ describe("message rendering", () => {
               content: [
                 {
                   type: "tool_use",
-                  id: "ws_1",
-                  name: "WebSearch",
-                  input: { query: "embedding models" },
+                  id: "bash_1",
+                  name: "Bash",
+                  input: { command: "echo visible" },
                 },
               ],
             },
@@ -525,8 +527,8 @@ describe("message rendering", () => {
               content: [
                 {
                   type: "tool_result",
-                  tool_use_id: "ws_1",
-                  content: "Search results for embedding models returned.",
+                  tool_use_id: "bash_1",
+                  content: marker,
                 },
               ],
             },
@@ -541,11 +543,49 @@ describe("message rendering", () => {
       }),
     );
 
+    await waitFor(() => expect(container.querySelector(".tool-call")).not.toBeNull());
     const tool = container.querySelector(".tool-call");
     expect(tool).not.toBeNull();
-    expect(tool!.textContent ?? "").toContain("WebSearch");
-    expect(tool!.querySelector(".tool-result-inline, .tool-result-block")).not.toBeNull();
-    expect(tool!.textContent ?? "").toContain("Search results for embedding models returned.");
+    expect(tool!.textContent ?? "").toContain("echo visible");
+    expect(tool!.querySelector(".bash-result-content")).not.toBeNull();
+    expect(tool!.textContent ?? "").toContain(marker);
+    const boxes = Array.from(container.querySelectorAll(".message-box"));
+    expect(boxes.some((box) => (box.textContent ?? "").includes(marker))).toBe(false);
+    unmount();
+  });
+
+  it("renders an orphaned tool_result as chat output", async () => {
+    const marker = "ORPHAN_CODEX_RESULT_VISIBLE";
+    const message = makeAssistantMsg({
+      id: "a",
+      content: "",
+      events: [
+        {
+          type: "agent_message",
+          data: {
+            type: "user",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "missing_tool",
+                  content: marker,
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message,
+        orchestrationMode: "native",
+      }),
+    );
+
+    expect(container.querySelector(".message-box")?.textContent ?? "").toContain(marker);
+    expect(container.querySelector(".tool-call")).toBeNull();
     unmount();
   });
 
