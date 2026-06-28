@@ -526,6 +526,17 @@ def test_sidebar_summary_omits_worker_refs() -> None:
     assert "summary, cleaned = _sanitize_summary(summary)" in source
 
 
+def test_summary_index_skips_empty_projection_scan() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "def _projection_snapshots_if_any()" in source
+    build_start = source.index("def _do_build_summary_index_unsafe()")
+    build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
+    build_source = source[build_start:build_end]
+    assert "projection_snapshots = _projection_snapshots_if_any()" in build_source
+    assert "summary_projection_present = False" in build_source
+    assert "if projection_snapshots is not None or summary_projection_present:" in build_source
+
+
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
@@ -681,6 +692,7 @@ if __name__ == "__main__":
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_sidebar_summary_omits_worker_refs()
+    test_summary_index_skips_empty_projection_scan()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_startup_recovery_defers_cold_runs()
     test_startup_recovery_gate_opens_before_live_integration()

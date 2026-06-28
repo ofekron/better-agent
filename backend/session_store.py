@@ -397,6 +397,31 @@ def _markers_for_session(session_id: str) -> dict[str, dict]:
         return {k: dict(v) for k, v in _markers_by_session.get(session_id, {}).items()}
 
 
+def _projection_snapshots_if_any() -> tuple[
+    dict[str, list[dict]],
+    dict[str, dict[str, dict]],
+] | None:
+    with _requirement_tags_lock:
+        if _requirement_tags_by_session:
+            requirement_tags = {
+                sid: list(tags)
+                for sid, tags in _requirement_tags_by_session.items()
+            }
+        else:
+            requirement_tags = {}
+    with _markers_lock:
+        if _markers_by_session:
+            markers = {
+                sid: {k: dict(v) for k, v in per.items()}
+                for sid, per in _markers_by_session.items()
+            }
+        else:
+            markers = {}
+    if not requirement_tags and not markers:
+        return None
+    return requirement_tags, markers
+
+
 def summary_version() -> int:
     with _summary_index_lock:
         return _summary_index_version
@@ -760,44 +785,50 @@ def _do_build_summary_index_unsafe() -> None:
             if pid:
                 eng_by_parent[pid] = data["id"]
 
-    with _requirement_tags_lock:
-        requirement_tags = {
-            sid: list(tags)
-            for sid, tags in _requirement_tags_by_session.items()
-        }
-    with _markers_lock:
-        markers = {
-            sid: {k: dict(v) for k, v in per.items()}
-            for sid, per in _markers_by_session.items()
-        }
+    projection_snapshots = _projection_snapshots_if_any()
 
     with _summary_index_lock:
         summary_items = list(_summary_index.items())
 
+    summary_projection_present = False
     for sid, summary in summary_items:
         if summary.get("working_mode"):
             meta = summary.get("working_mode_meta") or {}
             pid = meta.get("parent_session_id")
             if pid:
                 eng_by_parent[pid] = sid
+        if (
+            summary.get("requirement_tags")
+            or summary.get("markers")
+            or any(
+                isinstance(tag_id, str) and tag_id.startswith("req:")
+                for tag_id in (summary.get("tag_filter_ids") or [])
+            )
+        ):
+            summary_projection_present = True
 
     projected_updates: dict[str, dict] = {}
-    for sid, summary in summary_items:
-        tags = requirement_tags.get(sid, [])
-        marker = markers.get(sid, {})
-        tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
-        if (
-            summary.get("requirement_tags") == tags
-            and summary.get("markers") == marker
-            and summary.get("tag_filter_ids") == tag_filter_ids
-        ):
-            continue
-        projected_updates[sid] = {
-            **summary,
-            "requirement_tags": tags,
-            "markers": marker,
-            "tag_filter_ids": tag_filter_ids,
-        }
+    if projection_snapshots is not None or summary_projection_present:
+        if projection_snapshots is None:
+            requirement_tags, markers = {}, {}
+        else:
+            requirement_tags, markers = projection_snapshots
+        for sid, summary in summary_items:
+            tags = requirement_tags.get(sid, [])
+            marker = markers.get(sid, {})
+            tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
+            if (
+                summary.get("requirement_tags") == tags
+                and summary.get("markers") == marker
+                and summary.get("tag_filter_ids") == tag_filter_ids
+            ):
+                continue
+            projected_updates[sid] = {
+                **summary,
+                "requirement_tags": tags,
+                "markers": marker,
+                "tag_filter_ids": tag_filter_ids,
+            }
 
     # Final unified pass for eng pointers across the WHOLE index
     # (Pass 1 + Pass 2). Keep only the mutation phase under the index
