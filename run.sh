@@ -416,6 +416,21 @@ PY
   fi
 }
 
+FRONTEND_BUILD_PID=""
+start_frontend_build() {
+  local request_id="${1:-}"
+  if [ -n "$FRONTEND_BUILD_PID" ] && kill -0 "$FRONTEND_BUILD_PID" 2>/dev/null; then
+    if [ -n "$request_id" ]; then
+      local previous_pid="$FRONTEND_BUILD_PID"
+      (wait "$previous_pid" 2>/dev/null || true; build_frontend "$request_id") &
+      FRONTEND_BUILD_PID=$!
+    fi
+    return 0
+  fi
+  build_frontend "$request_id" &
+  FRONTEND_BUILD_PID=$!
+}
+
 start_backend() {
   local bind_host
   bind_host=$("$PY" - "$BA_HOME/user_prefs.json" <<'PY'
@@ -679,12 +694,15 @@ PY
   return 0
 }
 
-build_frontend ""
-
 PENDING_REFRESH_ID=""
+INITIAL_FRONTEND_BUILD_STARTED=0
 ZAI_STARTUP_CHECK_DONE=0
 while true; do
   start_backend
+  if [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
+    start_frontend_build ""
+    INITIAL_FRONTEND_BUILD_STARTED=1
+  fi
   # Capture health without aborting under `set -e`: a crashed backend must still
   # reach the startup checker so it can read the traceback and auto-fix.
   if wait_for_backend; then
@@ -711,7 +729,7 @@ while true; do
   fi
 
   if [ -n "$PENDING_REFRESH_ID" ]; then
-    build_frontend "$PENDING_REFRESH_ID"
+    start_frontend_build "$PENDING_REFRESH_ID"
     PENDING_REFRESH_ID=""
   fi
 
