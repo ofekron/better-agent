@@ -74,8 +74,8 @@ describe("InputArea queued prompt promote action", () => {
   it("shows separate active Queue, Steer, and Interrupt buttons while streaming", () => {
     renderInputArea(true, "active work");
 
-    expect(screen.getByTestId("send-btn").textContent).toBe("Queue");
-    expect(screen.getByTestId("steer-btn").textContent).toBe("Steer");
+    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
+    expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
     expect(screen.getByTestId("interrupt-btn").textContent).toBe("Interrupt");
   });
 
@@ -94,15 +94,15 @@ describe("InputArea queued prompt promote action", () => {
     const firstStop = vi.fn();
     const first = renderInputArea(true, "active work", { onStop: firstStop });
 
-    expect(screen.getByTestId("send-btn").textContent).toBe("Queue");
-    expect(screen.queryByTestId("steer-btn")).toBeNull();
+    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
+    expect(screen.queryByTestId("queue-btn")).toBeNull();
     expect(screen.queryByTestId("interrupt-btn")).toBeNull();
     expect(screen.queryByTestId("stop-btn")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByTestId("steer-btn"));
-    expect(first.onSteer).toHaveBeenCalledTimes(1);
-    expect(first.onSend).toHaveBeenCalledTimes(0);
+    fireEvent.click(screen.getByTestId("queue-btn"));
+    expect(first.onSend).toHaveBeenCalledTimes(1);
+    expect(first.onSteer).toHaveBeenCalledTimes(0);
 
     cleanup();
     setViewportWidth(390);
@@ -123,18 +123,18 @@ describe("InputArea queued prompt promote action", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
-  it("uses Queue as the primary active Codex action", async () => {
+  it("uses Steer as the primary active Codex action", async () => {
     const { onSend, onSteer } = renderInputArea(true, "active work");
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("send-btn"));
     });
 
-    expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSteer).toHaveBeenCalledTimes(0);
+    expect(onSteer).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledTimes(0);
   });
 
-  it("uses Queue for desktop Enter while streaming", async () => {
+  it("uses Steer for desktop Enter while streaming", async () => {
     setViewportWidth(1280);
     const { onSend, onSteer } = renderInputArea(true, "active work");
     const input = screen.getByTestId("input-textarea");
@@ -143,19 +143,19 @@ describe("InputArea queued prompt promote action", () => {
       fireEvent.keyDown(input, { key: "Enter" });
     });
 
-    expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSteer).toHaveBeenCalledTimes(0);
+    expect(onSteer).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledTimes(0);
   });
 
-  it("uses the explicit Steer button for active Codex steering", async () => {
+  it("uses the explicit Queue button for active Codex queueing", async () => {
     const { onSend, onSteer } = renderInputArea(true, "active work");
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("steer-btn"));
+      fireEvent.click(screen.getByTestId("queue-btn"));
     });
 
-    expect(onSteer).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledTimes(0);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
   });
 
   it("does not submit Steer twice on rapid double click", async () => {
@@ -165,8 +165,8 @@ describe("InputArea queued prompt promote action", () => {
     renderInputArea(true, "active work", { onSteer });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("steer-btn"));
-      fireEvent.click(screen.getByTestId("steer-btn"));
+      fireEvent.click(screen.getByTestId("send-btn"));
+      fireEvent.click(screen.getByTestId("send-btn"));
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
