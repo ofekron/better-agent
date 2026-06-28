@@ -26,6 +26,11 @@ export function ProjectSuggestionModal({
 }: Props) {
   useBackButtonDismiss(true, onCancel);
   const confidence = Math.round(suggestion.score * 100);
+  const bodyTextStyle = {
+    lineHeight: "1.5",
+    color: "var(--text-secondary)",
+    overflowWrap: "anywhere",
+  } as const;
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -35,20 +40,24 @@ export function ProjectSuggestionModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h2>Wrong project?</h2>
+          <h2>Check project</h2>
           <button className="modal-close" onClick={onCancel}>
             &times;
           </button>
         </div>
         <div className="modal-body">
-          <p style={{ margin: "16px 0", lineHeight: "1.5", color: "var(--text-secondary)" }}>
-            This prompt looks like it belongs to{" "}
+          <p style={{ ...bodyTextStyle, margin: "16px 0 8px" }}>
+            You sent this to:{" "}
+            <strong style={{ color: "var(--text-primary)" }}>{currentName}</strong>
+            <br />
+            I think you meant to send it to:{" "}
             <strong style={{ color: "var(--text-primary)" }}>{targetName}</strong>{" "}
-            rather than{" "}
-            <strong style={{ color: "var(--text-primary)" }}>{currentName}</strong>{" "}
-            ({confidence}% match). Move this session there before starting?
+            ({confidence}% match).
           </p>
-          <p style={{ margin: "0 0 8px", fontSize: scaledFontSize(12), color: "var(--text-tertiary)" }}>
+          <p style={{ ...bodyTextStyle, margin: "0 0 8px" }}>
+            Move this session there before starting?
+          </p>
+          <p style={{ margin: "0 0 8px", fontSize: scaledFontSize(12), color: "var(--text-tertiary)", overflowWrap: "anywhere" }}>
             {suggestion.target_cwd}
           </p>
         </div>

@@ -129,6 +129,8 @@ describe("orchestration selector → /selectors PATCH", () => {
     await h.selectSession(session.id);
 
     await h.typeAndSend("ship it");
+    expect(h.raw.container.textContent).toContain("You sent this to: source");
+    expect(h.raw.container.textContent).toContain("I think you meant to send it to: target");
     await h.clickByText("Move & send");
 
     const patches = h.backend.calls.filter(
