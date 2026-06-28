@@ -181,6 +181,12 @@ def test_ensure_singleton_refreshes_only_when_preamble_changes() -> bool:
                 raise AssertionError(f"unexpected sid {sid}")
             self.sess["name_locked"] = bool(locked)
 
+        def rename(self, sid, name, *, force=False):
+            if sid != "assistant-1":
+                raise AssertionError(f"unexpected sid {sid}")
+            self.sess["name"] = name
+            return self.sess
+
     fake = FakeSessionManager()
     original = assistant_ui.session_manager
     assistant_ui.session_manager = fake  # type: ignore[assignment]
@@ -207,9 +213,66 @@ def test_ensure_singleton_refreshes_only_when_preamble_changes() -> bool:
     return ok
 
 
-# ──────────────────────────────────────────────────────────────────────
-# _normalize_classifications
-# ──────────────────────────────────────────────────────────────────────
+def test_ensure_singleton_restores_canonical_name() -> bool:
+    """A singleton that was auto-named to its first prompt before the lock
+    existed must be renamed back to "Assistant" on ensure — the frontend
+    board slot renders only for name == "Assistant". The rename must use
+    force (the session is locked)."""
+    _ensure_ext_id()
+    state_path = assistant_ui._state_path()
+    # State file must point at the pre-existing singleton so ensure finds it
+    # (it looks up by state["session_id"], then session_manager.get(sid)).
+    assistant_ui._write_state({"session_id": "assistant-1", "board_preamble": ""})
+
+    class FakeSessionManager:
+        def __init__(self):
+            # Pre-existing singleton, drifted name, already locked.
+            self.sess = {"id": "assistant-1", "name": "Get X working",
+                         "name_locked": True, "capability_contexts": []}
+            self.renames: list[tuple[str, str, bool]] = []
+
+        def get(self, sid):
+            return self.sess if self.sess and self.sess.get("id") == sid else None
+
+        def create(self, **kwargs):  # not exercised (session pre-exists)
+            raise AssertionError("ensure should not create when session exists")
+
+        def set_capability_contexts(self, sid, caps):
+            self.sess["capability_contexts"] = caps
+
+        def set_name_locked(self, sid, locked):
+            self.sess["name_locked"] = bool(locked)
+
+        def rename(self, sid, name, *, force=False):
+            self.renames.append((sid, name, force))
+            self.sess["name"] = name
+            return self.sess
+
+    fake = FakeSessionManager()
+    original = assistant_ui.session_manager
+    assistant_ui.session_manager = fake  # type: ignore[assignment]
+    try:
+        assistant_ui.ensure_singleton(board_preamble="")
+    finally:
+        assistant_ui.session_manager = original  # type: ignore[assignment]
+    ok = True
+    if not fake.renames:
+        print(f"{FAIL} ensure did not rename the drifted-name singleton")
+        ok = False
+    else:
+        sid, name, force = fake.renames[-1]
+        if name != "Assistant":
+            print(f"{FAIL} ensure renamed to {name!r}, want 'Assistant'")
+            ok = False
+        if not force:
+            print(f"{FAIL} ensure renamed without force=True (locked session would refuse)")
+            ok = False
+    if ok:
+        print(f"{PASS} ensure_singleton restores canonical 'Assistant' name (force)")
+    return ok
+
+
+
 
 
 def test_normalize_classifications() -> bool:
@@ -448,6 +511,7 @@ def main_run() -> int:
         test_board_spec_shape,
         test_board_provision_prompt_is_stateless,
         test_ensure_singleton_refreshes_only_when_preamble_changes,
+        test_ensure_singleton_restores_canonical_name,
         test_normalize_classifications,
         test_classify_builds_instruction_and_normalizes,
         test_classify_empty_batch_short_circuits,

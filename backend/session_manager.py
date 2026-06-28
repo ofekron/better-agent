@@ -2950,13 +2950,15 @@ class SessionManager:
 
     # ── Top-level metadata patches ─────────────────────────────────
 
-    def rename(self, sid: str, name: str) -> Optional[dict]:
+    def rename(self, sid: str, name: str, *, force: bool = False) -> Optional[dict]:
         # `name_locked` sessions (e.g. the assistant singleton) refuse rename
         # from every path — AI auto-title, first-prompt auto-name, and the user
         # rename endpoint. Fail closed: return the unchanged session so callers
         # that branch on truthiness don't mistake a refusal for not-found.
+        # `force` is the internal-only escape hatch for the owner to restore the
+        # canonical name on a locked session that drifted before the lock existed.
         existing = self.get_lite(sid)
-        if existing is not None and existing.get("name_locked"):
+        if existing is not None and existing.get("name_locked") and not force:
             return existing
         return self._run(
             sid,
