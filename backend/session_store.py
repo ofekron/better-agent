@@ -627,8 +627,11 @@ def read_seen_cursors(root_id: str) -> dict[str, Optional[str]]:
 def write_seen_cursor(root_id: str, sid: str, uid: Optional[str]) -> None:
     if not (root_id and sid):
         return
+    normalized = uid if isinstance(uid, str) and uid else None
     cursors = read_seen_cursors(root_id)
-    cursors[sid] = uid if isinstance(uid, str) and uid else None
+    if cursors.get(sid) == normalized and (sid in cursors or normalized is None):
+        return
+    cursors[sid] = normalized
     path = _seen_cursor_path(root_id)
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=f".{root_id}.seen.", suffix=".tmp", dir=_sessions_dir(),
