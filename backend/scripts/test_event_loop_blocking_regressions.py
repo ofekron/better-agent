@@ -417,6 +417,15 @@ def test_session_timestamp_sort_value_is_cached() -> None:
     assert "return _timestamp_sort_value_str(value)" in helper_source
 
 
+def test_stubbed_tree_build_does_not_search_tree_per_node() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("def _build_stubbed_tree(")
+    end = source.index("def _compute_messages_snapshot(", start)
+    build_source = source[start:end]
+    assert "session_store._find_in_tree(root, node_sid)" not in build_source
+    assert "node_sid, rid, node_src" in build_source
+
+
 def test_metadata_session_search_is_summary_version_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -623,6 +632,7 @@ if __name__ == "__main__":
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
     test_session_list_does_not_prewarm_snapshots()
+    test_stubbed_tree_build_does_not_search_tree_per_node()
     test_sidebar_summary_omits_worker_refs()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_startup_recovery_defers_cold_runs()
