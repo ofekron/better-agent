@@ -34,6 +34,16 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     assert "sess = session_manager.get_lite(self.app_session_id)" not in source
 
 
+def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
+    source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
+    start = source.index("def prepare_provider_event_for_journal(")
+    end = source.index("    def _apply_worker_event(", start)
+    method_source = source[start:end]
+    assert "session_manager.get_file_ref_context(app_session_id)" in method_source
+    assert "session_manager.get_lite(app_session_id)" not in method_source
+    assert "assume_exists_for_node(node_id)" in method_source
+
+
 def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n                    strategy.ingest_orphan" in source

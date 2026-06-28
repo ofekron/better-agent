@@ -228,6 +228,11 @@ def assume_exists_for_session(sess: Optional[dict]) -> bool:
     """Single home for the rule: sessions hosted on a worker-node skip
     the local-disk existence check (their files live on the node)."""
     node_id = (sess or {}).get("node_id") or "primary"
+    return assume_exists_for_node(node_id)
+
+
+def assume_exists_for_node(node_id: Optional[str]) -> bool:
+    node_id = node_id or "primary"
     if node_id == "primary":
         return False
     try:

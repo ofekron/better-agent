@@ -658,15 +658,15 @@ class OrchestrationStrategy(ABC):
             inner_data = inner.get("data") if isinstance(inner, dict) else None
             if isinstance(inner_data, dict):
                 from file_ref_resolver import (
-                    assume_exists_for_session, rewrite_event_data,
+                    assume_exists_for_node, rewrite_event_data,
                 )
                 try:
-                    sess = session_manager.get_lite(app_session_id) or {}
+                    cwd, node_id = session_manager.get_file_ref_context(app_session_id)
                     rewrite_event_data(
                         inner.get("type") or "unknown",
                         inner_data,
-                        sess.get("cwd"),
-                        assume_exists=assume_exists_for_session(sess),
+                        cwd,
+                        assume_exists=assume_exists_for_node(node_id),
                     )
                 except Exception:
                     import logging
@@ -677,15 +677,15 @@ class OrchestrationStrategy(ABC):
             return "worker_event", data
 
         from file_ref_resolver import (
-            assume_exists_for_session, rewrite_event_data,
+            assume_exists_for_node, rewrite_event_data,
         )
         try:
-            sess = session_manager.get_lite(app_session_id) or {}
+            cwd, node_id = session_manager.get_file_ref_context(app_session_id)
             rewrite_event_data(
                 etype,
                 data,
-                sess.get("cwd"),
-                assume_exists=assume_exists_for_session(sess),
+                cwd,
+                assume_exists=assume_exists_for_node(node_id),
             )
         except Exception:
             import logging
