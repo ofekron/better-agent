@@ -108,9 +108,36 @@ def _run() -> bool:
     return passed == len(results)
 
 
+def _run_max_seq_seeds_cursor() -> bool:
+    root = "root-max-seq-cursor-test"
+    sid = "sid-max-seq-cursor-test"
+    EventIngester().ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-max-seq-cursor-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    EventIngester().ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-max-seq-cursor-2"},
+        source="prior-run", msg_id="msg-2",
+    )
+
+    ing = EventIngester()
+    max_by_sid = ing.max_seq_by_sid(root)
+    seq_after_scan = ing._seq.get(root)
+    cursor = ing.cursor(root)
+    ok = max_by_sid.get(sid) == 2 and seq_after_scan == 2 and cursor == 2
+    print(
+        f"  {PASS if ok else FAIL} max_seq_by_sid seeds cursor count"
+        f"{'' if ok else f' — max={max_by_sid} _seq={seq_after_scan} cursor={cursor}'}"
+    )
+    return ok
+
+
 def main() -> int:
     try:
         ok = _run()
+        ok = _run_max_seq_seeds_cursor() and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

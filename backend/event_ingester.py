@@ -682,6 +682,7 @@ class EventIngester:
         out: dict[str, int] = {}
         render_out: dict[str, int] = {}
         render_projection_version = 0
+        parsed_lines = 0
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -691,6 +692,7 @@ class EventIngester:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                parsed_lines += 1
                 sid = entry.get("sid")
                 seq = entry.get("seq")
                 if not isinstance(sid, str) or not isinstance(seq, int):
@@ -705,6 +707,7 @@ class EventIngester:
         self._max_seq_by_sid[root_id] = out
         self._render_seq_by_sid[root_id] = render_out
         self._root_events_version[root_id] = render_projection_version
+        self._seq[root_id] = parsed_lines
         return dict(out)
 
     @staticmethod
