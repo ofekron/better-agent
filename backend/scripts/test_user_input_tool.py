@@ -176,11 +176,16 @@ def test_pending_counts_are_cached_after_warmup() -> bool:
     if user_input_store.pending_count_for_session(sid) != 1:
         return False
     original = user_input_store._read_locked
+    original_path = user_input_store._path
 
     def fail_read():
         raise AssertionError("pending count hot path read store")
 
+    def fail_path():
+        raise AssertionError("pending count hot path resolved store path")
+
     user_input_store._read_locked = fail_read
+    user_input_store._path = fail_path
     try:
         return (
             user_input_store.pending_count_for_session(sid) == 1
@@ -188,6 +193,7 @@ def test_pending_counts_are_cached_after_warmup() -> bool:
         )
     finally:
         user_input_store._read_locked = original
+        user_input_store._path = original_path
 
 
 def run() -> int:
