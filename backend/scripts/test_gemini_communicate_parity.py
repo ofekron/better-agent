@@ -224,3 +224,72 @@ def test_create_sub_session_routes_to_create_sub_session_endpoint():
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"
     assert payload["reasoning_effort"] == "high"
+
+
+def _instrument_provision():
+    captured: list[tuple] = []
+
+    def fake_post(endpoint, payload, timeout):
+        captured.append((endpoint, payload, timeout))
+        spec = (payload.get("workers") or [{}])[0]
+        return {"workers": [{
+            "agent_session_id": "worker-session-1",
+            "name": f"worker:{spec.get('role_key')}",
+            "created": True,
+            "orchestration_mode": spec.get("orchestration_mode"),
+            "registry_cwd": payload.get("cwd"),
+        }]}
+
+    communicate_mcp._post_json = fake_post  # type: ignore[assignment]
+    return captured
+
+
+def test_ensure_named_worker_routes_to_provision_with_singleton_key():
+    captured = _instrument_provision()
+    res = communicate_mcp.ensure_named_worker_response(
+        name="testape",
+        cwd="/Users/ofekron/testape",
+        orchestration_mode="team",
+        provision_prompt="seed",
+    )
+    assert res["success"] is True
+    assert res["agent_session_id"] == "worker-session-1"
+    assert res["name"] == "worker:testape"
+    assert res["created"] is True
+    endpoint, payload, timeout = captured[0]
+    # The provision endpoint is the idempotent get-or-create path.
+    assert endpoint == "/api/internal/workers/provision"
+    assert timeout == communicate_mcp._LONG_TIMEOUT
+    spec = payload["workers"][0]
+    # role_key=name is the singleton key: provision derives session name
+    # `worker:<role_key>`, which the use-testape delegator recursion guard
+    # compares against BETTER_CLAUDE_APP_SESSION_ID.
+    assert spec["role_key"] == "testape"
+    assert spec["orchestration_mode"] == "team"
+    assert spec["provision_prompt"] == "seed"
+    assert payload["cwd"] == "/Users/ofekron/testape"
+
+
+def test_ensure_named_worker_drops_empty_optionals():
+    captured = _instrument_provision()
+    communicate_mcp.ensure_named_worker_response(
+        name="testape",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    spec = captured[0][1]["workers"][0]
+    # Empty optionals must NOT be forwarded (provision would treat them as
+    # explicit overrides over the creating session's defaults).
+    assert "provision_prompt" not in spec
+    assert "provider_id" not in spec
+    assert "model" not in spec
+    assert "reasoning_effort" not in spec
+    # description defaults to worker:<name> so the session is named correctly.
+    assert spec["description"] == "worker:testape"
+
+
+def test_ensure_named_worker_rejects_missing_fields():
+    captured = _instrument_provision()
+    res = communicate_mcp.ensure_named_worker_response("", "/repo", "native")
+    assert res["success"] is False
+    assert captured == []

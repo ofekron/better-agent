@@ -36,3 +36,63 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
     },
     "required": ["task"],
 }
+
+
+ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": (
+                "Stable worker name. Matched (case-sensitive) as the session "
+                "name `worker:<name>` together with cwd — that (name, cwd) "
+                "pair is the singleton key. Reuses the existing worker if "
+                "present, otherwise creates one."
+            ),
+        },
+        "cwd": {
+            "type": "string",
+            "description": (
+                "Registry cwd for the worker. Together with name it identifies "
+                "the singleton. Usually the project root the worker operates in."
+            ),
+        },
+        "orchestration_mode": {
+            "type": "string",
+            "enum": ["team", "native"],
+            "description": (
+                "'native' = a plain session that does work directly. 'team' = "
+                "a sub-coordinator that can itself delegate to workers."
+            ),
+        },
+        "provision_prompt": {
+            "type": ["string", "null"],
+            "description": (
+                "OPTIONAL first-turn prompt applied ONLY on first creation "
+                "(ignored when reusing an existing worker). Use to seed the "
+                "worker's role/expertise."
+            ),
+        },
+        "description": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL human-readable description; defaults to `worker:<name>`.",
+        },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL - provider for the worker. Defaults to the creating session's provider.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL - model for the worker. Defaults to the creating session's model.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL - reasoning effort for the worker. Defaults to the creating session's effort.",
+        },
+        "node_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL - worker node id. Defaults to the session's node_id.",
+        },
+    },
+    "required": ["name", "cwd", "orchestration_mode"],
+}

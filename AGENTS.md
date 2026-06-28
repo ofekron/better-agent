@@ -22,11 +22,6 @@ Gemini. When adding or changing a provider-facing feature, implement the
 equivalent behavior for every supported provider in the same turn, or stop and
 ask if true parity is not possible.
 
-All provider implementations must be aware of backend and frontend restarts and
-be as tolerant of them as possible. Design provider-facing flows to resume,
-rehydrate, or reconnect cleanly after either side restarts, without assuming a
-single uninterrupted process lifetime.
-
 For provider tools/MCPs, prefer the provider-native configuration path whenever
 it works. Detect config drift between the provider conversation's start-time
 tool/MCP set and the currently desired set; when a resumed conversation is

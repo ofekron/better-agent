@@ -66,3 +66,13 @@ CREATE_WORKER_DESCRIPTION = (
     "the returned worker_session_id with mssg/ask/delegate_task. For a standalone "
     "non-roster session, use create_session instead." + _PROVIDER_SELECTOR_NOTE
 )
+
+ENSURE_NAMED_WORKER_DESCRIPTION = (
+    "Idempotently get-or-create a NAMED singleton worker by `worker:<name>` + cwd and "
+    "return its agent_session_id. If a worker with that name and cwd already exists it "
+    "is reused (created=false); otherwise a new one is provisioned with the given "
+    "orchestration_mode and optional provision_prompt (created=true). Use this — not "
+    "create_worker — when you want a STABLE, REUSABLE named worker reachable from any "
+    "session (e.g. a single global cross-project worker). After it returns, delegate "
+    "work with ask/mssg/delegate_task. Available to all sessions."
+)
