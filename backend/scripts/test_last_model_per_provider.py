@@ -17,6 +17,7 @@ if _BACKEND not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from auth_test_helpers import authenticate_client  # noqa: E402
 import main  # noqa: E402
 import user_prefs  # noqa: E402
 from paths import ba_home  # noqa: E402
@@ -33,6 +34,17 @@ def _providers(client: TestClient) -> dict:
 
 def _provider_by_name(client: TestClient, name: str) -> dict:
     return next(p for p in _providers(client)["providers"] if p["name"] == name)
+
+
+def _other_provider(client: TestClient, current_id: str) -> dict:
+    return next(p for p in _providers(client)["providers"] if p["id"] != current_id)
+
+
+def _provider_model(client: TestClient, provider: dict) -> str:
+    r = client.get(f"/api/providers/{provider['id']}/models")
+    assert r.status_code == 200, r.text
+    models = r.json().get("models") or []
+    return models[0] if models else provider.get("default_model") or ""
 
 
 def test_create_session_records_last_model(client: TestClient) -> bool:
@@ -69,19 +81,20 @@ def test_create_without_explicit_model_does_not_record(client: TestClient) -> bo
 
 def test_selectors_model_patch_updates_last_model(client: TestClient) -> bool:
     claude = _provider_by_name(client, "Claude")
+    model = _provider_model(client, claude)
     r = client.post(
         "/api/sessions",
-        json={"model": "claude-sonnet-4-6", "cwd": "/tmp", "provider_id": claude["id"]},
+        json={"cwd": "/tmp", "provider_id": claude["id"], "orchestration_mode": "native"},
     )
     sid = r.json()["id"]
     r = client.patch(
-        f"/api/sessions/{sid}/selectors", json={"model": "claude-opus-4-8"},
+        f"/api/sessions/{sid}/selectors", json={"model": model},
     )
     if r.status_code != 200:
         print(f"  patch failed: {r.status_code} {r.text}")
         return False
     claude = _provider_by_name(client, "Claude")
-    if claude.get("last_model") != "claude-opus-4-8":
+    if claude.get("last_model") != model:
         print(f"  last_model mismatch: {claude.get('last_model')!r}")
         return False
     return True
@@ -91,11 +104,12 @@ def test_combined_provider_and_model_patch_records_under_new_provider(
     client: TestClient,
 ) -> bool:
     claude = _provider_by_name(client, "Claude")
-    gemini = _provider_by_name(client, "Gemini")
+    other = _other_provider(client, claude["id"])
+    other_model = _provider_model(client, other)
     r = client.post(
         "/api/sessions",
         json={
-            "model": "claude-sonnet-4-6",
+            "model": _provider_model(client, claude),
             "cwd": "/tmp",
             "provider_id": claude["id"],
             "orchestration_mode": "native",
@@ -104,18 +118,111 @@ def test_combined_provider_and_model_patch_records_under_new_provider(
     sid = r.json()["id"]
     r = client.patch(
         f"/api/sessions/{sid}/selectors",
-        json={"provider_id": gemini["id"], "model": "gemini-3-pro"},
+        json={"provider_id": other["id"], "model": other_model},
     )
     if r.status_code != 200:
         print(f"  patch failed: {r.status_code} {r.text}")
         return False
-    gemini = _provider_by_name(client, "Gemini")
-    if gemini.get("last_model") != "gemini-3-pro":
-        print(f"  gemini last_model mismatch: {gemini.get('last_model')!r}")
+    refreshed_other = next(p for p in _providers(client)["providers"] if p["id"] == other["id"])
+    if refreshed_other.get("last_model") != other_model:
+        print(f"  new provider last_model mismatch: {refreshed_other.get('last_model')!r}")
         return False
     claude = _provider_by_name(client, "Claude")
-    if claude.get("last_model") == "gemini-3-pro":
+    if claude.get("last_model") == other_model:
         print("  recorded under OLD provider")
+        return False
+    return True
+
+
+def test_provider_model_patch_allowed_with_active_run_marker(client: TestClient) -> bool:
+    claude = _provider_by_name(client, "Claude")
+    other = _other_provider(client, claude["id"])
+    other_model = _provider_model(client, other)
+    r = client.post(
+        "/api/sessions",
+        json={
+            "model": _provider_model(client, claude),
+            "cwd": "/tmp",
+            "provider_id": claude["id"],
+            "orchestration_mode": "native",
+        },
+    )
+    sid = r.json()["id"]
+    main.coordinator.turn_manager.active_run_ids[sid] = ["run-still-owned-by-old-provider"]
+    try:
+        r = client.patch(
+            f"/api/sessions/{sid}/selectors",
+            json={"provider_id": other["id"], "model": other_model},
+        )
+    finally:
+        main.coordinator.turn_manager.active_run_ids.pop(sid, None)
+    if r.status_code != 200:
+        print(f"  patch failed despite active run marker: {r.status_code} {r.text}")
+        return False
+    body = r.json().get("updates") or {}
+    if body.get("provider_id") != other["id"] or body.get("model") != other_model:
+        print(f"  update body mismatch: {body!r}")
+        return False
+    return True
+
+
+def test_selectors_patch_rejects_unknown_provider(client: TestClient) -> bool:
+    claude = _provider_by_name(client, "Claude")
+    r = client.post(
+        "/api/sessions",
+        json={
+            "model": _provider_model(client, claude),
+            "cwd": "/tmp",
+            "provider_id": claude["id"],
+            "orchestration_mode": "native",
+        },
+    )
+    sid = r.json()["id"]
+    r = client.patch(
+        f"/api/sessions/{sid}/selectors",
+        json={"provider_id": "missing-provider", "model": "ghost-model"},
+    )
+    if r.status_code != 400:
+        print(f"  unknown provider accepted: {r.status_code} {r.text}")
+        return False
+    session = client.get(f"/api/sessions/{sid}").json()
+    if session.get("provider_id") != claude["id"]:
+        print(f"  provider changed despite rejection: {session.get('provider_id')!r}")
+        return False
+    return True
+
+
+def test_provider_patch_without_model_uses_new_provider_default(client: TestClient) -> bool:
+    claude = _provider_by_name(client, "Claude")
+    other = _other_provider(client, claude["id"])
+    other_default = other.get("default_model")
+    if not other_default:
+        print("  fixture provider has no default_model")
+        return False
+    r = client.post(
+        "/api/sessions",
+        json={
+            "model": _provider_model(client, claude),
+            "cwd": "/tmp",
+            "provider_id": claude["id"],
+            "orchestration_mode": "native",
+        },
+    )
+    sid = r.json()["id"]
+    r = client.patch(
+        f"/api/sessions/{sid}/selectors",
+        json={"provider_id": other["id"]},
+    )
+    if r.status_code != 200:
+        print(f"  patch failed: {r.status_code} {r.text}")
+        return False
+    body = r.json().get("updates") or {}
+    if body.get("provider_id") != other["id"] or body.get("model") != other_default:
+        print(f"  update body mismatch: {body!r}")
+        return False
+    session = client.get(f"/api/sessions/{sid}").json()
+    if session.get("model") != other_default:
+        print(f"  persisted model mismatch: {session.get('model')!r}")
         return False
     return True
 
@@ -158,6 +265,9 @@ TESTS = [
     ("create without explicit model does not record", test_create_without_explicit_model_does_not_record),
     ("selectors model PATCH updates last_model", test_selectors_model_patch_updates_last_model),
     ("combined provider+model PATCH records under new provider", test_combined_provider_and_model_patch_records_under_new_provider),
+    ("provider+model PATCH allowed with active run marker", test_provider_model_patch_allowed_with_active_run_marker),
+    ("selectors PATCH rejects unknown provider", test_selectors_patch_rejects_unknown_provider),
+    ("provider PATCH without model uses new provider default", test_provider_patch_without_model_uses_new_provider_default),
     ("junk prefs shape is ignored", test_junk_prefs_shape_is_ignored),
     ("set_last_model change detection", test_set_last_model_change_detection),
 ]
@@ -165,6 +275,7 @@ TESTS = [
 
 def main_run() -> int:
     with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
+        authenticate_client(client)
         failed = 0
         try:
             for name, fn in TESTS:

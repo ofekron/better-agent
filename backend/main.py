@@ -884,6 +884,45 @@ async def _record_last_reasoning_effort(
         await _broadcast_provider_changed()
 
 
+async def _model_for_provider_switch(provider_id: str, provider_record: dict) -> str:
+    """Pick a valid model when the user switches provider without an
+    explicit model. Prefer the user's remembered model for that provider,
+    then the provider default, then the first cached active model. Never
+    leave the old provider's model attached to the session."""
+    import models as models_mod
+
+    last_models = await asyncio.to_thread(user_prefs.get_last_models)
+    candidates: list[str] = []
+    for value in (
+        last_models.get(provider_id),
+        provider_record.get("default_model"),
+    ):
+        model = str(value or "").strip()
+        if model and model not in candidates:
+            candidates.append(model)
+    try:
+        available = await asyncio.to_thread(models_mod.available_models, provider_id)
+    except Exception:
+        available = []
+    for value in available:
+        model = str(value or "").strip()
+        if model and model not in candidates:
+            candidates.append(model)
+
+    for model in candidates:
+        try:
+            await asyncio.to_thread(_validate_provider_model, provider_id, model, True)
+            return model
+        except HTTPException:
+            continue
+
+    name = provider_record.get("name") or provider_id
+    raise HTTPException(
+        status_code=400,
+        detail=f"{name} has no known models; cannot switch provider without a model",
+    )
+
+
 def _api_reasoning_effort(value: object) -> str | None:
     if value is None:
         return None
@@ -4935,12 +4974,27 @@ async def update_session_selectors(session_id: str, body: dict):
     `IncompatibleOrchestrationMode` → 400)."""
     body = body or {}
     updates: dict = {}
+    requested_provider_id = (
+        body.get("provider_id").strip()
+        if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
+        else None
+    )
+    provider_record = None
+    if "provider_id" in body:
+        if not requested_provider_id:
+            raise HTTPException(status_code=400, detail="provider_id is required")
+        provider_record = await asyncio.to_thread(
+            config_store.get_provider,
+            requested_provider_id,
+        )
+        if not provider_record:
+            raise HTTPException(status_code=400, detail="Unknown provider")
+        updates["provider_id"] = requested_provider_id
     if "model" in body and isinstance(body["model"], str) and body["model"].strip():
         requested_model = body["model"].strip()
         provider_for_model = (
-            body.get("provider_id")
-            if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
-            else ((await _session_lite(session_id)) or {}).get("provider_id")
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
         )
         # Fail closed: with no resolvable provider, `available_models(None)`
         # would validate against the DEFAULT provider — letting a foreign
@@ -4953,14 +5007,18 @@ async def update_session_selectors(session_id: str, body: dict):
             _validate_provider_model, provider_for_model, requested_model, True,
         )
         updates["model"] = requested_model
+    elif "provider_id" in updates:
+        updates["model"] = await _model_for_provider_switch(
+            requested_provider_id,
+            provider_record or {},
+        )
     if "reasoning_effort" in body:
         requested_effort = _api_reasoning_effort(body.get("reasoning_effort"))
         if requested_effort is None:
             raise HTTPException(status_code=400, detail="reasoning_effort is required")
         provider_for_effort = (
-            body.get("provider_id")
-            if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
-            else ((await _session_lite(session_id)) or {}).get("provider_id")
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
         )
         updates["reasoning_effort"] = _provider_reasoning_effort(
             provider_for_effort, requested_effort,
@@ -4970,21 +5028,15 @@ async def update_session_selectors(session_id: str, body: dict):
         if requested_permission is None:
             raise HTTPException(status_code=400, detail="permission is required")
         provider_for_permission = (
-            body.get("provider_id")
-            if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
-            else ((await _session_lite(session_id)) or {}).get("provider_id")
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
         )
         updates["permission"] = _provider_permission(
             provider_for_permission, requested_permission,
         )
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
-    if "provider_id" in body and isinstance(body["provider_id"], str) and body["provider_id"].strip():
-        updates["provider_id"] = body["provider_id"].strip()
-        provider_record = await asyncio.to_thread(
-            config_store.get_provider,
-            updates["provider_id"],
-        )
+    if requested_provider_id:
         if "reasoning_effort" not in updates:
             updates["reasoning_effort"] = (
                 (provider_record or {}).get("default_reasoning_effort") or ""
@@ -10803,15 +10855,6 @@ async def websocket_chat(websocket: WebSocket):
                 cwd = msg.get("cwd", os.path.expanduser("~"))
                 app_session_id = msg.get("app_session_id")
                 orchestration_mode = msg.get("orchestration_mode")
-                if orchestration_mode == "manager":
-                    orchestration_mode = "team"
-                if orchestration_mode == "team":
-                    team_not_ready = extension_store.runtime_not_ready_message(
-                        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
-                    )
-                    if team_not_ready is not None:
-                        await _send_message_error(team_not_ready)
-                        continue
                 send_mode = msg.get("send_mode") or await asyncio.to_thread(
                     user_prefs.get_send_mode,
                 )
@@ -10829,6 +10872,22 @@ async def websocket_chat(websocket: WebSocket):
                 if _offline_err:
                     await _send_message_error(_offline_err)
                     continue
+                if _offline_session:
+                    model = _offline_session.get("model") or model
+                    cwd = _offline_session.get("cwd") or cwd
+                    orchestration_mode = (
+                        _offline_session.get("orchestration_mode")
+                        or orchestration_mode
+                    )
+                if orchestration_mode == "manager":
+                    orchestration_mode = "team"
+                if orchestration_mode == "team":
+                    team_not_ready = extension_store.runtime_not_ready_message(
+                        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+                    )
+                    if team_not_ready is not None:
+                        await _send_message_error(team_not_ready)
+                        continue
 
                 # Ask-singleton entry point: when the user sends a prompt
                 # into the singleton session via WS, wrap the prompt with
