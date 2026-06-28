@@ -6770,6 +6770,27 @@ button.run-badge-clickable:focus-visible {
   background: var(--bg-tertiary);
 }
 
+.hidden-prompt-btn {
+  color: var(--warning, #d99100);
+}
+
+.hidden-prompt-modal {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(760px, calc(100dvh - 32px));
+}
+
+.hidden-prompt-modal-body {
+  overflow: auto;
+}
+
+.hidden-prompt-modal-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.45;
+}
+
 /* Children of a user prompt sit to the right of a vertical line, visually
    grouping the entire assistant response under the prompt that triggered it. */
 .message-group-children {

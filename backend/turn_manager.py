@@ -1093,6 +1093,7 @@ class TurnManager:
             client_id=client_id,
             source=source,
             lifecycle_msg_id=lifecycle_msg_id,
+            cli_prompt=cli_prompt,
             queue_item_id=queue_item_id,
             team_message=team_message,
             file_discussion_id=file_discussion_id,

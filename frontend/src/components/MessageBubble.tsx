@@ -2991,7 +2991,15 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   const isRunning = sessionRunning || isGroupRunning(assistantMessage, runs);
   const rawUserContent =
     typeof userMessage.content === "string" ? userMessage.content : "";
+  const hiddenPrompt =
+    userMessage.role === "user" &&
+    typeof userMessage.cli_prompt === "string" &&
+    userMessage.cli_prompt.length > 0 &&
+    userMessage.cli_prompt !== rawUserContent
+      ? userMessage.cli_prompt
+      : "";
   const [isEditingUser, setIsEditingUser] = useState(false);
+  const [showHiddenPrompt, setShowHiddenPrompt] = useState(false);
   const [userEditDraft, setUserEditDraft] = useState(rawUserContent);
   useEffect(() => {
     if (!isEditingUser) setUserEditDraft(rawUserContent);
@@ -3047,6 +3055,17 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           </button>
           {onAlterUserMessage && (
             <div className="message-header-actions">
+              {hiddenPrompt && (
+                <button
+                  type="button"
+                  className="message-header-action-btn hidden-prompt-btn"
+                  onClick={() => setShowHiddenPrompt(true)}
+                  title="Show full prompt"
+                  aria-label="Show full prompt"
+                >
+                  <Icon name="warning" size={13} />
+                </button>
+              )}
               <button
                 type="button"
                 className="message-header-action-btn alter-user-message-btn"
@@ -3058,6 +3077,19 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
               >
                 <Icon name="edit" size={13} />
                 <span>{t("message.alterButton")}</span>
+              </button>
+            </div>
+          )}
+          {!onAlterUserMessage && hiddenPrompt && (
+            <div className="message-header-actions">
+              <button
+                type="button"
+                className="message-header-action-btn hidden-prompt-btn"
+                onClick={() => setShowHiddenPrompt(true)}
+                title="Show full prompt"
+                aria-label="Show full prompt"
+              >
+                <Icon name="warning" size={13} />
               </button>
             </div>
           )}
@@ -3075,6 +3107,35 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             </button>
           )}
         </div>
+        {showHiddenPrompt && hiddenPrompt && (
+          <div
+            className="modal-overlay hidden-prompt-modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`hidden-prompt-title-${userMessage.id}`}
+            onClick={() => setShowHiddenPrompt(false)}
+          >
+            <div
+              className="modal-content hidden-prompt-modal"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="modal-header">
+                <h2 id={`hidden-prompt-title-${userMessage.id}`}>Full prompt</h2>
+                <button
+                  type="button"
+                  className="modal-close"
+                  onClick={() => setShowHiddenPrompt(false)}
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="modal-body hidden-prompt-modal-body">
+                <pre>{hiddenPrompt}</pre>
+              </div>
+            </div>
+          </div>
+        )}
         {(() => {
           const hasArtificial = hasArtificialSections(rawUserContent);
           return (
