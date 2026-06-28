@@ -3644,6 +3644,7 @@ async def get_sessions(
             else user_prefs.get_session_sort()
         )
         effective_status_sort = user_prefs.get_session_status_sort()
+        effective_search_fields = _split_session_search_fields(search_fields)
         filters = {
             "offset": offset,
             "limit": limit,
@@ -3676,7 +3677,7 @@ async def get_sessions(
         tuple(sorted(filters["model_ids"])),
         tuple(sorted(filters["modes"])),
         tuple(sorted(filters["sources"])),
-        search_fields,
+        tuple(sorted(effective_search_fields)),
         effective_sort_by,
         effective_status_sort,
         connected_version,
