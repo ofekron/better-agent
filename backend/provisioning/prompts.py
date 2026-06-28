@@ -10,7 +10,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 def render_prompt(name: str, params: dict[str, object]) -> str:
     path = _PROMPTS_DIR / name
-    if not path.is_file() and name in {"get_requirements_processor.md", "requirement_analysis_worker.md"}:
+    if not path.is_file() and name == "requirement_analysis_worker.md":
         import extension_package_loader
         import extension_store
 

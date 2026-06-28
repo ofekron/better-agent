@@ -87,6 +87,88 @@ def test_query_path_has_no_inline_extraction() -> None:
     check(not hasattr(rc, "_sync_requirement_units"), "inline unit-sync helper removed")
 
 
+def test_public_get_requirements_is_local_read_only() -> None:
+    import requirement_context as rc
+    from requirement_analysis.prephase import prephase_batches_path, units_path
+
+    saved = {
+        "prepare": rc.prepare_requirements_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "freshness": rc._requirement_unit_freshness,
+        "background": rc._ensure_background_extraction,
+    }
+    units_path().parent.mkdir(parents=True, exist_ok=True)
+    units_path().write_text(
+        '{"source_key":"s1:1:unit:0","text":"Performance logs must drive RCA before fixes.",'
+        '"kind":"explicit","polarity":"positive","strength":"high","source":"user","cwd":"/repo"}\n',
+        encoding="utf-8",
+    )
+    prephase_batches_path().write_text(
+        '{"version":1,"handled_session_counts":{},"batched_session_counts":{},"batches":[]}',
+        encoding="utf-8",
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("public requirements lookup must not call sync or worker")
+
+    rc.prepare_requirements_context = fail
+    rc._ensure_requirements_importable = lambda: None
+    rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
+    rc._ensure_background_extraction = lambda: {"running": True}
+    try:
+        result = rc.get_processed_requirements(query="performance logs rca", cwd="/repo")
+    finally:
+        rc.prepare_requirements_context = saved["prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._requirement_unit_freshness = saved["freshness"]
+        rc._ensure_background_extraction = saved["background"]
+
+    check(result["success"] is True, "public get-requirements succeeds from local corpus")
+    check(result["count"] == 1, "public get-requirements returns local matches")
+    check(result["requirements"][0]["text"].startswith("Performance logs"), "public result returns requirement text")
+    check("rg_args" not in result, "public result does not expose raw rg args")
+    check("command" not in result, "public result does not expose command")
+
+
+def test_public_get_requirements_ranks_noisy_queries() -> None:
+    import requirement_context as rc
+    from requirement_analysis.prephase import prephase_batches_path, units_path
+
+    saved = {
+        "ensure_importable": rc._ensure_requirements_importable,
+        "freshness": rc._requirement_unit_freshness,
+        "background": rc._ensure_background_extraction,
+    }
+    units_path().parent.mkdir(parents=True, exist_ok=True)
+    units_path().write_text(
+        "\n".join([
+            '{"source_key":"s1:1:unit:0","text":"Auth settings must be backend-owned.",'
+            '"kind":"explicit","source":"user","cwd":"/repo"}',
+            '{"source_key":"s2:1:unit:0","text":"Generic work items should stay concise.",'
+            '"kind":"explicit","source":"user","cwd":"/repo"}',
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    prephase_batches_path().write_text(
+        '{"version":1,"handled_session_counts":{},"batched_session_counts":{},"batches":[]}',
+        encoding="utf-8",
+    )
+
+    rc._ensure_requirements_importable = lambda: None
+    rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
+    rc._ensure_background_extraction = lambda: {"running": True}
+    try:
+        result = rc.get_processed_requirements(query="how does auth work", cwd="/repo", max_matches=2)
+    finally:
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._requirement_unit_freshness = saved["freshness"]
+        rc._ensure_background_extraction = saved["background"]
+
+    check(result["success"] is True, "noisy public query succeeds")
+    check(result["count"] == 1, "stopword-heavy query avoids generic work-only match")
+    check(result["requirements"][0]["text"].startswith("Auth settings"), "most relevant requirement ranks first")
+
+
 def test_prepare_orchestration_is_cheap_and_nonblocking() -> None:
     import requirement_context as rc
 
@@ -164,6 +246,8 @@ def run() -> None:
     test_greedy_packing_respects_capacity_and_cap()
     test_milp_failure_falls_back_to_greedy()
     test_query_path_has_no_inline_extraction()
+    test_public_get_requirements_is_local_read_only()
+    test_public_get_requirements_ranks_noisy_queries()
     test_prepare_orchestration_is_cheap_and_nonblocking()
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()

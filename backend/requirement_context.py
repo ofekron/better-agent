@@ -10,11 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import provisioning
 import extension_package_loader
 import extension_store
-from provisioning import DirtyPolicy, ProvisionedSessionSpec
-from provisioning.prompts import render_prompt
 
 RG_TIMEOUT_SECONDS = 30
 DEFAULT_MATCH_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
@@ -37,7 +34,6 @@ MATCH_FIELD_ORDER = (
     "user_seq",
 )
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
-GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
@@ -71,60 +67,6 @@ RG_OPTIONS_WITH_VALUE = {
 }
 
 
-class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
-    key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 1
-    name = "worker:requirements:query-processor"
-    env_prefix = "GET_REQUIREMENTS_PROCESSOR"
-    task_key = "requirement_analysis"
-    orchestration_mode = "native"
-    bare_config = False
-    worker_creation_policy = "deny"
-    machine_completion = False
-    run_mode = "direct"
-    ephemeral_forks = False
-    dispatch = "http"
-    on_no_fork = "error"
-    provision_timeout = 90.0
-    retry_attempts = 1
-    dirty_policy = DirtyPolicy(
-        max_base_bytes=5_000_000,
-        max_user_turns=None,
-        max_assistant_turns=None,
-    )
-
-    def build_provision_prompt(self, ctx: dict) -> str:
-        return render_prompt("get_requirements_processor.md", {})
-
-    def build_instructions(self, query: str, ctx: dict) -> str:
-        request = {
-            "query": query,
-            "cwd": ctx.get("cwd") or "",
-            "cwds": ctx.get("cwds") or [],
-            "all_projects": bool(ctx.get("all_projects")),
-            "max_matches": ctx.get("max_matches"),
-        }
-        return (
-            "Find the related stored requirements for this request.\n"
-            "Call get_requirements_internal with rg_args derived from request.query. "
-            "Use cwd/cwds/all_projects/max_matches from the request. "
-            "Return only the required JSON object.\n"
-            f"<request>\n{json.dumps(request, ensure_ascii=False)}\n</request>"
-        )
-
-    def parse_result(self, text: str, ctx: dict) -> dict[str, Any]:
-        obj = _parse_processor_json(text)
-        if not isinstance(obj, dict):
-            return {"requirements": [], "error": "parse_failed"}
-        requirements = obj.get("requirements")
-        if not isinstance(requirements, list):
-            return {"requirements": [], "error": "parse_failed"}
-        return {"requirements": _normalize_processed_requirements(requirements)}
-
-
-GET_REQUIREMENTS_PROCESSOR_SPEC = provisioning.register(GetRequirementsProcessorSpec())
-
-
 def _requirements_package_root() -> Path:
     return extension_package_loader.package_root(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
 
@@ -152,32 +94,27 @@ def get_processed_requirements(
             "requirements": [],
             "count": 0,
         }
-    # Strategy A: refresh the incremental cache on-demand inside the call
-    # (no background prewarm). Self-guarded — never raises; the processor
-    # queries whatever units are on disk.
-    prepare_requirements_context()
-    processed = _run_requirements_processor(
+    search = _search_processed_requirements(
         query=normalized_query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
         max_matches=max_matches,
     )
-    requirements = processed.get("requirements") if isinstance(processed, dict) else []
-    if not isinstance(requirements, list):
-        requirements = []
+    matches = search.get("matches") if isinstance(search, dict) else []
+    requirements = _normalize_processed_requirements(matches if isinstance(matches, list) else [])
     response = {
-        "success": not bool(processed.get("error")) if isinstance(processed, dict) else False,
+        "success": bool(search.get("success")) if isinstance(search, dict) else False,
         "requirements": requirements,
         "count": len(requirements),
     }
-    error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
+    error = search.get("error") if isinstance(search, dict) else "search_failed"
     if error:
         response["error"] = error
     return response
 
 
-def _run_requirements_processor(
+def _search_processed_requirements(
     *,
     query: str,
     cwd: str = "",
@@ -185,89 +122,101 @@ def _run_requirements_processor(
     all_projects: bool = False,
     max_matches: int | None = 20,
 ) -> dict[str, Any]:
-    ctx = {
-        "cwd": cwd,
-        "cwds": cwds or [],
-        "all_projects": all_projects,
-        "max_matches": max_matches,
-    }
-    try:
-        result = provisioning.run_sync(GET_REQUIREMENTS_PROCESSOR_SPEC, query, ctx)
-    except Exception as exc:
-        return {"requirements": [], "error": _processor_failure_message(exc)}
-    value = result.value
-    return value if isinstance(value, dict) else {"requirements": [], "error": "parse_failed"}
-
-
-# Strong, unambiguous rate-limit markers. A speculative timeout hedge
-# ("provider may be rate limited") contains none of these — it only ever uses
-# the bare phrase "rate limit(ed)", which is intentionally NOT a marker here.
-_RATE_LIMIT_MARKERS = (
-    "429",
-    "rate_limit",
-    "rate limit reached",
-    "rate limit exceeded",
-    "rate-limit reached",
-    "rate-limit exceeded",
-    "ratelimit",
-    "too many requests",
-    "resource_exhausted",
-    "quota exceeded",
-)
-
-
-def _processor_failure_message(exc: Exception) -> str:
-    error_text = str(exc).strip()
-    lower = error_text.lower()
-    if _is_explicit_rate_limit_error(lower):
-        return (
-            "processor_failed: get-requirements processor hit a provider rate limit; "
-            "no retry attempted"
-        )
-    if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
-        return (
-            "processor_failed: get-requirements processor timed out before returning requirements; "
-            "no retry attempted"
-        )
-    suffix = f": {error_text}" if error_text else ""
-    return f"processor_failed: {type(exc).__name__}{suffix}"
-
-
-def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
-    """True only for STRONG, unambiguous rate-limit signals.
-
-    We deliberately do NOT match the bare phrase "rate limit"/"rate limited":
-    speculative hedges ("may be / appears / likely / seems / could be / probably
-    rate limited") use exactly that bare phrasing, and enumerating every hedge in
-    a denylist is unbounded and fragile. Requiring a strong marker — a 429 status,
-    a rate-limit token, or an explicit "reached/exceeded/too many requests/quota
-    exhausted" phrasing that no speculative hedge produces — classifies real
-    rate-limit errors as rate limits while leaving every speculative timeout as a
-    timeout, with no hedge denylist to keep complete.
-    """
-    return any(
-        marker in lower_error_text
-        for marker in _RATE_LIMIT_MARKERS
+    terms = _query_terms(query)
+    if not terms:
+        return {"success": False, "error": "query must contain searchable terms", "matches": [], "count": 0}
+    preparation = prepare_requirements_local_read_context()
+    result = _search_requirements_prepared(
+        rg_args=_rg_args_from_terms(terms),
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        fields=list(DEFAULT_MATCH_FIELDS),
+        include_all_fields=False,
+        include_unprocessed_prompts=True,
+        max_matches=None,
+        preparation=preparation,
     )
+    matches = result.get("matches")
+    if isinstance(matches, list):
+        ranked = _rank_processed_matches(matches, terms)
+        normalized_max_matches, _ = _normalize_max_matches(max_matches)
+        if normalized_max_matches is not None:
+            ranked = ranked[:normalized_max_matches]
+        result = dict(result)
+        result["matches"] = ranked
+        result["count"] = len(ranked)
+        result["max_matches"] = normalized_max_matches
+    return result
 
 
-def _parse_processor_json(text: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-    matches = list(re.finditer(r"\{[\s\S]*\}", text))
-    for match in reversed(matches):
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
+def _query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for raw in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{2,}", query):
+        term = raw.strip("._:/-").lower()
+        if not term or term in _QUERY_STOP_WORDS or term in terms:
             continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+        terms.append(term)
+        if len(terms) >= 12:
+            break
+    return terms
+
+
+def _rg_args_from_terms(terms: list[str]) -> list[str]:
+    args = ["-i", "-F"]
+    for term in terms:
+        args.extend(["-e", term])
+    return args
+
+
+def _rank_processed_matches(matches: list[Any], terms: list[str]) -> list[dict[str, Any]]:
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for index, match in enumerate(matches):
+        if not isinstance(match, dict):
+            continue
+        score = _processed_match_score(match, terms)
+        if score <= 0:
+            continue
+        ranked.append((score, -index, match))
+    ranked.sort(reverse=True)
+    return [match for _, _, match in ranked]
+
+
+def _processed_match_score(match: dict[str, Any], terms: list[str]) -> int:
+    text = str(match.get("text") or "").lower()
+    source_text = str(match.get("source_text") or "").lower()
+    cwd = str(match.get("cwd") or "").lower()
+    score = 0
+    for term in terms:
+        if term in text:
+            score += 4
+        if source_text and term in source_text:
+            score += 2
+        if cwd and term in cwd:
+            score += 1
+    return score
+
+
+_QUERY_STOP_WORDS = {
+    "about",
+    "after",
+    "and",
+    "before",
+    "does",
+    "from",
+    "how",
+    "into",
+    "the",
+    "this",
+    "through",
+    "what",
+    "when",
+    "where",
+    "which",
+    "why",
+    "with",
+    "work",
+}
 
 
 def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]]:
@@ -356,6 +305,75 @@ def search_requirements(
         }
 
     preparation = prepare_requirements_context()
+    return _search_requirements_prepared(
+        rg_args=normalized_args,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        fields=fields,
+        include_all_fields=include_all_fields,
+        include_unprocessed_prompts=include_unprocessed_prompts,
+        max_matches=max_matches,
+        preparation=preparation,
+    )
+
+
+def _search_requirements_prepared(
+    *,
+    rg_args: list[str],
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    fields: list[str] | None = None,
+    include_all_fields: bool = False,
+    include_unprocessed_prompts: bool = False,
+    max_matches: int | None = None,
+    preparation: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_args = _normalize_rg_args(rg_args)
+    validation_error = _validate_rg_args(normalized_args)
+    if validation_error:
+        return {
+            "success": False,
+            "error": validation_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": normalized_args,
+        }
+    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
+    if cwds_error:
+        return {
+            "success": False,
+            "error": cwds_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": normalized_args,
+        }
+    normalized_fields, fields_error = _normalize_match_fields(fields, include_all_fields=include_all_fields)
+    if fields_error:
+        return {
+            "success": False,
+            "error": fields_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": normalized_args,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+        }
+    normalized_max_matches, max_matches_error = _normalize_max_matches(max_matches)
+    if max_matches_error:
+        return {
+            "success": False,
+            "error": max_matches_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": normalized_args,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+        }
+
     sync = preparation["sync"]
     from requirement_analysis.prephase import units_path
 
@@ -441,6 +459,21 @@ def prepare_requirements_context(
     return {
         "success": bool(sync.get("success")) and bool(freshness.get("fresh")),
         "sync": sync,
+        "freshness": freshness,
+        "extraction": extraction,
+    }
+
+
+def prepare_requirements_local_read_context(
+    *,
+    allowed_unhandled_prompts: int = 1,
+) -> dict[str, Any]:
+    _ensure_requirements_importable()
+    freshness = _requirement_unit_freshness(allowed_unhandled_prompts=allowed_unhandled_prompts)
+    extraction = _ensure_background_extraction()
+    return {
+        "success": bool(freshness.get("fresh")),
+        "sync": {"success": True, "changed": False, "skipped": "local_read"},
         "freshness": freshness,
         "extraction": extraction,
     }
