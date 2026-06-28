@@ -1978,6 +1978,8 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
     if _project_aggregates_gen > 0 and _project_aggregates_cache:
         return _project_aggregates_cache
     import working_mode as _wm
+    running_sids, _ = coordinator.turn_manager.cached_state_snapshot()
+    unread_by_sid = session_manager.unread_counts_snapshot()
     agg: dict[tuple[str, str], dict[str, int]] = {}
     for s in session_manager.list():
         if _wm.should_hide_from_sidebar(s):
@@ -1990,9 +1992,9 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
         slot = agg.setdefault(
             key, {"running_count": 0, "unread_session_count": 0}
         )
-        if coordinator.turn_manager.is_running_cached(sid):
+        if sid in running_sids:
             slot["running_count"] += 1
-        if (session_manager.peek_unread_count(sid) or 0) > 0:
+        if unread_by_sid.get(sid, 0) > 0:
             slot["unread_session_count"] += 1
     _project_aggregates_cache = agg
     _project_aggregates_gen += 1

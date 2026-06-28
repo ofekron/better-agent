@@ -364,6 +364,17 @@ def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     assert "def cached_state_snapshot(" in turn_source
 
 
+def test_project_aggregates_use_bulk_cached_state() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _project_aggregates(")
+    end = source.index("def _invalidate_project_aggregates(", start)
+    aggregate_source = source[start:end]
+    assert "cached_state_snapshot()" in aggregate_source
+    assert "unread_counts_snapshot()" in aggregate_source
+    assert "is_running_cached(" not in aggregate_source
+    assert "peek_unread_count(" not in aggregate_source
+
+
 def test_sidebar_file_paths_use_cached_sessions_dir() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _root_sessions_dir_path(" in source
@@ -638,6 +649,7 @@ if __name__ == "__main__":
     test_startup_defers_requirement_and_project_match_warmers()
     test_sidebar_organization_enrichment_stays_in_summary_index()
     test_sidebar_decoration_uses_bulk_cached_state()
+    test_project_aggregates_use_bulk_cached_state()
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
     test_session_list_does_not_prewarm_snapshots()
