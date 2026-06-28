@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Explorar archivos del proyecto",
   "sidebar.sessionsTab": "Sesiones",
   "sidebar.workersTab": "Workers",
+  "sidebar.tasksTab": "Tareas",
   "app.reconciling": "Reconciliando…",
   "app.reconcilingTitle": "El backend está reconciliando eventos rezagados. Se muestra solo cuando >0.3s.",
   "app.supervisorBannerDismiss": "Descartar",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Bienvenido — crea tu acceso para empezar.",
   "setup.unknownError": "No se pudieron guardar las credenciales (estado {{status}}).",
   "todos.previous": "Anterior",
-  "toolCall.canvasTitle": "Lienzo"
+  "toolCall.canvasTitle": "Lienzo",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

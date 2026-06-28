@@ -7,9 +7,15 @@ Run with:
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 
 BACKEND = Path(__file__).resolve().parents[1]
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+import extension_store as es  # noqa: E402
+
 RUNNER = BACKEND / "runner.py"
 EXTENSION_STORE = BACKEND / "extension_store.py"
 EXTENSION_PACKAGE_LOADER = BACKEND / "extension_package_loader.py"
@@ -33,7 +39,8 @@ def _run() -> bool:
         ),
         (
             "requirements extension may replace reserved MCP server",
-            'BUILTIN_REQUIREMENTS_EXTENSION_ID: frozenset({"get-requirements"})' in extension_store,
+            es._BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(es.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+            == frozenset({"get-requirements"}),
             "missing replacement allow-list entry",
         ),
         (
@@ -54,8 +61,8 @@ def _run() -> bool:
         ),
         (
             "requirements runtime files are an extension readiness gate",
-            "BUILTIN_RUNTIME_REQUIRED_PATHS" in extension_store
-            and 'BUILTIN_REQUIREMENTS_EXTENSION_ID: ("requirement_analysis",)' in extension_store,
+            es._BUILTIN_RUNTIME_REQUIRED_PATHS.get(es.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+            == ("requirement_analysis",),
             "requirements MCP can be runtime-ready without requirement_analysis",
         ),
     ]

@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "プロジェクトファイルを参照",
   "sidebar.sessionsTab": "セッション",
   "sidebar.workersTab": "ワーカー",
+  "sidebar.tasksTab": "タスク",
   "app.reconciling": "整合中…",
   "app.reconcilingTitle": "バックエンドが遅延イベントを整合しています。0.3 秒を超える場合のみ表示されます。",
   "app.supervisorBannerDismiss": "閉じる",
@@ -782,5 +783,9 @@
   "setup.subtitle": "ようこそ — 開始するにはログインを作成してください。",
   "setup.unknownError": "認証情報を保存できませんでした（ステータス {{status}}）。",
   "todos.previous": "前へ",
-  "toolCall.canvasTitle": "キャンバス"
+  "toolCall.canvasTitle": "キャンバス",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

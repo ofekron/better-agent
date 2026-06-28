@@ -883,6 +883,18 @@ async def _integrate_one(
     if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
         _is_consistent, sess, desc,
     ):
+        if last_asst_initial is not None:
+            await _emit_recovered_user_message_terminal(
+                coordinator=coordinator,
+                persist_sid=persist_sid,
+                mode=desc.get("mode") or "manager",
+                agent_sid=desc.get("session_id"),
+                run_id=run_id,
+                cancelled=cancelled,
+                sess=sess,
+                assistant_msg=last_asst_initial,
+            )
+            await asyncio.to_thread(_barrier_journal, persist_sid)
         await _mark_reconciled_if_safe_async(run_id, desc, "consistent state")
         return
 
@@ -1116,6 +1128,23 @@ async def _integrate_one(
                     "for retry on next startup", run_id,
                 )
                 return
+            if not (alive and not has_complete):
+                live_sess, terminal_asst, _ = await asyncio.to_thread(
+                    _recovery_target_snapshot,
+                    persist_sid,
+                    recovering_msg_id,
+                )
+                if live_sess is not None and terminal_asst is not None:
+                    await _emit_recovered_user_message_terminal(
+                        coordinator=coordinator,
+                        persist_sid=persist_sid,
+                        mode=mode,
+                        agent_sid=claude_sid,
+                        run_id=run_id,
+                        cancelled=cancelled,
+                        sess=live_sess,
+                        assistant_msg=terminal_asst,
+                    )
             # The replay's events.jsonl writes are fire-and-forget
             # (timeout=0 shard-executor submits). The marker permanently
             # gates this run out of future replays, so it must not land
@@ -1151,6 +1180,85 @@ def _last_assistant(sess: dict) -> Optional[dict]:
         if m.get("role") == "assistant":
             return m
     return None
+
+
+async def _emit_recovered_user_message_terminal(
+    *,
+    coordinator,
+    persist_sid: str,
+    mode: str,
+    agent_sid: Optional[str],
+    run_id: str,
+    cancelled: bool,
+    sess: dict,
+    assistant_msg: dict,
+) -> None:
+    """Publish the user_message_* terminal that live turn finalization would
+    have emitted if the backend had not restarted mid-turn.
+
+    Recovery finalizes the render tree directly, bypassing
+    ``Coordinator.handle_prompt``'s normal emit_user_msg_done/failed path. That
+    left durable ask/mssg waiters with only sent/received events and no terminal
+    to reattach to after a restart. Emit once, keyed by the preceding user
+    message's lifecycle id, and let the existing event-bus persistence + WS
+    fanout handle both disk and live waiters.
+    """
+    try:
+        import user_msg_lifecycle
+        from orchs import get_strategy
+    except Exception:
+        logger.debug("recovery lifecycle terminal imports failed", exc_info=True)
+        return
+
+    user_msg = _last_user_before(sess, assistant_msg)
+    lifecycle_msg_id = (
+        user_msg.get("lifecycle_msg_id")
+        if isinstance(user_msg, dict) else None
+    )
+    if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+        return
+    try:
+        if user_msg_lifecycle.terminal_event_for_lifecycle(
+            persist_sid, lifecycle_msg_id,
+        ) is not None:
+            return
+    except Exception:
+        logger.debug("recovery lifecycle terminal check failed", exc_info=True)
+        return
+
+    complete = _salvage_complete_payload(run_id)
+    success = bool(complete and complete.get("success")) and not cancelled
+    error = complete.get("error") if isinstance(complete, dict) else None
+    try:
+        if not success and not cancelled:
+            await coordinator.user_prompt_manager.emit_user_msg_failed(
+                persist_sid,
+                lifecycle_msg_id,
+                reason="recovered_run_failed",
+                error=error or "Run failed during recovery.",
+            )
+            return
+        strategy = get_strategy(mode)
+        strategy.record_turn_result(
+            lifecycle_msg_id,
+            role=mode,
+            success=success,
+            token_usage=complete.get("token_usage"),
+            error=error,
+            agent_sid=agent_sid or complete.get("session_id"),
+        )
+        await coordinator.user_prompt_manager.emit_user_msg_done(
+            persist_sid,
+            lifecycle_msg_id,
+            mode,
+            cancelled=cancelled,
+        )
+    except Exception:
+        logger.exception(
+            "recovery lifecycle terminal emit failed sid=%s run=%s",
+            persist_sid,
+            run_id,
+        )
 
 
 def _apply_completion_state(
@@ -1950,6 +2058,18 @@ async def _finalize_when_done(
                     recovering_msg_id=recovering_msg_id,
                 )
                 return  # new task owns cleanup
+
+        if finalize_ok and last_asst is not None:
+            await _emit_recovered_user_message_terminal(
+                coordinator=coordinator,
+                persist_sid=persist_sid,
+                mode=desc.get("mode") or "native",
+                agent_sid=desc.get("session_id"),
+                run_id=run_id,
+                cancelled=cancelled,
+                sess=sess,
+                assistant_msg=last_asst,
+            )
 
         provider._runs.pop(run_id, None)
         coordinator.turn_manager.run_state_remove(app_sid, run_id)

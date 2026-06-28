@@ -24,6 +24,7 @@ _HOOK_SNAPSHOT_SIGNATURE: tuple[Any, ...] | None = None
 _HOOK_SNAPSHOT_CHECKED_AT = 0.0
 _HOOK_SNAPSHOT_REFRESHING = False
 _HOOK_SNAPSHOT_GUARD = threading.Lock()
+_SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE: Any = object()
 
 
 def _queue_guard():
@@ -89,13 +90,36 @@ def _hook_snapshot_signature() -> tuple[Any, ...]:
 
 def invalidate_hook_snapshot() -> None:
     global _HOOK_SNAPSHOT, _HOOK_SNAPSHOT_SIGNATURE, _HOOK_SNAPSHOT_CHECKED_AT
+    global _SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE
     with _HOOK_SNAPSHOT_GUARD:
         _HOOK_SNAPSHOT = None
         _HOOK_SNAPSHOT_SIGNATURE = None
         _HOOK_SNAPSHOT_CHECKED_AT = 0.0
+        _SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE = object()
+
+
+def _reconcile_session_event_extensions_if_needed() -> None:
+    global _SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE
+    signature = _extension_store_signature()
+    if _SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE == signature:
+        return
+    try:
+        # Session-event hooks are part of the runtime path, not just the
+        # Settings UI. On a fresh home the bundled/local extension records may
+        # not exist yet because `list_extensions()`/`get_extension()` are pure
+        # reads; the reconciling list endpoint is not guaranteed to have been
+        # called before the first provider event. Reconcile here before
+        # discovering hooks so the builtin Todos projection (and any local
+        # session-event hooks) work on the first event after install/startup.
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    except Exception:
+        logger.exception("session-event extension reconciliation failed")
+    finally:
+        _SESSION_EVENT_RECONCILE_ATTEMPT_SIGNATURE = _extension_store_signature()
 
 
 def _load_hook_snapshot() -> SessionEventHookSnapshot:
+    _reconcile_session_event_extensions_if_needed()
     try:
         hooks = _session_event_hooks()
     except Exception:
@@ -158,7 +182,8 @@ def _refresh_hook_snapshot(signature: tuple[Any, ...]) -> None:
 
 
 def hook_snapshot_nonblocking() -> SessionEventHookSnapshot:
-    global _HOOK_SNAPSHOT_REFRESHING
+    global _HOOK_SNAPSHOT, _HOOK_SNAPSHOT_SIGNATURE
+    global _HOOK_SNAPSHOT_CHECKED_AT, _HOOK_SNAPSHOT_REFRESHING
     now = time.monotonic()
     signature = _hook_snapshot_signature()
     with _HOOK_SNAPSHOT_GUARD:
@@ -169,16 +194,38 @@ def hook_snapshot_nonblocking() -> SessionEventHookSnapshot:
             and now - _HOOK_SNAPSHOT_CHECKED_AT < _HOOK_SNAPSHOT_TTL_S
         ):
             return snapshot
-        if not _HOOK_SNAPSHOT_REFRESHING:
-            _HOOK_SNAPSHOT_REFRESHING = True
-            thread = threading.Thread(
-                target=_refresh_hook_snapshot,
-                args=(signature,),
-                name="session-event-hook-snapshot",
-                daemon=True,
-            )
-            thread.start()
+        signature_changed = _HOOK_SNAPSHOT_SIGNATURE != signature
+        # Cold cache (first event after start) and config changes (extension
+        # enable/disable, store rewrite) MUST load synchronously: returning the
+        # empty/stale snapshot here would silently DROP the triggering event —
+        # the builtin todos projection would never fire for the first
+        # TodoWrite / TaskCreate / update_topic of the session, and a
+        # just-disabled extension would still mutate the session. A stale-vs-
+        # fresh signature is the load-bearing distinction, so a pure TTL expiry
+        # (same signature) still serves the warm snapshot and refreshes async.
+        if snapshot is None or signature_changed:
+            load_inline = True
+        else:
+            load_inline = False
+            if not _HOOK_SNAPSHOT_REFRESHING:
+                _HOOK_SNAPSHOT_REFRESHING = True
+                thread = threading.Thread(
+                    target=_refresh_hook_snapshot,
+                    args=(signature,),
+                    name="session-event-hook-snapshot",
+                    daemon=True,
+                )
+                thread.start()
+    if not load_inline:
         return snapshot or _EMPTY_HOOK_SNAPSHOT
+    # Load outside the guard — `_load_hook_snapshot` takes the extension-store
+    # file lock, which must never nest under the in-process snapshot guard.
+    fresh = _load_hook_snapshot()
+    with _HOOK_SNAPSHOT_GUARD:
+        _HOOK_SNAPSHOT = fresh
+        _HOOK_SNAPSHOT_SIGNATURE = signature
+        _HOOK_SNAPSHOT_CHECKED_AT = time.monotonic()
+    return fresh
 
 
 def session_event_hook_specs() -> list[SessionEventHookSpec]:

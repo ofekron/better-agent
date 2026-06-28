@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Projektdateien durchsuchen",
   "sidebar.sessionsTab": "Sitzungen",
   "sidebar.workersTab": "Worker",
+  "sidebar.tasksTab": "Aufgaben",
   "app.reconciling": "Abgleich läuft…",
   "app.reconcilingTitle": "Das Backend gleicht verzögerte Ereignisse ab. Wird nur bei >0,3 s angezeigt.",
   "app.supervisorBannerDismiss": "Ausblenden",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Willkommen — erstellen Sie Ihren Zugang, um loszulegen.",
   "setup.unknownError": "Anmeldedaten konnten nicht gespeichert werden (Status {{status}}).",
   "todos.previous": "Vorherige",
-  "toolCall.canvasTitle": "Canvas"
+  "toolCall.canvasTitle": "Canvas",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "تصفّح ملفات المشروع",
   "sidebar.sessionsTab": "الجلسات",
   "sidebar.workersTab": "العمّال",
+  "sidebar.tasksTab": "المهام",
   "app.reconciling": "جارٍ التسوية…",
   "app.reconcilingTitle": "الخادم يقوم بتسوية الأحداث المتأخرة. يظهر فقط عندما يكون >0.3 ث.",
   "app.supervisorBannerDismiss": "إخفاء",
@@ -782,5 +783,9 @@
   "setup.subtitle": "مرحبًا — أنشئ حساب الدخول للبدء.",
   "setup.unknownError": "تعذّر حفظ بيانات الاعتماد (الحالة {{status}}).",
   "todos.previous": "السابق",
-  "toolCall.canvasTitle": "اللوحة"
+  "toolCall.canvasTitle": "اللوحة",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

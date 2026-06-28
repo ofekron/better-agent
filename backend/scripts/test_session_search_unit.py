@@ -90,6 +90,7 @@ def _write_session(
         "messages": messages or [],
         "updated_at": updated_at,
         "archived": archived,
+        "user_initiated": True,
     }
     if working_mode_value is not None:
         payload["working_mode"] = working_mode_value
@@ -190,6 +191,14 @@ def test_build_index_filters_hidden_and_archived() -> bool:
         working_mode_value="prompt_engineering",
         messages=[{"role": "user", "content": "x"}],
     )
+    _write_session(
+        sid="system-1",
+        name="agent-created helper",
+        messages=[{"role": "user", "content": "x"}],
+    )
+    raw = json.loads((Path(_TMP_HOME) / "sessions" / "system-1.json").read_text())
+    raw["user_initiated"] = False
+    (Path(_TMP_HOME) / "sessions" / "system-1.json").write_text(json.dumps(raw))
     index = session_search._build_index()
     ids = {s["id"] for s in index}
     if ids != {"normal-1", "normal-2"}:
@@ -216,7 +225,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
     if index[0]["id"] != "normal-1":
         print(f"{FAIL} build_index order: expected normal-1 first")
         return False
-    print(f"{PASS} _build_index filters hidden + archived; field shape correct")
+    print(f"{PASS} _build_index filters hidden + archived + non-user-initiated; field shape correct")
     return True
 
 

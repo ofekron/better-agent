@@ -83,9 +83,64 @@ def test_ensure_uses_scan_so_new_extension_loads() -> None:
             os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
 
 
+def test_public_marketplace_fallback_does_not_change_private_scan_root() -> None:
+    """The special local marketplace fallback uses the public repo package, but
+    it must not mutate the private repo root used for later scanned extensions."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        private_root = (tmp_root / "private").resolve()
+        public_root = (tmp_root / "public").resolve()
+        _make_ext(private_root, "scanned", "ofek-dev.scanned")
+        (public_root / "extensions" / "marketplace").mkdir(parents=True)
+
+        orig_paths = es._PRIVATE_EXTENSION_PATHS
+        orig_repo = es._local_private_extension_repo_root
+        orig_required = es._required_marketplace_repo_root
+        orig_public = es._repo_root
+        orig_snap = es._install_private_package_snapshot
+        installed: list[tuple[str, Path]] = []
+
+        def fake_snapshot(extension_id: str, package_dir: Path) -> dict:
+            installed.append((extension_id, package_dir))
+            return {
+                "manifest": {"id": extension_id, "entrypoints": {}, "marketplace": {}},
+                "enabled": True,
+                "installed_at": "now",
+                "updated_at": "now",
+                "source": {"type": "better_agent_local", "install_path": str(package_dir)},
+                "entitlement": {},
+                "smoke_test": {"status": "passed"},
+            }
+
+        try:
+            es._PRIVATE_EXTENSION_PATHS = {
+                es.MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
+            }
+            es._local_private_extension_repo_root = lambda: private_root
+            es._required_marketplace_repo_root = lambda: None
+            es._repo_root = lambda: public_root
+            es._install_private_package_snapshot = fake_snapshot
+            data = {"extensions": {}, "deleted_extensions": {}}
+            es._ensure_private_extensions(data)
+            check(es.MARKETPLACE_EXTENSION_ID in data["extensions"],
+                  "marketplace fallback still installs from public package")
+            check("ofek-dev.scanned" in data["extensions"],
+                  "later scanned extension still uses private scan root")
+            check(any(ext_id == "ofek-dev.scanned" and private_root in path.parents
+                      for ext_id, path in installed),
+                  "scanned extension package path is under private root")
+        finally:
+            es._PRIVATE_EXTENSION_PATHS = orig_paths
+            es._local_private_extension_repo_root = orig_repo
+            es._required_marketplace_repo_root = orig_required
+            es._repo_root = orig_public
+            es._install_private_package_snapshot = orig_snap
+
+
 if __name__ == "__main__":
     test_scan_discovers_unmapped_extension()
     test_scan_none_repo_is_empty()
     test_scan_skips_invalid_manifest()
     test_ensure_uses_scan_so_new_extension_loads()
+    test_public_marketplace_fallback_does_not_change_private_scan_root()
     print("all dirscan tests passed")

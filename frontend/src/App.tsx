@@ -564,6 +564,7 @@ function AppMain({
   const sessionToolbarModules = useExtensionFrontendModules("session-toolbar");
   const mobileSessionTopbarModules = useExtensionFrontendModules("mobile-session-topbar");
   const teamSidebarModules = useExtensionFrontendModules("team-sidebar");
+  const tasksSidebarModules = useExtensionFrontendModules("tasks-sidebar");
   const routePageModules = useExtensionFrontendModules("route-page");
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
@@ -3137,7 +3138,7 @@ function AppMain({
     "better-agent-sidebar-minimized",
     false,
   );
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers">(
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers" | "tasks">(
     "sessions",
   );
   // DOM slot above the sidebar tabs where SessionList portals the pinned
@@ -4686,6 +4687,34 @@ function AppMain({
       events,
     ],
   );
+  // Context for the Tasks sidebar module. `onOpenSession` lets a launched
+  // (or recent) run deep-link into the chat. `events` carries the live WS
+  // frames so the panel converges on `tasks_changed` without polling.
+  const tasksSidebarContext = useMemo(
+    () => ({
+      cwd,
+      nodeId: selectedProjectNodeId,
+      model,
+      providerId: currentSession?.provider_id ?? "",
+      reasoningEffort: currentSession?.reasoning_effort ?? "",
+      events,
+      onOpenSession: (sessionId: string) => {
+        if (!sessionId) return;
+        navigate(sessionPath(sessionId));
+        if (isMobile) setMobileSidebarOpen(false);
+      },
+    }),
+    [
+      cwd,
+      selectedProjectNodeId,
+      model,
+      currentSession?.provider_id,
+      currentSession?.reasoning_effort,
+      events,
+      navigate,
+      isMobile,
+    ],
+  );
   const machinePageContext = useMemo(
     () => ({
       activePage: "machines",
@@ -5183,6 +5212,16 @@ function AppMain({
     teamSidebarModules.length > 0
   );
 
+  // The Tasks tab is surfaced next to Sessions/Workers whenever the tasks
+  // extension + its sidebar module are present and a project is selected
+  // (tasks are project-scoped). Tasks are reusable, run-on-demand
+  // definitions that launch autonomous sessions.
+  const tasksTabAvailable = !!(
+    builtinExtensions.tasks &&
+    cwd &&
+    tasksSidebarModules.length > 0
+  );
+
   return (
     <MobileActionSheetProvider>
     <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id} activeSessionCwd={currentSession?.cwd}>
@@ -5580,7 +5619,7 @@ function AppMain({
 
         <div ref={setSelectedAnchorEl} className="sidebar-selected-anchor" />
 
-        {workersTabAvailable ? (
+        {workersTabAvailable || tasksTabAvailable ? (
           <div className="sidebar-tabs" role="tablist">
             <button
               type="button"
@@ -5591,15 +5630,28 @@ function AppMain({
             >
               {t("sidebar.sessionsTab")}
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sidebarTab === "workers"}
-              className={`sidebar-tab${sidebarTab === "workers" ? " active" : ""}`}
-              onClick={() => setSidebarTab("workers")}
-            >
-              {t("sidebar.workersTab")}
-            </button>
+            {workersTabAvailable ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "workers"}
+                className={`sidebar-tab${sidebarTab === "workers" ? " active" : ""}`}
+                onClick={() => setSidebarTab("workers")}
+              >
+                {t("sidebar.workersTab")}
+              </button>
+            ) : null}
+            {tasksTabAvailable ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "tasks"}
+                className={`sidebar-tab${sidebarTab === "tasks" ? " active" : ""}`}
+                onClick={() => setSidebarTab("tasks")}
+              >
+                {t("sidebar.tasksTab")}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
@@ -5611,6 +5663,16 @@ function AppMain({
                   key={`${module.extension_id}:${module.id}`}
                   module={module}
                   context={teamSidebarContext}
+                />
+              ))}
+            </div>
+          ) : tasksTabAvailable && sidebarTab === "tasks" ? (
+            <div className="sidebar-tasks-panel">
+              {tasksSidebarModules.map((module) => (
+                <ExtensionModuleSlot
+                  key={`${module.extension_id}:${module.id}`}
+                  module={module}
+                  context={tasksSidebarContext}
                 />
               ))}
             </div>

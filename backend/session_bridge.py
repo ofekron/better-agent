@@ -185,7 +185,9 @@ async def _run(
     if run_mode == "fork":
         config_store.apply_env_vars()
         try:
-            child = session_manager.fork(target_sid)
+            # This fork is spawned by an agent delegation into another
+            # session, not by the user opening the Fork action.
+            child = session_manager.fork(target_sid, user_initiated=False)
         except KeyError:
             return {"error": "unknown_session"}
         except ValueError as e:
@@ -235,6 +237,9 @@ async def _run_new(
         cwd=caller.get("cwd", ""),
         orchestration_mode=caller.get("orchestration_mode", "native"),
         provider_id=caller.get("provider_id"),
+        # New-session mode always reaches here only after the user approves
+        # the picker, so this session is user-aware.
+        user_initiated=True,
     )
     run_sid = sess["id"]
     final = await _run_turn(

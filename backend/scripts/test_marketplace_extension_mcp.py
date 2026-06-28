@@ -39,8 +39,8 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     extensions = extension_store.list_extensions()
     check(
-        extension_store.MARKETPLACE_EXTENSION_ID not in {item["manifest"]["id"] for item in extensions},
-        "marketplace stays hidden from public extension list",
+        extension_store.MARKETPLACE_EXTENSION_ID in {item["manifest"]["id"] for item in extensions},
+        "marketplace is listed in the public extension list",
     )
     hidden_extensions = extension_store.list_extensions(include_hidden=True)
     check(

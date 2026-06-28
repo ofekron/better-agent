@@ -61,6 +61,15 @@ from backend.extractor import (  # noqa: E402
     derive_current_tasks,
 )
 
+# Seed the isolated test home's extension store the same way production does on
+# its first `GET /api/extensions`: `_load()` is a pure read and never installs
+# the bundled Todos extension, so without this the builtin-todos session-event
+# hook is absent and every apply_event-driven assertion below silently no-ops.
+# `list_extensions_with_reconciliation` runs `_ensure_public_extensions`, which
+# installs + enables `ofek-dev.todos` as a first-party bundled extension.
+extension_store.list_extensions_with_reconciliation(include_hidden=True)
+session_event_extensions.invalidate_hook_snapshot()
+
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 

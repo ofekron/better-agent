@@ -55,6 +55,7 @@ def _record(sid: str, updated_at: str, pinned: bool = False) -> dict:
         "created_at": "2026-06-16T00:00:00+00:00",
         "updated_at": updated_at,
         "source": "cli",
+        "user_initiated": True,
         "pinned": pinned,
     }
 
@@ -440,6 +441,36 @@ def test_sidebar_strips_heavy_working_mode_meta(client: TestClient) -> bool:
     return ok
 
 
+def test_session_list_source_filter_user_awareness(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("human", "2026-06-18T00:00:00+00:00"))
+    system = _record("system", "2026-06-19T00:00:00+00:00")
+    system["source"] = "internal"
+    system["user_initiated"] = False
+    _write(system)
+
+    user_resp = client.get("/api/sessions?sources=user", headers=HEADERS)
+    system_resp = client.get("/api/sessions?sources=system", headers=HEADERS)
+    internal_resp = client.get("/api/sessions?sources=internal", headers=HEADERS)
+    if user_resp.status_code != 200 or system_resp.status_code != 200 or internal_resp.status_code != 200:
+        print(
+            f"{FAIL} /api/sessions source-awareness status "
+            f"user={user_resp.status_code} system={system_resp.status_code} "
+            f"internal={internal_resp.status_code}"
+        )
+        return False
+    user_ids = {s.get("id") for s in user_resp.json().get("sessions") or []}
+    system_ids = {s.get("id") for s in system_resp.json().get("sessions") or []}
+    internal_ids = {s.get("id") for s in internal_resp.json().get("sessions") or []}
+    ok = user_ids == {"human"} and system_ids == {"system"} and internal_ids == {"system"}
+    print(
+        f"{PASS if ok else FAIL} /api/sessions source filter distinguishes "
+        f"user-aware vs system-aware"
+        f"{'' if ok else f' — user={user_ids} system={system_ids} internal={internal_ids}'}"
+    )
+    return ok
+
+
 def test_session_list_does_not_schedule_snapshot_prewarm(client: TestClient) -> bool:
     _reset_home()
     _write(_record("old", "2026-06-16T00:00:00+00:00"))
@@ -467,6 +498,7 @@ def main_run() -> int:
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok
         ok = test_sidebar_strips_heavy_working_mode_meta(client) and ok
+        ok = test_session_list_source_filter_user_awareness(client) and ok
         ok = test_session_list_does_not_schedule_snapshot_prewarm(client) and ok
         return 0 if ok else 1
     finally:

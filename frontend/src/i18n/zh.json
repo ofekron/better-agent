@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "浏览项目文件",
   "sidebar.sessionsTab": "会话",
   "sidebar.workersTab": "Worker",
+  "sidebar.tasksTab": "任务",
   "app.reconciling": "正在对账…",
   "app.reconcilingTitle": "后端正在对账滞后事件。仅在 >0.3s 时显示。",
   "app.supervisorBannerDismiss": "关闭",
@@ -782,5 +783,9 @@
   "setup.subtitle": "欢迎 — 创建您的登录信息以开始。",
   "setup.unknownError": "无法保存凭据（状态 {{status}}）。",
   "todos.previous": "上一个",
-  "toolCall.canvasTitle": "画布"
+  "toolCall.canvasTitle": "画布",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

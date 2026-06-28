@@ -412,6 +412,7 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
 
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     stale = extension_store._load()
     package = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-")) / "headroom-like"
     (package / "mcp").mkdir(parents=True)
@@ -514,6 +515,7 @@ def test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extens
         },
         persist=True,
     )
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     stale = extension_store._load()
     extension_store.uninstall("ofek.concurrent-uninstall")
     stale["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["updated_at"] = "stale-writer"

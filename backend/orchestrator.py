@@ -1839,8 +1839,11 @@ class Coordinator:
                 })
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
-            # does not reliably re-emit user_message_done/failed, so the durable
-            # events.jsonl is the authoritative completion signal.
+            # normally writes a durable user_message_done/failed terminal; older
+            # already-reconciled runs may predate that terminal, so a reattached
+            # ask also consults the target assistant message + its run
+            # complete.json before it blocks again. That repairs existing
+            # stuck ask callers without re-queueing a duplicate prompt.
             terminal = user_msg_lifecycle.terminal_event_for_lifecycle(
                 target_session_id, lifecycle_msg_id
             )
@@ -1853,6 +1856,15 @@ class Coordinator:
                         "success": False,
                         "error": tdata.get("error") or tdata.get("reason") or "target turn failed",
                     }
+            elif reattach:
+                recovered = self._team_message_completed_result_from_store(
+                    target_session_id=target_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                )
+                if recovered is not None:
+                    result = recovered
+                else:
+                    result = await asyncio.wait_for(done, timeout=timeout_s)
             else:
                 result = await asyncio.wait_for(done, timeout=timeout_s)
         except Exception as exc:
@@ -1895,6 +1907,26 @@ class Coordinator:
         target_session_id: str,
         lifecycle_msg_id: str,
     ) -> dict:
+        found = self._team_message_user_and_assistant(
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if found is None:
+            return {"response_message_id": None, "assistant_content": ""}
+        _user_msg, assistant_msg = found
+        if assistant_msg is None:
+            return {"response_message_id": None, "assistant_content": ""}
+        return {
+            "response_message_id": assistant_msg.get("id"),
+            "assistant_content": assistant_msg.get("content") or "",
+        }
+
+    def _team_message_user_and_assistant(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> Optional[tuple[dict, Optional[dict]]]:
         session = session_manager.get(target_session_id) or {}
         messages = session.get("messages") or []
         user_idx = None
@@ -1906,15 +1938,105 @@ class Coordinator:
                 user_idx = idx
                 break
         if user_idx is None:
-            return {"response_message_id": None, "assistant_content": ""}
+            return None
         for msg in messages[user_idx + 1:]:
-            if msg.get("role") != "assistant":
+            if msg.get("role") == "assistant":
+                return messages[user_idx], msg
+        return messages[user_idx], None
+
+    def _team_message_complete_for_assistant(
+        self,
+        *,
+        target_session_id: str,
+        assistant_msg_id: str,
+    ) -> Optional[dict]:
+        try:
+            from runs_dir import read_best_complete, runs_root
+            root = runs_root()
+        except Exception:
+            logger.debug("ask reattach: runs_root unavailable", exc_info=True)
+            return None
+        if not root.exists():
+            return None
+        candidates = []
+        for child in root.iterdir():
+            if not child.is_dir():
                 continue
+            bs_path = child / "backend_state.json"
+            if not bs_path.exists():
+                continue
+            try:
+                state = json.loads(bs_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            persist_to = state.get("persist_to") or state.get("app_session_id")
+            if persist_to != target_session_id:
+                continue
+            if state.get("target_message_id") != assistant_msg_id:
+                continue
+            try:
+                candidates.append((child.stat().st_mtime, child))
+            except OSError:
+                continue
+        for _mtime, child in sorted(candidates, reverse=True):
+            try:
+                complete = read_best_complete(child)
+            except Exception:
+                logger.debug(
+                    "ask reattach: failed reading complete for %s", child.name,
+                    exc_info=True,
+                )
+                continue
+            if isinstance(complete, dict):
+                return complete
+        return None
+
+    def _team_message_completed_result_from_store(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> Optional[dict]:
+        found = self._team_message_user_and_assistant(
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if found is None:
+            return None
+        user_msg, assistant_msg = found
+        if user_msg.get("status") == "error":
             return {
-                "response_message_id": msg.get("id"),
-                "assistant_content": msg.get("content") or "",
+                "success": False,
+                "error": user_msg.get("errorText") or "target turn failed",
             }
-        return {"response_message_id": None, "assistant_content": ""}
+        if assistant_msg is None:
+            return None
+
+        response = {
+            "response_message_id": assistant_msg.get("id"),
+            "assistant_content": assistant_msg.get("content") or "",
+        }
+        complete = self._team_message_complete_for_assistant(
+            target_session_id=target_session_id,
+            assistant_msg_id=str(assistant_msg.get("id") or ""),
+        )
+        if complete is not None:
+            success = bool(complete.get("success"))
+            if success:
+                return {"success": True, **response}
+            return {
+                "success": False,
+                "error": complete.get("error") or "target turn failed",
+            }
+
+        if assistant_msg.get("completed_at"):
+            return {"success": True, **response}
+        if assistant_msg.get("error") or assistant_msg.get("errorText"):
+            return {
+                "success": False,
+                "error": assistant_msg.get("errorText") or "target turn failed",
+            }
+        return None
 
     async def create_worker_for_session(
         self,
@@ -2980,6 +3102,12 @@ class Coordinator:
         "projects_changed",
         "project_mappings_changed",
         "workers_changed",
+        # Per-project task-definition list invalidation. Authoritative
+        # state lives in `task_store`; payload carries {cwd, node_id} and
+        # clients refetch the project's tasks on receipt (mirrors
+        # `workers_changed`). Tasks are the on-demand, run-when-clicked
+        # definitions surfaced in the sidebar Tasks tab.
+        "tasks_changed",
         "extensions_changed",
         "session_organization_changed",
         # Global user-preferences mutation ping (folder-view toggle,

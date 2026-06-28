@@ -90,6 +90,8 @@ _STREAMING_KINDS = frozenset({"manager", "native"})
 _PIDLESS_RUN_STALE_AFTER_S = 30.0
 _RECOVERED_CANCEL_ESCALATE_AFTER_S = 5.0
 _CONTEXT_CONTINUATION_PREEMPT_RATIO = 0.90
+_RATE_LIMIT_MIN_WAIT_S = 5.0
+_RATE_LIMIT_FALLBACK_WAIT_S = 60.0
 
 
 def _provider_capability_contexts(
@@ -108,6 +110,20 @@ def _stamp_agent_type(mode: str, event_dict: dict) -> dict:
     if mode == "manager" and event_dict.get("type") == "agent_message":
         return {**event_dict, "agent_type": "manager"}
     return event_dict
+
+
+def _rate_limit_wait_seconds(reset_dt: Optional[datetime]) -> float:
+    if reset_dt is None:
+        return _RATE_LIMIT_FALLBACK_WAIT_S
+    reset_utc = (
+        reset_dt.astimezone(timezone.utc)
+        if reset_dt.tzinfo is not None
+        else reset_dt.replace(tzinfo=timezone.utc)
+    )
+    return max(
+        _RATE_LIMIT_MIN_WAIT_S,
+        (reset_utc - datetime.now(timezone.utc)).total_seconds(),
+    )
 
 
 def _release_abandoned_queue(
@@ -301,7 +317,13 @@ class TurnManager:
         self._forced_context_overflow_once.remove(app_session_id)
         return True
 
-    def request_immediate_continuation(self, app_session_id: str, prompt: str) -> bool:
+    def request_immediate_continuation(
+        self,
+        app_session_id: str,
+        prompt: str,
+        *,
+        reason: str = "agent_requested",
+    ) -> bool:
         """Agent-requested IMMEDIATE continuation (`continue_in_fresh_context`
         with `when="now"`): abort the in-flight run and restart in a fresh
         provider subprocess under the same session.
@@ -313,7 +335,7 @@ class TurnManager:
         instead of returning 'cancelled'. Returns False if no live turn is
         running to abort (caller falls back to next-turn semantics)."""
         session_manager.set_continuation_requested(
-            app_session_id, prompt, when="now",
+            app_session_id, prompt, reason=reason, when="now",
         )
         event = self.cancel_events.get(app_session_id)
         if not event:
@@ -1690,6 +1712,34 @@ class TurnManager:
                 return True
             return False
 
+        def _refresh_provider_context() -> None:
+            nonlocal _session_rec, reasoning_effort, provider, provider_kind
+            nonlocal _session_rec_chain, provider_run_config
+            nonlocal session_capability_contexts, runtime_capability_contexts
+            nonlocal run_capability_contexts, model
+            _session_rec = session_manager.get(primary_session_id or app_session_id) or {}
+            reasoning_effort = _session_rec.get("reasoning_effort")
+            session_model = _session_rec.get("model")
+            if isinstance(session_model, str) and session_model.strip():
+                model = session_model
+            provider = self._c.provider_for_session(primary_session_id or app_session_id)
+            provider_kind = getattr(provider, "KIND", "")
+            _session_rec_chain = _session_rec.get("continuation_chain") or []
+            provider_run_config = _session_rec.get("provider_run_config") or None
+            session_capability_contexts = _session_rec.get("capability_contexts") or []
+            runtime_capability_contexts = runtime_skill_contexts(
+                cwd,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
+            run_capability_contexts = _provider_capability_contexts(
+                [*session_capability_contexts, *(capability_contexts or [])],
+                provider_kind,
+            )
+            run_capability_contexts = [
+                *runtime_capability_contexts,
+                *run_capability_contexts,
+            ]
+
         def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
@@ -1715,6 +1765,7 @@ class TurnManager:
             return continuation.chain_depth
 
         while True:
+            _refresh_provider_context()
             if cancel_event.is_set():
                 # Displaced before spawn (pending-cancel consumed by
                 # run_turn, or cancel landed between retries) — don't
@@ -2081,15 +2132,7 @@ class TurnManager:
                 in_flight = self.current_assistant_msgs.get(app_session_id)
                 assistant_msg_id = in_flight.get("id") if in_flight else None
                 reset_dt = provider.parse_rate_limit(error, attempt_events)
-                if reset_dt is not None:
-                    wait_s = max(5.0, min(600.0,
-                        (reset_dt.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
-                else:
-                    wait_s = 5.0
-                # ±25% jitter so N concurrent rate-limited runs on the same
-                # provider window don't re-collide on identical backoff.
-                # Re-clamp so jitter can't push the wait past the 600s ceiling.
-                wait_s = min(600.0, wait_s * random.uniform(0.75, 1.25))
+                wait_s = _rate_limit_wait_seconds(reset_dt)
                 retry_at = (datetime.now(timezone.utc) + timedelta(seconds=wait_s)).isoformat()
                 if assistant_msg_id:
                     session_manager.set_msg_retrying_until(
@@ -2105,6 +2148,24 @@ class TurnManager:
                         session_manager.set_msg_retrying_until(
                             app_session_id, assistant_msg_id, None,
                         )
+                    requested = session_manager.pop_continuation_requested(
+                        primary_session_id or app_session_id,
+                    )
+                    if requested and requested.get("when") == "now":
+                        cancel_event.clear()
+                        self._c._session_cancelled.pop(app_session_id, None)
+                        prompt = requested.get("prompt") or ""
+                        _chain_depth = _start_context_continuation(
+                            new_sid or current_session_id,
+                            reason=requested.get("reason") or "agent_requested",
+                        )
+                        logger.info(
+                            "continuation: rate-limit provider switch restart for "
+                            "%s (chain depth %d)",
+                            app_session_id[:8], _chain_depth,
+                        )
+                        self._pop_run_id(app_session_id, run_id)
+                        continue
                     _clear_continuation_active()
                     return {
                         "success": False,

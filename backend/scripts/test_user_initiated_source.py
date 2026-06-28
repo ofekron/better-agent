@@ -101,6 +101,14 @@ def test_user_fork_inherits_and_internal_fork_forced_false() -> None:
     user_fork = session_manager.fork(parent["id"], name="user-fork")
     check("user fork inherits user_initiated=True", user_fork.get("user_initiated") is True)
 
+    bridge_fork = session_manager.fork(
+        parent["id"], name="bridge-fork", user_initiated=False,
+    )
+    check(
+        "agent-requested fork from user session can be forced NOT user_initiated",
+        bridge_fork.get("user_initiated") is False,
+    )
+
     adv_fork = session_manager.fork(
         parent["id"], name="adv-fork", kind="adv_sync_fork",
     )
@@ -133,8 +141,12 @@ def test_migration_backfill() -> None:
          False, "legacy provisioned (source=internal)"),
         ({"id": "m5", "_schema_version": 10, "source": "extension", "kind": "user"},
          False, "legacy extension-created"),
+        ({"id": "m5b", "_schema_version": 10, "source": "internal", "kind": "user"},
+         False, "legacy internal helper"),
         ({"id": "m6", "_schema_version": 10, "source": "web", "kind": "delegate_fork"},
          False, "legacy delegate_fork"),
+        ({"id": "m6b", "_schema_version": 10, "source": "web", "is_delegate_fork": True},
+         False, "legacy is_delegate_fork"),
         ({"id": "m7", "_schema_version": 10, "source": "cli", "kind": "sub_session"},
          False, "legacy sub_session"),
         ({"id": "m8", "_schema_version": 10, "source": "web", "kind": "adv_sync_fork"},
@@ -162,6 +174,18 @@ def main() -> None:
     test_sub_session_not_user_initiated()
     test_user_fork_inherits_and_internal_fork_forced_false()
     test_migration_backfill()
+
+    internal = session_store.create_session(
+        name="internal-helper", cwd="/tmp/ui-f", source="internal",
+    )
+    extension = session_store.create_session(
+        name="extension-helper", cwd="/tmp/ui-g", source="extension",
+    )
+    check("internal source is preserved", internal.get("source") == "internal")
+    check("extension source is preserved", extension.get("source") == "extension")
+    check("internal source defaults NOT user_initiated", internal.get("user_initiated") is False)
+    check("extension source defaults NOT user_initiated", extension.get("user_initiated") is False)
+
     if not _ok:
         print("FAILURES")
         sys.exit(1)

@@ -123,8 +123,8 @@ const SESSION_SEARCH_FIELDS_ALL: SessionSearchField[] = ["content", "title", "fi
 const SESSION_SEARCH_FIELDS: SessionSearchField[] = ["title", "first_prompt"];
 type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
-type SessionSource = "web" | "cli" | "import";
-const SESSION_SOURCES: SessionSource[] = ["web", "cli", "import"];
+type SessionSource = "user" | "system" | "web" | "cli" | "import" | "extension" | "internal";
+const SESSION_SOURCES: SessionSource[] = ["user", "system", "web", "cli", "import", "extension", "internal"];
 
 type FolderRenderNode = {
   folder: SessionFolder;

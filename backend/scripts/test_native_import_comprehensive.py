@@ -530,6 +530,7 @@ def _assert_session_invariants(root_id: str) -> None:
     check(sess is not None, "session exists")
     check(sess["orchestration_mode"] == "native", "mode native")
     check(sess["source"] == "import", "imported sessions tagged source=import")
+    check(sess.get("user_initiated") is True, "imported sessions tagged user_initiated")
     msgs = sess["messages"]
     check(len(msgs) >= 2, "has messages")
     check(msgs[0]["role"] == "user", "starts with user")

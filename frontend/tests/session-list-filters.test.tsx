@@ -176,6 +176,35 @@ describe("SessionList advanced filters", () => {
     );
   });
 
+  it("sends source/user-awareness chips to backend filters", async () => {
+    const onBackendFiltersChange = vi.fn();
+    renderList(
+      [
+        makeSession({ id: "human", name: "Human", source: "web", user_initiated: true }),
+        makeSession({ id: "system", name: "System", source: "internal", user_initiated: false }),
+      ],
+      { onBackendFiltersChange },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    fireEvent.click(screen.getByRole("button", { name: "session.source.user" }));
+    fireEvent.click(screen.getByRole("button", { name: "session.source.internal" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sources: ["user", "internal"] }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.clearFilters" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sources: [] }),
+      ),
+    );
+  });
+
   it("sends file edit mode choices to backend filters", async () => {
     const onBackendFiltersChange = vi.fn();
     renderList(

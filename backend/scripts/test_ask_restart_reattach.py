@@ -129,3 +129,227 @@ def test_terminal_event_for_lifecycle_scans_events_jsonl():
     terminal = user_msg_lifecycle.terminal_event_for_lifecycle(target["id"], "life-x")
     assert terminal is not None
     assert terminal["type"] == "user_message_failed"
+
+def test_reattach_returns_completed_target_message_without_terminal_event(monkeypatch):
+    """Older recovered runs may have finalized the target assistant message
+    before recovery emitted user_message_done/failed.  The ask retry must return
+    that durable completed result instead of re-queueing or waiting forever."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-recovered-success"
+    ask_status_store.write_status(
+        "ask_recovered_success",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id="queued-recovered-success",
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-recovered-success",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:00",
+        "lifecycle_msg_id": lifecycle_msg_id,
+    })
+    session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-recovered-success",
+        "role": "assistant",
+        "content": "durable recovered answer",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:01",
+        "completed_at": "2026-06-28T10:00:02",
+    })
+
+    coordinator = Coordinator()
+
+    def fail_submit_prompt(*_args, **_kwargs):
+        raise AssertionError("reattach must not re-queue a duplicate prompt")
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fail_submit_prompt)
+
+    result = asyncio.run(coordinator.ask_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="question",
+        ask_id="ask_recovered_success",
+        timeout_s=0.01,
+    ))
+
+    assert result["success"] is True
+    assert result["target_session_id"] == target["id"]
+    assert result["queued_id"] == "queued-recovered-success"
+    assert result["response_message_id"] == "assistant-recovered-success"
+    assert result["assistant_content"] == "durable recovered answer"
+    assert ask_status_store.read_status("ask_recovered_success")["result"] == result
+
+
+def test_reattach_ignores_unfinished_target_message_without_terminal_event(monkeypatch):
+    """A mere assistant placeholder is not a completion signal; without a
+    terminal event or completed/error marker the call should still wait."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender unfinished", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target unfinished", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-recovered-unfinished"
+    ask_status_store.write_status(
+        "ask_recovered_unfinished",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id="queued-recovered-unfinished",
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-recovered-unfinished",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:00",
+        "lifecycle_msg_id": lifecycle_msg_id,
+    })
+    session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-recovered-unfinished",
+        "role": "assistant",
+        "content": "partial",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:01",
+    })
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("reattach must not re-queue a duplicate prompt")
+        ),
+    )
+
+    try:
+        asyncio.run(coordinator.ask_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="question",
+            ask_id="ask_recovered_unfinished",
+            timeout_s=0.01,
+        ))
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("unfinished assistant must not be treated as success")
+
+    assert "result" not in ask_status_store.read_status("ask_recovered_unfinished")
+
+def test_recovery_emits_user_message_done_for_recovered_success(monkeypatch):
+    from session_manager import manager as session_manager
+    import run_recovery
+
+    target = session_manager.create(name="recovered terminal", cwd="/repo", orchestration_mode="native")
+    user_msg = session_manager.append_user_msg(target["id"], {
+        "id": "user-recovery-terminal",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:00",
+        "lifecycle_msg_id": "life-recovery-terminal",
+    })
+    assistant_msg = session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-recovery-terminal",
+        "role": "assistant",
+        "content": "answer",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:01",
+    })
+    sess = session_manager.get(target["id"])
+    captured: list[tuple] = []
+
+    class _UPM:
+        async def emit_user_msg_done(self, *args, **kwargs):
+            captured.append(("done", args, kwargs))
+
+        async def emit_user_msg_failed(self, *args, **kwargs):
+            captured.append(("failed", args, kwargs))
+
+    class _Coordinator:
+        user_prompt_manager = _UPM()
+
+    monkeypatch.setattr(
+        run_recovery,
+        "_salvage_complete_payload",
+        lambda _run_id: {
+            "success": True,
+            "session_id": "agent-sid",
+            "token_usage": {"input_tokens": 1},
+        },
+    )
+
+    asyncio.run(run_recovery._emit_recovered_user_message_terminal(
+        coordinator=_Coordinator(),
+        persist_sid=target["id"],
+        mode="native",
+        agent_sid="agent-sid",
+        run_id="run-recovered-success",
+        cancelled=False,
+        sess=sess,
+        assistant_msg=assistant_msg,
+    ))
+
+    assert captured and captured[0][0] == "done"
+    assert captured[0][1][0] == target["id"]
+    assert captured[0][1][1] == "life-recovery-terminal"
+    assert captured[0][1][2] == "native"
+    assert captured[0][2].get("cancelled") is False
+
+
+def test_recovery_emits_user_message_failed_when_complete_missing(monkeypatch):
+    from session_manager import manager as session_manager
+    import run_recovery
+
+    target = session_manager.create(name="recovered failed terminal", cwd="/repo", orchestration_mode="native")
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-recovery-failed",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:00",
+        "lifecycle_msg_id": "life-recovery-failed",
+    })
+    assistant_msg = session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-recovery-failed",
+        "role": "assistant",
+        "content": "partial",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:01",
+    })
+    sess = session_manager.get(target["id"])
+    captured: list[tuple] = []
+
+    class _UPM:
+        async def emit_user_msg_done(self, *args, **kwargs):
+            captured.append(("done", args, kwargs))
+
+        async def emit_user_msg_failed(self, *args, **kwargs):
+            captured.append(("failed", args, kwargs))
+
+    class _Coordinator:
+        user_prompt_manager = _UPM()
+
+    monkeypatch.setattr(run_recovery, "_salvage_complete_payload", lambda _run_id: None)
+
+    asyncio.run(run_recovery._emit_recovered_user_message_terminal(
+        coordinator=_Coordinator(),
+        persist_sid=target["id"],
+        mode="native",
+        agent_sid=None,
+        run_id="run-recovered-missing-complete",
+        cancelled=False,
+        sess=sess,
+        assistant_msg=assistant_msg,
+    ))
+
+    assert captured and captured[0][0] == "failed"
+    assert captured[0][1][0] == target["id"]
+    assert captured[0][1][1] == "life-recovery-failed"
+    assert captured[0][2].get("reason") == "recovered_run_failed"
+
