@@ -301,6 +301,32 @@ class TurnManager:
         self._forced_context_overflow_once.remove(app_session_id)
         return True
 
+    def request_immediate_continuation(self, app_session_id: str, prompt: str) -> bool:
+        """Agent-requested IMMEDIATE continuation (`continue_in_fresh_context`
+        with `when="now"`): abort the in-flight run and restart in a fresh
+        provider subprocess under the same session.
+
+        Sets the continuation flag with `when="now"`, then signals the current
+        run to abort (cancel_event + fanout) WITHOUT the user-cancel
+        side-effects (`_session_cancelled` / `_interrupted_by_msg_id`). The
+        drive loop's cancel path detects the flag and starts the continuation
+        instead of returning 'cancelled'. Returns False if no live turn is
+        running to abort (caller falls back to next-turn semantics)."""
+        session_manager.set_continuation_requested(
+            app_session_id, prompt, when="now",
+        )
+        event = self.cancel_events.get(app_session_id)
+        if not event:
+            return False
+        event.set()
+        for run_id in self.active_run_ids.get(app_session_id, []):
+            self._c._cancel_turn_fanout(run_id)
+        logger.info(
+            "continuation: agent-requested IMMEDIATE abort for %s",
+            app_session_id[:8],
+        )
+        return True
+
     def _run_state_age_s(self, entry: dict) -> float:
         started_at = entry.get("started_at")
         if not isinstance(started_at, str):
@@ -1978,6 +2004,30 @@ class TurnManager:
             collected.extend(attempt_events)
 
             if attempt_cancelled:
+                # Agent-requested IMMEDIATE continuation (`when="now"`): the
+                # abort landed — restart in a fresh provider subprocess under
+                # the SAME session with the queued prompt. Clear the cancel
+                # signal so the next iteration proceeds. Only fires for
+                # `when="now"`; a plain user-cancel with a stale next-turn
+                # flag falls through to the cancelled return.
+                requested = session_manager.pop_continuation_requested(
+                    primary_session_id or app_session_id,
+                )
+                if requested and requested.get("when") == "now":
+                    cancel_event.clear()
+                    self._c._session_cancelled.pop(app_session_id, None)
+                    prompt = requested.get("prompt") or ""
+                    _chain_depth = _start_context_continuation(
+                        discovered_session_id or current_session_id,
+                        reason="agent_requested",
+                    )
+                    logger.info(
+                        "continuation: agent-requested IMMEDIATE restart for "
+                        "%s (chain depth %d)",
+                        app_session_id[:8], _chain_depth,
+                    )
+                    self._pop_run_id(app_session_id, run_id)
+                    continue
                 _clear_continuation_active()
                 return {
                     "success": False,
@@ -2162,6 +2212,11 @@ class TurnManager:
                     primary_session_id or app_session_id,
                 )
                 if requested:
+                    # Clear any abort signal so the continuation iteration
+                    # proceeds — relevant when a `when="now"` abort raced the
+                    # run to a natural success and landed here instead.
+                    cancel_event.clear()
+                    self._c._session_cancelled.pop(app_session_id, None)
                     prompt = requested.get("prompt") or ""
                     _chain_depth = _start_context_continuation(
                         new_sid or current_session_id,
