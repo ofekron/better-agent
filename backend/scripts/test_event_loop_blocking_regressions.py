@@ -496,13 +496,23 @@ def test_tree_stub_cache_key_reads_render_seq_once() -> None:
 def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
+    assert "_metadata_text_cache" in source
     assert "_summary_metadata_version" in source
+    rows_start = source.index("def _metadata_search_rows(")
+    rows_end = source.index("def _metadata_search_scores(", rows_start)
+    rows_source = source[rows_start:rows_end]
+    assert "str(summary.get(\"name\") or \"\").lower()" in rows_source
+    assert "str(summary.get(\"first_prompt\") or \"\").lower()" in rows_source
+    assert "_metadata_text_cache_version == _summary_metadata_version" in rows_source
     start = source.index("def _metadata_search_scores(")
     end = source.index("def grep_session_scores(", start)
     search_source = source[start:end]
     assert "cache_key = (query_lower, metadata_fields, _summary_metadata_version)" in search_source
     assert "cached = _metadata_search_cache.get(cache_key)" in search_source
     assert "return dict(cached)" in search_source
+    assert "rows = _metadata_search_rows()" in search_source
+    assert "title.count(query_lower)" in search_source
+    assert "first_prompt.count(query_lower)" in search_source
     assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source
 
 
@@ -544,18 +554,25 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     assert "return _summary_metadata_version" in store_source
 
 
-def test_sidebar_session_search_bounds_content_scoring() -> None:
+def test_sidebar_session_search_bounds_content_only_scoring() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
     helper_start = main_source.index("async def _sidebar_search_scores(")
     helper_end = main_source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = main_source[helper_start:helper_end]
-    assert "content_max_wait_seconds=_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in helper_source
-
-    route_start = main_source.index("@app.post(\"/api/sessions/search-content\")")
-    route_end = main_source.index("@app.post(\"/api/session-organization/query\")", route_start)
+    assert "if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}" in helper_source
+    assert "metadata_max_wait_seconds" not in helper_source
+    route_start = main_source.index("def _build_local_sessions_page_for_list(")
+    route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = main_source[route_start:route_end]
-    assert "content_max_wait_seconds" not in route_source
+    assert route_source.count("content_max_wait_seconds = (") == 2
+    assert "metadata_max_wait_seconds" not in route_source
+
+    search_route_start = main_source.index("@app.post(\"/api/sessions/search-content\")")
+    search_route_end = main_source.index("@app.post(\"/api/session-organization/query\")", search_route_start)
+    search_route_source = main_source[search_route_start:search_route_end]
+    assert "content_max_wait_seconds" not in search_route_source
+    assert "metadata_max_wait_seconds" not in search_route_source
 
 
 def test_pending_node_polling_uses_public_projection_cache() -> None:

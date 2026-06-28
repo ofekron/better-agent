@@ -3697,18 +3697,14 @@ DEFAULT_SEARCH_FIELDS = frozenset({
 })
 _METADATA_SEARCH_CACHE_MAX = 128
 _metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
+_metadata_text_cache_version = -1
+_metadata_text_cache: list[tuple[str, str, str]] = []
 
 
 def _normalize_search_fields(fields: Iterable[str] | None) -> set[str]:
     if fields is None:
         return set(DEFAULT_SEARCH_FIELDS)
     return {field for field in fields if field in SEARCH_FIELDS}
-
-
-def _match_count(value: object, query_lower: str) -> int:
-    if not isinstance(value, str) or not query_lower:
-        return 0
-    return value.lower().count(query_lower)
 
 
 def _message_text(value: object) -> str:
@@ -3751,6 +3747,26 @@ def _first_user_prompt(root: dict) -> str:
     return ""
 
 
+def _metadata_search_rows() -> list[tuple[str, str, str]]:
+    global _metadata_text_cache_version, _metadata_text_cache
+    _ensure_summary_index(blocking=False)
+    with _summary_index_lock:
+        if _metadata_text_cache_version == _summary_metadata_version:
+            return list(_metadata_text_cache)
+        rows = [
+            (
+                str(summary.get("id") or ""),
+                str(summary.get("name") or "").lower(),
+                str(summary.get("first_prompt") or "").lower(),
+            )
+            for summary in _summary_index.values()
+            if summary.get("id")
+        ]
+        _metadata_text_cache = rows
+        _metadata_text_cache_version = _summary_metadata_version
+        return list(rows)
+
+
 def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
     query_lower = query.lower()
     metadata_fields = tuple(
@@ -3759,28 +3775,23 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
     )
     if not metadata_fields:
         return {}
-    _ensure_summary_index(blocking=False)
     with _summary_index_lock:
         cache_key = (query_lower, metadata_fields, _summary_metadata_version)
         cached = _metadata_search_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
-        summaries = list(_summary_index.values())
+    rows = _metadata_search_rows()
     scores: dict[str, int] = {}
     if SEARCH_FIELD_TITLE in metadata_fields:
-        for summary in summaries:
-            sid = summary.get("id")
-            score = _match_count(summary.get("name"), query_lower)
-            if sid and score > 0:
-                scores[str(sid)] = scores.get(str(sid), 0) + score
-    if SEARCH_FIELD_FIRST_PROMPT in metadata_fields:
-        for summary in summaries:
-            sid = summary.get("id")
-            if not sid:
-                continue
-            score = _match_count(summary.get("first_prompt"), query_lower)
+        for sid, title, _first_prompt in rows:
+            score = title.count(query_lower)
             if score > 0:
-                scores[str(sid)] = scores.get(str(sid), 0) + score
+                scores[sid] = scores.get(sid, 0) + score
+    if SEARCH_FIELD_FIRST_PROMPT in metadata_fields:
+        for sid, _title, first_prompt in rows:
+            score = first_prompt.count(query_lower)
+            if score > 0:
+                scores[sid] = scores.get(sid, 0) + score
     with _summary_index_lock:
         _metadata_search_cache[cache_key] = dict(scores)
         if len(_metadata_search_cache) > _METADATA_SEARCH_CACHE_MAX:
