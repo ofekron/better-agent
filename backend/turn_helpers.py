@@ -104,6 +104,10 @@ _NON_TRANSIENT_ERROR_SUBSTRINGS = (
 _TRANSIENT_MAX_ATTEMPTS = 10
 _TRANSIENT_BASE_WAIT_S = 5.0
 _TRANSIENT_MAX_WAIT_S = 60.0
+# Rate-limit retries are bounded too: an exhausted subscription window /
+# quota must terminate at the cap with the real error instead of
+# sleep-looping forever (the rate-limit branch has no per-provider cap).
+_RATE_LIMIT_MAX_ATTEMPTS = 5
 
 
 def _is_transient_error(error: Optional[str], events: list[dict]) -> bool:
