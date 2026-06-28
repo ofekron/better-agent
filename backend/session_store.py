@@ -90,6 +90,11 @@ SCHEMA_VERSION = 11
 #
 # Backfill heuristic for legacy records lives in `_migrate_session`.
 
+# Session origin labels we preserve on disk. `user_initiated` is the
+# authoritative user-awareness bit; `source` remains a coarse origin label
+# for filters/badges/debugging.
+_VALID_SESSION_SOURCES = frozenset({"web", "cli", "import", "extension", "internal"})
+
 # `source` values that are unambiguously NOT user-aware. Used only by the
 # legacy backfill heuristic — live creation paths pass `user_initiated`
 # explicitly.
@@ -108,6 +113,8 @@ def _infer_user_initiated(session: dict) -> bool:
     existed. Errs toward the safe signals we DO have (kind + source);
     cannot perfectly recover agent-created standalone sessions that
     historically reused source="cli", so those default to True."""
+    if bool(session.get("is_delegate_fork", False)):
+        return False
     if session.get("kind", "user") in _NON_USER_INITIATED_KINDS:
         return False
     if (session.get("source") or "web") in _NON_USER_INITIATED_SOURCES:
@@ -2131,7 +2138,7 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
         session["user_initiated"] = _infer_user_initiated(session)
         ctx.setdefault("dirty", [False])[0] = True
     src = session.get("source")
-    if src not in ("web", "cli"):
+    if src not in _VALID_SESSION_SOURCES:
         session["source"] = "web"
     session.setdefault("processed_line_by_sid", {})
     session.setdefault("parent_session_id", None)
@@ -2370,6 +2377,7 @@ def create_session(
     bare_config: bool = False,
     user_initiated: bool = False,
     id: Optional[str] = None,
+    created_at: Optional[str] = None,
 ) -> dict:
     """Create a new ROOT session and persist it.
 
@@ -2416,7 +2424,9 @@ def create_session(
         "reasoning_effort": resolved_reasoning_effort,
         "permission": _session_permission(permission, provider_id),
         "cwd": cwd or str(Path.home()),
-        "created_at": datetime.now().isoformat(),
+        # `created_at` may be supplied (native import preserves the original
+        # conversation time so analytics bucket it under its real date, not now).
+        "created_at": created_at or datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
         "orchestration_mode": _normalize_orchestration_mode(
             orchestration_mode
@@ -2429,7 +2439,7 @@ def create_session(
         "agent_session_id": None,
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
-        "source": source if source in ("web", "cli", "import") else "web",
+        "source": source if source in _VALID_SESSION_SOURCES else "web",
         # Whether the user is aware of having created this session. See the
         # module-level user-initiation taxonomy. Orthogonal to `source`.
         "user_initiated": bool(user_initiated),
@@ -2977,7 +2987,7 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "agent_session_id": None,
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
-        "source": parent.get("source") if parent.get("source") in ("web", "cli", "import") else "web",
+        "source": parent.get("source") if parent.get("source") in _VALID_SESSION_SOURCES else "web",
         # A plain fork inherits the parent's user-awareness. The
         # session_manager.fork wrapper forces this False when a non-user
         # `kind` (e.g. adv_sync_fork) is stamped on the new fork.
