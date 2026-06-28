@@ -565,7 +565,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             if (run_dir / "cancel").exists():
                 error = "cancelled"
                 break
-            finish_reason, tool_calls, chunk_usage = await _one_round(
+            finish_reason, tool_calls, asst_text, chunk_usage = await _one_round(
                 base_url, api_key, model, messages, emitter, run_dir,
             )
             if chunk_usage:
@@ -575,15 +575,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 pd = chunk_usage.get("prompt_tokens_details") or {}
                 usage_acc["cache_read_input_tokens"] += pd.get("cached_tokens", 0) or 0
 
-            # append the assistant turn to the OpenAI messages array
-            asst_msg: dict = {"role": "assistant", "content": None}
-            if tool_calls:
-                asst_msg["tool_calls"] = [
-                    {"id": c["id"], "type": "function",
-                     "function": {"name": c["name"], "arguments": c["arguments"]}}
-                    for c in tool_calls
-                ]
-            messages.append(asst_msg)
+            # append the assistant turn to the OpenAI messages array. Persist the
+            # reply text so resume on turn 2+ carries prior assistant answers.
+            # content=None is valid ONLY alongside tool_calls; a round that
+            # produced neither text nor tool_calls is dropped rather than
+            # persisted as an invalid null-content message that 400s on resume.
+            if tool_calls or asst_text is not None:
+                asst_msg: dict = {"role": "assistant", "content": asst_text}
+                if tool_calls:
+                    asst_msg["tool_calls"] = [
+                        {"id": c["id"], "type": "function",
+                         "function": {"name": c["name"], "arguments": c["arguments"]}}
+                        for c in tool_calls
+                    ]
+                messages.append(asst_msg)
 
             if not tool_calls or finish_reason == "stop":
                 break
@@ -628,9 +633,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
     emitter: EventEmitter, run_dir: Path,
-) -> tuple[Optional[str], list[dict], Optional[dict]]:
+) -> tuple[Optional[str], list[dict], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
-    Returns (finish_reason, finalized_tool_calls, usage_from_final_chunk)."""
+    Returns (finish_reason, finalized_tool_calls, assistant_text, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
     async for chunk in _stream_chat(base_url, api_key, model, messages, TOOL_SCHEMAS):
@@ -659,9 +664,9 @@ async def _one_round(
             )
 
     emitter.close_thinking()
-    emitter.close_text()
+    text = emitter.close_text()
     tool_calls = emitter.finalize_tool_calls()
-    return finish_reason, tool_calls, usage
+    return finish_reason, tool_calls, text, usage
 
 
 async def _dispatch_tool(
