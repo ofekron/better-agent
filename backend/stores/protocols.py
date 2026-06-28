@@ -120,6 +120,8 @@ class WorkersStorage(Protocol):
         orchestration_mode: str,
         agent_sid: str,
         node_id: str = "primary",
+        name: Optional[str] = None,
+        role_key: Optional[str] = None,
     ) -> dict: ...
 
     def touch_worker(
