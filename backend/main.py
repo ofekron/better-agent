@@ -1946,6 +1946,33 @@ async def internal_session_capabilities(
     }
 
 
+@app.get("/api/internal/sessions/{sid}/capabilities")
+async def internal_session_capabilities_list(
+    sid: str,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Catalog + the session's active set, for the capabilities management MCP."""
+    _require_capabilities_internal(x_internal_token)
+    sess = session_manager.get(sid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="unknown session")
+    active = [
+        str(c) for c in (sess.get("active_capability_ids") or []) if str(c or "").strip()
+    ]
+    catalog = []
+    for cap_id, descriptor in extension_store.capability_catalog().items():
+        catalog.append({
+            "id": cap_id,
+            "scope": descriptor.get("scope"),
+            "bare_allowed": bool(descriptor.get("bare_allowed")),
+            "scope_gate": descriptor.get("scope_gate", "internal"),
+            "release": descriptor.get("release") or {},
+            "loaded": cap_id in active,
+        })
+    catalog.sort(key=lambda c: c["id"])
+    return {"capabilities": catalog, "active_capability_ids": active}
+
+
 @app.post("/api/internal/project-updates/count")
 async def internal_project_update_count(
     body: dict,
