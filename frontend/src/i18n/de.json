@@ -95,6 +95,8 @@
   "input.attachTitle": "Anhängen",
   "input.removeImageTitle": "Bild entfernen",
   "input.queuedLabel": "Eingereiht:",
+  "input.queuedMinimize": "Eingereihte Nachricht minimieren",
+  "input.queuedExpand": "Eingereihte Nachricht ausklappen",
   "input.mentionProjects": "Projekte",
   "input.mentionSessions": "Sitzungen",
   "input.interruptButton": "⚡ Unterbrechen",

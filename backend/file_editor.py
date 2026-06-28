@@ -252,6 +252,8 @@ async def _create_interactive_fork(
         provider_id=cfg.provider_id,
         reasoning_effort=cfg.reasoning_effort or None,
         node_id=cfg.node_id,
+        # File-editing sessions are opened by an explicit user action.
+        user_initiated=True,
     )
     session_manager.set_forked_from(session["id"], base_agent_sid)
     if parent_lines > 0:

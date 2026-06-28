@@ -95,6 +95,8 @@
   "input.attachTitle": "Allega",
   "input.removeImageTitle": "Rimuovi immagine",
   "input.queuedLabel": "In coda:",
+  "input.queuedMinimize": "Riduci messaggio in coda",
+  "input.queuedExpand": "Espandi messaggio in coda",
   "input.mentionProjects": "Progetti",
   "input.mentionSessions": "Sessioni",
   "input.interruptButton": "⚡ Interrompi",

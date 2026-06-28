@@ -95,6 +95,8 @@
   "input.attachTitle": "Adjuntar",
   "input.removeImageTitle": "Quitar imagen",
   "input.queuedLabel": "En cola:",
+  "input.queuedMinimize": "Minimizar mensaje en cola",
+  "input.queuedExpand": "Expandir mensaje en cola",
   "input.mentionProjects": "Proyectos",
   "input.mentionSessions": "Sesiones",
   "input.interruptButton": "⚡ Interrumpir",

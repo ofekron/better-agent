@@ -43,6 +43,8 @@ check("codex sandbox", permission.CODEX_SANDBOX_MODES,
       ("read-only", "workspace-write", "danger-full-access"))
 check("gemini modes", permission.GEMINI_APPROVAL_MODES,
       ("auto_edit", "yolo", "plan"))
+check("openai modes", permission.OPENAI_PERMISSION_MODES,
+      ("default", "bypassPermissions"))
 
 # ── defaults preserve prior bypass behavior ────────────────────────────
 check("claude default", permission.default_permission_for_kind("claude"),
@@ -51,6 +53,8 @@ check("codex default", permission.default_permission_for_kind("codex"),
       {"approval": "never", "sandbox": "danger-full-access"})
 check("gemini default", permission.default_permission_for_kind("gemini"),
       {"mode": "yolo"})
+check("openai default", permission.default_permission_for_kind("openai"),
+      {"mode": "bypassPermissions"})
 
 # ── normalize: inherit semantics ───────────────────────────────────────
 check("normalize None", permission.normalize_permission("claude", None), None)
@@ -61,6 +65,8 @@ check("normalize valid", permission.normalize_permission("claude", {"mode": "pla
 check("normalize bogus axis value", permission.normalize_permission("codex", {"approval": "bogus", "sandbox": "read-only"}),
       {"approval": "never", "sandbox": "read-only"})
 check("normalize unknown kind", permission.normalize_permission("nope", {"mode": "x"}), None)
+check("normalize openai bypass", permission.normalize_permission("openai", {"mode": "bypassPermissions"}),
+      {"mode": "bypassPermissions"})
 
 # ── resolve: override → provider default → kind default ────────────────
 check("resolve override wins", permission.resolve_permission("gemini", {"mode": "plan"}, {"mode": "yolo"}),
@@ -69,6 +75,10 @@ check("resolve falls to provider default", permission.resolve_permission("gemini
       {"mode": "plan"})
 check("resolve falls to kind default", permission.resolve_permission("gemini", None, None),
       {"mode": "yolo"})
+check("resolve openai default", permission.resolve_permission("openai", None, None),
+      {"mode": "bypassPermissions"})
+check("resolve openai gated", permission.resolve_permission("openai", {"mode": "default"}, None),
+      {"mode": "default"})
 
 # ── codex runner flag translation (kebab → camelCase sandbox type) ─────
 check("codex approval policy", _codex_approval_policy({"approval": "on-request"}), "on-request")

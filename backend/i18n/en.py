@@ -8,7 +8,6 @@ TRANSLATIONS: dict[str, str] = {
     "error.invalid_path": "Invalid path",
     "error.orchestration_mode_frozen": "orchestration_mode is frozen after session creation",
     "error.no_recognized_selector": "no recognized selector field",
-    "error.provider_change_during_active_run": "cannot change provider while a turn is in flight — stop or wait for the current turn to finish",
     "error.session_not_found_retry": "session not found",
     "error.message_id_required": "message_id required",
     "error.assistant_message_id_required": "assistant_message_id required",

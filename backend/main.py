@@ -4715,6 +4715,9 @@ async def create_session(body: Any = Body(default=None)):
         node_id=node_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
+        # The UI/CLI `POST /api/sessions` is always an explicit user
+        # action — the user is aware of (and owns) this session.
+        user_initiated=True,
         capability_contexts=capability_contexts,
         id=client_session_id,
     )
@@ -4996,6 +4999,11 @@ async def rename_session(session_id: str, body: dict):
     session = await asyncio.to_thread(session_manager.rename, session_id, new_name)
     if not session:
         return {"error": t("error.session_not_found_rename")}, 404
+    # rename() refuses locked sessions (e.g. the assistant singleton) and
+    # returns the unchanged record; surface that as a clear 403, not a silent
+    # success that would let the UI believe the rename took.
+    if session.get("name_locked") and session.get("name") != new_name:
+        return {"error": "session name is locked", "name_locked": True}, 403
     return {"id": session_id, "name": new_name}
 
 
@@ -5082,6 +5090,105 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
     provider_id, reasoning_effort, permission, cwd). Shared by the public
     /selectors endpoint and the internal session-control tool so the agent
     applies selectors through the SAME validation + fail-closed path."""
+    body = body or {}
+    updates: dict = {}
+    requested_provider_id = (
+        body.get("provider_id").strip()
+        if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
+        else None
+    )
+    provider_record = None
+    if "provider_id" in body:
+        if not requested_provider_id:
+            raise HTTPException(status_code=400, detail="provider_id is required")
+        provider_record = await asyncio.to_thread(
+            config_store.get_provider,
+            requested_provider_id,
+        )
+        if not provider_record:
+            raise HTTPException(status_code=400, detail="Unknown provider")
+        updates["provider_id"] = requested_provider_id
+    if "model" in body and isinstance(body["model"], str) and body["model"].strip():
+        requested_model = body["model"].strip()
+        provider_for_model = (
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
+        )
+        # Fail closed: with no resolvable provider, `available_models(None)`
+        # would validate against the DEFAULT provider — letting a foreign
+        # model (e.g. glm-5.2 onto a Claude session) slip through. Reject.
+        if not provider_for_model:
+            raise HTTPException(
+                status_code=400, detail=t("error.session_not_found_retry"),
+            )
+        await asyncio.to_thread(
+            _validate_provider_model, provider_for_model, requested_model, True,
+        )
+        updates["model"] = requested_model
+    elif "provider_id" in updates:
+        updates["model"] = await _model_for_provider_switch(
+            requested_provider_id,
+            provider_record or {},
+        )
+    if "reasoning_effort" in body:
+        requested_effort = _api_reasoning_effort(body.get("reasoning_effort"))
+        if requested_effort is None:
+            raise HTTPException(status_code=400, detail="reasoning_effort is required")
+        provider_for_effort = (
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
+        )
+        updates["reasoning_effort"] = _provider_reasoning_effort(
+            provider_for_effort, requested_effort,
+        )
+    if "permission" in body:
+        requested_permission = _api_permission(body.get("permission"))
+        if requested_permission is None:
+            raise HTTPException(status_code=400, detail="permission is required")
+        provider_for_permission = (
+            requested_provider_id
+            or ((await _session_lite(session_id)) or {}).get("provider_id")
+        )
+        updates["permission"] = _provider_permission(
+            provider_for_permission, requested_permission,
+        )
+    if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
+        updates["cwd"] = body["cwd"].strip()
+    if requested_provider_id:
+        if "reasoning_effort" not in updates:
+            updates["reasoning_effort"] = (
+                (provider_record or {}).get("default_reasoning_effort") or ""
+            )
+        if "permission" not in updates:
+            updates["permission"] = (
+                (provider_record or {}).get("default_permission") or {}
+            )
+    if "orchestration_mode" in body:
+        raise HTTPException(
+            status_code=409,
+            detail=t("error.orchestration_mode_frozen"),
+        )
+    if not updates:
+        raise HTTPException(status_code=400, detail=t("error.no_recognized_selector"))
+    return updates
+
+
+@app.patch("/api/sessions/{session_id}/selectors")
+async def update_session_selectors(session_id: str, body: dict):
+    """Persist selector changes (model, cwd, provider_id) to the
+    session record.
+
+    `orchestration_mode` is FROZEN at session creation time and cannot
+    be changed here — flipping modes mid-session orphans the claude
+    session under the old mode.
+
+    `provider_id` IS mutable at any time. If it changes while a turn is
+    in flight, the current run keeps using the provider instance that
+    already owns that run; the changed selector is applied lazily to the
+    next prompt via continuation. `set_selectors` re-validates
+    `orchestration_mode` against the new provider's capability (e.g.
+    Claude→Gemini on a manager-mode session fails here with
+    `IncompatibleOrchestrationMode` → 400)."""
     body = body or {}
     updates = await _resolve_selector_updates(session_id, body)
     client_id = body.get("client_id") if isinstance(body.get("client_id"), str) else None
@@ -5680,6 +5787,70 @@ async def rewind_and_retry(session_id: str, body: dict):
         "retry_cwd": sess.get("cwd"),
         "retry_orchestration_mode": sess.get("orchestration_mode") or "team",
     }
+
+
+@app.post("/api/sessions/{session_id}/rate-limit/continue")
+async def continue_rate_limited_turn(session_id: str, body: dict):
+    body = body or {}
+    asst_id = body.get("assistant_message_id")
+    if not asst_id:
+        raise HTTPException(status_code=400, detail=t("error.assistant_message_id_required"))
+
+    sess = await _session_lite(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+
+    msgs = sess.get("messages") or []
+    asst_idx = next(
+        (i for i, m in enumerate(msgs) if m.get("id") == asst_id and m.get("role") == "assistant"),
+        None,
+    )
+    if asst_idx is None:
+        raise HTTPException(status_code=404, detail=t("error.assistant_message_not_found"))
+    assistant_msg = msgs[asst_idx]
+    if not assistant_msg.get("retrying_until"):
+        raise HTTPException(status_code=409, detail="assistant message is not waiting on a rate limit")
+
+    user_idx = next(
+        (i for i in range(asst_idx - 1, -1, -1) if msgs[i].get("role") == "user"),
+        None,
+    )
+    if user_idx is None:
+        raise HTTPException(
+            status_code=400,
+            detail=t("error.no_preceding_user_message"),
+        )
+
+    updates = await _resolve_selector_updates(session_id, body)
+    session = await asyncio.to_thread(
+        session_manager.set_selectors,
+        session_id,
+        client_id=body.get("client_id") if isinstance(body.get("client_id"), str) else None,
+        **updates,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    if "model" in updates:
+        await _record_last_model(session.get("provider_id"), updates["model"])
+    if updates.get("reasoning_effort"):
+        await _record_last_reasoning_effort(
+            session.get("provider_id"), updates["reasoning_effort"],
+        )
+
+    prompt = msgs[user_idx].get("content") or ""
+    landed = coordinator.turn_manager.request_immediate_continuation(
+        session_id,
+        prompt,
+        reason="rate_limit_provider_switch",
+    )
+    if not landed:
+        session_manager.set_continuation_requested(
+            session_id,
+            prompt,
+            reason="rate_limit_provider_switch",
+            when="next_turn",
+        )
+    return {"ok": True, "session_id": session_id, "updates": updates, "when": "now" if landed else "next_turn"}
 
 
 def _latest_user_message_index(messages: list[dict]) -> Optional[int]:
@@ -8978,7 +9149,6 @@ async def internal_session_bridge_search(
     return response
 
 
-
 @app.post("/api/internal/coordination/lock-ops")
 async def internal_coordination_lock_ops(
     body: dict,
@@ -8987,14 +9157,10 @@ async def internal_coordination_lock_ops(
     _require_builtin_runtime_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    raw_keys = body.get("keys")
-    keys = raw_keys if isinstance(raw_keys, list) else None
     return await coordination.lock_ops(
         key=str(body.get("key") or ""),
-        keys=keys,
         release=bool(body.get("release") or False),
         holder_token=str(body.get("holder_token") or ""),
-        timeout_seconds=body.get("timeout_seconds"),
     )
 
 

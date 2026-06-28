@@ -2194,7 +2194,7 @@ interface FormPayload {
 }
 
 // Per-provider-native permission vocabularies (mirror backend/permission.py).
-// One axis for claude/gemini, two independent axes (approval + sandbox) for codex.
+// One axis for claude/gemini/openai, two independent axes (approval + sandbox) for codex.
 const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
   claude: { mode: ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"] },
   codex: {
@@ -2202,11 +2202,13 @@ const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
     sandbox: ["read-only", "workspace-write", "danger-full-access"],
   },
   gemini: { mode: ["auto_edit", "yolo", "plan"] },
+  openai: { mode: ["default", "bypassPermissions"] },
 };
 const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
   claude: { mode: "bypassPermissions" },
   codex: { approval: "never", sandbox: "danger-full-access" },
   gemini: { mode: "yolo" },
+  openai: { mode: "bypassPermissions" },
 };
 function permissionOptionsForKind(kind: string): Record<string, string[]> {
   return PERMISSION_OPTIONS[kind] ?? {};

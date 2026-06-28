@@ -15,14 +15,32 @@ _DELEGATE_TIMEOUT = 24 * 60 * 60
 _PROPOSE_TIMEOUT = 10.0
 
 
-def search_sessions_response(query: str, limit: int = 5) -> dict[str, Any]:
+def search_sessions_response(
+    query: str,
+    limit: int = 5,
+    *,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    node_id: str = "",
+) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
         return {"results": [], "error": "empty_query"}
+    payload: dict[str, Any] = {"query": query, "limit": limit}
+    # Only forward non-empty filters so an unset param never constrains.
+    for key, val in (
+        ("provider_id", provider_id),
+        ("model", model),
+        ("reasoning_effort", reasoning_effort),
+        ("node_id", node_id),
+    ):
+        if isinstance(val, str) and val.strip():
+            payload[key] = val.strip()
     try:
         result = Client().call_internal(
             "/api/internal/session-bridge/search",
-            {"query": query, "limit": limit},
+            payload,
             timeout=_SEARCH_TIMEOUT,
         )
     except Exception as exc:  # tool boundary: surface transport failures, never crash
@@ -90,17 +108,34 @@ def propose_sessions_response(
         return {"success": False, "error": str(exc)}
 
 
-
-
 def build_server() -> FastMCP:
     server = FastMCP("better-agent-session-bridge")
 
     @server.tool()
-    def search_sessions(query: str, limit: int = 5) -> dict[str, Any]:
+    def search_sessions(
+        query: str,
+        limit: int = 5,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        node_id: str = "",
+    ) -> dict[str, Any]:
         """Find which of the user's OTHER sessions are relevant to a query, ranked
         by relevance. Discovery only — returns session ids/metadata to act on with
-        delegate_to_session or propose_sessions."""
-        return search_sessions_response(query, limit)
+        delegate_to_session or propose_sessions.
+
+        Optional exact-match filters narrow the candidate set (empty / unset =
+        no constraint): `provider_id` (e.g. "claude", "openai"), `model`
+        (e.g. "claude-sonnet-4-5"), `reasoning_effort`, `node_id`. Use these
+        to scope a search to sessions run on a specific provider/model."""
+        return search_sessions_response(
+            query,
+            limit,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            node_id=node_id,
+        )
 
     @server.tool()
     def delegate_to_session(
@@ -130,7 +165,6 @@ def build_server() -> FastMCP:
         which to act on. Use after search_sessions when the choice should be the
         user's, not yours."""
         return propose_sessions_response(session_ids, reasoning, proposed_project_path)
-
 
     return server
 

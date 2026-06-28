@@ -39,9 +39,6 @@ async def _fake_broadcast_workers_changed(_cwd):
 
 def _install_team_orchestration_extension() -> None:
     extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
-    if not extension_id:
-        extension_id = "test.team-orchestration"
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = extension_id
     package = Path(_tmp) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)

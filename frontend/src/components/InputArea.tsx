@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import Icon from "./Icon";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
 import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
@@ -665,6 +666,8 @@ export function InputArea({
           interruptTitle={t("input.interruptTitle")}
           cancelLabel={t("app.cancel")}
           queuedLabel={t("input.queuedLabel")}
+          minimizeLabel={t("input.queuedMinimize")}
+          expandLabel={t("input.queuedExpand")}
           compactActions={compactActionMenus}
         />
       )}
@@ -1003,6 +1006,8 @@ function QueuedPromptBanner({
   interruptTitle,
   cancelLabel,
   queuedLabel,
+  minimizeLabel,
+  expandLabel,
   compactActions = false,
 }: {
   preview: string;
@@ -1018,10 +1023,19 @@ function QueuedPromptBanner({
   interruptTitle: string;
   cancelLabel: string;
   queuedLabel: string;
+  minimizeLabel: string;
+  expandLabel: string;
   compactActions?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  // Persisted display preference: once minimized, future queued prompts
+  // honor the same choice (mirrors the sidebar-minimize pattern) so the
+  // banner stays out of the way until the user expands it again.
+  const [minimized, setMinimized] = useLocalStorage(
+    "better-agent-queued-prompt-minimized",
+    false,
+  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { comments, userText } = useMemo(() => splitPreview(preview), [preview]);
   const hasComments = comments.length > 0;
@@ -1067,10 +1081,88 @@ function QueuedPromptBanner({
     setEditing(false);
   }, [editText, hasComments, preview, onEdit]);
 
+  const imageCount = images && images.length > 0 ? images.length : (imagesCount ?? 0);
+  const fileCount = files && files.length > 0 ? files.length : (filesCount ?? 0);
+
+  // Minimized view: a single-line strip that keeps the user aware a
+  // prompt is queued (label + truncated preview + a count of any hidden
+  // attachments/comments) and leaves the primary Interrupt action and an
+  // expand toggle reachable, while hiding the bulky tag cards, attachment
+  // thumbnails and inline editor. Takes priority over the editing view so
+  // collapsing always wins.
+  if (minimized) {
+    const summaryBits: string[] = [];
+    if (comments.length > 0) {
+      summaryBits.push(`${comments.length} comment${comments.length !== 1 ? "s" : ""}`);
+    }
+    if (imageCount > 0) {
+      summaryBits.push(`${imageCount} image${imageCount !== 1 ? "s" : ""}`);
+    }
+    if (fileCount > 0) {
+      summaryBits.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
+    }
+    return (
+      <div
+        className="queued-prompt-banner is-minimized"
+        data-testid="queued-prompt-banner"
+        data-minimized="true"
+      >
+        <button
+          className="queued-minimize-btn"
+          type="button"
+          data-testid="queued-expand-btn"
+          title={expandLabel}
+          aria-label={expandLabel}
+          aria-expanded={false}
+          onClick={() => setMinimized(false)}
+        >
+          <Icon name="chevron-right" size={14} />
+        </button>
+        <span className="queued-prompt-label">{queuedLabel}</span>
+        <span
+          className="queued-prompt-preview"
+          onClick={() => setMinimized(false)}
+          title={expandLabel}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") setMinimized(false);
+          }}
+        >
+          {hasComments ? userText : preview}
+        </span>
+        {summaryBits.length > 0 && (
+          <span className="queued-attachments-count" data-testid="queued-minimized-summary">
+            {summaryBits.join(" · ")}
+          </span>
+        )}
+        <button
+          className="promote-btn interrupt"
+          data-testid="queued-interrupt-btn"
+          onClick={onPromote}
+          title={interruptTitle}
+        >
+          {interruptLabel}
+        </button>
+      </div>
+    );
+  }
+
   if (editing) {
     return (
       <div className="queued-prompt-banner" data-testid="queued-prompt-banner">
         <span className="queued-prompt-label">{queuedLabel}</span>
+        <button
+          className="queued-minimize-btn"
+          type="button"
+          data-testid="queued-minimize-btn"
+          title={minimizeLabel}
+          aria-label={minimizeLabel}
+          aria-expanded={true}
+          onClick={() => setMinimized(true)}
+        >
+          <Icon name="chevron-down" size={14} />
+        </button>
         <textarea
           ref={inputRef}
           className="queued-prompt-edit-input"
@@ -1143,7 +1235,20 @@ function QueuedPromptBanner({
 
   return (
     <div className={`queued-prompt-banner${hasComments ? " has-tags" : ""}${hasImages || hasFiles ? " has-attachments" : ""}`} data-testid="queued-prompt-banner">
-      <span className="queued-prompt-label">{queuedLabel}</span>
+      <div className="queued-prompt-header">
+        <span className="queued-prompt-label">{queuedLabel}</span>
+        <button
+          className="queued-minimize-btn"
+          type="button"
+          data-testid="queued-minimize-btn"
+          title={minimizeLabel}
+          aria-label={minimizeLabel}
+          aria-expanded={true}
+          onClick={() => setMinimized(true)}
+        >
+          <Icon name="chevron-down" size={14} />
+        </button>
+      </div>
       {(hasImages || hasFiles) && (
         <div className="queued-attachments">
           {images?.map((img, i) => (

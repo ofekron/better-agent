@@ -18,6 +18,35 @@ logger = logging.getLogger("tool_approval_client")
 # HTTP client, is the fail-closed authority.
 _HTTP_TIMEOUT_S = 6 * 60
 
+# Per-field display cap. The summary rides a WS broadcast to every tab, so a
+# huge value (a whole-file Write, a giant patch) must not be sent verbatim —
+# that would bloat the payload and risk leaking large/secret blobs into the UI.
+# The card shows enough to make the permission decision, not the full content.
+_SUMMARY_VALUE_CAP = 500
+
+
+def describe_tool_call(tool_name: object, tool_input: object) -> dict:
+    """Build the approval-card summary for a tool call.
+
+    Returns the ONE shape every runner must emit and the frontend relies on:
+    ``{"tool": <str>, "input": {<arg>: <stringified, capped str>}}``. EVERY
+    argument is preserved (the card renders them all so the user sees exactly
+    what they're approving), with non-string values JSON-encoded and each value
+    truncated to keep the summary small and secret-safe. A non-dict input
+    degrades to empty args rather than raising."""
+    raw = tool_input if isinstance(tool_input, dict) else {}
+    described: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, default=str)
+            except Exception:
+                text = str(value)
+        described[str(key)] = text[:_SUMMARY_VALUE_CAP]
+    return {"tool": str(tool_name), "input": described}
+
 
 def request_tool_approval(
     *,

@@ -7,6 +7,7 @@ const BYPASS_TARGET: Record<string, Permission> = {
   claude: { mode: "bypassPermissions" },
   codex: { approval: "never", sandbox: "danger-full-access" },
   gemini: { mode: "yolo" },
+  openai: { mode: "bypassPermissions" },
 };
 
 /** Resolve the axes this kind exposes (empty for kinds without permission). */

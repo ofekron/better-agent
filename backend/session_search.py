@@ -160,6 +160,12 @@ def _build_index() -> list[dict]:
             "first_user_prompt": data.get("first_prompt") or "",
             "updated_at": data.get("updated_at", ""),
             "message_count": int(data.get("message_count") or 0),
+            # Filter dimensions. Coerced to "" so filter matching is
+            # straightforward (a missing value never equals a real one).
+            "provider_id": data.get("provider_id") or "",
+            "model": data.get("model") or "",
+            "reasoning_effort": data.get("reasoning_effort") or "",
+            "node_id": data.get("node_id") or "primary",
         })
     # Most-recently-updated first — gives the model a useful prior when
     # multiple sessions look similar.
@@ -177,12 +183,70 @@ def index_stub_map() -> dict[str, dict]:
     return {s["id"]: s for s in _build_index()}
 
 
-def validate_proposed(session_ids: list) -> list[str]:
+# ── Filters (provider / model / reasoning_effort / node) ────────────────
+#
+# Exact-match filters applied to `_build_index()` entries. Each is optional;
+# `None` / "" means "no constraint". Matching is case-sensitive on the
+# canonical stored value (provider ids / model names are canonical). When any
+# filter is set the search worker is constrained to the matching candidate
+# ids AND its output is post-validated, so a worker that ignores the
+# constraint still can't surface a filtered-out session.
+
+_FILTER_KEYS = ("provider_id", "model", "reasoning_effort", "node_id")
+
+
+def _normalize_filters(**raw) -> dict:
+    """Drop empty/None values. Returns `{}` when no filter is active."""
+    out: dict = {}
+    for key in _FILTER_KEYS:
+        val = raw.get(key)
+        if isinstance(val, str):
+            val = val.strip()
+        if val:
+            out[key] = val
+    return out
+
+
+def _matches_filters(stub: dict, filters: dict) -> bool:
+    for key, want in filters.items():
+        if want and stub.get(key) != want:
+            return False
+    return True
+
+
+def _filtered_candidate_ids(filters: dict) -> list[str]:
+    """Ids from `_build_index()` that pass `filters`, newest-first order
+    preserved."""
+    if not filters:
+        return []
+    return [s["id"] for s in _build_index() if _matches_filters(s, filters)]
+
+
+def _filters_constraint_note(candidate_ids: list[str]) -> str:
+    """The instruction prepended to the worker query so it only ranks the
+    filtered candidate set instead of grepping every session directory."""
+    if not candidate_ids:
+        return ""
+    return (
+        "CONSTRAINT: only rank sessions from this exact id list "
+        f"(ignore every other session directory): "
+        f"{', '.join(candidate_ids)}. "
+    )
+
+
+def validate_proposed(
+    session_ids: list, *, filters: Optional[dict] = None,
+) -> list[str]:
     """Keep only ids that resolve to a real, listable session (drops the
-    Ask container itself, hidden/ephemeral workers, and unknown ids)."""
+    Ask container itself, hidden/ephemeral workers, and unknown ids). When
+    `filters` is given, additionally require each id's index entry to match
+    every non-empty filter value (exact, case-sensitive)."""
     if not isinstance(session_ids, list):
         return []
-    valid_ids = {s["id"] for s in _build_index()}
+    if filters:
+        valid_ids = set(_filtered_candidate_ids(filters))
+    else:
+        valid_ids = {s["id"] for s in _build_index()}
     out: list[str] = []
     seen: set[str] = set()
     for sid in session_ids:
@@ -390,6 +454,10 @@ async def run_search_sessions_session(
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
     max_results: int = _DEFAULT_MAX_RESULTS,
     include_worker_events: bool = False,
+    provider_id: Optional[str] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> dict:
     """Run one provisioned search-worker fork and return the ranked ids.
 
@@ -399,6 +467,13 @@ async def run_search_sessions_session(
     the fork is ephemeral. When `propose` is set, also stamps the picker on
     `propose_target`/`propose_msg_id` in the same call.
 
+    Optional filters (`provider_id` / `model` / `reasoning_effort` /
+    `node_id`) narrow the candidate set BEFORE the worker runs: the worker
+    is constrained to the matching ids and its output is post-validated
+    against the same filters, so a worker that ignores the constraint still
+    cannot surface a filtered-out session. An empty candidate set short-
+    circuits with no worker dispatch.
+
     Returns `{session_ids, reasoning, error}`; `error` is one of `None`,
     `"empty_query"`, `"timeout"`, `"dispatch_failed"`, `"parse_failed"`.
     """
@@ -406,13 +481,30 @@ async def run_search_sessions_session(
         return {"session_ids": [], "reasoning": "", "error": "empty_query"}
     query = query.strip()
 
+    filters = _normalize_filters(
+        provider_id=provider_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        node_id=node_id,
+    )
+    # When filters are active, restrict the worker to the matching candidate
+    # ids. Empty candidate set → short-circuit (no worker dispatch).
+    candidate_ids: list[str] = []
+    if filters:
+        candidate_ids = await asyncio.to_thread(_filtered_candidate_ids, filters)
+        if not candidate_ids:
+            return {"session_ids": [], "reasoning": "", "error": None}
+
+    note = _filters_constraint_note(candidate_ids)
+    effective_query = (note + query) if note else query
+
     ctx = {
         "sessions_dir": str(ba_home() / "sessions"),
         "max_results": max_results,
     }
     try:
         result = await asyncio.wait_for(
-            provisioning.run(SEARCH_SPEC, query, ctx),
+            provisioning.run(SEARCH_SPEC, effective_query, ctx),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
@@ -425,7 +517,9 @@ async def run_search_sessions_session(
     if not isinstance(reported, dict) or reported.get("error"):
         return {"session_ids": [], "reasoning": "", "error": "parse_failed"}
 
-    session_ids = validate_proposed(reported.get("session_ids") or [])[:max_results]
+    session_ids = validate_proposed(
+        reported.get("session_ids") or [], filters=filters or None,
+    )[:max_results]
     reasoning = reported.get("reasoning", "")
     if not isinstance(reasoning, str):
         reasoning = ""
@@ -564,6 +658,10 @@ async def search(
     on_user_message: Optional[Callable[[dict], Awaitable[None]]] = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
     max_results: int = _DEFAULT_MAX_RESULTS,
+    provider_id: Optional[str] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> dict:
     """Ask UI/REST entry. Append the query as a user turn on the stable Ask
     session, run a search worker, then append an assistant turn carrying
@@ -594,6 +692,10 @@ async def search(
                 on_user_message=on_user_message,
                 timeout=timeout,
                 max_results=max_results,
+                provider_id=provider_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                node_id=node_id,
             ),
             name="ask_search",
         )
@@ -658,6 +760,10 @@ async def _ask_search(
     on_user_message: Optional[Callable[[dict], Awaitable[None]]],
     timeout: float,
     max_results: int,
+    provider_id: Optional[str] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> dict:
     """Append the user turn, run the worker, append the assistant turn +
     picker on the stable Ask session."""
@@ -686,6 +792,10 @@ async def _ask_search(
             query,
             timeout=timeout,
             max_results=max_results,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            node_id=node_id,
         )
 
         assistant_msg = _ask_assistant_message_from_worker_result(result)

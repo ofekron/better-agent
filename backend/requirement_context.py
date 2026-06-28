@@ -199,21 +199,56 @@ def _run_requirements_processor(
     return value if isinstance(value, dict) else {"requirements": [], "error": "parse_failed"}
 
 
+# Strong, unambiguous rate-limit markers. A speculative timeout hedge
+# ("provider may be rate limited") contains none of these — it only ever uses
+# the bare phrase "rate limit(ed)", which is intentionally NOT a marker here.
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "rate_limit",
+    "rate limit reached",
+    "rate limit exceeded",
+    "rate-limit reached",
+    "rate-limit exceeded",
+    "ratelimit",
+    "too many requests",
+    "resource_exhausted",
+    "quota exceeded",
+)
+
+
 def _processor_failure_message(exc: Exception) -> str:
     error_text = str(exc).strip()
     lower = error_text.lower()
-    if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
-        return (
-            "processor_failed: get-requirements processor timed out; "
-            "provider may be rate limited or unavailable; no retry attempted"
-        )
-    if "rate_limit" in lower or "rate limit" in lower or "429" in lower:
+    if _is_explicit_rate_limit_error(lower):
         return (
             "processor_failed: get-requirements processor hit a provider rate limit; "
             "no retry attempted"
         )
+    if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
+        return (
+            "processor_failed: get-requirements processor timed out before returning requirements; "
+            "no retry attempted"
+        )
     suffix = f": {error_text}" if error_text else ""
     return f"processor_failed: {type(exc).__name__}{suffix}"
+
+
+def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
+    """True only for STRONG, unambiguous rate-limit signals.
+
+    We deliberately do NOT match the bare phrase "rate limit"/"rate limited":
+    speculative hedges ("may be / appears / likely / seems / could be / probably
+    rate limited") use exactly that bare phrasing, and enumerating every hedge in
+    a denylist is unbounded and fragile. Requiring a strong marker — a 429 status,
+    a rate-limit token, or an explicit "reached/exceeded/too many requests/quota
+    exhausted" phrasing that no speculative hedge produces — classifies real
+    rate-limit errors as rate limits while leaving every speculative timeout as a
+    timeout, with no hedge denylist to keep complete.
+    """
+    return any(
+        marker in lower_error_text
+        for marker in _RATE_LIMIT_MARKERS
+    )
 
 
 def _parse_processor_json(text: str) -> dict[str, Any] | None:

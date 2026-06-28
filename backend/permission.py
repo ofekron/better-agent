@@ -8,17 +8,20 @@ from typing import Optional
 #
 #   claude / gemini → {"mode": <value>}        (single axis)
 #   codex           → {"approval": ..., "sandbox": ...}  (two independent axes)
+#   openai          → {"mode": <value>}        (BA-owned approval gate)
 
 CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto")
 CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "on-failure", "never")
 CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 GEMINI_APPROVAL_MODES = ("auto_edit", "yolo", "plan")
+OPENAI_PERMISSION_MODES = ("default", "bypassPermissions")
 
 # Per-kind axis → allowed values. Order is the UI display order.
 _AXES: dict[str, dict[str, tuple[str, ...]]] = {
     "claude": {"mode": CLAUDE_PERMISSION_MODES},
     "codex": {"approval": CODEX_APPROVAL_POLICIES, "sandbox": CODEX_SANDBOX_MODES},
     "gemini": {"mode": GEMINI_APPROVAL_MODES},
+    "openai": {"mode": OPENAI_PERMISSION_MODES},
 }
 
 # Defaults preserve prior hardcoded behavior: full bypass on every provider.
@@ -27,6 +30,7 @@ DEFAULT_PERMISSION: dict[str, dict[str, str]] = {
     "claude": {"mode": "bypassPermissions"},
     "codex": {"approval": "never", "sandbox": "danger-full-access"},
     "gemini": {"mode": "yolo"},
+    "openai": {"mode": "bypassPermissions"},
 }
 
 

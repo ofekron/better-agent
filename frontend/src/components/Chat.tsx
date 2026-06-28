@@ -193,6 +193,46 @@ function UserInputCard({
   );
 }
 
+/** Max chars rendered per argument value in the approval card. The backend
+ *  already caps each value, but a runner that bypasses the shared helper (or a
+ *  future provider) might not — defend the UI so one huge field can't blow up
+ *  the card. Generous enough to show a full command / path / short patch. */
+const TOOL_APPROVAL_VALUE_LIMIT = 2000;
+
+/** Normalize a tool-call summary into ordered [label, value] rows covering
+ *  EVERY argument, so the user sees exactly what they're approving. Tolerant
+ *  of the unified `summary.input` shape and the legacy `summary.args` shape
+ *  (older runners / replayed records), and of non-string values. */
+export function toolApprovalArgRows(
+  summary: Record<string, unknown> | undefined,
+): Array<{ key: string; value: string }> {
+  const bag =
+    (summary?.input as Record<string, unknown> | undefined) ??
+    (summary?.args as Record<string, unknown> | undefined) ??
+    undefined;
+  if (!bag || typeof bag !== "object") return [];
+  const rows: Array<{ key: string; value: string }> = [];
+  for (const [key, raw] of Object.entries(bag)) {
+    let value: string;
+    if (typeof raw === "string") {
+      value = raw;
+    } else if (raw === null || raw === undefined) {
+      value = String(raw);
+    } else {
+      try {
+        value = JSON.stringify(raw);
+      } catch {
+        value = String(raw);
+      }
+    }
+    if (value.length > TOOL_APPROVAL_VALUE_LIMIT) {
+      value = value.slice(0, TOOL_APPROVAL_VALUE_LIMIT) + "…";
+    }
+    rows.push({ key, value });
+  }
+  return rows;
+}
+
 function ToolApprovalCard({
   approval,
   sessionId,
@@ -204,13 +244,11 @@ function ToolApprovalCard({
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
-  const input = (approval.summary?.input ?? {}) as Record<string, unknown>;
-  const detail =
-    typeof input.command === "string"
-      ? input.command
-      : Array.isArray(input.files)
-        ? (input.files as string[]).join(", ")
-        : "";
+  const toolName =
+    approval.tool_name ||
+    (typeof approval.summary?.tool === "string" ? (approval.summary.tool as string) : "") ||
+    t("toolApproval.unknownTool");
+  const rows = toolApprovalArgRows(approval.summary);
   const decide = async (approved: boolean) => {
     if (busy) return;
     setBusy(true);
@@ -230,13 +268,31 @@ function ToolApprovalCard({
     }
   };
   return (
-    <div className="user-input-card">
+    <div className="user-input-card" data-testid="tool-approval-card" data-approval-id={approval.approval_id}>
       <div className="user-input-card__title">{t("toolApproval.title")}</div>
       <div className="user-input-card__question">
         <div className="user-input-card__header">
-          {t("toolApproval.tool", { tool: approval.tool_name || approval.summary?.tool || "" })}
+          {t("toolApproval.tool", { tool: toolName })}
         </div>
-        {detail ? <div className="user-input-card__body">{detail}</div> : null}
+        {approval.provider_kind ? (
+          <div className="tool-approval-card__provider">
+            {t("toolApproval.provider", { provider: approval.provider_kind })}
+          </div>
+        ) : null}
+        {rows.length > 0 ? (
+          <dl className="tool-approval-card__args">
+            {rows.map((row) => (
+              <div key={row.key} className="tool-approval-card__arg">
+                <dt className="tool-approval-card__arg-key">{row.key}</dt>
+                <dd className="tool-approval-card__arg-value">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <div className="user-input-card__body tool-approval-card__no-args">
+            {t("toolApproval.noArgs")}
+          </div>
+        )}
       </div>
       <div className="user-input-card__actions">
         <button type="button" onClick={() => decide(false)} disabled={busy}>
@@ -280,6 +336,7 @@ interface Props {
   onStop?: () => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
+  onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   disabled: boolean;
@@ -372,6 +429,7 @@ interface Props {
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
   onSelectTab?: (id: string) => void;
+  onTabCapacityChange?: (capacity: number) => void;
   /** Optional node rendered at the TOP of the message scroll area,
    * above the first group. Used by the Ask view for its greeting box. */
   headerNode?: import("react").ReactNode;
@@ -426,6 +484,7 @@ export function Chat({
   onStop,
   onRetry,
   onRetryStopped,
+  onContinueRateLimitOnAnotherProvider,
   onFileClick,
   onViewDiff,
   disabled,
@@ -474,6 +533,7 @@ export function Chat({
   providers = [],
   onCloseTab,
   onSelectTab,
+  onTabCapacityChange,
   headerNode,
   composerHeaderNode,
   composerOverflowNode,
@@ -1086,6 +1146,7 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onMeasuredCapacityChange={onTabCapacityChange}
         />
       )}
       {session && !hideToolbar && (
@@ -1281,6 +1342,7 @@ export function Chat({
                       threadColorMap={threadColorMap}
                       onRetry={onRetry}
                       onRetryStopped={onRetryStopped}
+                      onContinueRateLimitOnAnotherProvider={onContinueRateLimitOnAnotherProvider}
                       onAlterUserMessage={
                         onAlterUserMessage &&
                         g.isLast &&

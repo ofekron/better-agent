@@ -140,6 +140,8 @@ async def start(parent_session_id: str, draft: str, mode: str) -> dict:
         provider_id=parent.get("provider_id"),
         reasoning_effort=parent.get("reasoning_effort"),
         node_id=node_id,
+        # The user explicitly invoked prompt-engineering on this session.
+        user_initiated=True,
     )
 
     if mode == "fork":

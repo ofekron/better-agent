@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -33,13 +32,13 @@ from provider import (
     create_loop_task,
     runner_argv,
 )
-import provider_runtime
 from provider_run_config import normalize_provider_run_config
 from reasoning_effort import CODEX_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from proc_control import process_control as _process_control
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
     pid_alive as _pid_alive,
+    reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
 )
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
@@ -386,6 +385,11 @@ class CodexProvider(Provider):
             "codex_binary": self.CODEX_BINARY,
             "codex_profile": self.CODEX_PROFILE,
             "app_session_id": app_session_id,
+            "active_capability_ids": [
+                str(cid)
+                for cid in (_sess_rec.get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -434,10 +438,8 @@ class CodexProvider(Provider):
                 user_facing=bool(open_file_panel_enabled) and not bool(_sess_rec.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = provider_runtime.popen_runner(
+            popen = subprocess.Popen(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind=self.RUNNER_KIND),
-                run_dir=run_dir,
-                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
@@ -1108,11 +1110,8 @@ class CodexProvider(Provider):
             except OSError:
                 continue
             if mtime < cutoff:
-                try:
-                    shutil.rmtree(child)
+                if _reap_run_dir(child):
                     removed += 1
-                except OSError as e:
-                    logger.warning("prune: failed to rm %s: %s", child, e)
         return removed
 
     # ------------------------------------------------------------------
@@ -1215,7 +1214,7 @@ class CodexProvider(Provider):
         if not any(kw in corpus for kw in self._CODEX_RATE_LIMIT_KEYWORDS):
             return None
 
-        return self._fallback_rate_limit(hours=1)
+        return None
 
     # ------------------------------------------------------------------
     # rewind — simulate by clearing session_id

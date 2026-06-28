@@ -34,7 +34,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -47,11 +46,10 @@ from typing import Any, Callable, ClassVar, Optional
 from event_bus import BusEvent, bus
 from env_compat import get_env
 from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
-import provider_runtime
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
-
 import git_policy
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +63,7 @@ from paths import ba_home
 # code that imported these from provider_claude. New code should
 # import from `runs_dir` directly.
 from runs_dir import runs_root as _runs_root
+from runs_dir import reap_run_dir as _reap_run_dir
 import perf
 from runs_dir import atomic_write_json as _atomic_write_json
 from runs_dir import pid_alive as _pid_alive
@@ -404,10 +403,8 @@ class ClaudeProvider(Provider):
                 user_facing=bool(open_file_panel_enabled) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = provider_runtime.popen_runner(
+            popen = subprocess.Popen(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="claude"),
-                run_dir=run_dir,
-                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
@@ -1118,11 +1115,8 @@ class ClaudeProvider(Provider):
             except OSError:
                 continue
             if mtime < cutoff:
-                try:
-                    shutil.rmtree(child)
+                if _reap_run_dir(child):
                     removed += 1
-                except OSError as e:
-                    logger.warning("prune: failed to rm %s: %s", child, e)
         if removed:
             logger.info("pruned %d old run dirs", removed)
         return removed
@@ -1300,7 +1294,7 @@ class ClaudeProvider(Provider):
             except Exception:
                 logger.warning("failed to parse Claude short reset time", exc_info=True)
 
-        return self._fallback_rate_limit(hours=1)
+        return None
 
     # ------------------------------------------------------------------
     # rewind — `claude --resume <sid> --rewind-files <uuid>`

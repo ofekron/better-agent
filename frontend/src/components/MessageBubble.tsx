@@ -148,6 +148,12 @@ function RetryingPill({ retryAt }: { retryAt: string }) {
     // `compute` closes over `target`; depending on `target` is enough.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
+  const label =
+    secondsLeft < 90
+      ? t("message.retryingIn", { seconds: secondsLeft })
+      : secondsLeft < 5400
+        ? `Retrying in ${Math.ceil(secondsLeft / 60)}m`
+        : `Retrying in ${Math.ceil(secondsLeft / 3600)}h`;
   return (
     <div
       className="retrying-pill"
@@ -156,9 +162,7 @@ function RetryingPill({ retryAt }: { retryAt: string }) {
       aria-live="polite"
     >
       <span className="retrying-spinner" aria-hidden="true" />
-      <span>
-        {t("message.retryingIn", { seconds: secondsLeft })}
-      </span>
+      <span>{label}</span>
     </div>
   );
 }
@@ -2215,6 +2219,7 @@ const AssistantMessage = memo(function AssistantMessage({
   onViewDiff,
   onRetry,
   onRetryStopped,
+  onContinueRateLimitOnAnotherProvider,
   threadColorMap,
   tags,
   advSyncOverlays,
@@ -2241,6 +2246,7 @@ const AssistantMessage = memo(function AssistantMessage({
    * rewind-then-retry of the discarded turn (deletes the stopped
    * assistant + its user message, then re-sends as a fresh turn). */
   onRetryStopped?: () => void;
+  onContinueRateLimitOnAnotherProvider?: () => void;
   threadColorMap?: Map<string, string>;
   tags?: InlineTag[];
   advSyncOverlays?: AdvSyncOverlay[];
@@ -2458,6 +2464,17 @@ const AssistantMessage = memo(function AssistantMessage({
                   ? message.errorText.split("\n", 1)[0]
                   : "Rate limit exceeded"}
               </span>
+              {onContinueRateLimitOnAnotherProvider && (
+                <button
+                  className="status-retry-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onContinueRateLimitOnAnotherProvider();
+                  }}
+                >
+                  Continue on another provider
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -2698,7 +2715,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  per-frame WS streaming updates — those mutate only the in-flight
  *  assistant message (last in the list), leaving every earlier
  *  group's props referentially stable. */
-function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLastGroup = false }: {
+function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLastGroup = false }: {
   userMessage: ChatMessage;
   assistantMessage?: ChatMessage;
   /** Worker output nested under the supervisor/main message. */
@@ -2708,6 +2725,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
+  onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
   onAlterUserMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
   threadColorMap?: Map<string, string>;
   defaultCollapsed?: boolean;
@@ -3209,6 +3227,11 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
               onRetry={onRetry ? () => onRetry(userMessage) : undefined}
               onRetryStopped={
                 onRetryStopped ? () => onRetryStopped(assistantMessage) : undefined
+              }
+              onContinueRateLimitOnAnotherProvider={
+                assistantMessage.retrying_until && onContinueRateLimitOnAnotherProvider
+                  ? () => onContinueRateLimitOnAnotherProvider(assistantMessage)
+                  : undefined
               }
               threadColorMap={threadColorMap}
               tags={assistantTags.length > 0 ? assistantTags : undefined}

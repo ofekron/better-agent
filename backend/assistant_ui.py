@@ -66,17 +66,57 @@ def _system_prompt() -> str:
         return ""
 
 
+# Conversation providers the assistant session can run on. The role prompt is
+# provider-agnostic, so the same content is attached to every provider kind;
+# `provider_capability_contexts` selects per turn by the runner's provider_kind,
+# so an output must exist for each kind the session may use.
+_FALLBACK_PROVIDER_KINDS = ("claude", "codex", "gemini", "openai")
+
+
+def _provider_kinds() -> list[str]:
+    """Deterministic list of provider KINDs to attach the role prompt to.
+
+    Sourced from the loaded provider registry when available, with a stable
+    fallback so the prompt still lands before providers load. Sorted so the
+    capability_contexts hash stays byte-stable regardless of registry order."""
+    kinds: list[str] = []
+    try:
+        from provider import known_providers
+        for prov in known_providers():
+            kind = getattr(prov, "KIND", "")
+            if isinstance(kind, str) and kind:
+                kinds.append(kind)
+    except Exception:  # noqa: BLE001 — registry unavailable in some test contexts
+        kinds = []
+    merged: list[str] = []
+    for kind in [*kinds, *_FALLBACK_PROVIDER_KINDS]:
+        if kind not in merged:
+            merged.append(kind)
+    return sorted(merged)
+
+
 def build_capability_contexts(board_preamble: str = "") -> list[dict]:
     """Capability context appended to the assistant session's system prompt every
     turn. v1: the role prompt; `board_preamble` (stateless item set) is appended
     here once the board mechanism feeds it. State is deliberately NOT included —
-    it lives in the volatile tail to keep this cached region byte-stable."""
+    it lives in the volatile tail to keep this cached region byte-stable.
+
+    One output per provider kind: the runner's `provider_capability_contexts`
+    filters by `provider_kind`, and a context with no matching output is silently
+    dropped — so a single `content` field (no `outputs`) delivers nothing."""
     content = _system_prompt()
     if board_preamble:
         content = f"{content}\n\n{board_preamble}" if content else board_preamble
     if not content.strip():
         return []
-    return [{"name": "Assistant", "category": "role", "content": content}]
+    outputs = [{"provider_kind": kind, "content": content} for kind in _provider_kinds()]
+    return [{
+        "source_id": "assistant",
+        "capability_id": "assistant-role",
+        "name": "Assistant",
+        "category": "role",
+        "outputs": outputs,
+    }]
 
 
 def _read_state() -> dict:
@@ -136,13 +176,19 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
                 orchestration_mode="native",
                 capability_contexts=caps,
             )
+            # The singleton is a stable, named entry point — never renamed by
+            # AI auto-title, first-prompt auto-name, or the user rename path.
+            session_manager.set_name_locked(sess["id"], True)
             next_state["session_id"] = sess["id"]
             _write_state(next_state)
-        elif caps and state.get("capability_contexts_hash") != cap_hash:
-            session_manager.set_capability_contexts(sess["id"], caps)
-            _write_state(next_state)
-        elif next_state != state:
-            _write_state(next_state)
+        else:
+            if caps and state.get("capability_contexts_hash") != cap_hash:
+                session_manager.set_capability_contexts(sess["id"], caps)
+            # Backfill the lock on singletons created before it existed.
+            if not sess.get("name_locked"):
+                session_manager.set_name_locked(sess["id"], True)
+            if next_state != state:
+                _write_state(next_state)
         return sess
 
 

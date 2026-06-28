@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -26,6 +26,8 @@ import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
+
+const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 
 interface Props {
   sessions: Session[];
@@ -236,7 +238,9 @@ interface NodeProps {
   /** Active sidebar sort field — its timestamp is shown on each row. */
   sortField: string;
   selected: boolean;
+  bulkSelectMode: boolean;
   onToggleSelected: (id: string) => void;
+  onStartBulkSelect: (id: string) => void;
 }
 
 function SessionNode({
@@ -271,7 +275,9 @@ function SessionNode({
   onToggleReqTag,
   sortField,
   selected,
+  bulkSelectMode,
   onToggleSelected,
+  onStartBulkSelect,
 }: NodeProps) {
   const { t } = useTranslation();
   const { show: showSheet } = useMobileActionSheet();
@@ -305,12 +311,49 @@ function SessionNode({
   const folderPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tagPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statsPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bulkSelectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressSelectedRef = useRef(false);
   useEffect(() => () => {
     if (renameTimerRef.current) clearTimeout(renameTimerRef.current);
     if (folderPopoverTimerRef.current) clearTimeout(folderPopoverTimerRef.current);
     if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
     if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
+    if (bulkSelectTimerRef.current) clearTimeout(bulkSelectTimerRef.current);
   }, []);
+
+  const clearBulkSelectTimer = () => {
+    if (!bulkSelectTimerRef.current) return;
+    clearTimeout(bulkSelectTimerRef.current);
+    bulkSelectTimerRef.current = null;
+  };
+
+  const isBulkSelectBlockedTarget = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false;
+    return Boolean(target.closest("button, input, textarea, select, a, [role='button']"));
+  };
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || isBulkSelectBlockedTarget(e.target)) return;
+    longPressSelectedRef.current = false;
+    clearBulkSelectTimer();
+    bulkSelectTimerRef.current = setTimeout(() => {
+      longPressSelectedRef.current = true;
+      onStartBulkSelect(session.id);
+    }, SESSION_BULK_SELECT_LONG_PRESS_MS);
+  };
+
+  const handleRowClick = () => {
+    clearBulkSelectTimer();
+    if (longPressSelectedRef.current) {
+      longPressSelectedRef.current = false;
+      return;
+    }
+    if (bulkSelectMode) {
+      onToggleSelected(session.id);
+      return;
+    }
+    onSelect(session.id);
+  };
 
   const toggleSessionTag = (tagId: string) => {
     const current = new Set(sessionTagIds(session));
@@ -522,6 +565,7 @@ function SessionNode({
         style={{ marginInlineStart: depth * 16 }}
         draggable
         onDragStart={(e) => {
+          clearBulkSelectTimer();
           // framer-motion forwards onDrag* handlers to the DOM when
           // `draggable` is set (filterProps special-case), so `e` is in
           // practice a native React.DragEvent even though motion's types
@@ -551,7 +595,11 @@ function SessionNode({
           const id = e.dataTransfer.getData(SESSION_DRAG_MIME);
           if (id && id !== session.id) onMoveToFolder(id, session.folder_id ?? null);
         }}
-        onClick={() => onSelect(session.id)}
+        onPointerDown={handlePointerDown}
+        onPointerUp={clearBulkSelectTimer}
+        onPointerLeave={clearBulkSelectTimer}
+        onPointerCancel={clearBulkSelectTimer}
+        onClick={handleRowClick}
         onContextMenu={(e) => {
           // Desktop-only: mobile uses the ⋯ button + long-press. Keep
           // the native menu (don't preventDefault) and add our floating
@@ -571,18 +619,20 @@ function SessionNode({
         data-active={session.id === currentSessionId ? "true" : "false"}
         data-selected={selected ? "true" : "false"}
       >
-        <label
-          className="session-item-select"
-          title={t("session.selectSession")}
-          aria-label={t("session.selectSession")}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={() => onToggleSelected(session.id)}
-          />
-        </label>
+        {bulkSelectMode && (
+          <label
+            className="session-item-select"
+            title={t("session.selectSession")}
+            aria-label={t("session.selectSession")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelected(session.id)}
+            />
+          </label>
+        )}
         <div className="session-item-name">
           {session.source === "cli" && (
             <span
@@ -883,7 +933,9 @@ function SessionNode({
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
           selected={selected}
+          bulkSelectMode={bulkSelectMode}
           onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
     </>
@@ -923,7 +975,9 @@ interface FolderSectionProps {
   onToggleFolder: (folderId: string) => void;
   sortField: string;
   selectedSessionIds: Set<string>;
+  bulkSelectMode: boolean;
   onToggleSelected: (id: string) => void;
+  onStartBulkSelect: (id: string) => void;
 }
 
 function FolderSection({
@@ -959,7 +1013,9 @@ function FolderSection({
   onToggleFolder,
   sortField,
   selectedSessionIds,
+  bulkSelectMode,
   onToggleSelected,
+  onStartBulkSelect,
 }: FolderSectionProps) {
   const collapsed = collapsedFolderIds.has(node.folder.id);
   const [dragOver, setDragOver] = useState(false);
@@ -1028,7 +1084,9 @@ function FolderSection({
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
           selected={selectedSessionIds.has(s.id)}
+          bulkSelectMode={bulkSelectMode}
           onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
       {!collapsed && node.children.map((child) => (
@@ -1066,7 +1124,9 @@ function FolderSection({
           onToggleFolder={onToggleFolder}
           sortField={sortField}
           selectedSessionIds={selectedSessionIds}
+          bulkSelectMode={bulkSelectMode}
           onToggleSelected={onToggleSelected}
+          onStartBulkSelect={onStartBulkSelect}
         />
       ))}
     </div>
@@ -1125,6 +1185,11 @@ export function SessionList({
     );
     observer.observe(node);
     return () => observer.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
+  const handleItemsScroll = useCallback((e: ReactUIEvent<HTMLDivElement>) => {
+    if (!hasMore || loadingMore || !onLoadMore) return;
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= 160) onLoadMore();
   }, [hasMore, loadingMore, onLoadMore]);
 
   // Desktop right-click context menu for session rows. State is lifted
@@ -1342,6 +1407,7 @@ export function SessionList({
     anchor: PopoverAnchor;
   } | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [bulkSelectMode, setBulkSelectMode] = useState(false);
   const [bulkFolderPopover, setBulkFolderPopover] = useState<PopoverAnchor | null>(null);
   const [bulkTagPopover, setBulkTagPopover] = useState<PopoverAnchor | null>(null);
 
@@ -1470,13 +1536,30 @@ export function SessionList({
   // sources are closed sets known client-side; models come from the backend
   // facet (distinct models across all the project's sessions).
   const providerOptions = useMemo(
-    () =>
-      providers
-        .map((provider) => ({ id: provider.id, name: provider.name }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    [providers],
+    () => {
+      const names = new Map(providers.map((provider) => [provider.id, provider.name]));
+      for (const session of sessions) {
+        const id = session.provider_id?.trim();
+        if (id && !names.has(id)) names.set(id, id);
+      }
+      return Array.from(names, ([id, name]) => ({ id, name }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+    [providers, sessions],
   );
-  const modelOptions = modelFacet;
+  const modelOptions = useMemo(() => {
+    const models = new Set(modelFacet);
+    for (const provider of providers) {
+      if (provider.default_model) models.add(provider.default_model);
+      for (const model of provider.custom_models ?? []) {
+        if (model) models.add(model);
+      }
+    }
+    for (const session of sessions) {
+      if (session.model) models.add(session.model);
+    }
+    return Array.from(models).sort((a, b) => a.localeCompare(b));
+  }, [modelFacet, providers, sessions]);
   const modeOptions = useMemo(
     () => ["team", "native", "virtual"] as OrchestrationMode[],
     [],
@@ -1848,10 +1931,21 @@ export function SessionList({
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      if (next.size === 0) setBulkSelectMode(false);
+      return next;
+    });
+  }, []);
+  const startBulkSelect = useCallback((id: string) => {
+    setBulkSelectMode(true);
+    setSelectedSessionIds((current) => {
+      if (current.has(id)) return current;
+      const next = new Set(current);
+      next.add(id);
       return next;
     });
   }, []);
   const selectVisibleSessions = useCallback(() => {
+    setBulkSelectMode(true);
     setSelectedSessionIds((current) => {
       const next = new Set(current);
       for (const id of visibleSelectionIds) next.add(id);
@@ -1859,6 +1953,7 @@ export function SessionList({
     });
   }, [visibleSelectionIds]);
   const clearSelectedSessions = useCallback(() => {
+    setBulkSelectMode(false);
     setSelectedSessionIds(new Set());
     setBulkFolderPopover(null);
     setBulkTagPopover(null);
@@ -2012,7 +2107,9 @@ export function SessionList({
       onToggleReqTag={toggleTagFilter}
       sortField={sessionSort ?? "updated_at"}
       selected={selectedSessionIds.has(s.id)}
+      bulkSelectMode={bulkSelectMode}
       onToggleSelected={toggleSelectedSession}
+      onStartBulkSelect={startBulkSelect}
     />
   );
 
@@ -2215,6 +2312,7 @@ export function SessionList({
       <div
         ref={itemsScrollRef}
         className="session-list-items"
+        onScroll={handleItemsScroll}
         onDragStart={(e) => {
           if (isSessionDrag(e)) setIsDraggingSession(true);
         }}
@@ -2594,7 +2692,9 @@ export function SessionList({
             onToggleFolder={toggleFolder}
             sortField={sessionSort ?? "updated_at"}
             selectedSessionIds={selectedSessionIds}
+            bulkSelectMode={bulkSelectMode}
             onToggleSelected={toggleSelectedSession}
+            onStartBulkSelect={startBulkSelect}
           />
         ))}
         {showFolders && unfiledSessions.length > 0 && folderRoots.length > 0 && (

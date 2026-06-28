@@ -94,6 +94,8 @@
   "input.attachTitle": "צרף",
   "input.removeImageTitle": "הסר תמונה",
   "input.queuedLabel": "בתור:",
+  "input.queuedMinimize": "מזער הודעה בתור",
+  "input.queuedExpand": "הרחב הודעה בתור",
   "input.mentionProjects": "פרויקטים",
   "input.mentionSessions": "שיחות",
   "input.interruptButton": "⚡ הפרע",
@@ -811,6 +813,9 @@
   "emptyProject.body": "אין עדיין שיחות בפרויקט זה.",
   "toolApproval.title": "נדרש אישור",
   "toolApproval.tool": "כלי: {{tool}}",
+  "toolApproval.provider": "ספק: {{provider}}",
+  "toolApproval.unknownTool": "(כלי לא ידוע)",
+  "toolApproval.noArgs": "(ללא ארגומנטים)",
   "toolApproval.approve": "אשר",
   "toolApproval.deny": "דחה"
 }
