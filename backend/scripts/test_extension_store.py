@@ -1730,6 +1730,40 @@ def test_required_runtime_path_extensions_are_managed_builtins() -> None:
         raise AssertionError(f"private builtins missing display names: {missing_names}")
 
 
+def test_prune_extension_versions_keeps_active_and_newest_fallbacks() -> None:
+    """Version snapshots accumulate one per private-repo HEAD / public hash and
+    are never pruned elsewhere. _prune_extension_versions must keep the active
+    install_path plus the N newest fallbacks and delete the rest, without
+    touching anything outside the extension's versions/ dir."""
+    import time
+
+    ext_id = "ofek.prune-fixture"
+    versions_dir = extension_store._install_root() / ext_id / "versions"
+    versions_dir.mkdir(parents=True)
+    active = versions_dir / "active-sha"
+    active.mkdir()
+    (active / "marker").write_text("active", encoding="utf-8")
+    base = time.time()
+    created = []
+    for i, name in enumerate(["v1", "v2", "v3", "v4", "v5", "v6"]):
+        d = versions_dir / name
+        d.mkdir()
+        (d / "marker").write_text(name, encoding="utf-8")
+        os.utime(d, (base + i, base + i))  # v1 oldest .. v6 newest
+        created.append(d)
+    data = {"extensions": {ext_id: {"source": {"install_path": str(active)}}}}
+
+    extension_store._prune_extension_versions(data)
+
+    keep = extension_store._MAX_FALLBACK_VERSIONS
+    remaining = {p.name for p in versions_dir.iterdir()}
+    expected = {"active-sha", "v6", "v5", "v4"}  # active + 3 newest fallbacks
+    if remaining != expected:
+        raise AssertionError(
+            f"pruning retained {sorted(remaining)}, expected {sorted(expected)}"
+        )
+
+
 def test_install_from_signed_marketplace_artifact() -> None:
     work = _private_monorepo_test_work()
     old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
@@ -4327,6 +4361,7 @@ if __name__ == "__main__":
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()
         test_required_runtime_path_extensions_are_managed_builtins()
+        test_prune_extension_versions_keeps_active_and_newest_fallbacks()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(_TMP_OS_HOME, ignore_errors=True)
