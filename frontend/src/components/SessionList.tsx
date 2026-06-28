@@ -235,6 +235,8 @@ interface NodeProps {
   onToggleReqTag: (key: string) => void;
   /** Active sidebar sort field — its timestamp is shown on each row. */
   sortField: string;
+  selected: boolean;
+  onToggleSelected: (id: string) => void;
 }
 
 function SessionNode({
@@ -268,6 +270,8 @@ function SessionNode({
   selectedReqTagKeys,
   onToggleReqTag,
   sortField,
+  selected,
+  onToggleSelected,
 }: NodeProps) {
   const { t } = useTranslation();
   const { show: showSheet } = useMobileActionSheet();
@@ -511,6 +515,8 @@ function SessionNode({
         } ${
           session.id === highlightedSessionId ? "highlighted" : ""
         } ${depth > 0 ? "session-item-child" : ""} ${
+          selected ? "session-item-selected" : ""
+        } ${
           folderDropOver ? "folder-drop-over" : ""
         }`}
         style={{ marginInlineStart: depth * 16 }}
@@ -563,7 +569,20 @@ function SessionNode({
         data-testid="session-item"
         data-session-id={session.id}
         data-active={session.id === currentSessionId ? "true" : "false"}
+        data-selected={selected ? "true" : "false"}
       >
+        <label
+          className="session-item-select"
+          title={t("session.selectSession")}
+          aria-label={t("session.selectSession")}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelected(session.id)}
+          />
+        </label>
         <div className="session-item-name">
           {session.source === "cli" && (
             <span
@@ -863,6 +882,8 @@ function SessionNode({
           selectedReqTagKeys={selectedReqTagKeys}
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
+          selected={selected}
+          onToggleSelected={onToggleSelected}
         />
       ))}
     </>
@@ -901,6 +922,8 @@ interface FolderSectionProps {
   collapsedFolderIds: Set<string>;
   onToggleFolder: (folderId: string) => void;
   sortField: string;
+  selectedSessionIds: Set<string>;
+  onToggleSelected: (id: string) => void;
 }
 
 function FolderSection({
@@ -935,6 +958,8 @@ function FolderSection({
   collapsedFolderIds,
   onToggleFolder,
   sortField,
+  selectedSessionIds,
+  onToggleSelected,
 }: FolderSectionProps) {
   const collapsed = collapsedFolderIds.has(node.folder.id);
   const [dragOver, setDragOver] = useState(false);
@@ -1002,6 +1027,8 @@ function FolderSection({
           selectedReqTagKeys={selectedReqTagKeys}
           onToggleReqTag={onToggleReqTag}
           sortField={sortField}
+          selected={selectedSessionIds.has(s.id)}
+          onToggleSelected={onToggleSelected}
         />
       ))}
       {!collapsed && node.children.map((child) => (
@@ -1038,6 +1065,8 @@ function FolderSection({
           collapsedFolderIds={collapsedFolderIds}
           onToggleFolder={onToggleFolder}
           sortField={sortField}
+          selectedSessionIds={selectedSessionIds}
+          onToggleSelected={onToggleSelected}
         />
       ))}
     </div>
@@ -1312,6 +1341,9 @@ export function SessionList({
     sessionId: string;
     anchor: PopoverAnchor;
   } | null>(null);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [bulkFolderPopover, setBulkFolderPopover] = useState<PopoverAnchor | null>(null);
+  const [bulkTagPopover, setBulkTagPopover] = useState<PopoverAnchor | null>(null);
 
   const refreshOrganization = useCallback(async () => {
     if (!projectId) {
@@ -1549,6 +1581,10 @@ export function SessionList({
       setOrgError(err instanceof Error ? err.message : "Failed to move session");
     }
   };
+  const moveSelectedToFolder = async (folderId: string | null) => {
+    await Promise.all(selectedSessions.map((session) => moveToFolder(session.id, folderId)));
+    setBulkFolderPopover(null);
+  };
 
   const createAndAssignFolder = async (sessionId: string, name: string) => {
     const trimmed = name.trim();
@@ -1571,6 +1607,17 @@ export function SessionList({
       setOrgError(err instanceof Error ? err.message : "Failed to update tags");
     }
   };
+  const toggleSelectedTag = async (tagId: string) => {
+    const remove = selectedTagIdsForBulk.has(tagId);
+    await Promise.all(
+      selectedSessions.map((session) => {
+        const ids = new Set(sessionTagIds(session));
+        if (remove) ids.delete(tagId);
+        else ids.add(tagId);
+        return setSessionTags(session.id, Array.from(ids));
+      }),
+    );
+  };
 
   // Create a project tag and assign it to the session in one step (the
   // inline "Create" affordance in the tag popover). The WS broadcast +
@@ -1583,6 +1630,23 @@ export function SessionList({
       const tag = await createSessionTag(trimmed, projectId);
       const result = await updateSessionOrganization(sessionId, { add_tag_ids: [tag.id] });
       applyAckedOrganization(sessionId, result.organization);
+      await refreshOrganization();
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Failed to create tag");
+    }
+  };
+  const createAndAssignSelectedTag = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || !projectId || selectedSessions.length === 0) return;
+    try {
+      const tag = await createSessionTag(trimmed, projectId);
+      await Promise.all(
+        selectedSessions.map((session) => {
+          const ids = new Set(sessionTagIds(session));
+          ids.add(tag.id);
+          return setSessionTags(session.id, Array.from(ids));
+        }),
+      );
       await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
@@ -1703,6 +1767,19 @@ export function SessionList({
     }
     return { roots: rootList, childrenByParent: childMap };
   }, [filtered, currentSessionId]);
+  const selectableSessionIds = useMemo(
+    () => new Set(filtered.map((session) => session.id)),
+    [filtered],
+  );
+  useEffect(() => {
+    setSelectedSessionIds((current) => {
+      const next = new Set<string>();
+      for (const id of current) {
+        if (selectableSessionIds.has(id)) next.add(id);
+      }
+      return next.size === current.size ? current : next;
+    });
+  }, [selectableSessionIds]);
 
   const [collapsedFolders, setCollapsedFolders] = useLocalStorage<string[]>(
     "better-agent-collapsed-folders",
@@ -1736,6 +1813,56 @@ export function SessionList({
     ],
     [folderRoots, collapsedFolderIds, unfiledSessions],
   );
+  const visibleSelectionIds = useMemo(
+    () => (folderViewEnabled !== false ? sortedRoots : roots).map((session) => session.id),
+    [folderViewEnabled, sortedRoots, roots],
+  );
+  const selectedSessions = useMemo(() => {
+    const byId = new Map(filtered.map((session) => [session.id, session]));
+    return Array.from(selectedSessionIds)
+      .map((id) => byId.get(id))
+      .filter((session): session is Session => Boolean(session));
+  }, [filtered, selectedSessionIds]);
+  const selectedCount = selectedSessions.length;
+  const selectedTagIdsForBulk = useMemo(() => {
+    if (selectedSessions.length === 0) return new Set<string>();
+    const [first, ...rest] = selectedSessions;
+    const common = new Set(sessionTagIds(first));
+    for (const session of rest) {
+      const ids = new Set(sessionTagIds(session));
+      for (const id of Array.from(common)) {
+        if (!ids.has(id)) common.delete(id);
+      }
+    }
+    return common;
+  }, [selectedSessions]);
+  const selectedFolderIdForBulk = useMemo(() => {
+    if (selectedSessions.length === 0) return null;
+    const first = selectedSessions[0].folder_id ?? null;
+    return selectedSessions.every((session) => (session.folder_id ?? null) === first)
+      ? first
+      : null;
+  }, [selectedSessions]);
+  const toggleSelectedSession = useCallback((id: string) => {
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const selectVisibleSessions = useCallback(() => {
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      for (const id of visibleSelectionIds) next.add(id);
+      return next;
+    });
+  }, [visibleSelectionIds]);
+  const clearSelectedSessions = useCallback(() => {
+    setSelectedSessionIds(new Set());
+    setBulkFolderPopover(null);
+    setBulkTagPopover(null);
+  }, []);
 
   // Keep the highlight valid: clear it if its row got filtered out, but
   // do NOT auto-set it — the highlight only appears after the first
@@ -1884,6 +2011,8 @@ export function SessionList({
       selectedReqTagKeys={selectedReqTagKeys}
       onToggleReqTag={toggleTagFilter}
       sortField={sessionSort ?? "updated_at"}
+      selected={selectedSessionIds.has(s.id)}
+      onToggleSelected={toggleSelectedSession}
     />
   );
 
@@ -2356,6 +2485,46 @@ export function SessionList({
             {orgError && <div className="session-org-error">{orgError}</div>}
           </div>
         )}
+        {selectedCount > 0 && (
+          <div className="session-bulk-bar" data-testid="session-bulk-bar">
+            <span className="session-bulk-count">
+              {t("session.selectedCount", { count: selectedCount })}
+            </span>
+            <button type="button" className="btn-small" onClick={selectVisibleSessions}>
+              {t("session.selectVisible")}
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-action"
+              onClick={(e) => setBulkFolderPopover(e.currentTarget.getBoundingClientRect())}
+            >
+              <Icon name="folder" size={12} />
+              <span>{t("session.folder")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-action"
+              onClick={(e) => setBulkTagPopover(e.currentTarget.getBoundingClientRect())}
+            >
+              <Icon name="tag" size={12} />
+              <span>{t("session.tags")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-delete"
+              onClick={() => {
+                for (const id of selectedSessionIds) onDelete(id);
+                clearSelectedSessions();
+              }}
+            >
+              <Icon name="trash" size={12} />
+              <span>{t("session.deleteSelected")}</span>
+            </button>
+            <button type="button" className="btn-small" onClick={clearSelectedSessions}>
+              {t("session.clearSelection")}
+            </button>
+          </div>
+        )}
         {searching && sessions.length > 0 && (
           <div className="session-list-loading session-list-loading-top">
             <span className="session-list-spinner" aria-hidden="true" />
@@ -2424,6 +2593,8 @@ export function SessionList({
             collapsedFolderIds={collapsedFolderIds}
             onToggleFolder={toggleFolder}
             sortField={sessionSort ?? "updated_at"}
+            selectedSessionIds={selectedSessionIds}
+            onToggleSelected={toggleSelectedSession}
           />
         ))}
         {showFolders && unfiledSessions.length > 0 && folderRoots.length > 0 && (
@@ -2486,6 +2657,25 @@ export function SessionList({
           anchor={newFolderDrop.anchor}
           onCreate={(name) => createAndAssignFolder(newFolderDrop.sessionId, name)}
           onClose={() => setNewFolderDrop(null)}
+        />
+      )}
+      {bulkFolderPopover && (
+        <SessionFolderPopover
+          anchor={bulkFolderPopover}
+          folders={folders}
+          assignedFolderId={selectedFolderIdForBulk}
+          onSelect={(folderId) => void moveSelectedToFolder(folderId)}
+          onClose={() => setBulkFolderPopover(null)}
+        />
+      )}
+      {bulkTagPopover && (
+        <SessionTagPopover
+          anchor={bulkTagPopover}
+          tags={tags}
+          assignedTagIds={selectedTagIdsForBulk}
+          onToggle={(tagId) => void toggleSelectedTag(tagId)}
+          onCreateTag={(name) => void createAndAssignSelectedTag(name)}
+          onClose={() => setBulkTagPopover(null)}
         />
       )}
       {ctxMenu && (

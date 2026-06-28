@@ -1086,6 +1086,42 @@ body {
   min-height: 24px;
 }
 
+.session-bulk-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 8px 8px 8px 16px;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, var(--accent) 8%);
+  border-block: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.session-bulk-count {
+  flex: 1 1 90px;
+  min-width: 72px;
+  color: var(--text-primary);
+  font-size: calc(12px * var(--app-font-scale));
+  font-weight: 600;
+}
+
+.session-bulk-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-bulk-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--error);
+}
+
 .session-folder-section {
   min-width: 0;
   margin-top: 8px;
@@ -1425,6 +1461,7 @@ body {
 
 .session-item {
   padding: 8px 8px 28px;   /* bottom padding reserves space for the action row */
+  padding-inline-start: 34px;
   border-radius: 6px;
   cursor: pointer;
   position: relative;
@@ -1468,6 +1505,29 @@ body {
 
 .session-item.active {
   background: var(--accent-dim);
+}
+
+.session-item-selected {
+  outline: 1px solid var(--accent, #7b68ee);
+  outline-offset: -1px;
+}
+
+.session-item-select {
+  position: absolute;
+  top: 8px;
+  inset-inline-start: 10px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.session-item-select input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent, #7b68ee);
 }
 
 /* Keyboard-nav highlight from ↑/↓ in the filter input. Sits visually
