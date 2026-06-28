@@ -3357,7 +3357,7 @@ function ArtificialSectionChip({
   inner: string;
   onFileClick?: (path: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(tag === "inline-tags");
   const label = prettyTagLabel(tag);
   // Surface attribute hints (path, range, role, mode, verb) as part of
   // the title so the collapsed chip is informative without expanding.
