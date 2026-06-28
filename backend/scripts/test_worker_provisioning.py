@@ -39,6 +39,9 @@ async def _fake_broadcast_workers_changed(_cwd):
 
 def _install_team_orchestration_extension() -> None:
     extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    if not extension_id:
+        extension_id = "test.team-orchestration"
+        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = extension_id
     package = Path(_tmp) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -360,6 +363,82 @@ def test_target_init_anchors_prep_events_to_provisioning_message():
     assert not event_ingester.root_events_by_sid(worker["id"]).get(worker["id"])
 
 
+def test_concurrent_provision_of_same_worker_creates_exactly_one():
+    """Two concurrent provisions of the same (name, cwd) must create exactly
+    ONE worker. Self-proving: with the real per-(name,cwd) lock -> 1 create;
+    with the lock neutered -> 2 creates (the race the lock kills)."""
+    import asyncio as _asyncio
+
+    body = {"cwd": "/tmp/race-project", "workers": [
+        {"role_key": "singleton", "orchestration_mode": "native"}]}
+    created_names: set[tuple[str, str]] = set()
+    create_order: list[str] = []
+
+    def fake_find(cwd, name):
+        return (
+            {"agent_session_id": "bc-1", "name": name, "cwd": cwd,
+             "registry_cwd": cwd, "orchestration_mode": "native",
+             "agent_sid": "agent-x", "initialized": True,
+             "diverged": False, "delegation_count": 0}
+            if (name, cwd) in created_names else None
+        )
+
+    async def fake_create(b):
+        create_order.append(b["name"])
+        # Yield so a second unlocked coroutine can also enter create before
+        # either records the worker — this is the race window. With the lock
+        # held, the second coroutine is parked on lock acquisition here, not
+        # inside create, so only one create runs.
+        await _asyncio.sleep(0)
+        created_names.add((b["name"], b["cwd"]))
+        return {"agent_session_id": f"bc-{len(create_order)}", "name": b["name"],
+                "cwd": b["cwd"], "registry_cwd": b["cwd"],
+                "orchestration_mode": "native", "agent_sid": "agent-new",
+                "initialized": True, "diverged": False, "delegation_count": 0}
+
+    class _NoLock:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    real_find = main._find_worker_by_session_name
+    real_create = main._create_worker_from_body
+    real_lock = main._provision_lock
+    main._find_worker_by_session_name = fake_find
+    main._create_worker_from_body = fake_create
+    try:
+        # Locked (real): concurrent provisions serialize -> 1 create.
+        created_names.clear()
+        create_order.clear()
+        main._provision_lock = real_lock
+        async def _two_provisions():
+            return await _asyncio.gather(
+                main._provision_workers_from_body(body),
+                main._provision_workers_from_body(body),
+            )
+
+        results = _asyncio.run(_two_provisions())
+        assert len(create_order) == 1, f"locked: expected 1 create, got {len(create_order)}"
+        # One call created, the other reused the SAME singleton id.
+        created_flags = [w["created"] for r in results for w in r["workers"]]
+        assert sorted(created_flags) == [False, True], created_flags
+        ids = {w["agent_session_id"] for r in results for w in r["workers"]}
+        assert ids == {"bc-1"}, ids
+
+        # Unlocked (neutered): the race window is reachable -> 2 creates.
+        created_names.clear()
+        create_order.clear()
+        main._provision_lock = lambda _name, _cwd: _NoLock()
+        _asyncio.run(_two_provisions())
+        assert len(create_order) == 2, f"unlocked: expected 2 creates (race), got {len(create_order)}"
+    finally:
+        main._find_worker_by_session_name = real_find
+        main._create_worker_from_body = real_create
+        main._provision_lock = real_lock
+
+
 if __name__ == "__main__":
     test_provision_workers_is_idempotent_by_role_key()
     test_provision_workers_allows_per_worker_cwd()
@@ -368,4 +447,5 @@ if __name__ == "__main__":
     test_coordinator_target_init_proxy_accepts_ws_callback()
     test_target_init_accepts_custom_provision_prompt()
     test_target_init_anchors_prep_events_to_provisioning_message()
+    test_concurrent_provision_of_same_worker_creates_exactly_one()
     print("PASS: provision workers is idempotent by role key")
