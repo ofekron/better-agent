@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -81,6 +81,8 @@ interface Props {
   searching?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
+  /** Rendered directly below the pinned current-session row. */
+  activeSessionSuffix?: ReactNode;
 }
 
 // Empty children map for the pinned selected-session anchor, which
@@ -1033,6 +1035,7 @@ export function SessionList({
   searching = false,
   loadingMore = false,
   onLoadMore,
+  activeSessionSuffix,
 }: Props) {
   const { t } = useTranslation();
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1869,12 +1872,14 @@ export function SessionList({
           ? createPortal(
               <div className="session-list-selected" data-testid="session-list-selected">
                 {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+                {activeSessionSuffix}
               </div>,
               selectedAnchorContainer,
             )
           : (
             <div className="session-list-selected" data-testid="session-list-selected">
               {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
+              {activeSessionSuffix}
             </div>
           ))}
       <div className="session-list-header">

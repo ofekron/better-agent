@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "No compilado en este servidor",
   "settings.desktopStatusFailed": "No se pudo cargar el estado de descarga de escritorio.",
   "sidebar.machinesLink": "Máquinas",
-  "sidebar.tools": "Archivos",
   "sidebar.toolsTitle": "Explorar archivos del proyecto",
   "sidebar.sessionsTab": "Sesiones",
   "sidebar.workersTab": "Workers",

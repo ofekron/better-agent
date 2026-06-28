@@ -56,7 +56,6 @@
   "settings.desktopUnavailable": "이 서버에서 빌드되지 않음",
   "settings.desktopStatusFailed": "데스크톱 다운로드 상태를 불러올 수 없습니다.",
   "sidebar.machinesLink": "머신",
-  "sidebar.tools": "파일",
   "sidebar.toolsTitle": "프로젝트 파일 탐색",
   "sidebar.sessionsTab": "세션",
   "sidebar.workersTab": "워커",

@@ -5460,6 +5460,16 @@ function AppMain({
                 {t("app.reconciling")}
               </span>
             );
+            const filesBtn = cwd && (
+              <button
+                className="setup-btn"
+                onClick={() => setFileChooserOpen(true)}
+                title={t("sidebar.toolsTitle")}
+                aria-label={t("sidebar.toolsTitle")}
+              >
+                <Icon name="folder" size={18} />
+              </button>
+            );
             const secondary = (
               <>
                 {showMachinesLink && (
@@ -5517,6 +5527,7 @@ function AppMain({
                 {brand}
                 {chip}
                 <div className="header-actions">
+                  {filesBtn}
                   {!headerOverflow && secondary}
                   {configBtn}
                   {headerOverflow && (
@@ -5546,6 +5557,7 @@ function AppMain({
                   {minimizeBtn}
                   {brand}
                   {chip}
+                  {filesBtn}
                   {secondary}
                   {configBtn}
                 </div>
@@ -5667,29 +5679,23 @@ function AppMain({
               searching={sessionsSearching}
               loadingMore={sessionsLoadingMore}
               onLoadMore={loadMoreSessions}
+              activeSessionSuffix={
+                currentSession ? (
+                  <TokenUsageDisplay
+                    usage={sessionTokenUsage}
+                    usageLast={sessionTokenUsageLast}
+                    rearrangerStats={currentSession.rearranger_stats ?? null}
+                    connected={connected}
+                    contextWindow={currentSession.context_window ?? null}
+                    collapsible={isMobile}
+                  />
+                ) : null
+              }
             />
           )}
         </div>
 
         <div className="sidebar-bottom">
-          {cwd && (
-            <button
-              className="sidebar-tools-btn"
-              onClick={() => setFileChooserOpen(true)}
-              title={t("sidebar.toolsTitle")}
-              aria-label={t("sidebar.toolsTitle")}
-            >
-              <Icon name="folder" size={14} /> {t("sidebar.tools")}
-            </button>
-          )}
-          <TokenUsageDisplay
-            usage={sessionTokenUsage}
-            usageLast={sessionTokenUsageLast}
-            rearrangerStats={currentSession?.rearranger_stats ?? null}
-            connected={connected}
-            contextWindow={currentSession?.context_window ?? null}
-            collapsible={isMobile}
-          />
           <div className="sidebar-user-row" title={authedUser?.username}>
             <span className="sidebar-user-name">{authedUser?.username}</span>
             <button
