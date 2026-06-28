@@ -272,7 +272,7 @@ from rearranger import Rearranger
 from run_recovery import integrate_recovered_runs
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
-from session_manager import IncompatibleOrchestrationMode, ProviderChangeWhileActive
+from session_manager import IncompatibleOrchestrationMode
 from session_store import _session_path
 import runs_dir
 import file_browser
@@ -357,16 +357,6 @@ async def _incompatible_orchestration_mode_handler(_request, exc):
     exception (no FastAPI middleware in those paths)."""
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=400, content={"detail": str(exc)})
-
-
-@app.exception_handler(ProviderChangeWhileActive)
-async def _provider_change_while_active_handler(_request, exc):
-    """A10's inside-the-lock TOCTOU recheck. The PATCH handler's
-    pre-check returns 409 directly; this exception is the path for
-    the case where a turn enqueues BETWEEN the pre-check and the
-    set_selectors persist, surfacing as 409 instead of 500."""
-    from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 _COMMAND_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
@@ -3714,6 +3704,10 @@ async def internal_ask_ui_search(
         kwargs["max_results"] = max_results
     if isinstance(timeout, (int, float)) and timeout > 0:
         kwargs["timeout"] = float(timeout)
+    for key in ("provider_id", "model", "reasoning_effort", "node_id"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            kwargs[key] = val.strip()
     return await session_search.search(query, **kwargs)
 
 
@@ -3736,6 +3730,10 @@ async def internal_ask_ui_search_sessions(
         kwargs["max_results"] = max_results
     if isinstance(timeout, (int, float)) and timeout > 0:
         kwargs["timeout"] = float(timeout)
+    for key in ("provider_id", "model", "reasoning_effort", "node_id"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            kwargs[key] = val.strip()
     return await session_search.run_search_sessions_session(query, **kwargs)
 
 
@@ -3800,6 +3798,57 @@ async def internal_assistant_ui_last_turn(
     if not sid:
         raise HTTPException(status_code=400, detail="session_id is required")
     return await asyncio.to_thread(assistant_ui.last_turn, sid)
+
+
+@app.post("/api/internal/assistant-ui/classify")
+async def internal_assistant_ui_classify(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Board fork: classify a batch of open turns into per-turn
+    `{turn_id, status, summary}` deltas. Forks the assistant board analyzer
+    (run_mode=fork, dispatch=in_process); state rides the fork instruction,
+    never the cached base."""
+    _require_assistant_internal(x_internal_token)
+    batch = body.get("batch")
+    if not isinstance(batch, list):
+        raise HTTPException(status_code=400, detail="batch must be a list")
+    return await assistant_ui.classify(batch)
+
+
+@app.post("/api/internal/assistant-ui/extract-status")
+async def internal_assistant_ui_extract_status(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Board fork: given a finished monitored target turn + the current board
+    item set, emit per-item state deltas (`{turn_id, status, summary}`). Fired
+    by the post-turn hook on a dispatched session's turn completion."""
+    _require_assistant_internal(x_internal_token)
+    target_turn = body.get("target_turn")
+    if not isinstance(target_turn, dict):
+        raise HTTPException(status_code=400, detail="target_turn must be an object")
+    items = body.get("items")
+    if not isinstance(items, list):
+        items = []
+    return await assistant_ui.extract_status(target_turn, items)
+
+
+@app.post("/api/internal/assistant-ui/rank")
+async def internal_assistant_ui_rank(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Board fork: order open items most-important-first (importance + focus
+    momentum). Returns `{order: [turn_id, ...]}`."""
+    _require_assistant_internal(x_internal_token)
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="items must be a list")
+    last_topic = body.get("last_topic")
+    if not isinstance(last_topic, dict):
+        last_topic = None
+    return await assistant_ui.rank(items, last_topic)
 
 
 def _strip_synthetic_events_from_tree(tree: dict) -> None:
@@ -4877,15 +4926,13 @@ async def update_session_selectors(session_id: str, body: dict):
     be changed here — flipping modes mid-session orphans the claude
     session under the old mode.
 
-    `provider_id` IS mutable, but a change while a turn is in flight
-    races the in-flight cancel/rewind/queue with the new provider's
-    run registry — per A10, the provider that started a run is the
-    only one that can cleanly stop or tail it. While
-    `coordinator.turn_manager.has_active_runs(session_id)` we 409 instead. Once
-    the turn settles, the change goes through and `set_selectors`
-    re-validates `orchestration_mode` against the new provider's
-    capability (e.g. Claude→Gemini on a manager-mode session fails
-    here with `IncompatibleOrchestrationMode` → 400)."""
+    `provider_id` IS mutable at any time. If it changes while a turn is
+    in flight, the current run keeps using the provider instance that
+    already owns that run; the changed selector is applied lazily to the
+    next prompt via continuation. `set_selectors` re-validates
+    `orchestration_mode` against the new provider's capability (e.g.
+    Claude→Gemini on a manager-mode session fails here with
+    `IncompatibleOrchestrationMode` → 400)."""
     body = body or {}
     updates: dict = {}
     if "model" in body and isinstance(body["model"], str) and body["model"].strip():
@@ -4933,11 +4980,6 @@ async def update_session_selectors(session_id: str, body: dict):
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if "provider_id" in body and isinstance(body["provider_id"], str) and body["provider_id"].strip():
-        if coordinator.turn_manager.has_active_runs(session_id):
-            raise HTTPException(
-                status_code=409,
-                detail=t("error.provider_change_during_active_run"),
-            )
         updates["provider_id"] = body["provider_id"].strip()
         provider_record = await asyncio.to_thread(
             config_store.get_provider,
@@ -5166,6 +5208,18 @@ async def get_session_details(session_id: str):
         "provenance": provenance_store.read(session_id, limit=500),
         "runs": trees,
     }
+
+
+@app.get("/api/sessions/{session_id}/changes")
+async def get_session_changes(session_id: str):
+    """Every file edit made in this session + the reasoning that preceded
+    each, projected from the provenance log. Backend owns the filter (file-
+    edit detection across providers); the Changes right-panel just renders.
+    Refetched on the ``session_provenance_changed`` WS ping."""
+    from stores import provenance_store
+
+    changes = await asyncio.to_thread(provenance_store.read_file_changes, session_id)
+    return {"session_id": session_id, "changes": changes}
 
 
 @app.post("/api/sessions/{session_id}/seen")
@@ -5716,7 +5770,7 @@ async def update_note(session_id: str, note_id: str, body: dict):
 
 # Single source for tab validation across the public PATCH and the
 # internal POST endpoints. Add new tab ids here, not at each handler.
-_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen"}
+_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen", "changes"}
 
 
 @app.patch("/api/sessions/{session_id}/right-panel")
@@ -8772,7 +8826,9 @@ async def internal_session_bridge_search(
     """Invoked by the session-bridge `search_sessions` MCP tool. Runs the
     same provisioned search-worker ranking engine as the Ask UI and returns
     ranked sessions. No picker; the agent can call `propose_sessions`
-    separately."""
+    separately. Optional filters (`provider_id` / `model` /
+    `reasoning_effort` / `node_id`) narrow the candidate set before the
+    worker runs and post-validate its output."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     query = str(body.get("query") or "").strip()
@@ -8782,10 +8838,19 @@ async def internal_session_bridge_search(
         limit = int(body.get("limit") or 5)
     except (TypeError, ValueError):
         limit = 5
+
+    def _opt_str(key: str) -> str:
+        val = body.get(key)
+        return val.strip() if isinstance(val, str) else ""
+
     flow = await session_search.run_search_sessions_session(
         query,
         timeout=session_search._DEFAULT_TIMEOUT_SECONDS,
         max_results=max(1, min(limit, 10)),
+        provider_id=_opt_str("provider_id") or None,
+        model=_opt_str("model") or None,
+        reasoning_effort=_opt_str("reasoning_effort") or None,
+        node_id=_opt_str("node_id") or None,
     )
     stubs = await asyncio.to_thread(session_search.index_stub_map)
     results: list[dict] = []

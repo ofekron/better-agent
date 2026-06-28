@@ -61,6 +61,7 @@ import type { FileAnchorComment } from "./components/FileEditor";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { ProjectTabs } from "./components/ProjectTabs";
 import { ProjectGitStatus } from "./components/ProjectGitStatus";
+import { SessionSelectorControls } from "./components/SessionSelectorControls";
 
 import { Login } from "./components/Login";
 import { DesktopInstallPrompt } from "./components/DesktopInstallPrompt";
@@ -78,6 +79,7 @@ import { ServerSetup } from "./components/ServerSetup";
 import { NotesPanel } from "./components/NotesPanel";
 import { TodosPanel, visibleTodoCount } from "./components/TodosPanel";
 import { CommentsPanel } from "./components/CommentsPanel";
+import { ChangesPanel } from "./components/ChangesPanel";
 import Icon from "./components/Icon";
 import { ExtensionPageIcons, ExtensionQuickButtons } from "./components/ExtensionUiHooks";
 import { RefreshResult } from "./components/RefreshResult";
@@ -846,7 +848,7 @@ function AppMain({
 
   type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen";
   const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
+    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
   >("better-agent-right-panel-states", {});
 
   /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
@@ -855,7 +857,7 @@ function AppMain({
       sessionId: string,
       patch: {
         open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen";
+        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes";
         addAutoReason?: AutoOpenReason;
         clearAutoReasons?: boolean;
       },
@@ -2207,7 +2209,7 @@ function AppMain({
   }, []);
   const [viewingFile, setViewingFile] = useState<ViewingFile | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<
-    "files" | "canvas" | "notes" | "comments" | "todos" | "screen"
+    "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes"
   >("files");
   useEffect(() => {
     if (!builtinExtensions.canvas && rightPanelTab === "canvas") {
@@ -6162,6 +6164,21 @@ function AppMain({
               onShowComments={() => openRightPanelWithTab("comments")}
               toolbarActionsNode={
                 <>
+                  {currentSession && !isAskView ? (
+                    <SessionSelectorControls
+                      session={currentSession}
+                      providers={providers}
+                      disabled={!!currentSession.offline_pending}
+                      clientId={clientId}
+                      onChange={(updates) => {
+                        applySessionMetadata(currentSession.id, updates);
+                        if (typeof updates.model === "string") {
+                          setModel(updates.model);
+                        }
+                      }}
+                      onSaved={refreshSessions}
+                    />
+                  ) : null}
                   <ExtensionQuickButtons context={hookActionContext} variant="toolbar" />
                   {builtinExtensions.ask && !isAskView && !isMobile
                     ? sessionToolbarModules.map((module) => (
@@ -6529,6 +6546,16 @@ function AppMain({
                   ? `${t("rightPanel.comments")} (${tags.length})`
                   : t("rightPanel.comments")}
               </button>
+              <button
+                className={`right-panel-tab ${rightPanelTab === "changes" ? "active" : ""}`}
+                onClick={() => {
+                  setRightPanelTab("changes");
+                  if (currentSession && !isMobile)
+                    patchRightPanel(currentSession.id, { tab: "changes", clearAutoReasons: true });
+                }}
+              >
+                {t("rightPanel.changes", "Changes")}
+              </button>
             </div>
             {rightPanelTab === "comments" ? (
               <CommentsPanel
@@ -6577,6 +6604,12 @@ function AppMain({
                   onEdit={(noteId, text) => handleUpdateNote(currentSession.id, noteId, text)}
                   onSendToPrompt={handleSendNoteToPrompt}
                 />
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : rightPanelTab === "changes" ? (
+              currentSession ? (
+                <ChangesPanel sessionId={currentSession.id} />
               ) : (
                 <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
               )

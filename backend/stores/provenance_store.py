@@ -149,3 +149,92 @@ def read(app_session_id: str, *, limit: Optional[int] = None) -> list[dict]:
     if limit is not None and len(rows) > limit:
         return rows[-limit:]
     return rows
+
+
+# ── File-change projection ───────────────────────────────────────────
+# The Changes right-panel shows every file edit made in a session plus the
+# reasoning ("why") that preceded it. The authoritative source is the
+# provenance log above; this is a disposable read projection (filter +
+# normalize), never a second source of truth — re-derived on every fetch.
+#
+# Tool names are the union across providers (Claude / Codex / Gemini); the
+# agents all normalize to Claude-shaped tool_use events before provenance.
+
+_WRITE_TOOLS = {"Write", "write_file", "create_file"}
+_EDIT_TOOLS = {"Edit", "edit_file", "MultiEdit", "multi_edit", "NotebookEdit"}
+
+
+def _is_patch_tool(tool: Optional[str]) -> bool:
+    return bool(tool) and (tool == "apply_patch" or tool.endswith(".apply_patch"))
+
+
+def normalize_change(row: dict) -> Optional[dict]:
+    """Project one provenance row into a file-change shape, or ``None`` if
+    the row is not a file edit. Output::
+
+        {uuid, tool, kind, file_path, edits:[{old_string,new_string}],
+         why, ts, msg_id}
+
+    ``kind`` is one of ``create`` | ``edit`` | ``patch``. ``edits`` carries
+    old→new pairs (create ⇒ one pair with empty old; patch ⇒ raw patch text
+    as the new side, file_path best-effort)."""
+    tool = row.get("tool")
+    inp = row.get("input") if isinstance(row.get("input"), dict) else {}
+
+    def _path(*keys: str) -> Optional[str]:
+        for k in keys:
+            v = inp.get(k)
+            if isinstance(v, str) and v:
+                return v
+        return None
+
+    edits: list[dict] = []
+    kind: Optional[str] = None
+    file_path: Optional[str] = None
+
+    if tool in _WRITE_TOOLS:
+        kind = "create"
+        file_path = _path("file_path", "path", "filename")
+        edits = [{"old_string": "", "new_string": inp.get("content") or inp.get("file_text") or ""}]
+    elif tool in _EDIT_TOOLS:
+        kind = "edit"
+        file_path = _path("file_path", "path", "notebook_path")
+        multi = inp.get("edits")
+        if isinstance(multi, list):
+            edits = [
+                {"old_string": e.get("old_string") or "", "new_string": e.get("new_string") or ""}
+                for e in multi
+                if isinstance(e, dict)
+            ]
+        else:
+            edits = [{"old_string": inp.get("old_string") or "", "new_string": inp.get("new_string") or ""}]
+    elif _is_patch_tool(tool):
+        kind = "patch"
+        file_path = _path("file_path", "path")
+        edits = [{"old_string": "", "new_string": inp.get("patch") or inp.get("input") or ""}]
+
+    if kind is None:
+        return None
+    if not edits:
+        return None
+    return {
+        "uuid": row.get("uuid"),
+        "tool": tool,
+        "kind": kind,
+        "file_path": file_path,
+        "edits": edits,
+        "why": row.get("why") or "",
+        "ts": row.get("ts"),
+        "msg_id": row.get("msg_id"),
+    }
+
+
+def read_file_changes(app_session_id: str) -> list[dict]:
+    """All file edits in a session (oldest first), normalized for the
+    Changes panel. Non-edit tool calls are dropped."""
+    return [
+        c for c in (
+            normalize_change(r) for r in read(app_session_id)
+        )
+        if c is not None
+    ]
