@@ -12691,4 +12691,5 @@ if __name__ == "__main__":
         host=user_prefs.get_network_bind_address(),
         port=8000,
         reload=True,
+        proxy_headers=False,
     )

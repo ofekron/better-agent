@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "run.sh"
+RUN_WINDOWS = ROOT / "run_windows.bat"
+APP_ENTRY = ROOT / "backend" / "app_entry.py"
+MAIN = ROOT / "backend" / "main.py"
 
 
 def check(name: str, ok: bool, failures: list[str]) -> None:
@@ -19,8 +22,11 @@ def check(name: str, ok: bool, failures: list[str]) -> None:
 def main() -> int:
     failures: list[str] = []
     text = RUN_SH.read_text(encoding="utf-8")
+    windows_text = RUN_WINDOWS.read_text(encoding="utf-8")
+    app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
+    main_text = MAIN.read_text(encoding="utf-8")
     zai_start = text.index("run_zai_startup_check() {")
-    zai_end = text.index("\nbuild_frontend \"\"", zai_start)
+    zai_end = text.index('\nPENDING_REFRESH_ID=""', zai_start)
     zai_check = text[zai_start:zai_end]
 
     check(
@@ -87,6 +93,14 @@ def main() -> int:
         "graceful restart timeout is configurable",
         'GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"' in text
         and "restart_limit=$((GRACEFUL_RESTART_TIMEOUT_SECONDS * 4))" in text,
+        failures,
+    )
+    check(
+        "direct uvicorn launch skips proxy header parsing",
+        "--no-proxy-headers" in text
+        and "--no-proxy-headers" in windows_text
+        and app_entry_text.count("proxy_headers=False") >= 2
+        and "proxy_headers=False" in main_text,
         failures,
     )
     check(
