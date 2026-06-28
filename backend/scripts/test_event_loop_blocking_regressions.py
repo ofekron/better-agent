@@ -426,6 +426,15 @@ def test_stubbed_tree_build_does_not_search_tree_per_node() -> None:
     assert "node_sid, rid, node_src" in build_source
 
 
+def test_tree_stub_cache_key_reads_render_seq_once() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("def _tree_stub_cache_key(")
+    end = source.index("def _build_stubbed_tree(", start)
+    key_source = source[start:end]
+    assert "render_seq_by_sid = event_ingester.render_seq_by_sid(rid)" in key_source
+    assert "render_seq_for_sid(" not in key_source
+
+
 def test_metadata_session_search_is_summary_version_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -633,6 +642,7 @@ if __name__ == "__main__":
     test_session_list_uses_sorted_summary_cache()
     test_session_list_does_not_prewarm_snapshots()
     test_stubbed_tree_build_does_not_search_tree_per_node()
+    test_tree_stub_cache_key_reads_render_seq_once()
     test_sidebar_summary_omits_worker_refs()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_startup_recovery_defers_cold_runs()
