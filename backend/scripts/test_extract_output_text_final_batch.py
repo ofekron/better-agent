@@ -12,7 +12,11 @@ Run with:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-extract-final-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -20,6 +24,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from event_shape import extract_output_text  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
+from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -198,7 +205,54 @@ def main() -> int:
             "primary final",
         ),
     ]
-    return 0 if all(_run_case(*case) for case in cases) else 1
+    ok = all(_run_case(*case) for case in cases)
+    ok = test_non_streaming_projection_clears_stale_content() and ok
+    shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    return 0 if ok else 1
+
+
+def test_non_streaming_projection_clears_stale_content() -> bool:
+    sess = session_manager.create(
+        name="projection",
+        model="sonnet",
+        cwd="/tmp/projection",
+        orchestration_mode="native",
+        source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    msg = strategy.build_assistant_scaffold()
+    msg["id"] = "msg-stale"
+    msg["content"] = "stale progress"
+    session_manager.append_assistant_msg(sid, msg)
+    live_msg = session_manager.get_ref(sid)["messages"][-1]
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=live_msg,
+        event=_assistant([_text("progress"), _tool()], uuid="tool-step"),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=live_msg,
+        event=_user_tool_result(),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    session_manager.set_streaming(sid, "msg-stale", False)
+    event_ingester.close(sid)
+    session_manager.refresh_message_content_from_events(sid, sid, "msg-stale")
+    projected = next(
+        m for m in session_manager.get_ref(sid)["messages"]
+        if m.get("id") == "msg-stale"
+    )
+    ok = projected.get("content") == ""
+    print(f"{PASS if ok else FAIL}  non-streaming projection clears stale content")
+    if not ok:
+        print(f"    got: {projected.get('content')!r}")
+    return ok
 
 
 if __name__ == "__main__":

@@ -1685,10 +1685,9 @@ def _replay_and_apply(
                     "(uuid=%s) — continuing with remaining signals",
                     run_id, (sig.get("data") or {}).get("uuid"),
                 )
-    if extracted:
-        session_manager.update_running_content(
-            persist_sid, msg_id, extracted,
-        )
+    session_manager.update_running_content(
+        persist_sid, msg_id, extracted,
+    )
     if context_window:
         session_manager.set_context_window(persist_sid, context_window)
     # Repair `updated_at` to the session's real last-activity time

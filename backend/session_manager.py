@@ -841,9 +841,10 @@ class SessionManager:
                 write_journal=False,
             )
             after_events = strategy._events_list(msg)
-            content = extract_output_text(strip_synthetic_events(after_events))
-            if content:
-                msg["content"] = content
+            if not msg.get("isStreaming"):
+                content = extract_output_text(strip_synthetic_events(after_events))
+                if content != (msg.get("content") or ""):
+                    msg["content"] = content
             changed = before != after_events
             if changed:
                 self._persist_root(rid, bump=True)
@@ -1524,7 +1525,7 @@ class SessionManager:
             msg["event_ref"] = self._event_ref(root_id, node_sid, msg_id, summary)
         if not msg.get("isStreaming"):
             content = extract_output_text(strip_synthetic_events(events))
-            if content:
+            if content != (msg.get("content") or ""):
                 msg["content"] = content
 
     # ── Reads ──────────────────────────────────────────────────────
@@ -2137,7 +2138,7 @@ class SessionManager:
                         content = extract_output_text(
                             strip_synthetic_events(m["events"])
                         )
-                        if content:
+                        if content != (m.get("content") or ""):
                             m["content"] = content
                 elif is_latest:
                     m["events"] = []
@@ -3633,9 +3634,20 @@ class SessionManager:
             msg_id_filter=msg_id,
         )
         content = extract_output_text(strip_synthetic_events(events))
-        if not content:
-            return None
-        return self.update_running_content(sid, msg_id, content)
+        def _do(s: dict) -> None:
+            m = _find_message(s, msg_id)
+            if m is None or m.get("isStreaming"):
+                return
+            if content != (m.get("content") or ""):
+                m["content"] = content
+        return self._run(
+            sid, _do,
+            {
+                "kind": "running_content_updated",
+                "msg_id": msg_id,
+                "content": content,
+            },
+        )
 
     def set_streaming(
         self, sid: str, msg_id: str, value: bool,
