@@ -1619,7 +1619,9 @@ class TurnManager:
                 return False
             return tokens >= int(window * _CONTEXT_CONTINUATION_PREEMPT_RATIO)
 
-        def _start_context_continuation(old_provider_sid: Optional[str]) -> int:
+        def _start_context_continuation(
+            old_provider_sid: Optional[str], *, reason: str = "context_exceeded",
+        ) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
             continuation = start_continuation_for(
@@ -1627,6 +1629,7 @@ class TurnManager:
                 app_session_id=primary_session_id or app_session_id,
                 prompt=prompt,
                 old_provider_sid=old_provider_sid,
+                reason=reason,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
@@ -2036,7 +2039,8 @@ class TurnManager:
                     wait_s = 5.0
                 # ±25% jitter so N concurrent rate-limited runs on the same
                 # provider window don't re-collide on identical backoff.
-                wait_s *= random.uniform(0.75, 1.25)
+                # Re-clamp so jitter can't push the wait past the 600s ceiling.
+                wait_s = min(600.0, wait_s * random.uniform(0.75, 1.25))
                 retry_at = (datetime.now(timezone.utc) + timedelta(seconds=wait_s)).isoformat()
                 if assistant_msg_id:
                     session_manager.set_msg_retrying_until(
@@ -2080,7 +2084,7 @@ class TurnManager:
                         _TRANSIENT_MAX_WAIT_S,
                     )
                     # ±25% jitter — same rationale as the rate-limit branch.
-                    wait_s *= random.uniform(0.75, 1.25)
+                    wait_s = min(_TRANSIENT_MAX_WAIT_S, wait_s * random.uniform(0.75, 1.25))
                     logger.warning(
                         "Transient error on attempt %d/%d for %s, retrying in %.0fs: %s",
                         transient_attempt, _TRANSIENT_MAX_ATTEMPTS,
@@ -2144,6 +2148,29 @@ class TurnManager:
                     session_manager.record_auto_retry(
                         app_session_id, done_msg_id, auto_retry_count, kind,
                     )
+
+            # Agent-requested continuation: the agent called
+            # `continue_in_fresh_context` during this turn. Honor it by
+            # starting a fresh provider subprocess under the SAME Better
+            # Agent session (continuation_chain extended) with the queued
+            # prompt — same path as context-overflow, triggered by the agent.
+            if success:
+                requested = session_manager.pop_continuation_requested(
+                    primary_session_id or app_session_id,
+                )
+                if requested:
+                    prompt = requested.get("prompt") or ""
+                    _chain_depth = _start_context_continuation(
+                        new_sid or current_session_id,
+                        reason="agent_requested",
+                    )
+                    logger.info(
+                        "continuation: agent-requested fresh subprocess for "
+                        "%s (chain depth %d)",
+                        app_session_id[:8], _chain_depth,
+                    )
+                    self._pop_run_id(app_session_id, run_id)
+                    continue
 
             await self._emit_attempt_terminal(
                 ws_callback=ws_callback,
