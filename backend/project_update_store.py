@@ -106,6 +106,13 @@ def total_unseen() -> int:
         return sum(_unseen_counts.values())
 
 
+def peek_total_unseen() -> int | None:
+    with _lock:
+        if not _counts_loaded:
+            return None
+        return sum(_unseen_counts.values())
+
+
 def mark_seen(project_id: str, entry_ids: list[str]) -> int:
     """Mark specific entries as seen. Returns count marked."""
     path = _project_path(project_id)
