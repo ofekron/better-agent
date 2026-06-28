@@ -1,6 +1,7 @@
 """Better Agent — FastAPI backend with WebSocket streaming and REST APIs."""
 
 import asyncio
+import copy
 from concurrent.futures import ProcessPoolExecutor
 import faulthandler
 import json
@@ -82,6 +83,83 @@ _second_sigint_event = threading.Event()
 # `_second_sigint_event`. Signal handlers run on the main thread
 # between bytecodes, so a plain int suffices — no lock needed.
 _sigint_count = 0
+
+_session_event_meta_cache: dict[
+    str,
+    tuple[tuple[int, int], bool, int, dict[str, int]],
+] = {}
+_sessions_list_response_cache: dict[
+    tuple,
+    tuple[float, dict],
+] = {}
+_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
+_machine_nodes_enabled_cache: tuple[float, bool] | None = None
+_MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
+
+
+def _session_event_file_fingerprint(root_id: str) -> tuple[int, int]:
+    path = event_ingester._events_path(root_id)
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (int(st.st_mtime_ns), int(st.st_size))
+
+
+def _session_event_meta(root_id: str) -> tuple[bool, int, dict[str, int]]:
+    fingerprint = _session_event_file_fingerprint(root_id)
+    cached = _session_event_meta_cache.get(root_id)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1], cached[2], dict(cached[3])
+
+    max_by_sid = event_ingester.max_seq_by_sid(root_id)
+    has_events = bool(max_by_sid)
+    barrier_seq = event_ingester.cursor(root_id) if has_events else 0
+    max_context = event_ingester.render_seq_by_sid(root_id) if has_events else {}
+    _session_event_meta_cache[root_id] = (
+        fingerprint,
+        has_events,
+        barrier_seq,
+        dict(max_context),
+    )
+    return has_events, barrier_seq, dict(max_context)
+
+
+def _machine_nodes_enabled_cached() -> bool:
+    global _machine_nodes_enabled_cache
+    now = time.monotonic()
+    cached = _machine_nodes_enabled_cache
+    if (
+        cached is not None
+        and now - cached[0] <= _MACHINE_NODES_ENABLED_TTL_SECONDS
+    ):
+        return cached[1]
+    enabled = _builtin_extension_enabled(
+        extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
+    )
+    _machine_nodes_enabled_cache = (now, enabled)
+    return enabled
+
+
+def _sessions_list_cache_get(key: tuple) -> dict | None:
+    cached = _sessions_list_response_cache.get(key)
+    if cached is None:
+        return None
+    if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
+        _sessions_list_response_cache.pop(key, None)
+        return None
+    return copy.deepcopy(cached[1])
+
+
+def _sessions_list_cache_put(key: tuple, value: dict) -> dict:
+    if len(_sessions_list_response_cache) >= 64:
+        oldest = min(
+            _sessions_list_response_cache,
+            key=lambda item: _sessions_list_response_cache[item][0],
+        )
+        _sessions_list_response_cache.pop(oldest, None)
+    _sessions_list_response_cache[key] = (time.monotonic(), copy.deepcopy(value))
+    return value
 
 _GIT_STATUS_TTL_SECONDS = 2.0
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
@@ -3263,9 +3341,7 @@ async def get_sessions(
     search_query = (search or "").strip()
     with perf.timed("sessions.list.nodes_ready"):
         nodes_ready = (
-            False if search_query else _builtin_extension_enabled(
-                extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
-            )
+            False if search_query else _machine_nodes_enabled_cached()
         )
     connected: list[str] = []
     if nodes_ready:
@@ -3305,10 +3381,34 @@ async def get_sessions(
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
         }
+    cache_key = (
+        offset,
+        limit,
+        project_path,
+        search,
+        show_archived,
+        file_edit_mode,
+        tuple(sorted(filters["folder_ids"])),
+        effective_folder_view,
+        tuple(sorted(filters["tag_ids"])),
+        tuple(sorted(filters["provider_ids"])),
+        tuple(sorted(filters["model_ids"])),
+        tuple(sorted(filters["modes"])),
+        tuple(sorted(filters["sources"])),
+        search_fields,
+        effective_sort_by,
+        effective_status_sort,
+        tuple(sorted(connected)),
+    )
+    cached_response = _sessions_list_cache_get(cache_key)
+    if cached_response is not None:
+        perf.record("sessions.list.response_cache.hit", 1.0)
+        return cached_response
+    perf.record("sessions.list.response_cache.miss", 1.0)
     if not connected:
         with perf.timed("sessions.list.local_page_thread"):
             page, total = await asyncio.to_thread(_build_local_sessions_page_for_list, **filters)
-        return {
+        return _sessions_list_cache_put(cache_key, {
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -3316,7 +3416,7 @@ async def get_sessions(
             "has_more": offset + limit < total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        }
+        })
 
     content_scores: dict[str, int] = {}
     if search_query:
@@ -3414,7 +3514,7 @@ async def get_sessions(
             {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
             for session in page
         ]
-    return {
+    return _sessions_list_cache_put(cache_key, {
         "sessions": page,
         "offset": offset,
         "limit": limit,
@@ -3422,7 +3522,7 @@ async def get_sessions(
         "has_more": end < total,
         "sort_by": effective_sort_by,
         "status_sort": effective_status_sort,
-    }
+    })
 
 
 @app.post("/api/sessions/search-content")
@@ -4284,8 +4384,6 @@ async def get_session(
     Each node carries a ``pagination`` dict: ``{total_messages,
     oldest_loaded_seq, has_older}``. Older messages can be loaded via
     ``GET /api/sessions/{id}/messages?before_seq=N``."""
-    from event_journal import event_journal_reader, event_journal_writer
-
     if session_id == session_search.ASK_SINGLETON_ID:
         virtual = await session_search.ensure_ask_session()
     else:
@@ -4300,24 +4398,15 @@ async def get_session(
     barrier_ms = 0.0
     tree_ms = 0.0
     max_context_ms = 0.0
-    # Fast path: skip reconcile/barrier/staleness for sessions with no
-    # events. max_seq_by_sid is O(1) cached and returns {} when no
-    # events.jsonl exists. Safe because WS subscribe with since_seq=0
-    # catches any events that arrive after this check.
     has_events = False
     if isinstance(root_id, str):
         max_seq_start = time.perf_counter()
-        has_events = bool(
-            await asyncio.to_thread(event_ingester.max_seq_by_sid, root_id)
+        has_events, barrier_seq, max_context = await asyncio.to_thread(
+            _session_event_meta, root_id,
         )
         max_seq_ms = (time.perf_counter() - max_seq_start) * 1000
-    if has_events:
-        # Non-blocking: read the current barrier cursor without waiting
-        # for reconcile. Reconcile is scheduled async below so the
-        # response returns immediately with the current cached state.
-        barrier_start = time.perf_counter()
-        barrier_seq = await asyncio.to_thread(event_ingester.cursor, root_id)
-        barrier_ms = (time.perf_counter() - barrier_start) * 1000
+    else:
+        max_context = {}
     gen_before = session_manager._reconcile_gen.get(root_id or "", 0) if root_id else 0
     tree_start = time.perf_counter()
     tree = await asyncio.to_thread(
@@ -4355,10 +4444,6 @@ async def get_session(
             )
         if has_events:
             max_context_start = time.perf_counter()
-            max_context = await asyncio.to_thread(
-                event_journal_reader.render_seq_by_context,
-                root_id,
-            )
             # Render-projection head, NOT the raw journal head: it equals
             # the highest seq materialized into the rendered snapshot, so
             # the frontend's WS resume cursor (events_from_seq) never
@@ -5708,7 +5793,7 @@ async def _wait_for_all_agents_idle() -> None:
 
 
 def _has_restart_blocking_agent_work() -> bool:
-    if any((session.get("queued_prompts") or []) for session in session_manager.iter_all()):
+    if session_manager.has_any_queued_prompts():
         return True
 
     active_sids = set(coordinator.turn_manager.active_run_ids.keys())
@@ -6730,6 +6815,7 @@ async def _re_enqueue_queued_prompts() -> None:
     import session_queue_projection
 
     await asyncio.to_thread(session_queue_projection.rebuild_from_disk)
+    await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
 
     for summary in await asyncio.to_thread(_ss.list_sessions):
         sid = summary.get("id")
