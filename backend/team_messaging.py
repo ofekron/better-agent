@@ -19,8 +19,12 @@ def validate_message_route(
     sender_session_id: str,
     target_session_id: str,
 ) -> tuple[dict, dict]:
-    sender = session_manager.get(sender_session_id)
-    target = session_manager.get(target_session_id)
+    if not session_manager.exists(sender_session_id):
+        raise ValueError("sender_session_id does not exist")
+    if not session_manager.exists(target_session_id):
+        raise ValueError("target_session_id does not exist")
+    sender = session_manager.get_lite(sender_session_id)
+    target = session_manager.get_lite(target_session_id)
     if not sender:
         raise ValueError("sender_session_id does not exist")
     if not target:
@@ -33,13 +37,14 @@ def build_message_metadata(
     sender_session_id: str,
     target_session_id: Optional[str] = None,
 ) -> dict:
-    sender = session_manager.get(sender_session_id) or {}
-    target = session_manager.get(target_session_id) if target_session_id else None
-    cwd = str(sender.get("cwd") or "")
+    cwd = str(session_manager.get_field(sender_session_id, "cwd") or "")
     metadata = {
         "sender_session_id": sender_session_id,
     }
-    target_cwd = str((target or {}).get("cwd") or "")
+    target_cwd = (
+        str(session_manager.get_field(target_session_id, "cwd") or "")
+        if target_session_id else ""
+    )
     if cwd and target_cwd and cwd != target_cwd:
         metadata["sender_cwd"] = cwd
     return metadata

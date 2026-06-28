@@ -74,6 +74,33 @@ def test_queue_payload_has_minimal_metadata():
     assert "idempotency_key" not in payload
 
 
+def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
+    sender = session_manager.create(
+        name="sender",
+        cwd="/repo/sender",
+        orchestration_mode="native",
+    )
+    target = session_manager.create(
+        name="target",
+        cwd="/repo/target",
+        orchestration_mode="native",
+    )
+
+    def fail_get(_sid: str):
+        raise AssertionError("metadata hot path must not deepcopy full sessions")
+
+    monkeypatch.setattr(team_messaging.session_manager, "get", fail_get)
+    metadata = team_messaging.build_message_metadata(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+
+    assert metadata == {
+        "sender_session_id": sender["id"],
+        "sender_cwd": "/repo/sender",
+    }
+
+
 def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     sender = session_manager.create(
         name="implementation worker",
