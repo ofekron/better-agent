@@ -301,6 +301,32 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         check(response.status_code == 404, f"disabled {extension_id} blocks {path}")
 
 
+def test_coordination_lock_ops_route_forwards_multi_key_body(client: TestClient) -> None:
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    internal_token = getattr(main.coordinator, "internal_token", "")
+    response = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": "", "keys": ["route-a", "route-b"], "timeout_seconds": 0.05},
+    )
+    body = response.json()
+    check(response.status_code == 200, "coordination lock_ops route accepts multi-key body")
+    check(body.get("success") is True, "coordination lock_ops route forwards keys")
+    check(body.get("keys") == ["route-a", "route-b"], "coordination lock_ops returns forwarded keys")
+    release = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": "",
+            "keys": body.get("keys"),
+            "release": True,
+            "holder_token": body.get("holder_token"),
+        },
+    )
+    check(release.json().get("success") is True, "coordination lock_ops route releases multi-key lock")
+
+
 def test_trace_internal_substrate_requires_trace_extension_identity(client: TestClient) -> None:
     import extension_token_registry
     install_gate_extension(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID)
@@ -339,6 +365,7 @@ if __name__ == "__main__":
             test_disabled_team_extension_blocks_routes(client)
             test_disabled_machine_nodes_extension_blocks_routes(client)
             test_disabled_misc_extensions_block_routes(client)
+            test_coordination_lock_ops_route_forwards_multi_key_body(client)
             test_get_ask_session_lazily_ensures_virtual_session(client)
             test_trace_internal_substrate_requires_trace_extension_identity(client)
     finally:
