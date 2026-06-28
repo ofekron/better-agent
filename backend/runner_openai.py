@@ -1342,7 +1342,10 @@ async def _stream_chat(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    timeout = httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=15.0)
+    # read=30min: per-chunk silence limit. Multi-agent endpoints (e.g. Fugu)
+    # can go quiet for many minutes during internal deliberation between
+    # stream chunks; 600s was too low and killed mid-stream turns.
+    timeout = httpx.Timeout(connect=15.0, read=1800.0, write=30.0, pool=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code >= 400:
