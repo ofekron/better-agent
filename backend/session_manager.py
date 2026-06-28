@@ -4914,6 +4914,30 @@ class SessionManager:
             {"kind": "continuation_chain_set", "continuation_chain": chain},
         )
 
+    def set_continuation_requested(
+        self, sid: str, prompt: str, reason: str = "agent_requested",
+    ) -> Optional[dict]:
+        """Agent-requested continuation flag. Read+cleared by the turn loop
+        on a successful turn: the next provider subprocess starts fresh under
+        the SAME Better Agent session (continuation_chain extended) with
+        `prompt`. Lives on the session record so it survives the tool-call →
+        turn-end gap."""
+        requested = {"prompt": str(prompt or ""), "reason": str(reason or "agent_requested")}
+        def _do(s: dict) -> None:
+            s["continuation_requested"] = requested
+        return self._run(
+            sid, _do,
+            {"kind": "continuation_requested_set", "continuation_requested": requested},
+        )
+
+    def pop_continuation_requested(self, sid: str) -> Optional[dict]:
+        """Atomically read+clear the agent-requested continuation flag."""
+        holder: list[Optional[dict]] = [None]
+        def _do(s: dict) -> None:
+            holder[0] = s.pop("continuation_requested", None)
+        self._run(sid, _do, {"kind": "continuation_requested_cleared"})
+        return holder[0]
+
     def add_rearranger_usage(
         self,
         sid: str,

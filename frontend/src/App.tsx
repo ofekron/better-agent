@@ -5938,7 +5938,7 @@ function AppMain({
                 );
               }}
               openSessions={
-                isAskView ? [] : sortedOpenSessions
+                isAskView || isAssistantView ? [] : sortedOpenSessions
               }
               sessionTabsVisible={sessionTabsVisible}
               sessionTabsSort={sessionTabsSort}

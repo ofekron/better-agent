@@ -56,6 +56,8 @@ def build_continuation_prompt(
     context_message = "Context window was exceeded"
     if reason == "selector_changed":
         context_message = "Session provider or model changed"
+    elif reason == "agent_requested":
+        context_message = "The agent requested a fresh context window"
 
     return render_prompt(
         "continuation/context_exceeded.md",

@@ -125,6 +125,7 @@ def _pid(key: str) -> str | None:
 # Public builtin ids stay literal in the public repo.
 BUILTIN_ASK_EXTENSION_ID = "ofek-dev.ask"
 BUILTIN_SESSION_BRIDGE_EXTENSION_ID = "ofek-dev.session-bridge"
+BUILTIN_SESSION_CONTROL_EXTENSION_ID = "ofek-dev.session-control"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
 BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
@@ -166,6 +167,7 @@ _PRIVATE_EXTENSION_PATHS = {
 _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_ASK_EXTENSION_ID: "extensions/ask",
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "extensions/session-bridge",
+    BUILTIN_SESSION_CONTROL_EXTENSION_ID: "extensions/session-control",
     BUILTIN_COORDINATION_EXTENSION_ID: "extensions/coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "extensions/provider-config-sync",
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
@@ -175,6 +177,7 @@ _PUBLIC_EXTENSION_PATHS = {
 _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "Session Bridge",
+    BUILTIN_SESSION_CONTROL_EXTENSION_ID: "Session Control",
     BUILTIN_COORDINATION_EXTENSION_ID: "Coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "Provider Config Sync",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",

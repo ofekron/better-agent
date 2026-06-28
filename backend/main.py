@@ -1993,6 +1993,60 @@ async def internal_session_capabilities(
     }
 
 
+@app.post("/api/internal/session-control/selectors")
+async def internal_session_control_selectors(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """`switch_model` tool backing. Applies model / provider_id /
+    reasoning_effort to the CALLER'S OWN session (`app_session_id` from the
+    loopback) through the SAME validation path as the public /selectors
+    endpoint. The change takes effect on the next turn via the
+    selector-change continuation (fresh provider subprocess, same session)."""
+    _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    sid = str((body or {}).get("app_session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="app_session_id is required")
+    updates = await _resolve_selector_updates(sid, body or {})
+    session = await asyncio.to_thread(
+        session_manager.set_selectors, sid, **updates,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    if "model" in updates:
+        await _record_last_model(session.get("provider_id"), updates["model"])
+    if updates.get("reasoning_effort"):
+        await _record_last_reasoning_effort(
+            session.get("provider_id"), updates["reasoning_effort"],
+        )
+    return {"id": sid, "updates": updates}
+
+
+@app.post("/api/internal/session-control/continue-fresh")
+async def internal_session_control_continue_fresh(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """`continue_in_fresh_context` tool backing. Sets the agent-requested
+    continuation flag on the CALLER'S OWN session. The turn loop honors it
+    on the next successful turn: a fresh provider subprocess starts under
+    the SAME Better Agent session (continuation_chain extended) running the
+    queued prompt. The agent can only continue its own session."""
+    _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    sid = str((body or {}).get("app_session_id") or "").strip()
+    prompt = str((body or {}).get("prompt") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="app_session_id is required")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    session_manager.set_continuation_requested(sid, prompt)
+    return {"ok": True, "session_id": sid}
+
+
 @app.post("/api/internal/project-updates/count")
 async def internal_project_update_count(
     body: dict,
@@ -4956,102 +5010,13 @@ async def archive_session(session_id: str, body: dict):
     return {"id": session_id, "archived": archived}
 
 
-@app.patch("/api/sessions/{session_id}/selectors")
-async def update_session_selectors(session_id: str, body: dict):
-    """Persist selector changes (model, cwd, provider_id) to the
-    session record.
-
-    `orchestration_mode` is FROZEN at session creation time and cannot
-    be changed here — flipping modes mid-session orphans the claude
-    session under the old mode.
-
-    `provider_id` IS mutable at any time. If it changes while a turn is
-    in flight, the current run keeps using the provider instance that
-    already owns that run; the changed selector is applied lazily to the
-    next prompt via continuation. `set_selectors` re-validates
-    `orchestration_mode` against the new provider's capability (e.g.
-    Claude→Gemini on a manager-mode session fails here with
-    `IncompatibleOrchestrationMode` → 400)."""
+async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
+    """Parse a selectors payload into a validated `updates` dict (model,
+    provider_id, reasoning_effort, permission, cwd). Shared by the public
+    /selectors endpoint and the internal session-control tool so the agent
+    applies selectors through the SAME validation + fail-closed path."""
     body = body or {}
-    updates: dict = {}
-    requested_provider_id = (
-        body.get("provider_id").strip()
-        if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
-        else None
-    )
-    provider_record = None
-    if "provider_id" in body:
-        if not requested_provider_id:
-            raise HTTPException(status_code=400, detail="provider_id is required")
-        provider_record = await asyncio.to_thread(
-            config_store.get_provider,
-            requested_provider_id,
-        )
-        if not provider_record:
-            raise HTTPException(status_code=400, detail="Unknown provider")
-        updates["provider_id"] = requested_provider_id
-    if "model" in body and isinstance(body["model"], str) and body["model"].strip():
-        requested_model = body["model"].strip()
-        provider_for_model = (
-            requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
-        )
-        # Fail closed: with no resolvable provider, `available_models(None)`
-        # would validate against the DEFAULT provider — letting a foreign
-        # model (e.g. glm-5.2 onto a Claude session) slip through. Reject.
-        if not provider_for_model:
-            raise HTTPException(
-                status_code=400, detail=t("error.session_not_found_retry"),
-            )
-        await asyncio.to_thread(
-            _validate_provider_model, provider_for_model, requested_model, True,
-        )
-        updates["model"] = requested_model
-    elif "provider_id" in updates:
-        updates["model"] = await _model_for_provider_switch(
-            requested_provider_id,
-            provider_record or {},
-        )
-    if "reasoning_effort" in body:
-        requested_effort = _api_reasoning_effort(body.get("reasoning_effort"))
-        if requested_effort is None:
-            raise HTTPException(status_code=400, detail="reasoning_effort is required")
-        provider_for_effort = (
-            requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
-        )
-        updates["reasoning_effort"] = _provider_reasoning_effort(
-            provider_for_effort, requested_effort,
-        )
-    if "permission" in body:
-        requested_permission = _api_permission(body.get("permission"))
-        if requested_permission is None:
-            raise HTTPException(status_code=400, detail="permission is required")
-        provider_for_permission = (
-            requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
-        )
-        updates["permission"] = _provider_permission(
-            provider_for_permission, requested_permission,
-        )
-    if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
-        updates["cwd"] = body["cwd"].strip()
-    if requested_provider_id:
-        if "reasoning_effort" not in updates:
-            updates["reasoning_effort"] = (
-                (provider_record or {}).get("default_reasoning_effort") or ""
-            )
-        if "permission" not in updates:
-            updates["permission"] = (
-                (provider_record or {}).get("default_permission") or {}
-            )
-    if "orchestration_mode" in body:
-        raise HTTPException(
-            status_code=409,
-            detail=t("error.orchestration_mode_frozen"),
-        )
-    if not updates:
-        raise HTTPException(status_code=400, detail=t("error.no_recognized_selector"))
+    updates = await _resolve_selector_updates(session_id, body)
     client_id = body.get("client_id") if isinstance(body.get("client_id"), str) else None
     session = await asyncio.to_thread(
         session_manager.set_selectors,
