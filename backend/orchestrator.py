@@ -3934,6 +3934,10 @@ class Coordinator:
                     session_manager.remove_assistant_msg(
                         app_session_id, assistant_msg["id"],
                     )
+                # Exception-path failure: surface the sidebar error dot
+                # here too so the single chokepoint covers every failure
+                # shape (raises vs. returns success=False).
+                session_manager.set_unseen_error(app_session_id, error_text)
                 return
 
             if assistant_msg is None:
@@ -3992,6 +3996,7 @@ class Coordinator:
                 primary_result.get("success") is False and not stopped_at
             )
             assistant_failed = False
+            dot_error_text = ""
             content_looks_erroring = bool(
                 re.search(
                     r"API Error:"
@@ -4031,6 +4036,7 @@ class Coordinator:
                     app_session_id, msg_id, err_text,
                 )
                 assistant_failed = True
+                dot_error_text = err_text
             elif content_looks_erroring and not stopped_at:
                 # Gemini CLI reported success but the content IS an API
                 # error (e.g. quota exhaustion with no 4xx code).
@@ -4038,6 +4044,7 @@ class Coordinator:
                     app_session_id, msg_id, extracted or "",
                 )
                 assistant_failed = True
+                dot_error_text = extracted or ""
             elif run_failed and not run_error:
                 session_manager.set_assistant_error(
                     app_session_id,
@@ -4045,6 +4052,18 @@ class Coordinator:
                     "Run failed without producing an error message.",
                 )
                 assistant_failed = True
+                dot_error_text = "Run failed without producing an error message."
+
+            if assistant_failed:
+                # Mirror the surfaced failure onto the sidebar error dot.
+                # This is the chokepoint for the COMMON non-exception
+                # failure path (provider API errors, quota, silent exits)
+                # which return success=False instead of raising and so
+                # never reach turn_manager's except block. The dot retires
+                # on the next turn-start; it is NOT tied to view/seen.
+                session_manager.set_unseen_error(
+                    app_session_id, dot_error_text or "Turn failed",
+                )
 
             # Delegate mode-specific finalization (pin session ids,
             # promote recovered placeholders, etc.)

@@ -44,6 +44,17 @@ def _mk_session() -> str:
     return sess["id"]
 
 
+def _mk_session_with_assistant() -> str:
+    """A session that already has an assistant message on disk (the shape
+    a real turn leaves behind), so derivation off the last message works."""
+    sid = _mk_session()
+    session_manager.append_user_msg(sid, {"id": "u1", "role": "user", "content": "go"})
+    session_manager.append_assistant_msg(sid, {
+        "id": "a1", "role": "assistant", "content": "", "events": [],
+    })
+    return sid
+
+
 def _capture_fires() -> tuple[list[dict], object]:
     events: list[dict] = []
 
@@ -137,6 +148,34 @@ def test_clear_retires_dot() -> None:
     print(f"{PASS} clear_retires_dot")
 
 
+def test_derived_from_last_assistant_error() -> None:
+    """The dot is ALSO derived from the last assistant message's error
+    state — the durable source of truth. Covers sessions that errored via
+    a path the flag missed (run-recovery, pre-feature errors), so they
+    show the dot on the next snapshot without a new finalize."""
+    sid = _mk_session_with_assistant()
+    assert session_manager.has_unseen_error(sid) is False, (
+        "fresh non-error assistant message → no dot"
+    )
+
+    # The recovery / existing-session path: the message is errored but
+    # the flag was never set.
+    session_manager.set_assistant_error(sid, "a1", "HTTP 400: bad request")
+    assert session_manager.has_unseen_error(sid) is True, (
+        "errored last assistant message must show the dot via derivation"
+    )
+
+    # A new turn appends a fresh non-error assistant message → it becomes
+    # the last → derivation clears the dot (mirrors turn-start).
+    session_manager.append_assistant_msg(sid, {
+        "id": "a2", "role": "assistant", "content": "", "events": [],
+    })
+    assert session_manager.has_unseen_error(sid) is False, (
+        "new non-error last assistant message must clear the derived dot"
+    )
+    print(f"{PASS} derived_from_last_assistant_error")
+
+
 def test_persistence_across_reload() -> None:
     sid = _mk_session()
     session_manager.set_unseen_error(sid, "persisted boom")
@@ -157,6 +196,7 @@ def main() -> int:
         test_clear_fires_and_unflags()
         test_mark_seen_does_not_clear_error()
         test_clear_retires_dot()
+        test_derived_from_last_assistant_error()
         test_persistence_across_reload()
         print("ALL PASSED")
         return 0
