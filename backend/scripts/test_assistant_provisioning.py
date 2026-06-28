@@ -220,12 +220,37 @@ def test_rename_refused_when_locked() -> bool:
     return ok
 
 
+def test_rename_force_overrides_lock() -> bool:
+    """The owner can restore the canonical name on a locked session via
+    force=True — the internal escape hatch ensure_singleton uses to self-heal
+    a singleton renamed before the lock existed."""
+    sess = session_manager.create(name="Drifted", cwd=str(_TMP_HOME), source="test")
+    sid = sess["id"]
+    session_manager.set_name_locked(sid, True)
+    out = session_manager.rename(sid, "Assistant", force=True)
+    after = session_manager.get_lite(sid)
+    ok = True
+    if after.get("name") != "Assistant":
+        print(f"{FAIL} force rename did not apply: name={after.get('name')!r}")
+        ok = False
+    if not after.get("name_locked"):
+        print(f"{FAIL} force rename dropped the name_locked flag")
+        ok = False
+    if out is None:
+        print(f"{FAIL} force rename returned None")
+        ok = False
+    if ok:
+        print(f"{PASS} rename(force=True) overrides the lock (keeps flag)")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_capability_contexts_deliver_per_provider,
         test_capability_contexts_hash_is_order_stable,
         test_capability_contexts_content_is_bounded,
         test_rename_refused_when_locked,
+        test_rename_force_overrides_lock,
     ]
     results = []
     for fn in tests:

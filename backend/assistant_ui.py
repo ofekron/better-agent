@@ -202,6 +202,12 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
             # Backfill the lock on singletons created before it existed.
             if not sess.get("name_locked"):
                 session_manager.set_name_locked(sess["id"], True)
+            # Self-heal the canonical name: a singleton auto-named to its first
+            # prompt before the lock existed must be restored to "Assistant" —
+            # the frontend board slot renders only for name == "Assistant". The
+            # lock pins the canonical name, so restoring it is the lock's intent.
+            if sess.get("name") != "Assistant":
+                session_manager.rename(sess["id"], "Assistant", force=True)
             if next_state != state:
                 _write_state(next_state)
         return sess
