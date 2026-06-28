@@ -821,6 +821,17 @@ class OrchestrationStrategy(ABC):
         )
 
 
+    def _refresh_message_content_from_latest_event(self, msg: dict, event: dict) -> None:
+        from event_shape import extract_output_text, strip_synthetic_events
+
+        content = extract_output_text(strip_synthetic_events([event]))
+        if content:
+            msg["content"] = content
+            msg["_content_dirty"] = False
+            return
+        msg["_content_dirty"] = True
+
+
     @perf.timed_fn("apply_event")
     def apply_event(
         self,
@@ -1098,7 +1109,7 @@ class OrchestrationStrategy(ABC):
                 # for every streaming snapshot.
                 self._replace_event(app_session_id, msg_id, normalized, ev_uuid)
                 evs[existing_idx] = normalized
-                msg["_content_dirty"] = True
+                self._refresh_message_content_from_latest_event(msg, normalized)
                 # uid_idx[ev_uuid] unchanged — same uuid, same index.
                 # Fall through to side-effect blocks + ingest tail.
             else:
@@ -1130,7 +1141,7 @@ class OrchestrationStrategy(ABC):
                 if ev_uuid not in uid_idx:
                     uid_idx[ev_uuid] = len(evs)
                     evs.append(normalized)
-                msg["_content_dirty"] = True
+                self._refresh_message_content_from_latest_event(msg, normalized)
                 if source_is_provider_stream:
                     session_manager.bump_unread(app_session_id, msg_id)
 
