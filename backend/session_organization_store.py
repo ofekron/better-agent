@@ -493,11 +493,6 @@ def query_sessions(sessions: list[dict[str, Any]], query: dict[str, Any]) -> lis
     status_set = set(statuses)
     out: list[dict[str, Any]] = []
     for session in sessions:
-        session_tags = {
-            tag.get("id")
-            for tag in session.get("session_tags") or []
-            if isinstance(tag, dict)
-        }
         if project_set and session.get("cwd") not in project_set:
             continue
         if folder_set and (session.get("folder_id") or "") not in folder_set:
@@ -509,6 +504,11 @@ def query_sessions(sessions: list[dict[str, Any]], query: dict[str, Any]) -> lis
         if mode_set and (session.get("orchestration_mode") or "") not in mode_set:
             continue
         if tag_set:
+            session_tags = {
+                tag.get("id")
+                for tag in session.get("session_tags") or []
+                if isinstance(tag, dict)
+            }
             if tag_match == "all" and not tag_set.issubset(session_tags):
                 continue
             if tag_match == "any" and not tag_set.intersection(session_tags):
