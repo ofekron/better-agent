@@ -47,6 +47,7 @@ from typing import Optional
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
 
+from json_store import write_json
 from paths import ba_home
 from topology import NodeSpec
 
@@ -82,8 +83,11 @@ def add(
     secret_hash: str,
 ) -> dict:
     """Persist an approved node. Overwrites any prior record for the
-    same id (re-approval rotates the secret hash). Returns the record."""
-    _dir().mkdir(parents=True, exist_ok=True)
+    same id (re-approval rotates the secret hash). Returns the record.
+
+    Written atomically (tmp + os.replace) via the canonical store writer:
+    these records hold argon2 secret hashes, so a crash mid-write must not
+    leave a truncated/half-written authority file."""
     record = {
         "schema_version": SCHEMA_VERSION,
         "node_id": node_id,
@@ -92,7 +96,7 @@ def add(
         "secret_hash": secret_hash,
         "approved_at": datetime.now().isoformat(),
     }
-    _path(node_id).write_text(json.dumps(record, indent=2), encoding="utf-8")
+    write_json(_path(node_id), record)
     return record
 
 

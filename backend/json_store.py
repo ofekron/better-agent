@@ -3,14 +3,17 @@
 Each store was reinventing the same three-step pattern:
   1. mkdir(mode=0o700, parents=True, exist_ok=True)
   2. json.loads(path.read_text()) with a warning + default on parse failure
-  3. path.write_text(json.dumps(data, indent=2))
+  3. atomic write: tmp sibling + os.replace (crash-safe)
 
 Centralized here so adding a new store (settings, templates, …) is two
-lines at the call site.
+lines at the call site. `write_json` is the single canonical atomic
+JSON writer for this backend; `runs_dir.atomic_write_json` delegates
+to it.
 """
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TypeVar
 
@@ -41,8 +44,23 @@ def read_json(path: Path, default: T) -> T:
 
 
 def write_json(path: Path, data, mode: int = 0o700) -> None:
-    """Write `data` as pretty-printed JSON. Creates parent dirs with the
-    given mode (restricted by default since these stores hold per-user
-    config and secrets-adjacent metadata)."""
+    """Write `data` as pretty-printed JSON, atomically. Creates parent
+    dirs with the given mode (restricted by default since these stores
+    hold per-user config and secrets-adjacent metadata).
+
+    Atomicity: write to a `.tmp` sibling, then `os.replace` onto the
+    target. A crash mid-write leaves the prior file intact instead of a
+    truncated half-write — these files back durable per-user state, so a
+    partial write must never become the canonical copy. The tmp is
+    cleaned up on failure so a crash does not leave debris behind."""
     path.parent.mkdir(mode=mode, parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise

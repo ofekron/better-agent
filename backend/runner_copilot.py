@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from cli_paths import resolve_cli_binary
+from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ def _new_uuid() -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def _write_state(run_dir: Path, state: dict[str, Any]) -> None:
