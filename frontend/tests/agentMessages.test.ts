@@ -170,6 +170,49 @@ describe("flattenClaudeMessages", () => {
     expect(toolResultById.has("agent-1")).toBe(false);
   });
 
+  it("surfaces orphaned Codex tool results in the flat chat event stream", () => {
+    const { flat, toolResultById } = flattenClaudeMessages([
+      toolResult("call_missing", "Chunk ID: 123\nOutput:\nvisible result"),
+    ]);
+
+    expect(toolResultById.get("call_missing")).toContain("visible result");
+    expect(flat).toHaveLength(1);
+    expect(flat[0].type).toBe("tool_result");
+    expect((flat[0].data as { output: string; orphan_tool_result?: boolean }).output).toContain(
+      "visible result",
+    );
+    expect((flat[0].data as { orphan_tool_result?: boolean }).orphan_tool_result).toBe(true);
+  });
+
+  it("keeps matched tool results in flat chat events without marking them orphaned", () => {
+    const { flat, toolResultById } = flattenClaudeMessages([
+      {
+        type: "agent_message",
+        data: {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{
+              type: "tool_use",
+              id: "call_exec",
+              name: "Bash",
+              input: { command: "echo visible" },
+            }],
+          },
+          uuid: "call_exec-event",
+        },
+      } as WSEvent,
+      toolResult("call_exec", "visible result"),
+    ]);
+
+    expect(toolResultById.get("call_exec")).toBe("visible result");
+    expect(flat).toHaveLength(2);
+    expect(flat[0].type).toBe("tool_call");
+    expect(flat[1].type).toBe("tool_result");
+    expect((flat[1].data as { output: string; paired_tool_result?: boolean }).output).toBe("visible result");
+    expect((flat[1].data as { paired_tool_result?: boolean }).paired_tool_result).toBe(true);
+  });
+
   it("extracts assistant speech from output events only", () => {
     const raw = [
       "Codex native event_msg.context_compacted",

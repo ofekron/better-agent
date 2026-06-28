@@ -2194,7 +2194,7 @@ export function SessionList({
                   <span className="ai-search-toggle-spinner">…</span>
                 ) : (
                   <>
-                    <span className="ai-search-toggle-icon"><Icon name="sparkles" size={12} /></span>
+                    <span className="ai-search-toggle-icon"><Icon name="assistant-start" size={14} /></span>
                     <span className="ai-search-toggle-label">AI</span>
                   </>
                 )}

@@ -1770,19 +1770,24 @@ body {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
+  width: var(--session-toolbar-control-size);
+  height: var(--session-toolbar-control-size);
   font-size: calc(11px * var(--app-font-scale));
   font-weight: 600;
   letter-spacing: 0.03em;
-  padding: 3px 8px;
-  border-radius: 12px;
+  padding: 0;
+  border-radius: 999px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-muted);
   transition: background-color 0.15s, color 0.15s, border-color 0.15s;
 }
 .session-search .ai-search-toggle .ai-search-toggle-icon {
-  font-size: calc(12px * var(--app-font-scale));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
 }
 /* In the OFF state we hide the "AI" label so the icon-only pill stays
@@ -1801,6 +1806,9 @@ body {
 /* ON state: filled accent pill with the label always visible so the
    toggled-on mode is unmistakable from any glance. */
 .session-search .ai-search-toggle.active {
+  width: auto;
+  min-width: var(--session-toolbar-control-size);
+  padding: 0 9px;
   background: var(--accent, #7b68ee);
   border-color: var(--accent, #7b68ee);
   color: #fff;
@@ -2418,6 +2426,7 @@ body {
 }
 
 .chat-toolbar {
+  --chat-toolbar-control-size: 42px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2504,8 +2513,9 @@ body {
 }
 
 .chat-toolbar-badge-btn {
+  height: var(--chat-toolbar-control-size);
   font-size: calc(11px * var(--app-font-scale));
-  padding: 2px 8px;
+  padding: 0 10px;
   border-radius: 4px;
   border: 1px solid var(--border);
   background: transparent;
@@ -2513,6 +2523,24 @@ body {
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.chat-toolbar .extension-quick-buttons {
+  min-height: var(--chat-toolbar-control-size);
+}
+.chat-toolbar .extension-quick-button {
+  height: var(--chat-toolbar-control-size);
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  gap: 8px;
+}
+.chat-toolbar .voice-activation {
+  width: var(--chat-toolbar-control-size);
+  height: var(--chat-toolbar-control-size);
 }
 .chat-toolbar-badge-btn:hover {
   background: var(--accent-dim);
@@ -2542,9 +2570,14 @@ body {
    the Ask CTA. Toggles `right_panel_open` (persisted per-session)
    via PATCH; `active` class reflects the open state. */
 .chat-toolbar-right-panel-toggle {
+  width: var(--chat-toolbar-control-size);
+  height: var(--chat-toolbar-control-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: calc(14px * var(--app-font-scale));
   line-height: 1;
-  padding: 3px 8px;
+  padding: 0;
   border-radius: 4px;
   border: 1px solid var(--border);
   background: transparent;
@@ -2564,10 +2597,17 @@ body {
 .chat-toolbar-overflow-wrapper {
   position: relative;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
 }
 .chat-toolbar-overflow-trigger {
+  width: var(--chat-toolbar-control-size);
+  height: var(--chat-toolbar-control-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: calc(14px * var(--app-font-scale));
-  padding: 2px 6px;
+  padding: 0;
   border-radius: 4px;
   border: 1px solid var(--border);
   background: transparent;
@@ -5273,11 +5313,12 @@ button.run-badge-clickable:focus-visible {
 }
 
 .input-row {
+  --input-action-height: 44px;
   --input-prompt-font-size: calc(14px * var(--app-font-scale));
   --input-prompt-max-height: 200px;
   display: flex;
   gap: 2px;
-  align-items: flex-end;
+  align-items: center;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -5406,7 +5447,12 @@ button.run-badge-clickable:focus-visible {
 }
 
 .send-btn {
-  padding: 8px 14px;
+  height: var(--input-action-height);
+  min-width: var(--input-action-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
   background: var(--accent);
   color: white;
   border: none;
@@ -5415,6 +5461,7 @@ button.run-badge-clickable:focus-visible {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  line-height: 1;
   transition: background 0.15s, opacity 0.15s;
 }
 
@@ -5527,11 +5574,17 @@ button.run-badge-clickable:focus-visible {
 }
 /* Stop button in input row: match send-btn proportions */
 .input-row .stop-btn {
-  padding: 8px 14px;
+  height: var(--input-action-height);
+  min-width: var(--input-action-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
   border-radius: 8px;
   flex-shrink: 0;
+  line-height: 1;
 }
 .stop-btn.stopping {
   opacity: 0.6;
@@ -5575,10 +5628,17 @@ button.run-badge-clickable:focus-visible {
 .input-overflow-wrapper {
   position: relative;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
 }
 
 .input-overflow-trigger {
-  padding: 8px 6px;
+  width: var(--input-action-height);
+  height: var(--input-action-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   background: transparent;
   border: none;
   border-radius: 8px;
@@ -7562,6 +7622,16 @@ button.run-badge-clickable:focus-visible {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+}
+.input-row .extension-module-slot--composer-actions,
+.input-row .extension-module-slot--composer-actions > button {
+  height: var(--input-action-height);
+}
+.input-row .extension-module-slot--composer-actions > button {
+  min-width: var(--input-action-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Overlay-slot modules (e.g. machine-node approvals) render position:fixed
@@ -10934,6 +11004,48 @@ pre .inline-tag-highlight {
   margin: 0;
   padding: 0;
 }
+.worker-group-row {
+  list-style: none;
+  margin: 2px 0 4px;
+}
+.worker-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  color: var(--text-secondary, #aaa);
+  cursor: pointer;
+  user-select: none;
+}
+.worker-group-header:hover {
+  background: var(--bg-hover, rgba(255,255,255,0.04));
+}
+.worker-group-header .caret {
+  width: 10px;
+  font-size: calc(10px * var(--app-font-scale));
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.worker-group-name {
+  min-width: 0;
+  flex: 1;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.worker-group-meta {
+  color: var(--text-muted, #777);
+  font-size: calc(10px * var(--app-font-scale));
+  white-space: nowrap;
+}
+.worker-group-list {
+  list-style: none;
+  margin: 0 0 0 12px;
+  padding: 0;
+}
 .worker-row {
   padding: 4px 6px;
   border-radius: 3px;
@@ -10985,6 +11097,21 @@ pre .inline-tag-highlight {
   color: #ff8888;
   font-weight: 600;
   text-transform: uppercase;
+}
+.worker-binding-badge {
+  font-size: calc(9px * var(--app-font-scale));
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.worker-binding-bound {
+  background: rgba(82, 196, 126, 0.18);
+  color: #82d99b;
+}
+.worker-binding-available {
+  background: rgba(120, 130, 150, 0.18);
+  color: var(--text-muted, #999);
 }
 .worker-needs-init-badge {
   font-size: calc(9px * var(--app-font-scale));

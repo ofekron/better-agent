@@ -269,6 +269,21 @@ export class MockBackend {
           : null,
       };
     }
+    if (method === "GET" && path === "/api/extensions/frontend-entrypoints") {
+      return {
+        entrypoints: [{
+          extension_id: "ofek-dev.team-orchestration",
+          name: "Team Orchestration",
+          frontend_modules: [{
+            slot: "team-sidebar",
+            id: "workers-panel",
+            label: "Workers",
+            kind: "module",
+            module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
+          }],
+        }],
+      };
+    }
     // ---- Sessions ----
     if (method === "GET" && path === "/api/sessions") {
       // First pass: bucket every eng session by parent so non-eng rows
@@ -669,8 +684,20 @@ export class MockBackend {
     }
     // ---- Workers ----
     if (method === "GET" && path === "/api/workers") {
+      const pools = new Map<string, WorkerInfo[]>();
+      for (const worker of this.state.workers) {
+        for (const tag of worker.tags ?? []) {
+          pools.set(tag, [...(pools.get(tag) ?? []), worker]);
+        }
+      }
       return {
         workers: this.state.workers.filter(() => true),
+        pools: Array.from(pools.entries()).map(([tag, workers]) => ({
+          tag,
+          workers,
+          queued_count: 0,
+        })),
+        teams: [],
       };
     }
     if (method === "POST" && path === "/api/workers") return { ok: true };

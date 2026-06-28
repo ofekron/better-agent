@@ -466,6 +466,7 @@ def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> bool:
     assert result_block["tool_use_id"] == "call_mcp"
     assert result_block["content"] == "{\"ok\":true}"
     assert rows[1]["parentUuid"] == rows[0]["uuid"]
+    assert rows[1]["uuid"] != rows[0]["uuid"]
     assert "Codex native event_msg.mcp_tool_call_end" not in str(rows)
     return True
 

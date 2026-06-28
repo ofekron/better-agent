@@ -4666,7 +4666,7 @@ function AppMain({
   const teamSidebarContext = useMemo(
     () => ({
       sessionId: currentSession?.id ?? "",
-      cwd,
+      cwd: currentSession?.cwd || selectedProjectPath || cwd || "",
       model,
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
@@ -4681,6 +4681,8 @@ function AppMain({
       currentSession?.reasoning_effort,
       currentSession?.node_id,
       currentSession?.worker_creation_policy,
+      currentSession?.cwd,
+      selectedProjectPath,
       cwd,
       model,
       sessions,
@@ -5208,7 +5210,7 @@ function AppMain({
   // the Sessions list whenever the extension + its sidebar module are present.
   const workersTabAvailable = !!(
     builtinExtensions.team &&
-    cwd &&
+    (currentSession?.cwd || selectedProjectPath || cwd) &&
     teamSidebarModules.length > 0
   );
 

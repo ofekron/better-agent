@@ -198,6 +198,9 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // Frontend-flattened provider tool result. Matched results are paired
+  // with their tool card; orphaned results render as standalone output.
+  | "tool_result"
   // Live PR-creation notice. Normally diverted in `useWebSocket` to the
   // ephemeral chat-panel toast (commit 9653bf49) because pr-link has no
   // uuid and never lands on the render tree; kept in the union so any
@@ -368,6 +371,9 @@ export interface WorkerInfo {
   last_active?: string;
   delegation_count?: number;
   token_usage?: TokenUsage;
+  tags?: string[];
+  team_binding?: "bound" | "available";
+  team_role?: string;
 }
 
 export interface RequirementTag {

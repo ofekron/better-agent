@@ -906,7 +906,7 @@ export function InputArea({
                   disabled={disabled}
                   data-testid="add-turn-capability-btn"
                 >
-                  <Icon name="sparkles" size={14} /> Add capability to next turn
+                  <Icon name="assistant-start" size={14} /> Add capability to next turn
                 </button>
               )}
               {onEngineer && (

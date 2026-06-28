@@ -365,6 +365,7 @@ class CodexRolloutNormalizer:
         event: Optional[dict],
         *,
         uuid_override: Optional[str] = None,
+        uuid_suffix: str = "",
     ) -> list[dict]:
         if event is None:
             return []
@@ -372,7 +373,7 @@ class CodexRolloutNormalizer:
             identity = json.dumps(raw_event, sort_keys=True, ensure_ascii=False, default=str)
         except TypeError:
             identity = str(raw_event)
-        event["uuid"] = uuid_override or _stable_uuid(self.namespace, f"native:{identity}")
+        event["uuid"] = uuid_override or _stable_uuid(self.namespace, f"native:{identity}{uuid_suffix}")
         return self._push(event)
 
     def normalize_event(self, raw_event: dict) -> list[dict]:
@@ -547,6 +548,7 @@ class CodexRolloutNormalizer:
             tool_event = self._push_from_native(
                 raw_event,
                 _normalize_mcp_tool_started(item, self.parent_uuid),
+                uuid_suffix=":tool_use",
             )
             rows.extend(tool_event)
             tool_parent = tool_event[-1]["uuid"] if tool_event else self.parent_uuid
@@ -554,6 +556,7 @@ class CodexRolloutNormalizer:
         rows.extend(self._push_from_native(
             raw_event,
             _normalize_mcp_tool_completed(item, tool_parent),
+            uuid_suffix=":tool_result",
         ))
         return rows
 
