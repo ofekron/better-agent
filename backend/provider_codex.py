@@ -33,6 +33,7 @@ from provider import (
     create_loop_task,
     runner_argv,
 )
+import provider_runtime
 from provider_run_config import normalize_provider_run_config
 from reasoning_effort import CODEX_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from proc_control import process_control as _process_control
@@ -433,8 +434,10 @@ class CodexProvider(Provider):
                 user_facing=bool(open_file_panel_enabled) and not bool(_sess_rec.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = subprocess.Popen(
+            popen = provider_runtime.popen_runner(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind=self.RUNNER_KIND),
+                run_dir=run_dir,
+                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,

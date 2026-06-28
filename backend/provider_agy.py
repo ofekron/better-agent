@@ -13,6 +13,7 @@ import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from provider import build_better_agent_run_env, create_loop_task, runner_argv
+import provider_runtime
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
 from proc_control import process_control as _process_control
@@ -192,8 +193,10 @@ class AgyProvider(GeminiProvider):
                 user_facing=bool(open_file_panel_enabled) and not bool(session_record.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = subprocess.Popen(
+            popen = provider_runtime.popen_runner(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="agy"),
+                run_dir=run_dir,
+                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,

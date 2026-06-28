@@ -17,6 +17,34 @@ _SCHEMA_VERSION = 1
 _DEFAULT_USER = "betteragent"
 _DEFAULT_GROUP = "betteragent"
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_RUNNER_LEGACY_ENV_KEYS = {
+    "BETTER_CLAUDE_BACKEND_URL",
+    "BETTER_CLAUDE_INTERNAL_TOKEN",
+    "BETTER_CLAUDE_APP_SESSION_ID",
+    "BETTER_CLAUDE_CWD",
+    "BETTER_CLAUDE_MODEL",
+    "BETTER_CLAUDE_PROVIDER_ID",
+    "BETTER_CLAUDE_BARE_CONFIG",
+    "BETTER_CLAUDE_USER_FACING",
+    "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS",
+}
+_PRESERVED_ENV_KEYS = {
+    *(_RUNNER_LEGACY_ENV_KEYS),
+    *(key.replace("BETTER_CLAUDE_", "BETTER_AGENT_", 1) for key in _RUNNER_LEGACY_ENV_KEYS),
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "GEMINI_API_KEY",
+    "GEMINI_CLI_HOME",
+    "GOOGLE_API_KEY",
+    "PATH",
+    "TMPDIR",
+}
 
 
 @dataclass(frozen=True)
@@ -92,6 +120,48 @@ def isolated_user_enabled() -> bool:
     return load_config().isolated_user_enabled
 
 
+def _preserved_env_keys(env: dict[str, str] | None) -> tuple[str, ...]:
+    if not env:
+        return ()
+    keys = []
+    for key in env:
+        if key in _PRESERVED_ENV_KEYS:
+            keys.append(key)
+    return tuple(sorted(keys))
+
+
+def runner_spawn_argv(argv: Sequence[str], *, env: dict[str, str] | None = None) -> tuple[str, ...]:
+    config = load_config()
+    base = tuple(str(part) for part in argv)
+    if not config.isolated_user_enabled:
+        return base
+    system = platform.system().lower()
+    if system not in ("darwin", "linux"):
+        raise RuntimeError(f"isolated provider runs are unsupported on {platform.system()}")
+    preserved = _preserved_env_keys(env)
+    preserve_arg = (f"--preserve-env={','.join(preserved)}",) if preserved else ()
+    return ("sudo", "-n", "-H", *preserve_arg, "-u", config.username, "--", *base)
+
+
+def popen_runner(
+    argv: Sequence[str],
+    *,
+    run_dir: Path,
+    project_cwd: str,
+    **kwargs,
+) -> subprocess.Popen:
+    config = load_config()
+    if config.isolated_user_enabled:
+        grant_runtime_path_access(run_dir, group=config.group)
+        if project_access_allowed(project_cwd):
+            grant_project_access(project_cwd, group=config.group)
+    env = kwargs.get("env")
+    return subprocess.Popen(
+        runner_spawn_argv(argv, env=env if isinstance(env, dict) else None),
+        **kwargs,
+    )
+
+
 def _current_username() -> str:
     import getpass
 
@@ -148,6 +218,7 @@ def apply_isolated_user(
     group: str = _DEFAULT_GROUP,
     *,
     current_user: str | None = None,
+    verify_run_as: bool = True,
     runner: CommandRunner = _run_command,
 ) -> RuntimeConfig:
     username = _validate_account_name(username, "username")
@@ -160,6 +231,8 @@ def apply_isolated_user(
         _apply_linux_isolated_user(username, group, actor, runner)
     else:
         raise RuntimeError(f"isolated users are unsupported on {platform.system()}")
+    if verify_run_as:
+        _ensure_run_as_available(username, runner)
     return enable_isolated_user(username, group)
 
 
@@ -172,6 +245,14 @@ def _must_run(argv: Sequence[str], runner: CommandRunner) -> None:
     result = runner(argv)
     if result.returncode != 0:
         raise RuntimeError(_command_error(argv, result))
+
+
+def _ensure_run_as_available(username: str, runner: CommandRunner) -> None:
+    result = runner(("sudo", "-n", "-H", "-u", username, "--", "true"))
+    if result.returncode != 0:
+        raise RuntimeError(
+            "noninteractive run-as is not available for isolated provider runs"
+        )
 
 
 def _apply_macos_isolated_user(
@@ -221,6 +302,19 @@ def project_access_allowed(path: str | Path) -> bool:
         return False
     if resolved == resolved.anchor:
         return False
+    if resolved.parent == Path(resolved.anchor):
+        return False
+    denied_roots = [
+        Path("/tmp"),
+        Path("/private"),
+        Path("/private/tmp"),
+        Path("/var/tmp"),
+        Path("/Applications"),
+        Path("/Library"),
+        Path("/System"),
+    ]
+    if any(resolved == root.resolve() for root in denied_roots if root.exists()):
+        return False
     home = user_home().resolve()
     if resolved == home:
         return False
@@ -234,6 +328,16 @@ def project_access_allowed(path: str | Path) -> bool:
     return True
 
 
+def _runtime_path(path: str | Path) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    runs_root = (ba_home() / "runs").resolve()
+    if not resolved.is_dir():
+        raise ValueError("runtime path must be an existing directory")
+    if resolved != runs_root and runs_root not in resolved.parents:
+        raise ValueError(f"refusing runtime ACL outside runs root: {resolved}")
+    return resolved
+
+
 def _macos_project_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
     acl = (
         f"group:{group} allow list,search,readattr,readextattr,readsecurity,"
@@ -243,6 +347,11 @@ def _macos_project_access_commands(path: Path, group: str) -> list[RuntimeComman
     return [RuntimeCommand(("chmod", "-R", "+a", acl, str(path)))]
 
 
+def _macos_search_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
+    acl = f"group:{group} allow search,readattr,readextattr,readsecurity"
+    return [RuntimeCommand(("chmod", "+a", acl, str(path)))]
+
+
 def _linux_project_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
     if not shutil.which("setfacl"):
         raise RuntimeError("setfacl is required for isolated-user project access on Linux")
@@ -250,6 +359,12 @@ def _linux_project_access_commands(path: Path, group: str) -> list[RuntimeComman
         RuntimeCommand(("setfacl", "-R", "-m", f"g:{group}:rwX", str(path))),
         RuntimeCommand(("setfacl", "-R", "-d", "-m", f"g:{group}:rwX", str(path))),
     ]
+
+
+def _linux_search_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
+    if not shutil.which("setfacl"):
+        raise RuntimeError("setfacl is required for isolated-user runtime access on Linux")
+    return [RuntimeCommand(("setfacl", "-m", f"g:{group}:--x", str(path)))]
 
 
 def plan_project_access_commands(path: str, group: str = _DEFAULT_GROUP) -> list[RuntimeCommand]:
@@ -270,6 +385,25 @@ def grant_project_access(
     runner: CommandRunner = _run_command,
 ) -> None:
     for command in plan_project_access_commands(path, group):
+        result = runner(command.argv)
+        if result.returncode != 0:
+            raise RuntimeError(_command_error(command.argv, result))
+
+
+def grant_runtime_path_access(
+    path: str | Path,
+    *,
+    group: str = _DEFAULT_GROUP,
+    runner: CommandRunner = _run_command,
+) -> None:
+    runtime_path = _runtime_path(path)
+    group = _validate_account_name(group, "group")
+    ancestors = [ba_home().resolve(), (ba_home() / "runs").resolve()]
+    commands: list[RuntimeCommand] = []
+    for ancestor in ancestors:
+        commands.extend(_search_access_commands(ancestor, group))
+    commands.extend(_project_access_commands(runtime_path, group))
+    for command in commands:
         result = runner(command.argv)
         if result.returncode != 0:
             raise RuntimeError(_command_error(command.argv, result))
@@ -296,3 +430,21 @@ def sync_loaded_project_access(projects: Iterable[dict]) -> int:
         if grant_project_access_if_enabled(project):
             changed += 1
     return changed
+
+
+def _project_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
+    system = platform.system().lower()
+    if system == "darwin":
+        return _macos_project_access_commands(path, group)
+    if system == "linux":
+        return _linux_project_access_commands(path, group)
+    raise RuntimeError(f"project access sync is unsupported on {platform.system()}")
+
+
+def _search_access_commands(path: Path, group: str) -> list[RuntimeCommand]:
+    system = platform.system().lower()
+    if system == "darwin":
+        return _macos_search_access_commands(path, group)
+    if system == "linux":
+        return _linux_search_access_commands(path, group)
+    raise RuntimeError(f"runtime access sync is unsupported on {platform.system()}")
