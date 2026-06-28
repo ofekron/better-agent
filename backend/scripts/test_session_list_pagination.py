@@ -21,6 +21,7 @@ import main  # noqa: E402
 import auth  # noqa: E402
 import session_search_index  # noqa: E402
 import session_store  # noqa: E402
+import user_prefs  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -107,6 +108,41 @@ def test_paginates_after_global_sort(client: TestClient) -> bool:
         and body.get("has_more") is True
     )
     print(f"{PASS if ok else FAIL} /api/sessions paginates after pinned/updated sort")
+    return ok
+
+
+def test_default_list_preserves_summary_order_without_resort(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("old", "2026-06-16T00:00:00+00:00"))
+    _write(_record("new", "2026-06-18T00:00:00+00:00"))
+    _write(_record("pinned-old", "2026-06-15T00:00:00+00:00", pinned=True))
+
+    original = main._filter_sort_sessions_for_list
+    original_folder_view = user_prefs.get_folder_view_enabled
+    original_sort = user_prefs.get_session_sort
+    original_status_sort = user_prefs.get_session_status_sort
+
+    def fail_full_sort(*_args, **_kwargs):
+        raise AssertionError("default session list should preserve summary order")
+
+    main._filter_sort_sessions_for_list = fail_full_sort
+    user_prefs.get_folder_view_enabled = lambda: False
+    user_prefs.get_session_sort = lambda: "updated_at"
+    user_prefs.get_session_status_sort = lambda: False
+    try:
+        response = client.get("/api/sessions?offset=1&limit=1", headers=HEADERS)
+    finally:
+        main._filter_sort_sessions_for_list = original
+        user_prefs.get_folder_view_enabled = original_folder_view
+        user_prefs.get_session_sort = original_sort
+        user_prefs.get_session_status_sort = original_status_sort
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions presorted fast path status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = ids == ["new"] and body.get("total") == 3
+    print(f"{PASS if ok else FAIL} /api/sessions default list preserves summary order")
     return ok
 
 
@@ -489,6 +525,7 @@ def main_run() -> int:
     try:
         ok = True
         ok = test_paginates_after_global_sort(client) and ok
+        ok = test_default_list_preserves_summary_order_without_resort(client) and ok
         ok = test_selected_session_does_not_override_pagination(client) and ok
         ok = test_filters_before_pagination(client) and ok
         ok = test_file_edit_mode_filters_before_pagination(client) and ok
