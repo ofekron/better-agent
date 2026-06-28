@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from starlette.requests import ClientDisconnect
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-extension-backend-"))
 import _test_home
@@ -28,6 +31,19 @@ def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
     print(f"PASS {message}")
+
+
+class _DisconnectingRequest:
+    async def stream(self):
+        yield b"partial"
+        raise ClientDisconnect()
+
+
+def _assert_client_closed(exc: Exception, message: str) -> None:
+    check(
+        getattr(exc, "status_code", None) == extension_backend_loader._CLIENT_CLOSED_REQUEST_STATUS,  # type: ignore[attr-defined]
+        message,
+    )
 
 
 def _configure_internal_llm_defaults() -> None:
@@ -319,6 +335,33 @@ def main() -> int:
         check(os.environ.get("BA_EXTENSION_MUTATED_PARENT") is None, "extension process cannot mutate parent env")
         response = client.post("/api/extensions/ofek.backend/backend/mutate-env", content=b"x" * (2 * 1024 * 1024 + 1))
         check(response.status_code == 413, "oversized extension backend request is rejected")
+        try:
+            asyncio.run(extension_backend_loader._read_limited_body(_DisconnectingRequest()))  # type: ignore[attr-defined]
+        except Exception as exc:
+            _assert_client_closed(exc, "disconnecting extension backend request is reported as client-closed")
+        else:
+            raise AssertionError("disconnecting extension backend request should not produce a body")
+        original_invoke = extension_backend_loader._invoke_backend  # type: ignore[attr-defined]
+
+        async def fail_invoke(*args, **kwargs):
+            raise AssertionError("disconnected request reached extension backend invocation")
+
+        extension_backend_loader._invoke_backend = fail_invoke  # type: ignore[attr-defined]
+        try:
+            asyncio.run(
+                extension_backend_loader.dispatch_extension_backend_request(
+                    "ofek.backend",
+                    "mutate-env",
+                    _DisconnectingRequest(),  # type: ignore[arg-type]
+                    backend_spec={"extension_id": "ofek.backend"},
+                )
+            )
+        except Exception as exc:
+            _assert_client_closed(exc, "disconnecting dispatch stops before extension backend invocation")
+        else:
+            raise AssertionError("disconnecting extension backend dispatch should fail closed")
+        finally:
+            extension_backend_loader._invoke_backend = original_invoke  # type: ignore[attr-defined]
         old_timeout = extension_backend_loader._HOST_TIMEOUT_SECONDS  # type: ignore[attr-defined]
         extension_backend_loader._HOST_TIMEOUT_SECONDS = 1.0  # type: ignore[attr-defined]
         try:
