@@ -61,6 +61,64 @@ _logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 11
 
 
+# ── User-initiation taxonomy ──────────────────────────────────────────
+#
+# `user_initiated` distinguishes sessions the user is AWARE of having
+# created (so they expect to see / own them) from sessions the system or
+# an agent spun up on its own. It is ORTHOGONAL to the free-form `source`
+# label: `source` is coerced to ("web","cli","import") and an agent's
+# standalone session reuses source="cli", so `source` alone can never
+# tell a human CLI session from an agent-spawned one. Each creation
+# pathway stamps `user_initiated` explicitly.
+#
+# User-initiated (True) — the user explicitly asked for this session, or
+#   approved a popup to create it:
+#     • UI / CLI `POST /api/sessions`
+#     • native import
+#     • file-editor / prompt-engineer sessions (user clicked)
+#     • user-made forks
+#     • fresh-worker creation the user APPROVED via the "ask" popup
+#
+# Non-user-initiated (False) — created by the system or an agent without
+#   the user being aware:
+#     • agent tools: create_session / create_sub_session / delegate_task
+#     • worker creation under "approve"/"deny" policy (no popup shown)
+#     • provisioned helper sessions (search / board workers, source=internal)
+#     • extension-created sessions
+#     • internal forks: delegate_fork / adv_sync_fork / supervisor_worker
+#       / sub_session
+#
+# Backfill heuristic for legacy records lives in `_migrate_session`.
+
+# `source` values that are unambiguously NOT user-aware. Used only by the
+# legacy backfill heuristic — live creation paths pass `user_initiated`
+# explicitly.
+_NON_USER_INITIATED_SOURCES = frozenset({
+    "internal", "extension", "subprocess_agent", "provisioning",
+})
+
+# `kind` values that are never the session the user thinks they created.
+_NON_USER_INITIATED_KINDS = frozenset({
+    "delegate_fork", "supervisor_worker", "sub_session", "adv_sync_fork",
+})
+
+
+def _infer_user_initiated(session: dict) -> bool:
+    """Best-effort backfill for records written before `user_initiated`
+    existed. Errs toward the safe signals we DO have (kind + source);
+    cannot perfectly recover agent-created standalone sessions that
+    historically reused source="cli", so those default to True."""
+    if session.get("kind", "user") in _NON_USER_INITIATED_KINDS:
+        return False
+    if (session.get("source") or "web") in _NON_USER_INITIATED_SOURCES:
+        return False
+    if session.get("working_mode") in (
+        "search_worker", "ask_singleton", "assistant_board",
+    ):
+        return False
+    return True
+
+
 def _sessions_dir() -> Path:
     return ba_home() / "sessions"
 
@@ -176,7 +234,6 @@ def _build_summary_for_root(root: dict) -> dict:
         "permission": root.get("permission", {}),
         "provider_id": root.get("provider_id"),
         "cwd": cwd,
-        "cwd_explicit": root.get("cwd_explicit", True),
         "node_id": root.get("node_id") or "primary",
         "created_at": root.get("created_at", ""),
         "updated_at": _effective_updated,
@@ -194,6 +251,7 @@ def _build_summary_for_root(root: dict) -> dict:
         "worker_creation_policy": root.get("worker_creation_policy", "ask"),
         "bare_config": bool(root.get("bare_config", False)),
         "source": root.get("source", "web"),
+        "user_initiated": bool(root.get("user_initiated", _infer_user_initiated(root))),
         "kind": root.get("kind", "user"),
         "agent_session_id": root.get("agent_session_id"),
         "supervisor_agent_session_id": root.get("supervisor_agent_session_id"),
@@ -2066,6 +2124,12 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
             "cache_read_input_tokens": 0,
         },
     })
+    # Backfill `user_initiated` BEFORE the source coercion below clobbers
+    # non-(web,cli) source values (e.g. "internal"/"extension") to "web" —
+    # those source labels are a signal `_infer_user_initiated` relies on.
+    if "user_initiated" not in session:
+        session["user_initiated"] = _infer_user_initiated(session)
+        ctx.setdefault("dirty", [False])[0] = True
     src = session.get("source")
     if src not in ("web", "cli"):
         session["source"] = "web"
@@ -2287,11 +2351,7 @@ def should_auto_register_project(session: dict) -> bool:
     machine-completion workers, TestApe-isolated runs); their cwd is an
     implementation detail and must never surface in the user's project
     list."""
-    return (
-        bool(session.get("cwd"))
-        and session.get("cwd_explicit", True)
-        and not session.get("bare_config")
-    )
+    return bool(session.get("cwd")) and not session.get("bare_config")
 
 
 def create_session(
@@ -2308,9 +2368,19 @@ def create_session(
     node_id: str = "primary",
     worker_creation_policy: str = "ask",
     bare_config: bool = False,
+    user_initiated: bool = False,
     id: Optional[str] = None,
 ) -> dict:
     """Create a new ROOT session and persist it.
+
+    `user_initiated` records whether the user is AWARE of having created
+    this session (UI/CLI create, import, file-edit, an approved worker
+    popup) versus a session the system or an agent spun up on its own
+    (provisioning, agent `create_session`, auto-approved workers). It is
+    orthogonal to `source` — see the module-level taxonomy. Defaults to
+    False so any caller that forgets to pass it is treated as NOT
+    user-aware (fail-closed: hidden helper sessions never leak into
+    user-facing surfaces just because a caller omitted the flag).
 
     `provider_id`, `model`, and `reasoning_effort` default to the
     `default_session` internal-LLM assignment (which itself falls back to
@@ -2338,7 +2408,6 @@ def create_session(
     resolved_reasoning_effort = _session_reasoning_effort(
         reasoning_effort, provider_id,
     )
-    cwd_explicit = bool(cwd)
     session = {
         "id": sid,
         "_schema_version": SCHEMA_VERSION,
@@ -2347,7 +2416,6 @@ def create_session(
         "reasoning_effort": resolved_reasoning_effort,
         "permission": _session_permission(permission, provider_id),
         "cwd": cwd or str(Path.home()),
-        "cwd_explicit": cwd_explicit,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
         "orchestration_mode": _normalize_orchestration_mode(
@@ -2362,6 +2430,9 @@ def create_session(
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
         "source": source if source in ("web", "cli", "import") else "web",
+        # Whether the user is aware of having created this session. See the
+        # module-level user-initiation taxonomy. Orthogonal to `source`.
+        "user_initiated": bool(user_initiated),
         "processed_line_by_sid": {},
         "parent_session_id": None,
         "forked_from_agent_sid": None,
@@ -2772,12 +2843,19 @@ def iter_all_sessions() -> Iterator[dict]:
     walk the full session universe regardless of nesting.
 
     Persists any first-time provider_id backfill so SessionWatcher
-    ticks don't re-run detection on the same record across restarts."""
+    ticks don't re-run detection on the same record across restarts.
+
+    Non-session JSON files that leak into the sessions dir (e.g. a
+    stray ``git-last.json``) are skipped: only dicts carrying an
+    ``id`` are yielded, so one malformed file can't abort the walk and
+    crash callers like the startup adv-sync overlay recovery task."""
     _ensure_dir()
     for path in _session_json_files():
         try:
             root = _migrate_and_persist(json.loads(path.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, KeyError, ValueError):
+            continue
+        if not isinstance(root, dict) or "id" not in root:
             continue
         _index_tree(root)
         yield root
@@ -2900,6 +2978,10 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
         "source": parent.get("source") if parent.get("source") in ("web", "cli", "import") else "web",
+        # A plain fork inherits the parent's user-awareness. The
+        # session_manager.fork wrapper forces this False when a non-user
+        # `kind` (e.g. adv_sync_fork) is stamped on the new fork.
+        "user_initiated": bool(parent.get("user_initiated", _infer_user_initiated(parent))),
         "processed_line_by_sid": {},
         "parent_session_id": parent_id,
         "forked_from_agent_sid": parent_claude_sid,
@@ -2992,6 +3074,9 @@ def create_sub_session(
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
         "source": "cli",
+        # Hidden native child spun up by an agent (mssg/ask/delegate_task);
+        # the user is not aware of it.
+        "user_initiated": False,
         "processed_line_by_sid": {},
         "parent_session_id": parent_session_id,
         "forked_from_agent_sid": None,
@@ -3089,6 +3174,9 @@ def create_delegate_fork(
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
         "source": "web",
+        # Internal per-(caller,target) fork for ask(run_mode="fork");
+        # never user-facing.
+        "user_initiated": False,
         "processed_line_by_sid": {},
         "parent_session_id": parent_agent_session_id,
         "forked_from_agent_sid": parent_agent_sid_at_fork,

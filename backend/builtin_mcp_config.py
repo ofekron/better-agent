@@ -27,6 +27,14 @@ def _open_config_panel_server_config(env: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _capabilities_server_config(env: dict[str, str]) -> dict[str, Any]:
+    import sys
+    script = Path(__file__).with_name("capabilities_mcp.py")
+    if getattr(sys, "frozen", False):
+        return {"command": sys.executable, "args": ["--capabilities-mcp"], "env": env}
+    return {"command": sys.executable, "args": [str(script)], "env": env}
+
+
 def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     config = {
         **provider_run_config,
@@ -63,6 +71,19 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
         if _spec is None or _spec.hosts_ui_mcp:
             servers["ui"] = _open_file_panel_server_config(base_env)
         servers["open-config-panel"] = _open_config_panel_server_config(base_env)
+
+    # Capability management — let the model scope its own session (load/release/
+    # list scoped capabilities). Internal, non-bare sessions only; bare sessions
+    # are deliberately capability-stripped. Independent of user_facing so
+    # headless/worker turns can self-scope too (matches runner.py's Claude path).
+    if app_session_id and backend_url and internal_token and not bare:
+        cap_env = dual_env_many({
+            "BETTER_CLAUDE_BACKEND_URL": backend_url,
+            "BETTER_CLAUDE_INTERNAL_TOKEN": internal_token,
+            "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
+            "BETTER_CLAUDE_BARE_CONFIG": "0",
+        })
+        servers["capabilities"] = _capabilities_server_config(cap_env)
 
     for name, server_config in extension_store.runtime_mcp_server_configs(
         inputs,

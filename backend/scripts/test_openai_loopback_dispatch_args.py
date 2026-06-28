@@ -1,0 +1,203 @@
+"""Regression: OpenAI runner must forward tool arguments to loopback handlers.
+
+`_dispatch_tool` decodes the provider's JSON arguments into a bare dict, but
+every loopback handler unwraps its input via `_args(params)` (i.e. it reads
+`params["arguments"]`). If the dispatcher hands the handler the bare args dict
+instead of `{"arguments": args}`, the handler sees empty args and rejects every
+valid call ("target_session_id and message are required", "name is required",
+...). That regression forced the model to fall back from
+ask/mssg/create_sub_session onto create_session — and that, too, failed — so adv
+review ended up spawning standalone/provisioned sessions.
+
+This test runs the real `_dispatch_tool` against a fake loopback handler and
+asserts the handler receives the decoded arguments wrapped the way `_args`
+expects.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import _test_home
+_test_home.isolate("bc-test-openai-loopback-")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import runner_openai
+
+
+def _make_emitter() -> runner_openai.EventEmitter:
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="events-", suffix=".jsonl", delete=False
+    )
+    tmp.close()
+    return runner_openai.EventEmitter(Path(tmp.name))
+
+
+def test_dispatch_forwards_args_to_loopback_handler() -> None:
+    seen: list[dict] = []
+
+    async def fake_ask(params: dict) -> str:
+        # Mirror the real handler contract: unwrap via _args.
+        args = runner_openai._args(params)
+        seen.append(args)
+        return runner_openai._dynamic_tool_json_result(
+            {"success": True}, success=True
+        )
+
+    emitter = _make_emitter()
+    call = {
+        "id": "call_1",
+        "name": "ask",
+        "arguments": json.dumps(
+            {"target_session_id": "w1", "message": "review please"}
+        ),
+    }
+
+    result = asyncio.run(
+        runner_openai._dispatch_tool(
+            call,
+            Path("/tmp"),
+            "app-1",
+            Path("/tmp"),
+            True,  # bypass
+            True,  # interactive
+            "http://backend",
+            "tok",
+            emitter,
+            {"ask": fake_ask},
+        )
+    )
+
+    assert seen, "loopback handler was never invoked"
+    assert seen[0].get("target_session_id") == "w1", seen[0]
+    assert seen[0].get("message") == "review please", seen[0]
+    assert json.loads(result).get("success") is True
+
+
+def test_real_create_sub_session_preserves_dispatched_args() -> None:
+    """create_sub_session has no required user args, so the broken dispatcher
+    did not fail loudly; it silently created a default unnamed/default-provider
+    sub-session. Lock that optional args survive dispatch too."""
+    captured: list[tuple[str, dict]] = []
+    original_post = runner_openai._post_loopback_sync
+
+    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+        captured.append((kwargs["url_path"], payload))
+        return {"success": True, "target_session_id": "sub-1"}
+
+    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    try:
+        handlers = runner_openai._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://backend",
+                "internal_token": "tok",
+                "app_session_id": "sender-1",
+            },
+            cwd="/tmp/project",
+            model="model-x",
+        )
+        emitter = _make_emitter()
+        call = {
+            "id": "call_sub",
+            "name": "create_sub_session",
+            "arguments": json.dumps(
+                {
+                    "description": "Adversarial reviewer",
+                    "provider_id": "provider-1",
+                    "model": "model-1",
+                    "reasoning_effort": "high",
+                    "node_id": "node-1",
+                }
+            ),
+        }
+        result = asyncio.run(
+            runner_openai._dispatch_tool(
+                call,
+                Path("/tmp"),
+                "sender-1",
+                Path("/tmp"),
+                True,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                handlers,
+            )
+        )
+    finally:
+        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+
+    assert json.loads(result).get("success") is True
+    assert captured, "create_sub_session handler never posted to backend"
+    endpoint, payload = captured[0]
+    assert endpoint == "/api/internal/create-sub-session"
+    assert payload["description"] == "Adversarial reviewer"
+    assert payload["provider_id"] == "provider-1"
+    assert payload["model"] == "model-1"
+    assert payload["reasoning_effort"] == "high"
+    assert payload["node_id"] == "node-1"
+
+
+
+def test_real_ask_handler_accepts_dispatched_args() -> None:
+    """End-to-end through the real ask handler: a valid call must NOT be
+    rejected with the 'required' error that triggered the fallback cascade."""
+    captured: list[tuple[str, dict]] = []
+    original_post = runner_openai._post_loopback_sync
+
+    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+        captured.append((kwargs["url_path"], payload))
+        return {"success": True}
+
+    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    try:
+        handlers = runner_openai._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://backend",
+                "internal_token": "tok",
+                "app_session_id": "sender-1",
+            },
+            cwd="/tmp/project",
+            model="model-x",
+        )
+        emitter = _make_emitter()
+        call = {
+            "id": "call_2",
+            "name": "ask",
+            "arguments": json.dumps(
+                {"target_session_id": "w1", "message": "review"}
+            ),
+        }
+        result = asyncio.run(
+            runner_openai._dispatch_tool(
+                call,
+                Path("/tmp"),
+                "sender-1",
+                Path("/tmp"),
+                True,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                handlers,
+            )
+        )
+    finally:
+        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+
+    assert "required" not in result, result
+    assert captured, "ask handler never posted to backend"
+    assert captured[0][0] == "/api/internal/ask"
+    assert captured[0][1]["target_session_id"] == "w1"
+    assert captured[0][1]["message"] == "review"
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"PASS {name}")

@@ -95,6 +95,8 @@
   "input.attachTitle": "Bijlage",
   "input.removeImageTitle": "Afbeelding verwijderen",
   "input.queuedLabel": "In wachtrij:",
+  "input.queuedMinimize": "Bericht in wachtrij minimaliseren",
+  "input.queuedExpand": "Bericht in wachtrij uitvouwen",
   "input.mentionProjects": "Projecten",
   "input.mentionSessions": "Sessies",
   "input.interruptButton": "⚡ Onderbreken",

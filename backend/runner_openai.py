@@ -1638,7 +1638,12 @@ async def _dispatch_tool(
     lb_handler = loopback_handlers.get(name)
     if lb_handler is not None:
         try:
-            result = await lb_handler(args)
+            # Loopback handlers unwrap their inputs via `_args(params)`, i.e.
+            # they read `params["arguments"]`. The provider gives us the bare
+            # arguments dict, so wrap it to match that contract — otherwise
+            # every loopback tool (ask/mssg/delegate_task/create_session/
+            # create_sub_session/...) sees empty args and rejects valid calls.
+            result = await lb_handler({"arguments": args})
         except Exception as e:
             logger.exception("loopback tool %s failed", name)
             result = f"Error: {type(e).__name__}: {e}"

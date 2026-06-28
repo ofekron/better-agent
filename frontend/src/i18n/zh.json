@@ -95,6 +95,8 @@
   "input.attachTitle": "附件",
   "input.removeImageTitle": "移除图片",
   "input.queuedLabel": "已排队：",
+  "input.queuedMinimize": "最小化排队消息",
+  "input.queuedExpand": "展开排队消息",
   "input.mentionProjects": "项目",
   "input.mentionSessions": "会话",
   "input.interruptButton": "⚡ 打断",

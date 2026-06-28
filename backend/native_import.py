@@ -97,6 +97,25 @@ def _is_junk_cwd(cwd: str) -> bool:
     return False
 
 
+# Encoded-cwd prefixes for system-temp roots. Claude stores each session
+# under projects/<encoded-cwd>/, encoding path separators as '-', so a temp
+# cwd like /private/tmp/... becomes a '-private-tmp-...' dir. Trailing '-'
+# avoids matching real dirs like /tmpwork.
+_JUNK_DIR_PREFIXES = ("-tmp-", "-private-tmp-", "-var-folders-", "-private-var-folders-")
+
+
+def _is_junk_session(sess: NativeSession) -> bool:
+    """Temp / BA-internal sessions that aren't real conversations. Uses the
+    real cwd when hydrated; for claude's un-hydrated count path (cwd=""),
+    infers junk from the encoded project-dir name so counts stay cheap."""
+    if sess.cwd:
+        return _is_junk_cwd(sess.cwd)
+    if sess.provider_kind == "claude":
+        name = Path(sess.jsonl_path).parent.name
+        return any(name.startswith(p) for p in _JUNK_DIR_PREFIXES)
+    return False
+
+
 def _under_projects(cwd: str, project_paths: list[str]) -> bool:
     if not cwd:
         return False
@@ -146,12 +165,18 @@ def _ba_managed_native_ids() -> set[str]:
     try:
         import session_store
         for s in session_store.list_sessions():
-            for k in ("agent_session_id", "supervisor_agent_session_id"):
+            for k in ("agent_session_id", "supervisor_agent_session_id",
+                      "forked_from_agent_sid", "forked_from_supervisor_agent_sid",
+                      "caller_agent_session_id"):
                 v = s.get(k)
                 if isinstance(v, str) and v:
                     ids.add(v)
     except Exception:
         logger.exception("native_import: session_store scan failed")
+    # Durable provenance: sids harvested at run-dir reap time survive the
+    # 7-day prune / session delete that erase live run dirs above.
+    import spawn_ledger
+    ids |= spawn_ledger.all_sids()
     return ids
 
 
@@ -190,10 +215,12 @@ def enumerate_native_sessions(
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
     if project_paths is not None:
-        out = [s for s in out if _under_projects(s.cwd, project_paths) and not _is_junk_cwd(s.cwd)]
-    # Always skip native sessions Better Agent itself spawned/manages — they
-    # are agent/internal sessions (or already-in-BA user sessions), not real
-    # external conversations worth importing.
+        out = [s for s in out if _under_projects(s.cwd, project_paths)]
+    # Always skip junk (system-temp / BA-internal) and BA-spawned sessions —
+    # both are orchestration artifacts, not real external conversations. The
+    # junk filter runs regardless of `project_paths`; the global import path
+    # used to skip it and offered BA's own integration-test runs for import.
+    out = [s for s in out if not _is_junk_session(s)]
     managed = _ba_managed_native_ids()
     if managed:
         out = [s for s in out if s.native_id not in managed]
@@ -673,6 +700,9 @@ def _import_session_locked(sess: NativeSession) -> str:
         # idempotency registry is the source of truth for "already imported".
         source="import",
         provider_id=sess.provider_id or None,
+        # The user explicitly triggered the import; they are aware of and
+        # own the resulting session.
+        user_initiated=True,
     )
     root_id = created["id"]
 

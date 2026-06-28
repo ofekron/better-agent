@@ -189,4 +189,58 @@ describe("InputArea queued prompt promote action", () => {
     fireEvent.click(within(banner).getByRole("button", { name: "⚡ Interrupt" }));
     expect(onPromoteQueued).toHaveBeenCalledTimes(1);
   });
+
+  it("can minimize and expand the queued prompt banner", () => {
+    renderInputArea(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+    expect(within(minimized).getByRole("button", { name: "Expand queued prompt" })).toBeTruthy();
+    expect(within(minimized).getByText("queued work")).toBeTruthy();
+    expect(within(minimized).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
+    expect(within(minimized).queryByRole("button", { name: "Steer" })).toBeNull();
+    expect(within(minimized).queryByRole("button", { name: "Cancel" })).toBeNull();
+
+    fireEvent.click(within(minimized).getByRole("button", { name: "Expand queued prompt" }));
+
+    const expanded = screen.getByTestId("queued-prompt-banner");
+    expect(expanded.getAttribute("data-minimized")).toBeNull();
+    expect(within(expanded).getByRole("button", { name: "Minimize queued prompt" })).toBeTruthy();
+  });
+
+  it("persists the queued prompt minimized preference", () => {
+    renderInputArea(false);
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+    expect(localStorage.getItem("better-agent-queued-prompt-minimized")).toBe("true");
+
+    cleanup();
+    renderInputArea(false);
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+    expect(within(minimized).getByRole("button", { name: "Expand queued prompt" })).toBeTruthy();
+  });
+
+  it("summarizes hidden queued comments and attachments while minimized", () => {
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: '<inline-tags><c file="a.ts" range="1-2">check this</c></inline-tags>\n\nqueued work',
+        images: [{ dataUrl: "data:image/png;base64,aaa", base64: "aaa", mediaType: "image/png" }],
+        files: [{ name: "notes.txt", base64: "bbb", mediaType: "text/plain", size: 12 }],
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(within(minimized).getByText("queued work")).toBeTruthy();
+    expect(screen.queryByText("check this")).toBeNull();
+    expect(screen.queryByText("notes.txt")).toBeNull();
+    expect(screen.getByTestId("queued-minimized-summary").textContent).toBe(
+      "1 comment · 1 image · 1 file",
+    );
+  });
 });

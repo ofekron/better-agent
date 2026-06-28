@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -28,7 +27,6 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
-import provider_runtime
 from provider_run_config import normalize_provider_run_config
 from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
@@ -36,6 +34,7 @@ from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
     pid_alive as _pid_alive,
+    reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
 )
 
@@ -424,6 +423,11 @@ class GeminiProvider(Provider):
             "session_id": session_id,
             "mode": runner_mode,
             "app_session_id": app_session_id,
+            "active_capability_ids": [
+                str(cid)
+                for cid in (_sess_rec.get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -472,10 +476,8 @@ class GeminiProvider(Provider):
                 user_facing=bool(open_file_panel_enabled) and not bool(_sess_rec.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = provider_runtime.popen_runner(
+            popen = subprocess.Popen(
                 runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="gemini"),
-                run_dir=run_dir,
-                project_cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
@@ -866,11 +868,8 @@ class GeminiProvider(Provider):
             except OSError:
                 continue
             if mtime < cutoff:
-                try:
-                    shutil.rmtree(child)
+                if _reap_run_dir(child):
                     removed += 1
-                except OSError as e:
-                    logger.warning("prune: failed to rm %s: %s", child, e)
         return removed
 
     # ------------------------------------------------------------------
@@ -1007,7 +1006,7 @@ class GeminiProvider(Provider):
         if not any(kw in corpus for kw in self._GEMINI_RATE_LIMIT_KEYWORDS):
             return None
 
-        return self._fallback_rate_limit(hours=1)
+        return None
 
     # ------------------------------------------------------------------
     # rewind — we simulate rewind by clearing the session_id so the

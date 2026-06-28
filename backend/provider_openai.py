@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,6 +47,7 @@ from proc_control import process_control as _process_control
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
     pid_alive as _pid_alive,
+    reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
 )
 
@@ -774,11 +774,8 @@ class OpenAIProvider(Provider):
             except OSError:
                 continue
             if mtime < cutoff:
-                try:
-                    shutil.rmtree(child)
+                if _reap_run_dir(child):
                     removed += 1
-                except OSError as e:
-                    logger.warning("prune: failed to rm %s: %s", child, e)
         return removed
 
     # ------------------------------------------------------------------

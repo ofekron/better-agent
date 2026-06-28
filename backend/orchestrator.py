@@ -926,19 +926,40 @@ class Coordinator:
         client_id: Optional[str],
         lifecycle_msg_id: str,
     ) -> bool:
-        provider = self.provider_for_session(app_session_id)
-        if not provider.supports_steering:
-            return False
-        candidates = [
-            run_id
-            for run_id in self.turn_manager.active_run_ids.get(app_session_id, [])
-            if run_id in provider._runs
-        ]
+        # Resolve which provider owns the in-flight run. The common case
+        # (and the path the steer tests exercise) is the session's current
+        # provider — try it FIRST. Only when it doesn't own the run do we
+        # scan the provider registry: the user may have switched
+        # provider/model metadata mid-turn (that change applies lazily to
+        # the next prompt), so the live run is still owned by the
+        # previously-active provider instance.
+        run_ids = list(self.turn_manager.active_run_ids.get(app_session_id, []))
+        candidates: list[tuple[object, str]] = []
+        seen_runs: set[str] = set()
+
+        def _collect(prov: object) -> None:
+            if not getattr(prov, "supports_steering", False):
+                return
+            runs = getattr(prov, "_runs", {})
+            for rid in run_ids:
+                if rid in runs and rid not in seen_runs:
+                    seen_runs.add(rid)
+                    candidates.append((prov, rid))
+
+        try:
+            _collect(self.provider_for_session(app_session_id))
+        except Exception:
+            pass
+        if not candidates:
+            for prov in known_providers():
+                _collect(prov)
+
         save_callback = self.turn_manager._turn_save_callbacks.get(app_session_id)
         if save_callback is None:
             return False
         if len(candidates) != 1:
             return False
+        provider, run_id = candidates[0]
         current_assistant_msgs = getattr(
             self.turn_manager, "current_assistant_msgs", {},
         )
@@ -958,7 +979,7 @@ class Coordinator:
             return True
         deadline = _time.monotonic() + _STEER_READY_RETRY_SECONDS
         while True:
-            if provider.steer_run(candidates[0], prompt, images):
+            if provider.steer_run(run_id, prompt, images):
                 break
             if _time.monotonic() >= deadline:
                 return False

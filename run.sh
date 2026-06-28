@@ -250,15 +250,27 @@ kill_backend_lock_holder() {
   fi
 
   cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n1 || true)"
+  looks_like_ours=0
   case "$cmd" in
     *"$DIR/backend"*uvicorn*"main:app"*|*"$DIR/backend/app_entry.py"*"--serve"*)
+      looks_like_ours=1
       ;;
-    *)
-      echo "Backend lock is held by PID $pid, but it does not look like this checkout's backend:"
-      echo "$cmd"
-      return 0
+    *uvicorn*"main:app"*)
+      # The launcher runs `(cd "$DIR/backend" && source .venv/bin/activate &&
+      # exec uvicorn main:app ...)`, so argv shows a relative
+      # `.venv/bin/uvicorn` without the absolute checkout path. Accept it only
+      # when the process cwd is this checkout's backend dir.
+      if [ "$cwd" = "$DIR/backend" ]; then
+        looks_like_ours=1
+      fi
       ;;
   esac
+  if [ "$looks_like_ours" -ne 1 ]; then
+    echo "Backend lock is held by PID $pid, but it does not look like this checkout's backend:"
+    echo "$cmd"
+    return 0
+  fi
 
   echo "Stopping previous Better Agent backend lock holder: $pid"
   kill -15 "$pid" 2>/dev/null || true

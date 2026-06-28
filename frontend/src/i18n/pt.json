@@ -95,6 +95,8 @@
   "input.attachTitle": "Anexar",
   "input.removeImageTitle": "Remover imagem",
   "input.queuedLabel": "Na fila:",
+  "input.queuedMinimize": "Minimizar mensagem na fila",
+  "input.queuedExpand": "Expandir mensagem na fila",
   "input.mentionProjects": "Projetos",
   "input.mentionSessions": "Sessões",
   "input.interruptButton": "⚡ Interromper",

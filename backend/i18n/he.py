@@ -8,7 +8,6 @@ TRANSLATIONS: dict[str, str] = {
     "error.invalid_path": "נתיב לא תקין",
     "error.orchestration_mode_frozen": "מצב תזמור קפוא לאחר יצירת הסשן",
     "error.no_recognized_selector": "לא זוהה שדה בורר",
-    "error.provider_change_during_active_run": "לא ניתן להחליף ספק בזמן ריצת תור — עצור או המתן לסיום התור הנוכחי",
     "error.session_not_found_retry": "סשן לא נמצא",
     "error.message_id_required": "נדרש message_id",
     "error.assistant_message_id_required": "נדרש assistant_message_id",

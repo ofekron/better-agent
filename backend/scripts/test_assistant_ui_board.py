@@ -176,6 +176,11 @@ def test_ensure_singleton_refreshes_only_when_preamble_changes() -> bool:
             self.sets.append(caps)
             self.sess["capability_contexts"] = caps
 
+        def set_name_locked(self, sid, locked):
+            if sid != "assistant-1":
+                raise AssertionError(f"unexpected sid {sid}")
+            self.sess["name_locked"] = bool(locked)
+
     fake = FakeSessionManager()
     original = assistant_ui.session_manager
     assistant_ui.session_manager = fake  # type: ignore[assignment]

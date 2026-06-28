@@ -55,6 +55,7 @@ export type SessionMetadataPatch = {
   reasoning_effort?: string;
   cwd?: string;
   provider_id?: string;
+  permission?: Session["permission"];
   supervisor_enabled?: boolean;
   supervisor_custom_prompt?: string;
   pinned?: boolean;
@@ -1957,6 +1958,7 @@ export function useSession(authStatus?: string) {
         }
         if (patch.cwd !== undefined) next.cwd = patch.cwd;
         if (patch.provider_id !== undefined) next.provider_id = patch.provider_id;
+        if (patch.permission !== undefined) next.permission = patch.permission;
         if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
         if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
         if (patch.pinned !== undefined) next.pinned = patch.pinned;

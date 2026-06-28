@@ -5,6 +5,7 @@ runner subprocesses, because a frozen app cannot run `python runner.py`.
 This entrypoint inspects argv:
   - `--run-dir` present  → run the named runner in-process and exit.
   - `--communicate-mcp` present → run the stdio team-message MCP server.
+  - `--capabilities-mcp` present → run the stdio capability-management MCP server.
   - `--open-file-panel-mcp` present → run the stdio file-panel MCP server.
   - `--open-config-panel-mcp` present → run the stdio config-panel MCP server.
   - `--extension-mcp` present → run an installed extension MCP launcher.
@@ -43,6 +44,8 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
     invocation starts the server."""
     if "--communicate-mcp" in argv:
         return ("communicate_mcp", None, None)
+    if "--capabilities-mcp" in argv:
+        return ("capabilities_mcp", None, None)
     if "--open-file-panel-mcp" in argv:
         return ("open_file_panel_mcp", None, None)
     if "--open-config-panel-mcp" in argv:
@@ -70,6 +73,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
     if mode == "communicate_mcp":
         from communicate_mcp import main as communicate_main
         return communicate_main()
+    if mode == "capabilities_mcp":
+        from capabilities_mcp import main as capabilities_main
+        return capabilities_main()
     if mode == "open_file_panel_mcp":
         from open_file_panel_mcp import main as open_file_panel_main
         return open_file_panel_main()

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "../src/components/SessionList";
@@ -78,15 +78,33 @@ function renderList(
 }
 
 function visibleSessionNames(): string[] {
-  return screen
-    .getAllByTestId("session-item")
+  return within(screen.getByTestId("session-list")).getAllByTestId("session-item")
+    .filter((item) => item.closest(".session-list-items"))
     .map((item) => item.querySelector(".session-item-name")?.textContent?.trim() ?? "");
+}
+
+function rowBySessionId(id: string): HTMLElement {
+  const row = screen.getAllByTestId("session-item").find(
+    (item) => item.getAttribute("data-session-id") === id,
+  );
+  if (!row) throw new Error(`Session row not found: ${id}`);
+  return row;
+}
+
+function longPressSession(id: string) {
+  const row = rowBySessionId(id);
+  fireEvent.pointerDown(row, { button: 0 });
+  act(() => {
+    vi.advanceTimersByTime(500);
+  });
+  fireEvent.pointerUp(row);
 }
 
 describe("SessionList advanced filters", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("unpins a specific pinned session from the row button", () => {
@@ -216,7 +234,7 @@ describe("SessionList advanced filters", () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps selected sessions in backend recency order", () => {
+  it("keeps the non-selected list in backend recency order and pins the selected session", () => {
     renderList(
       [
         makeSession({
@@ -233,7 +251,8 @@ describe("SessionList advanced filters", () => {
       { currentSessionId: "selected-old" },
     );
 
-    expect(visibleSessionNames()).toEqual(["Newer", "Selected old"]);
+    expect(visibleSessionNames()).toEqual(["Newer"]);
+    expect(within(screen.getByTestId("session-list-selected")).getByText("Selected old")).toBeTruthy();
   });
 
   it("does not show search loading for plain list refresh", () => {
@@ -507,7 +526,43 @@ describe("SessionList advanced filters", () => {
     expect(screen.getByText("session.searching")).toBeTruthy();
   });
 
+  it("keeps bulk selection closed on normal session clicks", () => {
+    const onSelect = vi.fn();
+    renderList(
+      [makeSession({ id: "alpha", name: "Alpha" })],
+      { onSelect },
+    );
+
+    expect(screen.queryByLabelText("session.selectSession")).toBeNull();
+    fireEvent.click(rowBySessionId("alpha"));
+
+    expect(onSelect).toHaveBeenCalledWith("alpha");
+    expect(screen.queryByTestId("session-bulk-bar")).toBeNull();
+    expect(screen.queryByLabelText("session.selectSession")).toBeNull();
+  });
+
+  it("starts bulk selection by long pressing a session", () => {
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    renderList(
+      [
+        makeSession({ id: "alpha", name: "Alpha" }),
+        makeSession({ id: "beta", name: "Beta" }),
+      ],
+      { onSelect },
+    );
+
+    longPressSession("alpha");
+    vi.useRealTimers();
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(rowBySessionId("alpha").getAttribute("data-selected")).toBe("true");
+    expect(screen.getByTestId("session-bulk-bar")).toBeTruthy();
+    expect(screen.getAllByLabelText("session.selectSession")).toHaveLength(2);
+  });
+
   it("bulk deletes selected sessions", () => {
+    vi.useFakeTimers();
     const onDelete = vi.fn();
     renderList(
       [
@@ -518,8 +573,9 @@ describe("SessionList advanced filters", () => {
       { onDelete },
     );
 
+    longPressSession("alpha");
+    vi.useRealTimers();
     const checkboxes = screen.getAllByLabelText("session.selectSession");
-    fireEvent.click(checkboxes[0]);
     fireEvent.click(checkboxes[2]);
 
     const bulkBar = screen.getByTestId("session-bulk-bar");
@@ -533,6 +589,7 @@ describe("SessionList advanced filters", () => {
   });
 
   it("bulk moves and tags selected sessions", async () => {
+    vi.useFakeTimers();
     const organizationRequests: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal(
       "fetch",
@@ -620,8 +677,9 @@ describe("SessionList advanced filters", () => {
       />,
     );
 
+    longPressSession("alpha");
+    vi.useRealTimers();
     const checkboxes = screen.getAllByLabelText("session.selectSession");
-    fireEvent.click(checkboxes[0]);
     fireEvent.click(checkboxes[1]);
 
     await waitFor(() => expect(screen.getByTestId("session-bulk-bar")).toBeTruthy());

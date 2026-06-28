@@ -2950,6 +2950,8 @@ body {
 }
 
 .status-error-text {
+  min-width: 0;
+  flex: 1 1 auto;
   opacity: 0.8;
   font-size: 0.85em;
   white-space: nowrap;
@@ -3003,6 +3005,7 @@ body {
 
 .error-block-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   cursor: pointer;
@@ -3035,6 +3038,7 @@ body {
 }
 
 .status-retry-btn {
+  flex: 0 0 auto;
   background: none;
   border: 1px solid #e74c3c;
   color: #e74c3c;
@@ -5800,6 +5804,35 @@ button.run-badge-clickable:focus-visible {
   border-radius: 8px;
   font-size: calc(13px * var(--app-font-scale));
 }
+.queued-prompt-banner.is-minimized {
+  padding: 4px 8px;
+  gap: 6px;
+}
+.queued-prompt-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.queued-minimize-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.queued-minimize-btn:hover {
+  color: var(--fg);
+  background: var(--border);
+  border-color: var(--border);
+}
 /* When the queued prompt contains inline-tag comments, switch to
    column layout so the cards and the user text each get their own row. */
 .queued-prompt-actions {
@@ -5880,6 +5913,7 @@ button.run-badge-clickable:focus-visible {
 }
 .queued-prompt-preview {
   flex: 1;
+  min-width: 0;
   color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -14064,6 +14098,7 @@ button.progress-inflight {
   .attach-btn,
   .input-overflow-trigger,
   .queued-overflow-trigger,
+  .queued-minimize-btn,
   .send-mode-toggle,
   .stop-btn,
   .setup-btn,

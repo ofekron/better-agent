@@ -81,6 +81,7 @@ class _RetryProvider:
         *,
         id: str = "codex",
         emit_discovered: bool = False,
+        reset_seconds: float = 0.5,
     ) -> None:
         self._runs: dict = {}
         self.outcomes = outcomes
@@ -91,6 +92,7 @@ class _RetryProvider:
         self.KIND = "codex"
         self.id = id
         self._emit_discovered = emit_discovered
+        self.reset_seconds = reset_seconds
 
     def start_run(self, **kw):
         self.prompts.append(kw["prompt"])
@@ -126,7 +128,7 @@ class _RetryProvider:
         self.cancelled.append(run_id)
 
     def parse_rate_limit(self, error, events):
-        return datetime.now(timezone.utc) + timedelta(seconds=30)
+        return datetime.now(timezone.utc) + timedelta(seconds=self.reset_seconds)
 
 
 def test_noop_cancel_does_not_leak_session_cancelled() -> None:
@@ -418,8 +420,72 @@ def test_rate_limit_retry_spawns_once_then_emits_terminal() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_rate_limit_wait_uses_reset_or_one_minute_fallback() -> None:
+    print("T7a rate-limit wait uses parsed reset or one-minute fallback")
+    fallback = turn_manager_mod._rate_limit_wait_seconds(None)
+    long_reset = datetime.now(timezone.utc) + timedelta(hours=2)
+    parsed = turn_manager_mod._rate_limit_wait_seconds(long_reset)
+    check("fallback is one minute", 59 <= fallback <= 61)
+    check("parsed reset is not capped to ten minutes", parsed > 7000)
+
+
+def test_rate_limit_wait_can_continue_immediately() -> None:
+    print("T7b rate-limit wait can continue immediately")
+    session = session_manager.create(name="rate-limit-continue", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    c = _StubCoordinator()
+    provider = _RetryProvider([
+        {
+            "success": False,
+            "error": "rate_limit",
+            "session_id": "agent-rate-limited",
+            "token_usage": None,
+        },
+        {
+            "success": True,
+            "session_id": "agent-continued",
+            "token_usage": {"input_tokens": 1},
+        },
+    ], reset_seconds=30)
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        ev = asyncio.Event()
+        tm.cancel_events[sid] = ev
+        task = asyncio.create_task(tm._drive_cli_run(
+            prompt="p",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=ev,
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-rl-continue",
+        ))
+        await asyncio.sleep(0.2)
+        landed = tm.request_immediate_continuation(
+            sid,
+            "p",
+            reason="rate_limit_provider_switch",
+        )
+        result = await asyncio.wait_for(task, timeout=3)
+        return {"landed": landed, **result}
+
+    result = asyncio.run(_go())
+    check("immediate continuation landed", result.get("landed") is True)
+    check("turn succeeds after continuation", result.get("success") is True)
+    check("fresh prompt is continuation-wrapped", "Previous provider session ids: agent-rate-limited" in provider.prompts[-1])
+
+
 def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
-    print("T7b forced context overflow starts fresh continuation")
+    print("T7c forced context overflow starts fresh continuation")
     user_prefs.set_context_strategy("continuation")
     session = session_manager.create(name="forced-overflow", cwd="/tmp", model="sonnet")
     sid = session["id"]
@@ -597,6 +663,8 @@ def main() -> int:
     test_drive_cli_run_pre_spawn_guard()
     test_rate_limit_wait_keeps_turn_active_and_cancellable()
     test_rate_limit_retry_spawns_once_then_emits_terminal()
+    test_rate_limit_wait_uses_reset_or_one_minute_fallback()
+    test_rate_limit_wait_can_continue_immediately()
     test_forced_context_overflow_retries_as_fresh_continuation()
     test_codex_context_fill_preempts_native_compaction()
     test_lazy_selector_change_continuation()

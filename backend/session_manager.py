@@ -107,16 +107,6 @@ class IncompatibleOrchestrationMode(ValueError):
     pass
 
 
-class ProviderChangeWhileActive(RuntimeError):
-    """Raised when `set_selectors` is asked to change `provider_id`
-    while `coordinator.has_active_runs(sid)` reports True. A10's
-    TOCTOU closure — the PATCH route pre-checks for a fast 409, but
-    the authoritative check lives INSIDE the per-root lock so a turn
-    that starts between the pre-check and the persist can't slip past
-    the gate. main.py's exception handler maps this to 409."""
-    pass
-
-
 def _validate_orchestration_mode_against_provider(
     *, orchestration_mode: str, provider_id: Optional[str],
 ) -> None:
@@ -991,7 +981,20 @@ class SessionManager:
                 self._drop_cached_root_for_reload(rid, cached)
                 cached = None
             else:
-                self._roots.move_to_end(rid)   # LRU: mark most-recently-used
+                # `_cached_root_is_stale` above does a disk fingerprint check
+                # (I/O, so the GIL can drop), and a concurrent thread — LRU-cap
+                # eviction, `_drop_cached_root_for_reload`, or an explicit
+                # `reload_root_from_disk`/`delete` — can evict `rid` between the
+                # `get` above and here. `OrderedDict.move_to_end` raises
+                # `KeyError` on an absent key, which would 500 the caller (seen
+                # on the /api/sessions sidebar-list path). There is nothing to
+                # bump if the entry was concurrently evicted; fall through and
+                # return the still-valid `cached` tree (the next reader
+                # cold-loads a fresh copy).
+                try:
+                    self._roots.move_to_end(rid)   # LRU: mark most-recently-used
+                except KeyError:
+                    pass
                 batch_ctx = self._batches.get(rid)
                 hydrating = bool(batch_ctx and batch_ctx.get("_phantom"))
                 if (
@@ -1067,7 +1070,21 @@ class SessionManager:
             session_store.session_file_fingerprint(rid) or (0, 0)
         )
         self._root_file_checked_at[rid] = time.monotonic()
-        self._roots.move_to_end(rid)
+        # Mirror the warm-branch guard above (see comment at the cached
+        # branch): `session_file_fingerprint` (line ~1070) does disk I/O,
+        # dropping the GIL, and a concurrent thread can evict `rid`
+        # (`_drop_cached_root_for_reload` from a stale-on-reload check,
+        # `_enforce_root_cap`, or an explicit reload/delete) between the
+        # insert at 1068 and here. `OrderedDict.move_to_end` raises
+        # `KeyError` on an absent key, which 500s the caller (seen on the
+        # /api/sessions sidebar-list path). For a freshly-inserted key the
+        # entry is already at the end, so there is nothing to bump when the
+        # entry was concurrently evicted — fall through; `root` is still
+        # valid and the next reader cold-loads a fresh copy.
+        try:
+            self._roots.move_to_end(rid)
+        except KeyError:
+            pass
         self._index_root(root)
         self._enforce_root_cap(keep_rid=rid)
         if not hydrate_events:
@@ -2600,12 +2617,18 @@ class SessionManager:
         node_id: str = "primary",
         worker_creation_policy: str = "ask",
         bare_config: bool = False,
+        user_initiated: bool = False,
         capability_contexts: Optional[list[dict]] = None,
         id: Optional[str] = None,
     ) -> dict:
         # bare_config marks a TestApe-isolated session: empty system prompt
         # (no skills / CLAUDE.md / injected instructions) and orchestration_mode
         # honored at the runner level. Routed entirely off this session field.
+        #
+        # `user_initiated` records whether the user is aware of having
+        # created this session (see session_store user-initiation taxonomy).
+        # Defaults to False — fail-closed so a caller that forgets it never
+        # surfaces a hidden helper session as user-facing.
         _validate_orchestration_mode_against_provider(
             orchestration_mode=orchestration_mode, provider_id=provider_id,
         )
@@ -2620,6 +2643,7 @@ class SessionManager:
             node_id=node_id,
             worker_creation_policy=worker_creation_policy,
             bare_config=bare_config,
+            user_initiated=user_initiated,
             id=id,
         )
         sess["capability_contexts"] = list(capability_contexts or [])
@@ -2804,6 +2828,10 @@ class SessionManager:
             child = session_store.fork_session(cached_root, parent_sid, name=name)
             if kind is not None:
                 child["kind"] = kind
+                # A non-"user" kind (e.g. adv_sync_fork) is an internal
+                # fork the user did not ask for — never user-facing.
+                if kind != "user":
+                    child["user_initiated"] = False
             # The new fork node is now live inside cached_root; register
             # its id→root mapping, then persist the tree exactly once.
             # Synchronous (not debounced): fork durability is part of the
@@ -2906,10 +2934,27 @@ class SessionManager:
     # ── Top-level metadata patches ─────────────────────────────────
 
     def rename(self, sid: str, name: str) -> Optional[dict]:
+        # `name_locked` sessions (e.g. the assistant singleton) refuse rename
+        # from every path — AI auto-title, first-prompt auto-name, and the user
+        # rename endpoint. Fail closed: return the unchanged session so callers
+        # that branch on truthiness don't mistake a refusal for not-found.
+        existing = self.get_lite(sid)
+        if existing is not None and existing.get("name_locked"):
+            return existing
         return self._run(
             sid,
             lambda s: s.__setitem__("name", name),
             {"kind": "renamed", "name": name},
+        )
+
+    def set_name_locked(self, sid: str, locked: bool) -> Optional[dict]:
+        """Mark a session's name as immutable. The rename gate (`rename`) and
+        the user rename endpoint both honor this field — it is the single
+        source of truth for name immutability."""
+        return self._run(
+            sid,
+            lambda s: s.__setitem__("name_locked", bool(locked)),
+            {"kind": "name_locked", "name_locked": bool(locked)},
         )
 
     def set_capability_contexts(
@@ -2946,15 +2991,13 @@ class SessionManager:
         to change a session's mode it must delete + recreate so the
         capability gate re-runs.
 
-        `provider_id` IS mutable, but only while NO turn is in flight
-        or queued — `set_selectors` re-checks `_active_run_gate(sid)`
-        INSIDE the per-root lock and raises `ProviderChangeWhileActive`
-        if the gate fires. The PATCH route also pre-checks for a fast
-        409, but the inside-lock recheck is what makes the gate
-        TOCTOU-safe (a turn enqueued between the pre-check and the
-        persist can't slip past the gate).
+        `provider_id` IS mutable even while a turn is in flight. The
+        current run keeps using the provider instance that already owns
+        it; the changed selector is picked up lazily by the next prompt,
+        which starts a continuation if the provider/model differs from
+        the last active provider subprocess.
 
-        When we DO accept a provider change, we re-validate the
+        When we accept a provider change, we re-validate the
         session's existing `orchestration_mode` against the NEW
         provider's capability (e.g. switching Claude→Gemini on a
         manager-mode session must fail loudly here, not silently on
@@ -5297,6 +5340,9 @@ class SessionManager:
             browser_harness_enabled=bool(x_snap.get("browser_harness_enabled")),
             browser_harness_headless=bool(x_snap.get("browser_harness_headless")),
             node_id=x_snap.get("node_id") or "primary",
+            # Separating the supervisor is an explicit user action; Y
+            # inherits X's user-awareness.
+            user_initiated=bool(x_snap.get("user_initiated", True)),
         )
         # Take ownership of S1 outright + baseline its tailer cursor.
         y["agent_session_id"] = s1

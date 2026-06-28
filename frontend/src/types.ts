@@ -887,6 +887,13 @@ export interface Session {
    * the sidebar can render a badge. "import" = ingested from a native
    * provider CLI session. */
   source?: "web" | "cli" | "extension" | "import";
+  /** Whether the user is AWARE of having created this session (UI/CLI
+   * create, import, file-edit, a fork, or a worker the user approved via
+   * the popup) versus a session the system or an agent spun up on its own
+   * (provisioning, agent create_session, auto-approved workers, internal
+   * forks). Orthogonal to `source`. Backend migrates legacy records on
+   * read; defaults to false (fail-closed) for non-user-aware sessions. */
+  user_initiated?: boolean;
   virtual?: boolean;
   extension_id?: string;
   backing_session_ids?: string[];
@@ -1162,7 +1169,7 @@ export interface BrowseResult {
 export type ProviderMode = "subscription" | "api_key";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini,
+/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,
  * {"approval","sandbox"} for codex. {} = inherit the provider default. */
 export type Permission = Record<string, string>;
 /** Axis → allowed-values map for the provider's permission selector(s). */

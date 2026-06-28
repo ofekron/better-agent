@@ -95,6 +95,8 @@
   "input.attachTitle": "संलग्न करें",
   "input.removeImageTitle": "छवि हटाएँ",
   "input.queuedLabel": "कतारबद्ध:",
+  "input.queuedMinimize": "कतारबद्ध संदेश छोटा करें",
+  "input.queuedExpand": "कतारबद्ध संदेश बड़ा करें",
   "input.mentionProjects": "प्रोजेक्ट",
   "input.mentionSessions": "सत्र",
   "input.interruptButton": "⚡ रोकें",

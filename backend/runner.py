@@ -125,24 +125,8 @@ from claude_agent_sdk import (
 )
 
 from paths import encode_cwd
+from tool_approval_client import describe_tool_call as _describe_tool_call
 from tool_approval_client import request_tool_approval
-
-
-def _describe_tool_call(tool_name: object, tool_input: object) -> dict:
-    """Build a size-capped, secret-free summary of a tool call for the approval
-    card. Values are stringified and truncated; structure is preserved."""
-    raw = tool_input if isinstance(tool_input, dict) else {}
-    described: dict[str, str] = {}
-    for key, value in raw.items():
-        if isinstance(value, str):
-            text = value
-        else:
-            try:
-                text = json.dumps(value, default=str)
-            except Exception:
-                text = str(value)
-        described[str(key)] = text[:500]
-    return {"tool": str(tool_name), "input": described}
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -2053,6 +2037,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     backend_url = inputs.get("backend_url")
     internal_token = inputs.get("internal_token")
     disabled_builtin_tools = _disabled_builtin_tools(inputs)
+    # Bare (TestApe-isolated) sessions are capability-stripped and also
+    # suppress user-facing extras later in MCP setup, so compute this before
+    # any MCP-server gating checks use it.
+    _bare = bool(inputs.get("bare_config", False))
     mssg_sender_session_id = (
         inputs.get("mssg_sender_session_id") or app_session_id
     )
@@ -2179,7 +2167,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # scheduler). They DO get the credential broker — a bare device worker
     # needs it to fetch login secrets — wired off the bare signal instead
     # of the user-facing one.
-    _bare = bool(inputs.get("bare_config", False))
     _user_facing_extras = open_file_panel_enabled and not _bare
     _cred_enabled = open_file_panel_enabled or _bare
 

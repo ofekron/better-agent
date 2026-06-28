@@ -95,6 +95,8 @@
   "input.attachTitle": "첨부",
   "input.removeImageTitle": "이미지 제거",
   "input.queuedLabel": "대기 중:",
+  "input.queuedMinimize": "대기 중 메시지 최소화",
+  "input.queuedExpand": "대기 중 메시지 확장",
   "input.mentionProjects": "프로젝트",
   "input.mentionSessions": "세션",
   "input.interruptButton": "⚡ 중단",

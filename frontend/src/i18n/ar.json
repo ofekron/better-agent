@@ -95,6 +95,8 @@
   "input.attachTitle": "إرفاق",
   "input.removeImageTitle": "إزالة الصورة",
   "input.queuedLabel": "في الطابور:",
+  "input.queuedMinimize": "تصغير الرسالة في الطابور",
+  "input.queuedExpand": "توسيع الرسالة في الطابور",
   "input.mentionProjects": "المشاريع",
   "input.mentionSessions": "الجلسات",
   "input.interruptButton": "⚡ مقاطعة",

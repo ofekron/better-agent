@@ -150,14 +150,41 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
             continue
         persist_sid = bs.get("persist_to") or bs.get("app_session_id")
         if persist_sid in sids:
-            try:
-                shutil.rmtree(child)
+            if reap_run_dir(child):
                 removed += 1
-            except OSError as e:
-                logger.warning("delete_runs_for_sessions: failed to rm %s: %s", child, e)
     if removed:
         logger.info("delete_runs_for_sessions: removed %d run dir(s)", removed)
     return removed
+
+
+def _harvest_spawn_sid(child: Path) -> None:
+    """Record the run dir's provider session_id into the durable spawn
+    ledger so BA-spawn provenance survives the dir's removal. Reads the sid
+    from whichever run-state file carries it."""
+    import spawn_ledger
+    for name in ("state.json", "backend_state.json", "complete.json"):
+        try:
+            o = json.loads((child / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        sid = o.get("session_id") if isinstance(o, dict) else None
+        if isinstance(sid, str) and sid:
+            spawn_ledger.add(sid)
+            return
+
+
+def reap_run_dir(child: Path) -> bool:
+    """Single owner of run-dir removal: harvest the spawn sid into the
+    durable ledger, THEN remove the dir. Every reap site (session-delete and
+    the per-provider age-prune) routes through here so no BA-spawned sid is
+    lost when its run dir is reaped. Returns True if the dir was removed."""
+    _harvest_spawn_sid(child)
+    try:
+        shutil.rmtree(child)
+        return True
+    except OSError as e:
+        logger.warning("reap_run_dir: failed to rm %s: %s", child, e)
+        return False
 
 
 def atomic_write_json(path: Path, data: dict) -> None:

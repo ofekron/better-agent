@@ -95,6 +95,8 @@
   "input.attachTitle": "Прикрепить",
   "input.removeImageTitle": "Удалить изображение",
   "input.queuedLabel": "В очереди:",
+  "input.queuedMinimize": "Свернуть сообщение в очереди",
+  "input.queuedExpand": "Развернуть сообщение в очереди",
   "input.mentionProjects": "Проекты",
   "input.mentionSessions": "Сессии",
   "input.interruptButton": "⚡ Прервать",
