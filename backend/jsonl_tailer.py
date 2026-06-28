@@ -46,6 +46,7 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -527,6 +528,8 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     """
 
     _SUB_DIR_POLL_INTERVAL = 0.2  # subagent meta files appear once per Agent call
+    _active_sub_tailer_keys: set[tuple[str, str]] = set()
+    _active_sub_tailer_lock = threading.Lock()
 
     def __init__(
         self,
@@ -839,6 +842,16 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         meta_key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
         self._known_meta_files.add(meta_key)
         self.subagent_registry._bound[agent_id] = parent_tuid
+        active_key = (str(jsonl_path), parent_tuid)
+        with self._active_sub_tailer_lock:
+            if active_key in self._active_sub_tailer_keys:
+                logger.debug(
+                    "ClaudeJsonlTailer: sub-tailer already active for agent %s "
+                    "under tool_use_id=%s",
+                    agent_id, parent_tuid,
+                )
+                return
+            self._active_sub_tailer_keys.add(active_key)
         sub_tailer = ClaudeJsonlTailer(
             path=jsonl_path,
             start_offset=0,
@@ -848,15 +861,24 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             inject_parent_tool_use_id=parent_tuid,
             is_subagent=True,
         )
-        self._sub_tasks.append(asyncio.create_task(
+        task = asyncio.create_task(
             sub_tailer.run(),
             name=f"claude-tailer-sub-{agent_id[:8]}",
-        ))
+        )
+        task.add_done_callback(
+            lambda _task, key=active_key: self._release_active_sub_tailer_key(key)
+        )
+        self._sub_tasks.append(task)
         logger.info(
             "ClaudeJsonlTailer: spawned sub-tailer for agent %s "
             "(type=%s) under tool_use_id=%s",
             agent_id, agent_type, parent_tuid,
         )
+
+    @classmethod
+    def _release_active_sub_tailer_key(cls, key: tuple[str, str]) -> None:
+        with cls._active_sub_tailer_lock:
+            cls._active_sub_tailer_keys.discard(key)
 
 
 # ============================================================================

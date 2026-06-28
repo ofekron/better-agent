@@ -94,9 +94,71 @@ def test_prune_bounds_sub_tasks() -> bool:
     return asyncio.run(_scenario())
 
 
+async def _duplicate_spawn_scenario() -> bool:
+    original_run = ClaudeJsonlTailer.run
+    started = 0
+
+    async def fake_run(self) -> None:
+        nonlocal started
+        started += 1
+        await asyncio.sleep(60)
+
+    ClaudeJsonlTailer.run = fake_run
+    ClaudeJsonlTailer._active_sub_tailer_keys.clear()
+    first = _make_tailer()
+    second = _make_tailer()
+    jsonl_path = Path(_BC_HOME) / "agent-a.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")
+    try:
+        first._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
+        second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
+        await asyncio.sleep(0.05)
+        if started != 1:
+            print(f"  expected one active sub-tailer, started={started}")
+            return False
+        if len(first._sub_tasks) != 1 or second._sub_tasks:
+            print(
+                "  duplicate task retained: "
+                f"first={len(first._sub_tasks)} second={len(second._sub_tasks)}"
+            )
+            return False
+        first._sub_tasks[0].cancel()
+        try:
+            await first._sub_tasks[0]
+        except BaseException:
+            pass
+        await asyncio.sleep(0.05)
+        if ClaudeJsonlTailer._active_sub_tailer_keys:
+            print("  active sub-tailer key not released")
+            return False
+        second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
+        await asyncio.sleep(0.05)
+        if started != 2 or len(second._sub_tasks) != 1:
+            print(f"  respawn after release failed: started={started}")
+            return False
+        return True
+    finally:
+        for tailer in (first, second):
+            for task in tailer._sub_tasks:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+        ClaudeJsonlTailer._active_sub_tailer_keys.clear()
+        ClaudeJsonlTailer.run = original_run
+
+
+def test_duplicate_sub_tailer_spawn_is_suppressed() -> bool:
+    return asyncio.run(_duplicate_spawn_scenario())
+
+
 TESTS = [
     ("done sub-tailer tasks pruned; pending kept; list stays bounded",
      test_prune_bounds_sub_tasks),
+    ("duplicate concurrent sub-tailer spawn suppressed",
+     test_duplicate_sub_tailer_spawn_is_suppressed),
 ]
 
 
