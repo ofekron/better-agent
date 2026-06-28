@@ -4058,8 +4058,9 @@ class SessionManager:
             sess["last_seen_event_uid"] = None
             self._unread_counts[sid] = self._count_unread_from_disk(sess)
             self._unread_hydrated.add(sid)
-            if rid not in self._batches:
-                self._persist_root(rid, bump=False)
+            session_store.write_seen_cursor(rid, sid, None)
+            if sid == rid:
+                session_store.update_seen_cursor_projection(sid, None)
             self._fire(
                 sid,
                 {
@@ -4109,8 +4110,9 @@ class SessionManager:
             sess["last_seen_event_uid"] = resolved
             self._unread_counts[sid] = set()
             self._unread_hydrated.add(sid)
-            if rid not in self._batches:
-                self._persist_root(rid, bump=False)
+            session_store.write_seen_cursor(rid, sid, resolved)
+            if sid == rid:
+                session_store.update_seen_cursor_projection(sid, resolved)
             self._fire(
                 sid,
                 {

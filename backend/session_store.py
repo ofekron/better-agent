@@ -489,6 +489,10 @@ def _drafts_path(root_id: str) -> Path:
     return _sessions_dir() / f"{root_id}.drafts.json"
 
 
+def _seen_cursor_path(root_id: str) -> Path:
+    return _sessions_dir() / f"{root_id}.seen.json"
+
+
 def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
     """Atomically persist the per-node draft sidecar. `drafts` maps a
     node sid -> {draft_input, draft_input_seq, draft_images}; nodes with
@@ -583,6 +587,73 @@ def _overlay_drafts(root: dict, root_id: str) -> None:
         node["draft_input"] = d.get("draft_input") or ""
         node["draft_input_seq"] = d.get("draft_input_seq") or 0
         node["draft_images"] = d.get("draft_images") or []
+
+
+def read_seen_cursors(root_id: str) -> dict[str, Optional[str]]:
+    path = _seen_cursor_path(root_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    raw = data.get("seen") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        sid: (uid if isinstance(uid, str) and uid else None)
+        for sid, uid in raw.items()
+        if isinstance(sid, str) and sid
+    }
+
+
+def write_seen_cursor(root_id: str, sid: str, uid: Optional[str]) -> None:
+    if not (root_id and sid):
+        return
+    cursors = read_seen_cursors(root_id)
+    cursors[sid] = uid if isinstance(uid, str) and uid else None
+    path = _seen_cursor_path(root_id)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{root_id}.seen.", suffix=".tmp", dir=_sessions_dir(),
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "seen": cursors}, f)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def update_seen_cursor_projection(sid: str, uid: Optional[str]) -> None:
+    global _summary_index_version
+    updated: Optional[dict] = None
+    with _summary_index_lock:
+        if not _summary_index_loaded:
+            return
+        summary = _summary_index.get(sid)
+        if summary is None or summary.get("last_seen_event_uid") == uid:
+            return
+        updated = {**summary, "last_seen_event_uid": uid}
+        _summary_index[sid] = updated
+        _summary_index_version += 1
+    try:
+        _write_summary_file(sid, updated)
+    except Exception:
+        pass
+
+
+def _overlay_seen_cursors(root: dict, root_id: str) -> None:
+    cursors = read_seen_cursors(root_id)
+    if not cursors:
+        return
+    for node in [root, *_walk_forks(root)]:
+        sid = node.get("id")
+        if sid in cursors:
+            node["last_seen_event_uid"] = cursors[sid]
 
 
 def _remove_summary(root_id: str) -> None:
@@ -745,6 +816,13 @@ def _do_build_summary_index_unsafe() -> None:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
                         summary, cleaned = _sanitize_summary(summary)
+                        seen_cursors = read_seen_cursors(sid)
+                        if sid in seen_cursors:
+                            summary = {
+                                **summary,
+                                "last_seen_event_uid": seen_cursors[sid],
+                            }
+                            cleaned = True
                         needs_fork_backfill = (
                             "fork_ids" not in summary
                             and int(summary.get("fork_count") or 0) > 0
@@ -770,6 +848,7 @@ def _do_build_summary_index_unsafe() -> None:
         try:
             ctx = _provider_backfill_context()
             data = _migrate_session(json.loads(fpath.read_text(encoding="utf-8")), ctx)
+            _overlay_seen_cursors(data, data["id"])
             summary = _build_summary_for_root(data)
             with _summary_index_lock:
                 _summary_index[data["id"]] = summary
@@ -983,7 +1062,12 @@ def _index_pop(sid: str) -> None:
 # Sidecar files share the sessions dir and the `.json` extension but are
 # NOT session root trees — they must be excluded from every root-file
 # glob (else they get parsed as sessions → KeyError 'id').
-_SIDECAR_JSON_SUFFIXES = (".summary.json", ".drafts.json", ".fork-index.json")
+_SIDECAR_JSON_SUFFIXES = (
+    ".summary.json",
+    ".drafts.json",
+    ".seen.json",
+    ".fork-index.json",
+)
 
 
 def _is_sidecar_json(name: str) -> bool:
@@ -2690,6 +2774,7 @@ def get_session(session_id: str) -> Optional[dict]:
     # contains forks not yet in our in-memory map.
     _index_tree(root, force=True)
     _overlay_drafts(root, root_id)
+    _overlay_seen_cursors(root, root_id)
     return _find_in_tree(root, session_id)
 
 
@@ -2734,6 +2819,8 @@ def get_root_tree(session_id: str) -> Optional[dict]:
             _index_tree(root, file_signature=file_signature)
     with perf.timed("store.session.get_root_tree.overlay_drafts"):
         _overlay_drafts(root, root_id)
+    with perf.timed("store.session.get_root_tree.overlay_seen"):
+        _overlay_seen_cursors(root, root_id)
     return root
 
 
@@ -3431,6 +3518,10 @@ def delete_session(root_id: str) -> bool:
         _logger.debug("session search index delete failed", exc_info=True)
     try:
         _drafts_path(root_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        _seen_cursor_path(root_id).unlink(missing_ok=True)
     except OSError:
         pass
     return True
