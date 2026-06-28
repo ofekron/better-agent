@@ -229,6 +229,12 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
     _sessions_list_response_cache[key] = (time.monotonic(), content)
     return _sessions_list_response(content)
 
+
+def _sessions_list_cache_version(search_query: str) -> int:
+    if search_query:
+        return session_store.search_metadata_version()
+    return session_store.summary_version()
+
 _GIT_STATUS_TTL_SECONDS = 2.0
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _git_status_inflight: dict[tuple[str, str], asyncio.Task] = {}
@@ -3586,7 +3592,7 @@ async def get_sessions(
         effective_status_sort,
         connected_version,
         connected,
-        session_store.summary_version(),
+        _sessions_list_cache_version(search_query),
     )
     cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:
@@ -8870,7 +8876,7 @@ async def internal_mssg(
             detail="sender_session_id, one target, and message are required",
         )
     try:
-        target_session_id = _resolve_communication_target(body)
+        target_session_id = await _resolve_communication_target(body)
         return await coordinator.submit_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -8901,7 +8907,7 @@ async def internal_async_communicate(
             or str(body.get("target_worker_id") or "").strip()
         )
         if target_worker_pool and not has_exact_target:
-            target = _pick_idle_pool_worker(target_worker_pool)
+            target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
             if not target:
                 queued = await _enqueue_worker_pool_message(
                     tag=target_worker_pool,
@@ -8912,7 +8918,7 @@ async def internal_async_communicate(
                 return {"success": True, "queued": True, **queued}
             target_session_id = str(target.get("agent_session_id") or "")
         else:
-            target_session_id = _resolve_communication_target(body)
+            target_session_id = await _resolve_communication_target(body)
         return await coordinator.submit_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -8924,7 +8930,7 @@ async def internal_async_communicate(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _resolve_communication_target(body: dict) -> str:
+async def _resolve_communication_target(body: dict) -> str:
     target_session_id = str((body or {}).get("target_session_id") or "").strip()
     target_worker_id = str((body or {}).get("target_worker_id") or "").strip()
     target_worker_pool = str((body or {}).get("target_worker_pool") or "").strip()
@@ -8934,11 +8940,11 @@ def _resolve_communication_target(body: dict) -> str:
     if target_session_id:
         return target_session_id
     if target_worker_id:
-        worker = _find_worker_by_agent_session_id(target_worker_id)
+        worker = await asyncio.to_thread(_find_worker_by_agent_session_id, target_worker_id)
         if not worker:
             raise HTTPException(status_code=404, detail="target_worker_id does not exist")
         return str(worker.get("agent_session_id") or "")
-    target = _pick_idle_pool_worker(target_worker_pool)
+    target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
     if not target:
         raise HTTPException(status_code=409, detail="no idle worker in target_worker_pool")
     return str(target.get("agent_session_id") or "")
@@ -8959,7 +8965,7 @@ async def internal_ask(
             detail="sender_session_id, one target, and message are required",
         )
     try:
-        target_session_id = _resolve_communication_target(body)
+        target_session_id = await _resolve_communication_target(body)
         return await coordinator.ask_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,

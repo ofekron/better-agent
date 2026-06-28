@@ -505,6 +505,23 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "copy.deepcopy" not in cache_source
 
 
+def test_search_sessions_response_cache_uses_metadata_version() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = main_source.index("def _sessions_list_cache_version(")
+    helper_end = main_source.index("_GIT_STATUS_TTL_SECONDS", helper_start)
+    helper_source = main_source[helper_start:helper_end]
+    assert "session_store.search_metadata_version()" in helper_source
+    assert "session_store.summary_version()" in helper_source
+    route_start = main_source.index("async def get_sessions(")
+    route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "_sessions_list_cache_version(search_query)" in route_source
+
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "def search_metadata_version()" in store_source
+    assert "return _summary_metadata_version" in store_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source
@@ -691,6 +708,22 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     assert "extension_store.get_extension(extension_id)" in core_source
 
 
+def test_internal_communication_worker_lookup_is_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    resolver_start = source.index("async def _resolve_communication_target(")
+    resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
+    resolver_source = source[resolver_start:resolver_end]
+    assert "await asyncio.to_thread(_find_worker_by_agent_session_id" in resolver_source
+    assert "await asyncio.to_thread(_pick_idle_pool_worker" in resolver_source
+
+    async_start = source.index("async def internal_async_communicate(")
+    async_end = source.index("async def _resolve_communication_target(", async_start)
+    async_source = source[async_start:async_end]
+    assert "await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)" in async_source
+    assert "await _resolve_communication_target(body)" in async_source
+    assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
+
+
 if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
     test_ownership_projection_uses_dedicated_executor()
@@ -738,4 +771,6 @@ if __name__ == "__main__":
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
     test_builtin_extension_core_dispatch_precedes_backend_spec_lookup()
+    test_search_sessions_response_cache_uses_metadata_version()
+    test_internal_communication_worker_lookup_is_off_loop()
     print("PASS event loop blocking regressions")
