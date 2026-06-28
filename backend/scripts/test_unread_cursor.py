@@ -32,6 +32,7 @@ if _BACKEND not in sys.path:
 
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 import session_manager as session_manager_module  # noqa: E402
+import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -223,6 +224,62 @@ def test_mark_seen_uses_journal_latest_uid() -> None:
     print(f"{PASS} mark_seen_uses_journal_latest_uid")
 
 
+def test_mark_seen_avoids_full_tree_write() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("sidecar-head"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+
+    original_write = session_store.write_session_full
+
+    def guarded_write(*_args, **_kwargs):
+        raise AssertionError("mark_seen wrote the full session tree")
+
+    session_store.write_session_full = guarded_write
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_store.write_session_full = original_write
+    assert result == {"last_seen_event_uid": "sidecar-head"}, result
+    assert session_store.read_seen_cursors(sid).get(sid) == "sidecar-head"
+
+    session_manager._roots.clear()
+    session_manager._event_hydrated_roots.clear()
+    session_manager._unread_counts.clear()
+    session_manager._unread_hydrated.clear()
+    loaded = session_manager.get(sid)
+    assert loaded and loaded.get("last_seen_event_uid") == "sidecar-head"
+    print(f"{PASS} mark_seen_avoids_full_tree_write")
+
+
+def test_mark_unread_clears_seen_sidecar() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("clear-sidecar"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    session_manager.mark_seen(sid, "clear-sidecar")
+    assert session_store.read_seen_cursors(sid).get(sid) == "clear-sidecar"
+
+    session_manager.mark_unread(sid)
+    assert session_store.read_seen_cursors(sid).get(sid) is None
+
+    session_manager._roots.clear()
+    session_manager._event_hydrated_roots.clear()
+    session_manager._unread_counts.clear()
+    session_manager._unread_hydrated.clear()
+    loaded = session_manager.get(sid)
+    assert loaded and loaded.get("last_seen_event_uid") is None
+    print(f"{PASS} mark_unread_clears_seen_sidecar")
+
+
 def test_persistence_across_reload() -> None:
     """Persist `last_seen_event_uid`, then drop the in-memory
     SessionManager state and re-hydrate. Counter must rebuild
@@ -300,6 +357,8 @@ def main() -> int:
         test_mark_seen_zeros()
         test_mark_seen_does_not_copy_session_tree()
         test_mark_seen_uses_journal_latest_uid()
+        test_mark_seen_avoids_full_tree_write()
+        test_mark_unread_clears_seen_sidecar()
         test_persistence_across_reload()
         test_worker_fork_does_not_bump_root()
         print("ALL PASSED")
