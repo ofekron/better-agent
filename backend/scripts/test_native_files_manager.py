@@ -237,6 +237,7 @@ async def test_run_state_lookup_is_targeted_and_cached() -> None:
     from runs_dir import runs_root
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
     for name, sid in (("run-index-a", "INDEX-A-SID"), ("run-index-b", "INDEX-B-SID")):
         run_dir = root / name
@@ -260,6 +261,37 @@ async def test_run_state_lookup_is_targeted_and_cached() -> None:
     print("PASS test_run_state_lookup_is_targeted_and_cached")
 
 
+async def test_run_state_recent_index_is_reused_across_sids() -> None:
+    from runs_dir import runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    root = runs_root()
+    for name, sid in (("run-reuse-a", "REUSE-A-SID"), ("run-reuse-b", "REUSE-B-SID")):
+        run_dir = root / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            f'{{"session_id":"{sid}","jsonl_path":"/tmp/{sid}.jsonl"}}',
+            encoding="utf-8",
+        )
+    calls = 0
+    original_build = nfm_mod._build_recent_state_index
+
+    def counted_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_build(*args, **kwargs)
+
+    nfm_mod._build_recent_state_index = counted_build  # type: ignore
+    try:
+        assert str(nfm_mod._scan_run_state_for_jsonl("REUSE-A-SID")) == "/tmp/REUSE-A-SID.jsonl"
+        assert str(nfm_mod._scan_run_state_for_jsonl("REUSE-B-SID")) == "/tmp/REUSE-B-SID.jsonl"
+    finally:
+        nfm_mod._build_recent_state_index = original_build  # type: ignore
+    assert calls == 1, f"expected one recent state index build, got {calls}"
+    print("PASS test_run_state_recent_index_is_reused_across_sids")
+
+
 async def test_run_state_lookup_coalesces_concurrent_scans() -> None:
     from runs_dir import runs_root
     import threading
@@ -267,6 +299,7 @@ async def test_run_state_lookup_coalesces_concurrent_scans() -> None:
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
     nfm_mod._RUN_STATE_INFLIGHT.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
     run_dir = root / "run-coalesced"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -302,6 +335,7 @@ async def test_run_state_lookup_checks_recent_dirs_before_rg() -> None:
     from runs_dir import runs_root
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
     agent_sid = "RECENT-FIRST-SID"
     for i in range(nfm_mod._RUN_STATE_RECENT_SCAN_LIMIT + 10):
@@ -489,6 +523,7 @@ if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
+    asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_lookup_checks_recent_dirs_before_rg())
     asyncio.run(test_persisted_native_path_skips_run_state_lookup())

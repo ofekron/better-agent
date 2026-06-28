@@ -53,10 +53,12 @@ logger = logging.getLogger(__name__)
 _PRIMARY_JSONL_CACHE_TTL_S = 5.0
 _RUN_STATE_LOOKUP_TIMEOUT_S = 1.0
 _RUN_STATE_LOOKUP_CACHE_TTL_S = 5.0
+_RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_LOOKUP_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RUN_STATE_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
+_RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
 
 
 @dataclass
@@ -119,7 +121,7 @@ def _finish_run_state_lookup(root_key: str, agent_sid: str, path: Optional[Path]
 
 
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
-    recent = _recent_state_files_for_sid(root, agent_sid)
+    recent = _recent_state_index_for_root(root).get(agent_sid, [])
     if recent:
         return recent
     rg = shutil.which("rg")
@@ -153,8 +155,26 @@ def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     return [Path(line) for line in proc.stdout.splitlines() if line]
 
 
-def _recent_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
-    candidates: list[tuple[int, str]] = []
+def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
+    now = time.monotonic()
+    root_key = str(root)
+    candidates = _recent_state_candidates(root)
+    if not candidates:
+        return {}
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+        if cached is not None:
+            ts, fingerprint, index = cached
+            if fingerprint == candidates and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+                return index
+    index = _build_recent_state_index(candidates)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
+    return index
+
+
+def _recent_state_candidates(root: Path) -> tuple[tuple[int, int, str], ...]:
+    candidates: list[tuple[int, int, str]] = []
     try:
         with os.scandir(root) as entries:
             for entry in entries:
@@ -165,19 +185,25 @@ def _recent_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                     st = state_path.stat()
                 except OSError:
                     continue
-                candidates.append((st.st_mtime_ns, str(state_path)))
+                candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
     except OSError:
-        return []
-    newest = heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates)
-    matches: list[Path] = []
-    for _, state_path in newest:
+        return ()
+    return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates))
+
+
+def _build_recent_state_index(candidates: tuple[tuple[int, int, str], ...]) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for _, _, state_path in candidates:
         path = Path(state_path)
         try:
-            if agent_sid in path.read_text(encoding="utf-8", errors="ignore"):
-                matches.append(path)
-        except OSError:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
             continue
-    return matches
+        agent_sid = str(st.get("session_id") or "")
+        if not agent_sid:
+            continue
+        index.setdefault(agent_sid, []).append(path)
+    return index
 
 
 def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
