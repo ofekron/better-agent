@@ -55,9 +55,7 @@ def _install_path() -> Path | None:
     eid = _ext_id()
     if not eid:
         return None
-    record = extension_store.get_extension(eid) or {}
-    install = (record.get("source") or {}).get("install_path")
-    return Path(install).expanduser() if install else None
+    return extension_store.runtime_package_root(eid)
 
 
 def _system_prompt() -> str:

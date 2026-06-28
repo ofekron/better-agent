@@ -3868,6 +3868,8 @@ def test_frontend_extension_exports_frontend_modules() -> None:
         entries = extension_store.frontend_entrypoints()
         entry = next(item for item in entries if item["extension_id"] == "ofek.settings-module")
         modules = entry["frontend_modules"]
+        record = extension_store.get_extension("ofek.settings-module") or {}
+        v = str((record.get("source") or {}).get("commit_sha") or "")[:12]
         if modules != [
             {
                 "slot": "settings",
@@ -3875,7 +3877,7 @@ def test_frontend_extension_exports_frontend_modules() -> None:
                 "label": "Settings Module",
                 "kind": "module",
                 "module": "ui/settings.entry.js",
-                "module_url": "/api/extensions/ofek.settings-module/frontend/ui/settings.entry.js",
+                "module_url": f"/api/extensions/ofek.settings-module/frontend/ui/settings.entry.js?v={v}",
             }
         ]:
             raise AssertionError(modules)
@@ -4016,6 +4018,8 @@ def test_frontend_extension_exports_iframe_module() -> None:
         entries = extension_store.frontend_entrypoints()
         entry = next(item for item in entries if item["extension_id"] == "ofek.iframe-panel")
         modules = entry["frontend_modules"]
+        record = extension_store.get_extension("ofek.iframe-panel") or {}
+        v = str((record.get("source") or {}).get("commit_sha") or "")[:12]
         if modules != [
             {
                 "slot": "settings",
@@ -4023,7 +4027,7 @@ def test_frontend_extension_exports_iframe_module() -> None:
                 "label": "Iframe Panel",
                 "kind": "iframe",
                 "module": "ui/index.html",
-                "module_url": "/api/extensions/ofek.iframe-panel/frontend/ui/index.html",
+                "module_url": f"/api/extensions/ofek.iframe-panel/frontend/ui/index.html?v={v}",
             }
         ]:
             raise AssertionError(modules)

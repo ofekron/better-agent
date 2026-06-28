@@ -112,18 +112,21 @@ def reconcile_blocks(record: dict) -> None:
     desired: list[dict[str, Any]] = []
 
     if bool(record.get("enabled")):
-        install_path = Path(str((record.get("source") or {}).get("install_path") or ""))
-        state = normalize_state(record)
-        if state["global"]:
-            sections = _sections_for_level(manifest, install_path, "global")
-            if sections:
-                desired.append({"scope": "global", "project_root": None, "sections": sections})
-        for project_root in project_roots:
-            if not state["projects"].get(str(project_root), False):
-                continue
-            sections = _sections_for_level(manifest, install_path, "project")
-            if sections:
-                desired.append({"scope": "project", "project_root": project_root, "sections": sections})
+        import extension_store
+
+        install_path = extension_store.runtime_package_root_for_record(record)
+        if install_path is not None:
+            state = normalize_state(record)
+            if state["global"]:
+                sections = _sections_for_level(manifest, install_path, "global")
+                if sections:
+                    desired.append({"scope": "global", "project_root": None, "sections": sections})
+            for project_root in project_roots:
+                if not state["projects"].get(str(project_root), False):
+                    continue
+                sections = _sections_for_level(manifest, install_path, "project")
+                if sections:
+                    desired.append({"scope": "project", "project_root": project_root, "sections": sections})
 
     _pcs.reconcile_managed_instruction_blocks(
         owner=owner,
