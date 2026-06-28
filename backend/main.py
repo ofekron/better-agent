@@ -9731,7 +9731,9 @@ async def internal_list_workers_for_cwd(
         diverged = sid_rotated or any_pair_stale
         out.append({
             "agent_session_id": bc_sid,
-            "name": bc.get("name") or t("session.untitled_worker"),
+            "name": w.get("name") or bc.get("name") or t("session.untitled_worker"),
+            "display_name": bc.get("name") or t("session.untitled_worker"),
+            "role_key": w.get("role_key"),
             "cwd": worker_cwd,
             "registry_cwd": worker_cwd,
             "orchestration_mode": mode,
@@ -9842,6 +9844,7 @@ async def _provision_workers_from_body(body: dict):
                 "provider_id": spec.get("provider_id"),
                 "reasoning_effort": spec.get("reasoning_effort"),
                 "node_id": spec.get("node_id"),
+                "role_key": key,
                 "bare_config": bool(spec.get("bare_config", body_bare)),
                 "provision_prompt": spec.get("provision_prompt"),
                 "capability_contexts": spec.get("capability_contexts"),
@@ -9886,12 +9889,29 @@ def _find_worker_by_session_name(cwd: str, name: str) -> dict | None:
 
     raw = _ws._read()
     for worker in raw.get("workers", []):
+        worker_name = str(worker.get("name") or "").strip()
         bc = session_manager.get_lite(worker.get("agent_session_id"))
         worker_cwd = str((worker.get("cwd") or bc.get("cwd")) if bc else "").strip()
+        if worker_name and worker_name == name and worker_cwd == str(cwd or "").strip():
+            return {
+                "agent_session_id": worker.get("agent_session_id"),
+                "name": worker_name,
+                "display_name": bc.get("name") if bc else worker_name,
+                "role_key": worker.get("role_key"),
+                "cwd": worker.get("cwd") or (bc.get("cwd") if bc else cwd),
+                "registry_cwd": worker.get("cwd") or (bc.get("cwd") if bc else cwd),
+                "orchestration_mode": worker.get("orchestration_mode") or (bc.get("orchestration_mode") if bc else None),
+                "agent_sid": worker.get("agent_sid"),
+                "initialized": bool(bc.get("agent_session_id")) if bc else bool(worker.get("agent_sid")),
+                "diverged": False,
+                "delegation_count": worker.get("delegation_count", 0),
+            }
         if bc and bc.get("name") == name and worker_cwd == str(cwd or "").strip():
             return {
                 "agent_session_id": bc["id"],
-                "name": bc.get("name"),
+                "name": worker.get("name") or bc.get("name"),
+                "display_name": bc.get("name"),
+                "role_key": worker.get("role_key"),
                 "cwd": worker.get("cwd") or bc.get("cwd"),
                 "registry_cwd": worker.get("cwd") or bc.get("cwd"),
                 "orchestration_mode": worker.get("orchestration_mode") or bc.get("orchestration_mode"),
@@ -9908,6 +9928,7 @@ def _create_pending_worker_from_body(body: dict):
 
     cwd = body.get("cwd")
     description = body.get("description") or t("worker.default_name")
+    session_name = body.get("name") or description
     mode = body.get("orchestration_mode") or "native"
     provider_id = body.get("provider_id")
     try:
@@ -9928,7 +9949,7 @@ def _create_pending_worker_from_body(body: dict):
         raise HTTPException(status_code=400, detail=t("error.orchestration_mode_must_be_manager_or_native"))
     node_id = _resolve_session_node_id(body)
     bc = session_manager.create(
-        name=description,
+        name=session_name,
         model=model,
         cwd=cwd,
         orchestration_mode=mode,
@@ -9944,10 +9965,14 @@ def _create_pending_worker_from_body(body: dict):
         orchestration_mode=mode,
         agent_sid=None,
         node_id=node_id,
+        name=body.get("name"),
+        role_key=body.get("role_key"),
     )
     return {
         "agent_session_id": bc["id"],
-        "name": bc["name"],
+        "name": body.get("name") or bc["name"],
+        "display_name": bc["name"],
+        "role_key": body.get("role_key"),
         "cwd": cwd,
         "registry_cwd": cwd,
         "orchestration_mode": mode,
@@ -10018,11 +10043,15 @@ async def _create_worker_from_body(body: dict):
         orchestration_mode=mode,
         agent_sid=init_sid,
         node_id=node_id,
+        name=body.get("name"),
+        role_key=body.get("role_key"),
     )
     await coordinator.broadcast_workers_changed(None)
     return {
         "agent_session_id": bc["id"],
-        "name": bc["name"],
+        "name": body.get("name") or bc["name"],
+        "display_name": bc["name"],
+        "role_key": body.get("role_key"),
         "cwd": cwd,
         "registry_cwd": cwd,
         "orchestration_mode": mode,

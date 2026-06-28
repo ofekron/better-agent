@@ -7,8 +7,9 @@ The registry holds:
   1. `workers` — which Better Agent sessions are delegate-able, what
      their orchestration mode is, and which agent_sid the manager forks
      off. Each record carries the worker session's cwd for filtering and
-     execution. Description is intentionally NOT stored — the Better Agent session's
-     `name` is the source of truth (looked up lazily on read).
+     execution. Provisioned workers also store their stable worker `name`
+     and `role_key`; the Better Agent session title is user/provider-owned
+     display state and can change independently.
 
   2. `forks` — the per-(caller Better Agent session, target Better Agent session)
      fork session id. Each delegate fork is now a full Better Agent session (kind
@@ -29,6 +30,8 @@ Storage: one JSON file at ~/.better-claude/workers/global.json with shape:
         "workers": [
             {
                 "agent_session_id": str,
+                "name": str | None,
+                "role_key": str | None,
                 "cwd": str,
                 "orchestration_mode": "manager" | "native",
                 "agent_sid": str,           # what we fork off
@@ -206,6 +209,8 @@ def upsert_worker(
     orchestration_mode: str,
     agent_sid: Optional[str],
     node_id: str = "primary",
+    name: Optional[str] = None,
+    role_key: Optional[str] = None,
 ) -> dict:
     if orchestration_mode == "manager":
         orchestration_mode = "team"
@@ -223,10 +228,16 @@ def upsert_worker(
                 w["orchestration_mode"] = orchestration_mode
                 w["agent_sid"] = agent_sid
                 w["node_id"] = node_id
+                if name:
+                    w["name"] = name
+                if role_key:
+                    w["role_key"] = role_key
                 _write(cwd, registry)
                 return w
         record = {
             "agent_session_id": agent_session_id,
+            "name": name,
+            "role_key": role_key,
             "cwd": cwd,
             "orchestration_mode": orchestration_mode,
             "agent_sid": agent_sid,

@@ -144,6 +144,50 @@ def test_provision_workers_is_idempotent_by_role_key():
     assert all(worker["created"] is False for worker in second_workers)
 
 
+def test_provision_workers_remains_idempotent_after_session_title_changes():
+    from session_manager import manager as session_manager
+
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/title-project",
+        "workers": [
+            {
+                "role_key": "testape",
+                "description": "TestApe worker seed",
+                "orchestration_mode": "team",
+            },
+        ],
+    }
+
+    first = _post_team_ui_provision(client, payload)
+    assert first.status_code == 200, first.text
+    first_worker = first.json()["workers"][0]
+    assert first_worker["name"] == "worker:testape"
+
+    session_manager.rename(first_worker["agent_session_id"], "Execute TestApe e2e testing task")
+
+    second = _post_team_ui_provision(client, payload)
+    assert second.status_code == 200, second.text
+    second_worker = second.json()["workers"][0]
+    assert second_worker["agent_session_id"] == first_worker["agent_session_id"]
+    assert second_worker["created"] is False
+    assert second_worker["name"] == "worker:testape"
+    assert second_worker["display_name"] == "Execute TestApe e2e testing task"
+
+    listed = client.post(
+        "/api/internal/workers/list",
+        json={"cwd": "/tmp/title-project"},
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert listed.status_code == 200, listed.text
+    listed_worker = listed.json()["workers"][0]
+    assert listed_worker["agent_session_id"] == first_worker["agent_session_id"]
+    assert listed_worker["name"] == "worker:testape"
+    assert listed_worker["display_name"] == "Execute TestApe e2e testing task"
+
+
 def test_provision_workers_allows_per_worker_cwd():
     init_calls = []
 
@@ -438,6 +482,7 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
 
 if __name__ == "__main__":
     test_provision_workers_is_idempotent_by_role_key()
+    test_provision_workers_remains_idempotent_after_session_title_changes()
     test_provision_workers_allows_per_worker_cwd()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()
