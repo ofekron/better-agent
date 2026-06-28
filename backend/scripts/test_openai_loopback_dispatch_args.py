@@ -27,6 +27,7 @@ _test_home.isolate("bc-test-openai-loopback-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import runner_openai
+import extension_store
 
 
 def _make_emitter() -> runner_openai.EventEmitter:
@@ -194,6 +195,118 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
     assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["target_session_id"] == "w1"
     assert captured[0][1]["message"] == "review"
+
+
+def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
+    captured: list[tuple[str, dict]] = []
+    original_post = runner_openai._post_loopback_sync
+    original_ready = extension_store.is_extension_runtime_ready
+
+    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+        captured.append((kwargs["url_path"], payload))
+        return {
+            "workers": [
+                {
+                    "agent_session_id": "worker-1",
+                    "name": "worker:testape",
+                    "created": True,
+                    "orchestration_mode": "team",
+                    "registry_cwd": "/repo",
+                }
+            ]
+        }
+
+    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    extension_store.is_extension_runtime_ready = lambda _extension_id: True  # type: ignore[assignment]
+    try:
+        handlers = runner_openai._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://backend",
+                "internal_token": "tok",
+                "app_session_id": "sender-1",
+            },
+            cwd="/repo",
+            model="model-x",
+        )
+        assert "ensure_named_worker" in handlers
+        emitter = _make_emitter()
+        call = {
+            "id": "call_named_worker",
+            "name": "ensure_named_worker",
+            "arguments": json.dumps(
+                {
+                    "name": "testape",
+                    "cwd": "/repo",
+                    "orchestration_mode": "team",
+                    "provision_prompt": "seed",
+                }
+            ),
+        }
+        result = asyncio.run(
+            runner_openai._dispatch_tool(
+                call,
+                Path("/tmp"),
+                "sender-1",
+                Path("/tmp"),
+                True,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                handlers,
+            )
+        )
+    finally:
+        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        extension_store.is_extension_runtime_ready = original_ready  # type: ignore[assignment]
+
+    parsed = json.loads(result)
+    assert parsed["agent_session_id"] == "worker-1"
+    assert captured, "ensure_named_worker handler never posted to backend"
+    endpoint, payload = captured[0]
+    assert endpoint == "/api/internal/workers/provision"
+    assert payload["cwd"] == "/repo"
+    spec = payload["workers"][0]
+    assert spec["role_key"] == "testape"
+    assert spec["orchestration_mode"] == "team"
+    assert spec["provision_prompt"] == "seed"
+
+
+def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
+    base = {
+        "backend_url": "http://backend",
+        "internal_token": "tok",
+        "app_session_id": "sender-1",
+    }
+
+    without_team = runner_openai._tool_schemas_for_run(
+        inputs=base,
+        capabilities_enabled=False,
+        loopback_enabled=True,
+        team_manager_enabled=False,
+        team_orchestration_enabled=False,
+        open_file_panel_enabled=False,
+        file_editing_mode=False,
+    )
+    assert all(
+        schema.get("function", {}).get("name") != "ensure_named_worker"
+        for schema in without_team
+    )
+
+    with_team = runner_openai._tool_schemas_for_run(
+        inputs=base,
+        capabilities_enabled=False,
+        loopback_enabled=True,
+        team_manager_enabled=False,
+        team_orchestration_enabled=True,
+        open_file_panel_enabled=False,
+        file_editing_mode=False,
+    )
+    tool = next(
+        schema for schema in with_team
+        if schema.get("function", {}).get("name") == "ensure_named_worker"
+    )
+    assert tool["function"]["parameters"]["required"] == ["name", "cwd", "orchestration_mode"]
 
 
 if __name__ == "__main__":

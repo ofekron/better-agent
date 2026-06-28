@@ -492,6 +492,63 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
         main._provision_lock = real_lock
 
 
+def test_provision_broadcasts_created_worker_before_later_failure():
+    import asyncio as _asyncio
+
+    broadcasts = []
+    create_order = []
+    body = {
+        "cwd": "/tmp/partial-project",
+        "workers": [
+            {"role_key": "created-worker", "orchestration_mode": "native"},
+            {"role_key": "failing-worker", "orchestration_mode": "native"},
+        ],
+    }
+
+    async def fake_broadcast(cwd):
+        broadcasts.append(cwd)
+
+    def fake_find(_cwd, _name):
+        return None
+
+    async def fake_create(b, *_args, **_kwargs):
+        create_order.append(b["role_key"])
+        if b["role_key"] == "failing-worker":
+            raise RuntimeError("init failed")
+        return {
+            "agent_session_id": "bc-created",
+            "name": b["name"],
+            "cwd": b["cwd"],
+            "registry_cwd": b["cwd"],
+            "orchestration_mode": "native",
+            "agent_sid": "agent-created",
+            "initialized": True,
+            "diverged": False,
+            "delegation_count": 0,
+        }
+
+    real_find = main._find_worker_by_session_name
+    real_create = main._create_worker_from_body
+    real_broadcast = main.coordinator.broadcast_workers_changed
+    main._find_worker_by_session_name = fake_find
+    main._create_worker_from_body = fake_create
+    main.coordinator.broadcast_workers_changed = fake_broadcast
+    try:
+        try:
+            _asyncio.run(main._provision_workers_from_body(body))
+        except RuntimeError as exc:
+            assert str(exc) == "init failed"
+        else:
+            raise AssertionError("expected failing worker to abort the batch")
+    finally:
+        main._find_worker_by_session_name = real_find
+        main._create_worker_from_body = real_create
+        main.coordinator.broadcast_workers_changed = real_broadcast
+
+    assert create_order == ["created-worker", "failing-worker"]
+    assert broadcasts == [None]
+
+
 if __name__ == "__main__":
     test_provision_workers_is_idempotent_by_role_key()
     test_provision_workers_remains_idempotent_after_session_title_changes()
@@ -502,4 +559,5 @@ if __name__ == "__main__":
     test_target_init_accepts_custom_provision_prompt()
     test_target_init_anchors_prep_events_to_provisioning_message()
     test_concurrent_provision_of_same_worker_creates_exactly_one()
+    test_provision_broadcasts_created_worker_before_later_failure()
     print("PASS: provision workers is idempotent by role key")

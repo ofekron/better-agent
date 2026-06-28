@@ -15,8 +15,8 @@ provider-native CLI quirks:
   - native and team/manager mode both run through this in-process loop.
   - in-process coding tools: Bash, Read, Write, Edit, Grep, Glob.
   - BA loopback tools: mssg, ask, delegate_task, create_session,
-    create_sub_session, create_worker, open_file_panel, request_user_input,
-    start_file_discussion, and scoped capability load/release.
+    create_sub_session, create_worker, ensure_named_worker, open_file_panel,
+    request_user_input, start_file_discussion, and scoped capability load/release.
   - fork is a pure history copy to a fresh BA-owned OpenAI agent session.
   - steering is appended as the next user message before the next model round.
   - text, file, and image attachments are encoded directly for Chat
@@ -54,6 +54,7 @@ from orchestration_tool_descriptions import (
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
@@ -671,6 +672,23 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "cwd": {"type": "string"},
+        "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
+        "provision_prompt": {"type": "string"},
+        "description": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
+        "node_id": {"type": "string"},
+    },
+    "required": ["name", "cwd", "orchestration_mode"],
+    "additionalProperties": False,
+}
+
 _OPEN_FILE_PANEL_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -802,12 +820,13 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "ensure_named_worker",
     "mssg",
 })
 
 _ORCHESTRATION_TOOL_NAMES = frozenset({
     "mssg", "ask", "delegate_task", "create_session", "create_sub_session",
-    "create_worker", "open_file_panel", "request_user_input",
+    "create_worker", "ensure_named_worker", "open_file_panel", "request_user_input",
     "start_file_discussion",
 })
 
@@ -875,6 +894,7 @@ def _tool_schemas_for_run(
     capabilities_enabled: bool,
     loopback_enabled: bool,
     team_manager_enabled: bool,
+    team_orchestration_enabled: bool,
     open_file_panel_enabled: bool,
     file_editing_mode: bool,
 ) -> list[dict]:
@@ -887,9 +907,15 @@ def _tool_schemas_for_run(
     schemas = _filtered_core_tool_schemas(inputs)
     disabled = _disabled_builtin_tools(inputs)
     if loopback_enabled:
-        if team_manager_enabled:
+        if team_manager_enabled and team_orchestration_enabled:
             schemas.append(_function_tool_schema(
                 "create_worker", _CREATE_WORKER_DESCRIPTION, _CREATE_WORKER_INPUT_SCHEMA,
+            ))
+        if team_orchestration_enabled and "ensure_named_worker" not in disabled:
+            schemas.append(_function_tool_schema(
+                "ensure_named_worker",
+                _ENSURE_NAMED_WORKER_DESCRIPTION,
+                _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
             ))
         mssg_sender_session_id = str(
             inputs.get("mssg_sender_session_id") or inputs.get("app_session_id") or ""
@@ -1059,6 +1085,66 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
             return _dynamic_tool_text_result(f"create_worker failed: {e}", success=False)
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def ensure_named_worker(params: dict) -> str:
+        args = _args(params)
+        name = str(args.get("name") or "").strip()
+        worker_cwd = str(args.get("cwd") or "").strip()
+        orchestration_mode = str(args.get("orchestration_mode") or "").strip()
+        if not name or not worker_cwd or not orchestration_mode:
+            return _dynamic_tool_text_result(
+                "name, cwd and orchestration_mode are required",
+                success=False,
+            )
+        if orchestration_mode == "manager":
+            orchestration_mode = "team"
+        if orchestration_mode not in ("team", "native"):
+            return _dynamic_tool_text_result(
+                "orchestration_mode must be 'team' or 'native'",
+                success=False,
+            )
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        spec = {
+            "role_key": name,
+            "description": args.get("description") or f"worker:{name}",
+            "orchestration_mode": orchestration_mode,
+            "provision_prompt": args.get("provision_prompt"),
+            "provider_id": args.get("provider_id"),
+            "model": args.get("model"),
+            "reasoning_effort": args.get("reasoning_effort"),
+            "node_id": node_id,
+        }
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {"cwd": worker_cwd, "workers": [spec]},
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/workers/provision",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("ensure_named_worker dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"ensure_named_worker failed: {e}", success=False)
+        workers = (result or {}).get("workers") or []
+        if not workers:
+            return _dynamic_tool_text_result(
+                "ensure_named_worker provision returned no worker",
+                success=False,
+            )
+        worker = workers[0]
+        return _dynamic_tool_json_result(
+            {
+                "agent_session_id": worker.get("agent_session_id"),
+                "name": worker.get("name"),
+                "created": bool(worker.get("created")),
+                "orchestration_mode": worker.get("orchestration_mode"),
+                "registry_cwd": worker.get("registry_cwd") or worker.get("cwd"),
+            },
+            success=True,
+        )
 
     async def mssg(params: dict) -> str:
         args = _args(params)
@@ -1317,6 +1403,8 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         team_orchestration_ready = False
     if (inputs.get("mode") or "native") == "manager" and team_orchestration_ready:
         handlers["create_worker"] = create_worker
+    if team_orchestration_ready and "ensure_named_worker" not in disabled:
+        handlers["ensure_named_worker"] = ensure_named_worker
     if mssg_sender_session_id:
         if "mssg" not in disabled:
             handlers["mssg"] = mssg
@@ -1424,6 +1512,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     mode = inputs.get("mode") or "native"
     loopback_enabled = capabilities_enabled
     team_manager_enabled = mode == "manager"
+    try:
+        import extension_store
+        team_orchestration_enabled = extension_store.is_extension_runtime_ready(
+            extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        )
+    except Exception:
+        team_orchestration_enabled = False
     open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     tool_schemas = _tool_schemas_for_run(
@@ -1431,6 +1526,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         capabilities_enabled=capabilities_enabled,
         loopback_enabled=loopback_enabled,
         team_manager_enabled=team_manager_enabled,
+        team_orchestration_enabled=team_orchestration_enabled,
         open_file_panel_enabled=open_file_panel_enabled,
         file_editing_mode=file_editing_mode,
     )
