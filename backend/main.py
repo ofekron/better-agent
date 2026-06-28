@@ -88,6 +88,8 @@ _session_event_meta_cache: dict[
     str,
     tuple[tuple[int, int], bool, int, dict[str, int]],
 ] = {}
+_session_event_meta_warm_inflight: set[str] = set()
+_SESSION_EVENT_META_WARM_LIMIT = 20
 _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes],
@@ -181,6 +183,64 @@ def _session_event_meta(root_id: str) -> tuple[bool, int, dict[str, int]]:
         dict(max_context),
     )
     return has_events, barrier_seq, dict(max_context)
+
+
+def _session_event_meta_cache_fresh(root_id: str) -> bool:
+    cached = _session_event_meta_cache.get(root_id)
+    return cached is not None and cached[0] == _session_event_file_fingerprint(root_id)
+
+
+def _session_event_meta_roots_for_page(page: list[dict]) -> list[str]:
+    root_ids: list[str] = []
+    seen: set[str] = set()
+    for session in page:
+        if len(root_ids) >= _SESSION_EVENT_META_WARM_LIMIT:
+            break
+        if session.get("node_id") not in (None, "primary"):
+            continue
+        root_id = session.get("id")
+        if not isinstance(root_id, str) or not root_id or root_id in seen:
+            continue
+        if int(session.get("message_count") or 0) <= 0:
+            continue
+        seen.add(root_id)
+        root_ids.append(root_id)
+    return root_ids
+
+
+async def _warm_session_event_meta_roots(root_ids: list[str]) -> None:
+    pending: list[str] = []
+    for root_id in root_ids:
+        if root_id in _session_event_meta_warm_inflight:
+            continue
+        if _session_event_meta_cache_fresh(root_id):
+            continue
+        _session_event_meta_warm_inflight.add(root_id)
+        pending.append(root_id)
+    if not pending:
+        return
+
+    try:
+        await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)
+    finally:
+        for root_id in pending:
+            _session_event_meta_warm_inflight.discard(root_id)
+
+
+def _warm_session_event_meta_roots_sync(root_ids: list[str]) -> None:
+    for root_id in root_ids:
+        try:
+            _session_event_meta(root_id)
+        except Exception:
+            logger.debug("session event meta warm failed for %s", root_id, exc_info=True)
+
+
+def _schedule_session_event_meta_warm(page: list[dict]) -> None:
+    root_ids = _session_event_meta_roots_for_page(page)
+    if not root_ids:
+        return
+    task = asyncio.create_task(_warm_session_event_meta_roots(root_ids))
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
 def _machine_nodes_enabled_cached() -> bool:
@@ -3602,6 +3662,7 @@ async def get_sessions(
     if not connected:
         with perf.timed("sessions.list.local_page_thread"):
             page, total = await asyncio.to_thread(_build_local_sessions_page_for_list, **filters)
+        _schedule_session_event_meta_warm(page)
         return _sessions_list_cache_put(cache_key, {
             "sessions": page,
             "offset": offset,
@@ -3717,6 +3778,7 @@ async def get_sessions(
             {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
             for session in page
         ]
+    _schedule_session_event_meta_warm(page)
     return _sessions_list_cache_put(cache_key, {
         "sessions": page,
         "offset": offset,
