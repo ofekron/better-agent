@@ -14,6 +14,7 @@ to it.
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import TypeVar
 
@@ -54,9 +55,16 @@ def write_json(path: Path, data, mode: int = 0o700) -> None:
     partial write must never become the canonical copy. The tmp is
     cleaned up on failure so a crash does not leave debris behind."""
     path.parent.mkdir(mode=mode, parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
         os.replace(tmp, path)
     except Exception:
         try:

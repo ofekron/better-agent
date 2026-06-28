@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
 
+from json_store import write_json
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -161,11 +161,7 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
-    """Crash-safe JSON write for run-dir state. Thin alias over the single
-    canonical writer in `json_store` so run-dir and store writes share one
-    atomicity recipe."""
-    from json_store import write_json
-
+    """Crash-safe JSON write for run-dir state."""
     write_json(path, data)
 
 
