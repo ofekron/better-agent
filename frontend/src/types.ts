@@ -886,7 +886,7 @@ export interface Session {
    * (backend migrates on read). CLI-created sessions are tagged "cli" so
    * the sidebar can render a badge. "import" = ingested from a native
    * provider CLI session. */
-  source?: "web" | "cli" | "extension" | "import";
+  source?: "web" | "cli" | "extension" | "import" | "internal";
   /** Whether the user is AWARE of having created this session (UI/CLI
    * create, import, file-edit, a fork, or a worker the user approved via
    * the popup) versus a session the system or an agent spun up on its own

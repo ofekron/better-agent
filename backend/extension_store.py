@@ -151,6 +151,7 @@ BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
 BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
 BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
+BUILTIN_TASKS_EXTENSION_ID = _pid("tasks")
 BUILTIN_ASSISTANT_EXTENSION_ID = _pid("assistant")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
@@ -227,6 +228,7 @@ _FRONTEND_BUILTIN_KEYS = {
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
     "testape": BUILTIN_TESTAPE_EXTENSION_ID,
     "scheduler": BUILTIN_SCHEDULER_EXTENSION_ID,
+    "tasks": BUILTIN_TASKS_EXTENSION_ID,
     "assistant": BUILTIN_ASSISTANT_EXTENSION_ID,
 }
 
@@ -2430,7 +2432,8 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
         if extension_id in deleted and extension_id not in REQUIRED_EXTENSION_IDS:
             continue
         record = data["extensions"].get(extension_id)
-        package_dir = (repo_root / extension_path).resolve() if repo_root is not None else None
+        package_repo_root = repo_root
+        package_dir = (package_repo_root / extension_path).resolve() if package_repo_root is not None else None
         if (
             record
             and extension_id not in REQUIRED_EXTENSION_IDS
@@ -2494,9 +2497,9 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
             and _required_marketplace_repo_root() is None
             and os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") != "1"
         ):
-            repo_root = _repo_root()
-            package_dir = (repo_root / extension_path).resolve()
-        if repo_root is None or package_dir is None or not package_dir.exists():
+            package_repo_root = _repo_root()
+            package_dir = (package_repo_root / extension_path).resolve()
+        if package_repo_root is None or package_dir is None or not package_dir.exists():
             if extension_id not in REQUIRED_EXTENSION_IDS:
                 continue
             placeholder_error = ""
@@ -2545,7 +2548,7 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
                     record["updated_at"] = _now()
                     changed = True
             continue
-        if not package_dir.is_relative_to(repo_root):
+        if not package_dir.is_relative_to(package_repo_root):
             raise ExtensionError("Private extension path escapes configured repo root")
         if not package_dir.exists():
             if record is None:
@@ -2849,11 +2852,28 @@ def _smoke_python(package_dir: Path) -> Path:
     return Path(sys.executable)
 
 
+def _smoke_static_modules(entrypoints: dict[str, Any]) -> dict[str, str]:
+    """Modules that should be syntax-checked, not imported, during smoke.
+
+    For file-path MCP entrypoints (``python: mcp/server.py``), compile the exact
+    declared file. Import resolution for a local ``mcp/`` namespace is otherwise
+    shadowed by the installed third-party ``mcp`` package, so ``find_spec`` can
+    either compile the wrong file or fail for modules such as
+    ``mcp.worker_server``.
+    """
+    modules = {module: "" for module in _required_smoke_python_modules(entrypoints)}
+    for item in entrypoints.get("mcp") or []:
+        python_path = item.get("python")
+        if python_path:
+            modules[_python_path_to_module(python_path)] = python_path
+    return modules
+
+
 def _run_python_module_smoke(
     package_dir: Path,
     modules: list[str],
     *,
-    static_modules: set[str] | None = None,
+    static_modules: dict[str, str] | set[str] | None = None,
 ) -> None:
     if not modules:
         return
@@ -2864,10 +2884,22 @@ def _run_python_module_smoke(
     existing_python_path = os.environ.get("PYTHONPATH")
     if existing_python_path:
         python_path_parts.append(existing_python_path)
+    if isinstance(static_modules, dict):
+        static_payload = dict(static_modules)
+    else:
+        static_payload = {module: "" for module in (static_modules or set())}
     code = (
         "import importlib, importlib.util, json, py_compile, sys\n"
-        "static = set(json.loads(sys.argv[2]))\n"
+        "from pathlib import Path\n"
+        "static = json.loads(sys.argv[2])\n"
+        "root = Path(sys.argv[3]).resolve()\n"
         "for module in json.loads(sys.argv[1]):\n"
+        "    if module in static and static[module]:\n"
+        "        path = (root / static[module]).resolve()\n"
+        "        if not path.is_relative_to(root):\n"
+        "            raise RuntimeError(f'smoke path escapes package: {static[module]}')\n"
+        "        py_compile.compile(str(path), doraise=True)\n"
+        "        continue\n"
         "    spec = importlib.util.find_spec(module)\n"
         "    if spec is None:\n"
         "        raise ModuleNotFoundError(module)\n"
@@ -2884,7 +2916,8 @@ def _run_python_module_smoke(
             "-c",
             code,
             json.dumps(modules),
-            json.dumps(sorted(static_modules or set())),
+            json.dumps(static_payload, sort_keys=True),
+            str(package_dir),
         ],
         check=False,
         capture_output=True,
@@ -2911,7 +2944,7 @@ def _run_extension_smoke_test(manifest: dict[str, Any], package_dir: Path) -> di
     _run_python_module_smoke(
         package_dir,
         python_modules,
-        static_modules=set(_required_smoke_python_modules(manifest.get("entrypoints") or {})),
+        static_modules=_smoke_static_modules(manifest.get("entrypoints") or {}),
     )
     return {
         "status": "passed",
@@ -2946,7 +2979,7 @@ def _record_smoke_test_passes(record: dict[str, Any]) -> bool:
         _run_python_module_smoke(
             install_path,
             python_modules,
-            static_modules=set(python_modules),
+            static_modules=_smoke_static_modules(manifest.get("entrypoints") or {}),
         )
         return True
     except ExtensionError:
@@ -3806,6 +3839,20 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         for item in inputs.get("disabled_builtin_extensions") or []
         if str(item or "").strip()
     ]
+    # The launcher subprocess re-resolves the MCP config from env via
+    # `_runtime_inputs()`, then re-evaluates the manifest predicate. A predicate
+    # that gates on the per-session active-capability set (e.g. testape's
+    # `contains: {active_capability_ids: ...}`) would otherwise fail closed in
+    # the launcher path — the entry is built (cap active at build time) but the
+    # subprocess has no active set to match — so a loaded capability's MCP would
+    # advertise tools whose server then refuses to start. Thread the active set
+    # through so the launcher predicate evaluates identically to the in-process
+    # path. Comma-joined; ids never contain commas (validated `<ext_id>:<cap_id>`).
+    active_capability_ids = [
+        str(item).strip()
+        for item in inputs.get("active_capability_ids") or []
+        if str(item or "").strip()
+    ]
     return dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
         "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
@@ -3819,6 +3866,7 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         if bool(inputs.get("open_file_panel_enabled")) and not bool(inputs.get("bare_config"))
         else "0",
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
+        "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
     })
 
 

@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "프로젝트 파일 탐색",
   "sidebar.sessionsTab": "세션",
   "sidebar.workersTab": "워커",
+  "sidebar.tasksTab": "작업",
   "app.reconciling": "조율 중…",
   "app.reconcilingTitle": "백엔드가 지연된 이벤트를 조율하는 중입니다. 0.3초 초과일 때만 표시됩니다.",
   "app.supervisorBannerDismiss": "닫기",
@@ -782,5 +783,9 @@
   "setup.subtitle": "환영합니다 — 시작하려면 로그인을 만드세요.",
   "setup.unknownError": "자격 증명을 저장할 수 없습니다 (상태 {{status}}).",
   "todos.previous": "이전",
-  "toolCall.canvasTitle": "캔버스"
+  "toolCall.canvasTitle": "캔버스",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

@@ -149,6 +149,8 @@ def _build_index() -> list[dict]:
             continue
         if working_mode.should_hide_from_sidebar(data):
             continue
+        if not data.get("user_initiated"):
+            continue
         if data.get("archived"):
             continue
         cwd = data.get("cwd", "") or ""

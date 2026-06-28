@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Parcourir les fichiers du projet",
   "sidebar.sessionsTab": "Sessions",
   "sidebar.workersTab": "Workers",
+  "sidebar.tasksTab": "Tâches",
   "app.reconciling": "Réconciliation…",
   "app.reconcilingTitle": "Le backend réconcilie les événements en retard. Affiché uniquement lorsque >0.3s.",
   "app.supervisorBannerDismiss": "Fermer",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Bienvenue — créez votre identifiant pour démarrer.",
   "setup.unknownError": "Impossible d'enregistrer les identifiants (statut {{status}}).",
   "todos.previous": "Précédent",
-  "toolCall.canvasTitle": "Canvas"
+  "toolCall.canvasTitle": "Canvas",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

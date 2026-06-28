@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Navegar pelos arquivos do projeto",
   "sidebar.sessionsTab": "Sessões",
   "sidebar.workersTab": "Trabalhadores",
+  "sidebar.tasksTab": "Tarefas",
   "app.reconciling": "Reconciliando…",
   "app.reconcilingTitle": "O backend está reconciliando eventos atrasados. Exibido apenas quando >0,3s.",
   "app.supervisorBannerDismiss": "Dispensar",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Bem-vindo — crie seu login para começar.",
   "setup.unknownError": "Não foi possível salvar as credenciais (status {{status}}).",
   "todos.previous": "Anterior",
-  "toolCall.canvasTitle": "Canvas"
+  "toolCall.canvasTitle": "Canvas",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

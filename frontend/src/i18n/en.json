@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Browse project files",
   "sidebar.sessionsTab": "Sessions",
   "sidebar.workersTab": "Workers",
+  "sidebar.tasksTab": "Tasks",
   "app.reconciling": "Reconciling…",
   "app.reconcilingTitle": "Backend is reconciling lagged events. Shown only when >0.3s.",
   "app.supervisorBannerDismiss": "Dismiss",
@@ -831,5 +832,9 @@
   "toolApproval.unknownTool": "(unknown tool)",
   "toolApproval.noArgs": "(no arguments)",
   "toolApproval.approve": "Approve",
-  "toolApproval.deny": "Deny"
+  "toolApproval.deny": "Deny",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

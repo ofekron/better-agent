@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Projectbestanden doorbladeren",
   "sidebar.sessionsTab": "Sessies",
   "sidebar.workersTab": "Workers",
+  "sidebar.tasksTab": "Taken",
   "app.reconciling": "Bezig met reconciliëren…",
   "app.reconcilingTitle": "Backend reconcilieert vertraagde gebeurtenissen. Alleen zichtbaar bij >0.3s.",
   "app.supervisorBannerDismiss": "Negeren",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Welkom — maak je login aan om te beginnen.",
   "setup.unknownError": "Kon inloggegevens niet opslaan (status {{status}}).",
   "todos.previous": "Vorige",
-  "toolCall.canvasTitle": "Canvas"
+  "toolCall.canvasTitle": "Canvas",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

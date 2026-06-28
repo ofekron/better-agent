@@ -16,6 +16,7 @@ const BUILTIN_FLAG_KEYS = [
   "promptEngineer",
   "browserHarness",
   "testape",
+  "tasks",
 ] as const;
 
 export type BuiltinExtensionFlags = Record<(typeof BUILTIN_FLAG_KEYS)[number], boolean>;
@@ -33,6 +34,7 @@ const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   promptEngineer: true,
   browserHarness: true,
   testape: true,
+  tasks: true,
 };
 
 export function useBuiltinExtensionFlags(

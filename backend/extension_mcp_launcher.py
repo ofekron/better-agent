@@ -35,6 +35,15 @@ def _runtime_inputs() -> dict:
             for item in get_env("BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS").split(",")
             if item
         ],
+        # Threaded from `_native_mcp_launcher_env` so a capability-gated MCP
+        # (predicate `contains: {active_capability_ids: ...}`) re-resolves the
+        # same way it was built; without this the launcher predicate fails
+        # closed and the server refuses to start (`extension MCP unavailable`).
+        "active_capability_ids": [
+            item
+            for item in get_env("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS").split(",")
+            if item
+        ],
     }
 
 

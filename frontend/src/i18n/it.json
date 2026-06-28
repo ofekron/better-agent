@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Sfoglia i file del progetto",
   "sidebar.sessionsTab": "Sessioni",
   "sidebar.workersTab": "Worker",
+  "sidebar.tasksTab": "Attività",
   "app.reconciling": "Riconciliazione…",
   "app.reconcilingTitle": "Il backend sta riconciliando gli eventi in ritardo. Mostrato solo quando >0.3s.",
   "app.supervisorBannerDismiss": "Ignora",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Benvenuto — crea il tuo login per iniziare.",
   "setup.unknownError": "Impossibile salvare le credenziali (stato {{status}}).",
   "todos.previous": "Precedente",
-  "toolCall.canvasTitle": "Canvas"
+  "toolCall.canvasTitle": "Canvas",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

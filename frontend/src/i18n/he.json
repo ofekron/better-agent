@@ -58,6 +58,7 @@
   "sidebar.toolsTitle": "עיון בקבצי הפרויקט",
   "sidebar.sessionsTab": "שיחות",
   "sidebar.workersTab": "Workerים",
+  "sidebar.tasksTab": "משימות",
   "app.reconciling": "מסנכרן…",
   "app.reconcilingTitle": "השרת מסנכרן אירועים מאוחרים (>0.3 שניות).",
   "app.supervisorBannerDismiss": "סגור",
@@ -817,5 +818,9 @@
   "toolApproval.unknownTool": "(כלי לא ידוע)",
   "toolApproval.noArgs": "(ללא ארגומנטים)",
   "toolApproval.approve": "אשר",
-  "toolApproval.deny": "דחה"
+  "toolApproval.deny": "דחה",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

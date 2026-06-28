@@ -59,6 +59,7 @@
   "sidebar.toolsTitle": "Просматривать файлы проекта",
   "sidebar.sessionsTab": "Сессии",
   "sidebar.workersTab": "Воркеры",
+  "sidebar.tasksTab": "Задачи",
   "app.reconciling": "Сверка…",
   "app.reconcilingTitle": "Бэкенд сверяет отстающие события. Показывается только когда >0.3 c.",
   "app.supervisorBannerDismiss": "Скрыть",
@@ -782,5 +783,9 @@
   "setup.subtitle": "Добро пожаловать — создайте логин для начала работы.",
   "setup.unknownError": "Не удалось сохранить учётные данные (статус {{status}}).",
   "todos.previous": "Предыдущие",
-  "toolCall.canvasTitle": "Холст"
+  "toolCall.canvasTitle": "Холст",
+  "session.source.user": "User-created",
+  "session.source.system": "System/agent-created",
+  "session.source.extension": "Extension",
+  "session.source.internal": "Internal"
 }

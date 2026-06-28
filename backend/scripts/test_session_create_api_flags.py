@@ -61,6 +61,9 @@ def main_run() -> int:
         check("summary has bare_config true", summary.get("bare_config") is True)
         check("summary has node_id", summary.get("node_id") == "primary")
         check("summary has kind", summary.get("kind") == "user")
+        check("UI/API create is user_initiated", body.get("user_initiated") is True)
+        check("stored UI/API create is user_initiated", stored.get("user_initiated") is True)
+        check("summary UI/API create is user_initiated", summary.get("user_initiated") is True)
 
         invalid_policy = client.post(
             "/api/sessions",
@@ -106,6 +109,7 @@ def main_run() -> int:
         internal_stored = main.session_manager.get(internal_sid)
         check("internal response has bare_config true", internal_body.get("bare_config") is True)
         check("internal stored has bare_config true", internal_stored.get("bare_config") is True)
+        check("internal agent-created session is NOT user_initiated", internal_stored.get("user_initiated") is False)
         check(
             "internal stored has capability contexts",
             internal_stored.get("capability_contexts") == [

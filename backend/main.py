@@ -2771,6 +2771,22 @@ async def _delete_session_tree(session_id: str) -> bool:
             await asyncio.to_thread(runs_dir.delete_runs_for_sessions, removed_sids)
         except Exception:
             logger.exception("run-dir cleanup failed during session delete")
+        # Drop any task deep-link breadcrumbs / singleton bindings that
+        # pointed at deleted sessions, so the Tasks tab never links to a
+        # gone session. Best-effort, store-only; safe (no-op) when the
+        # tasks extension isn't installed (empty store).
+        try:
+            from stores import task_store as _task_store
+            for _removed in removed_sids:
+                if await asyncio.to_thread(_task_store.drop_session_references, _removed):
+                    # A reference changed — ping tabs to refetch. cwd/node
+                    # are unknown here; a null-cwd ping invalidates broadly,
+                    # like worker fan-out's cross-cwd broadcast.
+                    await coordinator.broadcast_global(
+                        "tasks_changed", {"cwd": None, "node_id": "primary"},
+                    )
+        except Exception:
+            logger.debug("task reference cleanup failed during session delete", exc_info=True)
     await _publish_worker_fanout_required(
         session_id,
         op_label="session delete",
@@ -3020,8 +3036,11 @@ def _session_matches_list_filters(
         return False
     if modes and (session.get("orchestration_mode") or "team") not in modes:
         return False
-    if sources and (session.get("source") or "web") not in sources:
-        return False
+    if sources:
+        source = session.get("source") or "web"
+        user_aware_bucket = "user" if session.get("user_initiated") else "system"
+        if source not in sources and user_aware_bucket not in sources:
+            return False
     if tag_ids:
         manual_tags = {
             tag.get("id")
@@ -9067,6 +9086,116 @@ async def internal_schedules(
         return {"success": True}
 
     return {"success": False, "error": "action must be create|list|delete"}
+
+
+def _require_tasks_internal(x_internal_token: str) -> None:
+    """Gate for the tasks substrate. Tasks are surfaced by the (private)
+    tasks extension; in a pure-public checkout the extension is absent and
+    this fails closed."""
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    _require_builtin_runtime_extension(extension_store.BUILTIN_TASKS_EXTENSION_ID)
+
+
+@app.post("/api/internal/tasks")
+async def internal_tasks(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Backend-owned task definitions + on-demand launch.
+
+    Tasks are reusable, run-when-clicked definitions that spin up an
+    autonomous session (via `task_runner.launch_task`). Core owns the
+    durable store + launch; the tasks extension's routes/MCP only forward
+    here. All validation is server-side (`task_store` raises ValueError
+    with a surfaceable message). Actions: list | get | create | update |
+    delete | run.
+    """
+    _require_tasks_internal(x_internal_token)
+    from stores import task_store
+    import task_runner
+
+    action = (body or {}).get("action")
+
+    if action == "list":
+        cwd = str((body or {}).get("cwd") or "").strip()
+        node_id = str((body or {}).get("node_id") or "primary").strip() or "primary"
+        if not cwd:
+            return {"success": False, "error": "cwd is required"}
+        return {
+            "success": True,
+            "tasks": await asyncio.to_thread(task_store.list_for_project, cwd, node_id),
+        }
+
+    if action == "get":
+        task_id = str((body or {}).get("task_id") or "").strip()
+        rec = await asyncio.to_thread(task_store.get, task_id)
+        if rec is None:
+            return {"success": False, "error": "unknown task_id"}
+        return {"success": True, "task": rec}
+
+    if action == "create":
+        node_id = _resolve_session_node_id(body or {})
+        try:
+            rec = await asyncio.to_thread(
+                task_store.create,
+                cwd=str((body or {}).get("cwd") or "").strip(),
+                name=(body or {}).get("name"),
+                prompt=(body or {}).get("prompt"),
+                node_id=node_id,
+                description=(body or {}).get("description") or "",
+                orchestration_mode=(body or {}).get("orchestration_mode") or "native",
+                worker_creation_policy=(body or {}).get("worker_creation_policy") or "approve",
+                model=(body or {}).get("model"),
+                provider_id=(body or {}).get("provider_id"),
+                reasoning_effort=(body or {}).get("reasoning_effort"),
+                permission=(body or {}).get("permission"),
+                capability_contexts=(body or {}).get("capability_contexts"),
+                singleton=bool((body or {}).get("singleton", False)),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        await task_runner.broadcast_tasks_changed(coordinator, rec["cwd"], rec["node_id"])
+        return {"success": True, "task": rec}
+
+    if action == "update":
+        task_id = str((body or {}).get("task_id") or "").strip()
+        patch = (body or {}).get("patch")
+        if not isinstance(patch, dict):
+            return {"success": False, "error": "patch must be an object"}
+        try:
+            rec = await asyncio.to_thread(task_store.update, task_id, patch)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        if rec is None:
+            return {"success": False, "error": "unknown task_id"}
+        await task_runner.broadcast_tasks_changed(coordinator, rec["cwd"], rec["node_id"])
+        return {"success": True, "task": rec}
+
+    if action == "delete":
+        task_id = str((body or {}).get("task_id") or "").strip()
+        removed = await asyncio.to_thread(task_store.delete, task_id)
+        if removed is None:
+            return {"success": False, "error": "unknown task_id"}
+        await task_runner.broadcast_tasks_changed(
+            coordinator, removed.get("cwd") or "", removed.get("node_id") or "primary",
+        )
+        return {"success": True}
+
+    if action == "run":
+        task_id = str((body or {}).get("task_id") or "").strip()
+        try:
+            result = await task_runner.launch_task(
+                task_id,
+                coordinator=coordinator,
+                prompt_override=(body or {}).get("prompt"),
+                client_id=(body or {}).get("client_id"),
+            )
+        except task_runner.TaskLaunchError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, **result}
+
+    return {"success": False, "error": "action must be list|get|create|update|delete|run"}
 
 
 @app.get("/api/sessions/{app_session_id}/background")
