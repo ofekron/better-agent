@@ -266,6 +266,18 @@ def test_startup_reenqueue_reads_sessions_off_loop() -> None:
     assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
 
 
+def test_queue_projection_scans_user_messages_once() -> None:
+    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
+    assert "def _user_message_projection(" in source
+    assert "def _user_message_keys(" not in source
+    assert "def _user_messages(" not in source
+    project_start = source.index("def project_session(")
+    project_end = source.index("def upsert_from_session(", project_start)
+    project_source = source[project_start:project_end]
+    assert "user_projection = _user_message_projection(" in project_source
+    assert "**user_projection" in project_source
+
+
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "startup-unread-warm" not in source
