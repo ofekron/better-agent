@@ -548,6 +548,21 @@ def test_sidebar_session_search_bounds_content_scoring() -> None:
     assert "content_max_wait_seconds" not in route_source
 
 
+def test_pending_node_polling_uses_public_projection_cache() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("async def internal_list_pending_nodes(")
+    route_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "node_link.public_pending_nodes()" in route_source
+    assert "pending_node_registrations.list_pending()" not in route_source
+
+    extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
+    dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
+    dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
+    dispatch_source = extension_source[dispatch_start:dispatch_end]
+    assert "node_link.public_pending_nodes()" in dispatch_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source

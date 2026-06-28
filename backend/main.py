@@ -11308,13 +11308,8 @@ async def internal_list_pending_nodes(
     frontend on mount / WS reconnect to (re)render the approval popup.
 
     Secrets never leave the server — only the display fingerprint does."""
-    from stores import pending_node_registrations
     import node_link
-    out = [
-        node_link._public_rec(rec)
-        for rec in pending_node_registrations.list_pending()
-    ]
-    return {"pending_nodes": out}
+    return {"pending_nodes": node_link.public_pending_nodes()}
 
 
 @app.post("/api/internal/machine-nodes/approve")

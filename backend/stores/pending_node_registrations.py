@@ -62,6 +62,12 @@ _ID_RE = re.compile(r"[A-Za-z0-9_\-.]{1,64}")
 _cache_lock = threading.Lock()
 _cache_loaded = False
 _pending_by_node: dict[str, dict] = {}
+_cache_version = 0
+
+
+def _bump_version_locked() -> None:
+    global _cache_version
+    _cache_version += 1
 
 
 def _copy_record(record: dict) -> dict:
@@ -115,7 +121,13 @@ def create(
     _path(node_id).write_text(json.dumps(record, indent=2), encoding="utf-8")
     with _cache_lock:
         _pending_by_node[node_id] = _copy_record(record)
+        _bump_version_locked()
     return _copy_record(record)
+
+
+def version() -> int:
+    with _cache_lock:
+        return _cache_version
 
 
 def get(node_id: str) -> Optional[dict]:
@@ -142,7 +154,10 @@ def list_pending() -> list[dict]:
                 key=lambda r: r.get("created_at", ""),
             )
         if not _dir().exists():
+            changed = bool(_pending_by_node)
             _pending_by_node.clear()
+            if changed:
+                _bump_version_locked()
             _cache_loaded = True
             return []
         out: list[dict] = []
@@ -207,6 +222,7 @@ def _transition_locked(node_id: str, new_status: str) -> tuple[Optional[dict], s
                 f.write(json.dumps(rec, indent=2))
                 with _cache_lock:
                     _pending_by_node.pop(node_id, None)
+                    _bump_version_locked()
                 return rec, "ok"
         finally:
             portable_lock.unlock(fd)
@@ -235,7 +251,8 @@ def delete(node_id: str) -> bool:
     try:
         path.unlink()
         with _cache_lock:
-            _pending_by_node.pop(node_id, None)
+            if _pending_by_node.pop(node_id, None) is not None:
+                _bump_version_locked()
         return True
     except OSError:
         return False
@@ -254,7 +271,8 @@ def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
                 path.unlink()
                 deleted += 1
                 with _cache_lock:
-                    _pending_by_node.pop(path.stem, None)
+                    if _pending_by_node.pop(path.stem, None) is not None:
+                        _bump_version_locked()
         except OSError:
             continue
     return deleted

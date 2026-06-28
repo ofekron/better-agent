@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import threading
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -97,6 +98,29 @@ def _public_rec(rec: dict) -> dict:
         "created_at": rec.get("created_at"),
         "expires_at": rec.get("expires_at"),
     }
+
+
+_public_pending_cache: tuple[int, list[dict]] | None = None
+_public_pending_cache_lock = threading.Lock()
+
+
+def public_pending_nodes() -> list[dict]:
+    global _public_pending_cache
+    from stores import pending_node_registrations
+
+    version = pending_node_registrations.version()
+    with _public_pending_cache_lock:
+        cached = _public_pending_cache
+        if cached is not None and cached[0] == version:
+            return [dict(item) for item in cached[1]]
+    projected = [
+        _public_rec(rec)
+        for rec in pending_node_registrations.list_pending()
+    ]
+    version = pending_node_registrations.version()
+    with _public_pending_cache_lock:
+        _public_pending_cache = (version, [dict(item) for item in projected])
+    return projected
 
 
 def _primary_id() -> str:
