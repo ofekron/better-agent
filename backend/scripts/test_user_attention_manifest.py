@@ -50,7 +50,7 @@ def main() -> int:
         assert decision["strip_wrapper"] is True
         assert decision["bold"] is True
         assert decision["font_scale"] == 1.3
-        assert decision["highlight"] == {"color": "#ff8c00", "alpha": 0.18}, decision.get("highlight")
+        assert decision["highlight"] == {"color": "#cfbcff", "alpha": 0.18}, decision.get("highlight")
         assert decision["marker"] == {
             "color": "#ff8c00",
             "tooltip": "Needs your decision",

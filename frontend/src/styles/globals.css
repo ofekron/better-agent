@@ -6,8 +6,14 @@
   --text-primary: #e6edf3;
   --text-secondary: #8b949e;
   --text-muted: #6e7681;
+  /* Material Purple tonal palette keyed off the brand accent (#7b68ee ≈
+     tone 58). Tones 80/58/38 form the light/key/dark steps; links ride
+     the light tone so they read as clickable on dark surfaces without
+     leaving the brand palette. */
+  --purple-80: #cfbcff;
   --accent: #7b68ee;
   --accent-dim: #4a3d8f;
+  --link: var(--purple-80);
   --agent: rgb(52, 211, 153);
   --agent-dim: rgba(52, 211, 153, 0.15);
   --skill: rgb(139, 92, 246);
@@ -3434,7 +3440,7 @@ button.run-badge-clickable:focus-visible {
   padding: 0;
   margin: 0;
   font: inherit;
-  color: var(--accent);
+  color: var(--link);
   text-decoration: underline;
   text-decoration-color: var(--accent-dim);
   text-underline-offset: 2px;
@@ -6241,7 +6247,7 @@ button.run-badge-clickable:focus-visible {
 .file-viewer-markdown h1 { font-size: 1.8em; border-bottom: 1px solid #333; padding-bottom: 0.3em; }
 .file-viewer-markdown h2 { font-size: 1.4em; border-bottom: 1px solid #2a2a2a; padding-bottom: 0.25em; }
 .file-viewer-markdown p  { margin: 0.6em 0; }
-.file-viewer-markdown a  { color: #79b8ff; }
+.file-viewer-markdown a  { color: var(--link); }
 .file-viewer-markdown code {
   background: #2d2d2d;
   padding: 1px 5px;
@@ -9820,7 +9826,7 @@ button.run-badge-clickable:focus-visible {
 }
 
 .message-box-body .wmde-markdown a {
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
 }
 
