@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from queue import SimpleQueue
 from typing import Any
@@ -36,6 +36,62 @@ class ProvisionedResult:
     base_session_id: str
     caller_session_id: str
     dispatch_result: dict
+
+
+async def ensure_warm_base(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+    ctx: dict | None = None,
+) -> str:
+    """Return a provisioned base session whose provider sid is initialized.
+
+    `ensure_session` owns find/create/recycle. This helper adds the missing
+    warm step for callers that need to mint their own user-facing forks rather
+    than dispatch through `run(...)`: if the base has no provider sid yet, run
+    the spec's one-time provision prompt through the normal target-init path.
+    """
+    ctx = dict(ctx or {})
+    async with _async_acquired_lifecycle_lock(spec, cfg):
+        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
+            base_session_id = await asyncio.to_thread(ensure_session, spec, cfg)
+        try:
+            from session_manager import manager as session_manager
+        except Exception as exc:
+            raise RuntimeError("provisioning cannot load base session") from exc
+        base = await asyncio.to_thread(session_manager.get, base_session_id) or {}
+        if base.get("agent_session_id"):
+            return base_session_id
+
+        with perf.timed(f"provisioning.{spec.key}.warm_base"):
+            from main import coordinator as _coordinator
+
+            cancel_event = asyncio.Event()
+            _coordinator.init_cancel_events[base_session_id] = (
+                "__provisioning__",
+                cancel_event,
+            )
+            try:
+                agent_sid = await _coordinator._init_target_agent_session(
+                    bc_session=base,
+                    model=cfg.model,
+                    cwd=cfg.cwd,
+                    description=cfg.worker_description,
+                    cancel_event=cancel_event,
+                    provision_prompt=spec.build_provision_prompt(ctx),
+                )
+            finally:
+                _coordinator.init_cancel_events.pop(base_session_id, None)
+            if not agent_sid:
+                raise RuntimeError(f"{spec.key} base did not initialize")
+            await asyncio.to_thread(
+                session_manager.set_agent_sid,
+                base_session_id,
+                spec.orchestration_mode,
+                agent_sid,
+                provider_id=cfg.provider_id,
+                model=cfg.model,
+            )
+            return base_session_id
 
 
 async def run(
@@ -96,6 +152,24 @@ def _lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> thr
             _LIFECYCLE_LOCKS[key] = lock
         return lock
 
+
+
+
+@asynccontextmanager
+async def _async_acquired_lifecycle_lock(
+    spec: ProvisionedSessionSpec, cfg: ProvisionedConfig,
+):
+    lock = _lifecycle_lock(spec, cfg)
+    timeout = max(0.0, float(spec.provision_timeout))
+    acquired = await asyncio.to_thread(lock.acquire, True, timeout)
+    if not acquired:
+        raise TimeoutError(
+            f"{spec.key} provisioned lifecycle lock timed out after {timeout:g}s"
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 @contextmanager
 def _acquired_lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig):
