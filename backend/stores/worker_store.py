@@ -154,12 +154,16 @@ def _read(cwd: str = "") -> dict:
     return raw
 
 
-def _write(_cwd: str, registry: dict) -> None:
+def _write(
+    _cwd: str,
+    registry: dict,
+    *,
+    refresh_worker_summaries: bool = True,
+) -> None:
     write_json(_path(), registry)
-    # Worker mutations contribute to session-summary `worker_count`, so
-    # the summary index MUST refresh from the global roster.
-    from session_store import _refresh_all_worker_summaries
-    _refresh_all_worker_summaries()
+    if refresh_worker_summaries:
+        from session_store import _refresh_all_worker_summaries
+        _refresh_all_worker_summaries()
 
 
 # ============================================================================
@@ -268,7 +272,7 @@ def upsert_worker(
                     w["role_key"] = role_key
                 if tags is not None:
                     w["tags"] = normalize_tags(tags)
-                _write(cwd, registry)
+                _write(cwd, registry, refresh_worker_summaries=False)
                 return w
         record = {
             "agent_session_id": agent_session_id,
@@ -299,7 +303,7 @@ def enqueue_pool_task(tag: str, item: dict) -> dict:
         registry = _read()
         queue = registry.setdefault("pool_queues", {}).setdefault(clean, [])
         queue.append(item)
-        _write("", registry)
+        _write("", registry, refresh_worker_summaries=False)
         return {"tag": clean, "queued_count": len(queue), "item": item}
 
 
@@ -332,7 +336,7 @@ def pop_pool_task(tag: str, item_id: str) -> bool:
         registry["pool_queues"] = queues
         if len(queues.get(clean, [])) == before:
             return False
-        _write("", registry)
+        _write("", registry, refresh_worker_summaries=False)
         return True
 
 
@@ -355,7 +359,7 @@ def touch_worker(
                         if isinstance(v, (int, float)):
                             merged[k] = int(prev.get(k, 0)) + int(v)
                     w["token_usage"] = merged
-                _write(cwd, registry)
+                _write(cwd, registry, refresh_worker_summaries=False)
                 return w
         return None
 
@@ -394,7 +398,8 @@ def remove_worker_everywhere(agent_session_id: str) -> int:
             w for w in raw.get("workers", [])
             if w.get("agent_session_id") != agent_session_id
         ]
-        if len(raw["workers"]) != before:
+        removed_worker = len(raw["workers"]) != before
+        if removed_worker:
             changed = True
         forks = raw.get("forks") or {}
         if agent_session_id in forks:
@@ -408,7 +413,7 @@ def remove_worker_everywhere(agent_session_id: str) -> int:
                     forks.pop(caller_sid, None)
         raw["forks"] = forks
         if changed:
-            _write("", raw)
+            _write("", raw, refresh_worker_summaries=removed_worker)
             return 1
     return 0
 
@@ -460,7 +465,7 @@ def set_fork(
             "created_at": now,
             "last_used": now,
         }
-        _write(cwd, registry)
+        _write(cwd, registry, refresh_worker_summaries=False)
 
 
 def touch_fork(
@@ -477,7 +482,7 @@ def touch_fork(
         )
         if isinstance(rec, dict):
             rec["last_used"] = _now()
-            _write(cwd, registry)
+            _write(cwd, registry, refresh_worker_summaries=False)
 
 
 def clear_fork(
@@ -495,7 +500,7 @@ def clear_fork(
         if not by_worker:
             forks.pop(caller_agent_session_id, None)
         registry["forks"] = forks
-        _write(cwd, registry)
+        _write(cwd, registry, refresh_worker_summaries=False)
         return True
 
 
@@ -525,10 +530,7 @@ def clear_forks_for_worker_everywhere(worker_agent_session_id: str) -> list[str]
                     forks.pop(caller_sid, None)
         if changed:
             raw["forks"] = forks
-            _write("", raw)
-    if cleared:
-        from session_store import _refresh_all_worker_summaries
-        _refresh_all_worker_summaries()
+            _write("", raw, refresh_worker_summaries=False)
     return cleared
 
 
@@ -549,8 +551,5 @@ def clear_forks_for_caller_everywhere(caller_agent_session_id: str) -> list[str]
                         cleared.append(fbsid)
             forks.pop(caller_agent_session_id, None)
             raw["forks"] = forks
-            _write("", raw)
-    if cleared:
-        from session_store import _refresh_all_worker_summaries
-        _refresh_all_worker_summaries()
+            _write("", raw, refresh_worker_summaries=False)
     return cleared
