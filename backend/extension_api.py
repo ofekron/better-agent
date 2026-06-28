@@ -191,13 +191,9 @@ async def _dispatch_machine_nodes_core_backend(
         import node_store
         return JSONResponse(node_store.snapshot())
     if request.method == "GET" and path == "pending_nodes":
-        from stores import pending_node_registrations
         import node_link
         return JSONResponse({
-            "pending_nodes": [
-                node_link._public_rec(rec)
-                for rec in pending_node_registrations.list_pending()
-            ],
+            "pending_nodes": node_link.public_pending_nodes(),
         })
     if request.method == "GET" and path == "local_node_id":
         try:
