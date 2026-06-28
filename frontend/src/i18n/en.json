@@ -291,6 +291,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "Config-sync review",
   "settings.internalLlmTask.session_search_worker": "Search / Ask worker",
   "settings.internalLlmTask.project_structure_edit": "Project structure edit",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "Auto-delete sessions older than",
   "settings.sessionAutoDeleteNever": "Never",
   "settings.sessionAutoDeleteHint": "Days. Leave empty to never auto-delete sessions.",

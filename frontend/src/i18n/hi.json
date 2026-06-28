@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "Config-sync समीक्षा",
   "settings.internalLlmTask.session_search_worker": "खोज / पूछें वर्कर",
   "settings.internalLlmTask.project_structure_edit": "प्रोजेक्ट संरचना संपादन",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "इससे पुराने सत्र स्वतः-हटाएँ",
   "settings.sessionAutoDeleteNever": "कभी नहीं",
   "settings.sessionAutoDeleteHint": "दिन। सत्र कभी स्वतः-हटाने के लिए खाली छोड़ें।",

@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "설정 동기화 검토",
   "settings.internalLlmTask.session_search_worker": "검색 / 질문 워커",
   "settings.internalLlmTask.project_structure_edit": "프로젝트 구조 편집",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "다음보다 오래된 세션 자동 삭제",
   "settings.sessionAutoDeleteNever": "사용 안 함",
   "settings.sessionAutoDeleteHint": "일 수. 세션을 자동 삭제하지 않으려면 비워두세요.",

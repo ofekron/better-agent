@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "Ревью Config-sync",
   "settings.internalLlmTask.session_search_worker": "Воркер поиска / Ask",
   "settings.internalLlmTask.project_structure_edit": "Редактирование структуры проекта",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "Автоудаление сессий старше",
   "settings.sessionAutoDeleteNever": "Никогда",
   "settings.sessionAutoDeleteHint": "Дни. Оставьте пустым, чтобы никогда не удалять сессии автоматически.",

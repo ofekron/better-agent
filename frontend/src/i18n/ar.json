@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "مراجعة مزامنة الإعدادات",
   "settings.internalLlmTask.session_search_worker": "عامل البحث / الطلب",
   "settings.internalLlmTask.project_structure_edit": "تعديل بنية المشروع",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "حذف تلقائي للجلسات الأقدم من",
   "settings.sessionAutoDeleteNever": "أبدًا",
   "settings.sessionAutoDeleteHint": "بالأيام. اتركه فارغًا لعدم الحذف التلقائي للجلسات أبدًا.",

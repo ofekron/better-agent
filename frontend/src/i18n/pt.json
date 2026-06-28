@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "Revisão de config-sync",
   "settings.internalLlmTask.session_search_worker": "Trabalhador de Busca / Pergunta",
   "settings.internalLlmTask.project_structure_edit": "Edição da estrutura do projeto",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "Excluir automaticamente sessões anteriores a",
   "settings.sessionAutoDeleteNever": "Nunca",
   "settings.sessionAutoDeleteHint": "Dias. Deixe vazio para nunca excluir sessões automaticamente.",

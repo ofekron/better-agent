@@ -62,6 +62,23 @@ def run() -> None:
         "Inherit task is ready via default-provider fallback",
     )
 
+    # The assistant extension's board analyzer resolves from a dedicated
+    # `assistant` internal-LLM task (its own settings row), registered as a
+    # known task and ready on Inherit via the same default-provider fallback.
+    check(
+        "assistant" in config_store.INTERNAL_LLM_TASKS,
+        "assistant is a registered internal-LLM task",
+    )
+    assistant_resolved = config_store.resolve_internal_llm("assistant")
+    check(
+        bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),
+        "assistant task resolves to a concrete provider + model on Inherit",
+    )
+    check(
+        es._internal_llm_task_ready("assistant") is True,
+        "assistant task is ready via default-provider fallback",
+    )
+
     record = _requirements_record()
     orig_surface = es._record_backend_surface_ready
     es._record_backend_surface_ready = lambda _r: True  # isolate the LLM branch
