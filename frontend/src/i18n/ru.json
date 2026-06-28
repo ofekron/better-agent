@@ -513,6 +513,7 @@
   "tokens.stats": "Статистика",
   "tokens.connected": "Подключено",
   "tokens.disconnected": "Отключено",
+  "tokens.noUsage": "Нет данных об использовании",
   "tokens.input": "Ввод",
   "tokens.output": "Вывод",
   "tokens.cache": "Кэш",

@@ -31,7 +31,6 @@ import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
-import { TokenUsageDisplay } from "./components/TokenUsage";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
@@ -100,7 +99,7 @@ import {
 } from "./lib/voiceActivation";
 import { useRoute, sessionPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, statusRankForRow, useSessionMeta } from "./lib/sessionRegistry";
-import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, TokenUsage } from "./types";
+import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
@@ -2218,10 +2217,6 @@ function AppMain({
       setRightPanelTab("files");
     }
   }, [builtinExtensions.canvas, builtinExtensions.testape, rightPanelTab]);
-  const [sessionTokenUsage, setSessionTokenUsage] =
-    useState<TokenUsage | null>(null);
-  const [sessionTokenUsageLast, setSessionTokenUsageLast] =
-    useState<TokenUsage | null>(null);
   // pendingBySession is declared above (right before useWebSocket) so
   // the user_message_persisted callback can clear it imperatively.
   // Each session owns its own pending list so a prompt mid-flight in
@@ -3577,8 +3572,6 @@ function AppMain({
       lastSyncedSessionIdRef.current = null;
       return;
     }
-    setSessionTokenUsage(currentSession.token_usage_total || null);
-    setSessionTokenUsageLast(currentSession.token_usage_last || null);
     if (currentSession.id !== lastSyncedSessionIdRef.current) {
       lastSyncedSessionIdRef.current = currentSession.id;
       // Re-establish the global selector from the focused session
@@ -5451,6 +5444,11 @@ function AppMain({
             );
             const brand = (
               <div className="app-title-brand">
+                <span
+                  className={`brand-connection-dot${connected ? " connected" : ""}`}
+                  title={connected ? t("tokens.connected") : t("tokens.disconnected")}
+                  aria-label={connected ? t("tokens.connected") : t("tokens.disconnected")}
+                />
                 <BetterAgentBrandMark className="sidebar-brand-mark" />
                 <h1 className="app-title">{t("app.title")}</h1>
               </div>
@@ -5679,18 +5677,6 @@ function AppMain({
               searching={sessionsSearching}
               loadingMore={sessionsLoadingMore}
               onLoadMore={loadMoreSessions}
-              activeSessionSuffix={
-                currentSession ? (
-                  <TokenUsageDisplay
-                    usage={sessionTokenUsage}
-                    usageLast={sessionTokenUsageLast}
-                    rearrangerStats={currentSession.rearranger_stats ?? null}
-                    connected={connected}
-                    contextWindow={currentSession.context_window ?? null}
-                    collapsible={isMobile}
-                  />
-                ) : null
-              }
             />
           )}
         </div>

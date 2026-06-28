@@ -514,6 +514,7 @@
   "tokens.stats": "סטטיסטיקה",
   "tokens.connected": "מחובר",
   "tokens.disconnected": "מנותק",
+  "tokens.noUsage": "אין עדיין שימוש",
   "tokens.input": "קלט",
   "tokens.output": "פלט",
   "tokens.cache": "מטמון",

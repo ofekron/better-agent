@@ -1308,6 +1308,26 @@ body {
 
 /* Fixed-position tag editor. position: fixed lets it escape the
    sidebar's overflow-y: auto container. */
+.session-stats-popover {
+  width: min(240px, calc(100vw - 16px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg-primary, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.session-stats-popover-header {
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .session-tag-popover {
   width: min(220px, calc(100vw - 16px));
   max-height: min(60vh, 360px);
@@ -6331,68 +6351,14 @@ button.run-badge-clickable:focus-visible {
 
 /* Collapsible header (mobile) — compact title row, tight margin. Doubles as
    the connection indicator; cost shows as a collapsed summary. */
-.token-usage-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: calc(11px * var(--app-font-scale));
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.token-usage-toggle:hover {
-  color: var(--text-primary);
-}
-
-.token-usage-toggle-right {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.token-usage-toggle-summary {
-  font-family: "SF Mono", "Fira Code", monospace;
-  font-weight: 400;
-  font-size: calc(11px * var(--app-font-scale));
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--text-muted);
-}
-
-.token-usage-toggle .collapse-arrow {
-  font-size: calc(10px * var(--app-font-scale));
-  color: var(--text-muted);
-  transition: transform 0.15s ease;
-}
-
 .token-usage-row {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.connection-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--error);
-  flex-shrink: 0;
-}
-
-.connection-dot.connected {
-  background: var(--success);
-}
-
-.connection-label {
+.token-usage-empty {
+  color: var(--text-muted);
   font-size: calc(11px * var(--app-font-scale));
 }
 
@@ -6985,6 +6951,19 @@ button.run-badge-clickable:focus-visible {
   min-width: 0;
   flex: 1 1 auto;
   gap: 8px;
+}
+
+/* Connection status dot at the start of the brand mark. */
+.brand-connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--error);
+  flex-shrink: 0;
+}
+
+.brand-connection-dot.connected {
+  background: var(--success);
 }
 
 .sidebar-brand-mark {

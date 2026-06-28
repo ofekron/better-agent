@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -17,6 +17,7 @@ import type { ActionItem } from "./MobileActionSheet";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import { NewFolderDropPopover } from "./NewFolderDropPopover";
 import { SessionTagPopover, type PopoverAnchor } from "./SessionTagPopover";
+import { SessionStatsPopover } from "./SessionStatsPopover";
 import Icon from "./Icon";
 import { SearchInput } from "./SearchInput";
 import type { SessionListFilters } from "../hooks/useSession";
@@ -81,8 +82,6 @@ interface Props {
   searching?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
-  /** Rendered directly below the pinned current-session row. */
-  activeSessionSuffix?: ReactNode;
 }
 
 // Empty children map for the pinned selected-session anchor, which
@@ -297,13 +296,16 @@ function SessionNode({
   // the popover's click-away listener doesn't immediately close it.
   const [tagPopover, setTagPopover] = useState<PopoverAnchor | null>(null);
   const [folderPopover, setFolderPopover] = useState<PopoverAnchor | null>(null);
+  const [statsPopover, setStatsPopover] = useState<PopoverAnchor | null>(null);
   const menuAnchorRef = useRef<PopoverAnchor | null>(null);
   const folderPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tagPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statsPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (renameTimerRef.current) clearTimeout(renameTimerRef.current);
     if (folderPopoverTimerRef.current) clearTimeout(folderPopoverTimerRef.current);
     if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
+    if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
   }, []);
 
   const toggleSessionTag = (tagId: string) => {
@@ -346,6 +348,20 @@ function SessionNode({
           if (folderPopoverTimerRef.current) clearTimeout(folderPopoverTimerRef.current);
           folderPopoverTimerRef.current = setTimeout(
             () => setFolderPopover(menuAnchorRef.current),
+            220,
+          );
+        },
+      },
+      {
+        id: "stats",
+        label: t("tokens.stats"),
+        icon: <Icon name="info" size={14} />,
+        onClick: () => {
+          // Match the folder/tags timer: wait for the action sheet's
+          // fade-out so the popover mounts after the backdrop is gone.
+          if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
+          statsPopoverTimerRef.current = setTimeout(
+            () => setStatsPopover(menuAnchorRef.current),
             220,
           );
         },
@@ -697,6 +713,17 @@ function SessionNode({
         <div className="session-item-actions">
           <button
             className="session-item-tag-control"
+            title={t("tokens.stats")}
+            aria-label={t("tokens.stats")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setStatsPopover(e.currentTarget.getBoundingClientRect());
+            }}
+          >
+            <Icon name="info" size={12} />
+          </button>
+          <button
+            className="session-item-tag-control"
             title={t("session.folder")}
             aria-label={t("session.folder")}
             onClick={(e) => {
@@ -794,6 +821,13 @@ function SessionNode({
           onToggle={toggleSessionTag}
           onCreateTag={(name) => onCreateTag(session.id, name)}
           onClose={() => setTagPopover(null)}
+        />
+      )}
+      {statsPopover && (
+        <SessionStatsPopover
+          anchor={statsPopover}
+          session={session}
+          onClose={() => setStatsPopover(null)}
         />
       )}
       {kids.map((child) => (
@@ -1035,7 +1069,6 @@ export function SessionList({
   searching = false,
   loadingMore = false,
   onLoadMore,
-  activeSessionSuffix,
 }: Props) {
   const { t } = useTranslation();
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1872,14 +1905,12 @@ export function SessionList({
           ? createPortal(
               <div className="session-list-selected" data-testid="session-list-selected">
                 {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
-                {activeSessionSuffix}
               </div>,
               selectedAnchorContainer,
             )
           : (
             <div className="session-list-selected" data-testid="session-list-selected">
               {renderNode(selectedSession, 0, false, EMPTY_CHILDREN)}
-              {activeSessionSuffix}
             </div>
           ))}
       <div className="session-list-header">

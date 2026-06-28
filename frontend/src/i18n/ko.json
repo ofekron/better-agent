@@ -513,6 +513,7 @@
   "tokens.stats": "통계",
   "tokens.connected": "연결됨",
   "tokens.disconnected": "연결 끊김",
+  "tokens.noUsage": "아직 사용 내역 없음",
   "tokens.input": "입력",
   "tokens.output": "출력",
   "tokens.cache": "캐시",
