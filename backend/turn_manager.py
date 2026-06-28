@@ -1484,13 +1484,9 @@ class TurnManager:
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
-            # Surface the failure as a red error dot on the session item
-            # so the user notices even if they're not on the session.
-            # Retired by a view-ack or the next successful turn.
-            try:
-                session_manager.set_unseen_error(app_session_id, error_text)
-            except Exception:
-                logger.debug("set_unseen_error failed", exc_info=True)
+            # The error dot is set inside `_finalize_turn_messages` (called
+            # just above with error_text) — the single chokepoint covering
+            # both exception and non-exception failure paths.
 
             # (ii) NEW: error terminal now publishes lifecycle.turn_stopped.
             # Pre-cutover the error path emitted only the direct

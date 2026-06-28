@@ -14,7 +14,11 @@ from typing import Optional
 
 import perf
 from provider import RecoveredPopen
-from runs_dir import pid_alive as _pid_alive, runs_root as _runs_root
+from runs_dir import (
+    pid_alive as _pid_alive,
+    runs_root as _runs_root,
+    salvage_complete_payload as _salvage_complete_payload,
+)
 from event_shape import extract_output_text as _extract_output_text
 from turn_helpers import (
     _is_rate_limit_attempt,
@@ -1153,6 +1157,7 @@ def _apply_completion_state(
     persist_sid: str,
     msg_id: str,
     *,
+    run_id: str,
     cancelled: bool,
 ) -> None:
     """Pin the assistant msg as not-streaming at recovery completion.
@@ -1160,13 +1165,25 @@ def _apply_completion_state(
     Cancelled recovered runs must carry `stopped_at` so the rendered
     message exits the in-flight UI state and exposes retry affordances.
     Non-cancelled completions clear stale `stopped_at` because they
-    finished normally."""
+    finished normally.
+
+    A recovered run that FAILED (non-success, non-cancel) also surfaces
+    the sidebar error dot here — mirroring the live `_finalize_turn_messages`
+    chokepoint so the dot is set consistently whether the failure happened
+    live or was discovered during recovery."""
     session_manager.set_streaming(persist_sid, msg_id, False)
     session_manager.set_stopped_at(
         persist_sid,
         msg_id,
         datetime.utcnow().isoformat() if cancelled else None,
     )
+    if not cancelled:
+        payload = _salvage_complete_payload(run_id)
+        if payload is not None and not payload.get("success"):
+            session_manager.set_unseen_error(
+                persist_sid,
+                payload.get("error") or "Run failed during recovery.",
+            )
 
 
 def _finalize_sync(
@@ -1200,7 +1217,9 @@ def _finalize_sync(
             last_asst=last_asst,
             msg_id=msg_id,
         )
-        _apply_completion_state(persist_sid, msg_id, cancelled=cancelled)
+        _apply_completion_state(
+            persist_sid, msg_id, run_id=run_id, cancelled=cancelled,
+        )
 
 
 def _apply_integration_sync(
@@ -1266,6 +1285,7 @@ def _apply_integration_sync(
             _apply_completion_state(
                 persist_sid,
                 msg_id,
+                run_id=run_id,
                 cancelled=cancelled,
             )
 
