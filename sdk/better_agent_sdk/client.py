@@ -371,13 +371,20 @@ class Client:
         self,
         key: str,
         *,
+        keys: list[str] | None = None,
         release: bool = False,
         holder_token: str = "",
+        timeout_seconds: float | int | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {"key": key, "release": release, "holder_token": holder_token}
+        if keys is not None:
+            body["keys"] = keys
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
         return self._post(
             "/api/internal/coordination/lock-ops",
-            {"key": key, "release": release, "holder_token": holder_token},
-            timeout=10.0,
+            body,
+            timeout=max(10.0, float(timeout_seconds or 0) + 5.0),
         )
 
     # ── session bridge ────────────────────────────────────────────────

@@ -20,24 +20,39 @@ def _load_mcp_module():
 
 def test_lock_ops_proxies_to_internal_substrate() -> None:
     module = _load_mcp_module()
-    calls: list[tuple[str, bool, str]] = []
+    calls: list[tuple[str, list[str] | None, bool, str, float | int | None]] = []
 
     class FakeClient:
-        def lock_ops(self, key, *, release=False, holder_token=""):
-            calls.append((key, release, holder_token))
+        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
+            calls.append((key, keys, release, holder_token, timeout_seconds))
             return {"success": True, "holder_token": "tok"}
 
     module.Client = FakeClient
 
     assert module.lock_ops_response("file-a") == {"success": True, "holder_token": "tok"}
-    assert calls == [("file-a", False, "")]
+    assert calls == [("file-a", None, False, "", None)]
+
+
+def test_lock_ops_proxies_multi_key_args() -> None:
+    module = _load_mcp_module()
+    calls: list[tuple[str, list[str] | None, bool, str, float | int | None]] = []
+
+    class FakeClient:
+        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
+            calls.append((key, keys, release, holder_token, timeout_seconds))
+            return {"success": True, "keys": keys}
+
+    module.Client = FakeClient
+
+    assert module.lock_ops_response("", keys=[" a ", "b"], timeout_seconds=3) == {"success": True, "keys": ["a", "b"]}
+    assert calls == [("", ["a", "b"], False, "", 3)]
 
 
 def test_lock_ops_validates_key_before_loopback() -> None:
     module = _load_mcp_module()
 
     class FakeClient:
-        def lock_ops(self, key, *, release=False, holder_token=""):
+        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
             raise AssertionError("loopback should not be called")
 
     module.Client = FakeClient
