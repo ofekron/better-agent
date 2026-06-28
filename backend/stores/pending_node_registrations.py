@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,17 @@ PRUNE_AFTER_DAYS = 7
 # Same id charset as topology node ids — never let a caller-controlled
 # string escape the directory.
 _ID_RE = re.compile(r"[A-Za-z0-9_\-.]{1,64}")
+_cache_lock = threading.Lock()
+_cache_loaded = False
+_pending_by_node: dict[str, dict] = {}
+
+
+def _copy_record(record: dict) -> dict:
+    copied = dict(record)
+    cwd_roots = copied.get("cwd_roots")
+    if isinstance(cwd_roots, list):
+        copied["cwd_roots"] = list(cwd_roots)
+    return copied
 
 
 def _dir() -> Path:
@@ -101,7 +113,9 @@ def create(
     # Overwrite on re-dial: the node retries with the same node_id; the
     # latest request is the one a human should act on.
     _path(node_id).write_text(json.dumps(record, indent=2), encoding="utf-8")
-    return record
+    with _cache_lock:
+        _pending_by_node[node_id] = _copy_record(record)
+    return _copy_record(record)
 
 
 def get(node_id: str) -> Optional[dict]:
@@ -120,19 +134,33 @@ def get(node_id: str) -> Optional[dict]:
 def list_pending() -> list[dict]:
     """All records still in `pending` status, oldest first. Used by the
     REST `GET /api/pending_nodes` endpoint for popup rehydration."""
-    if not _dir().exists():
-        return []
-    out: list[dict] = []
-    for path in _dir().glob("*.json"):
-        try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if rec.get("status") != "pending":
-            continue
-        out.append(rec)
-    out.sort(key=lambda r: r.get("created_at", ""))
-    return out
+    global _cache_loaded
+    with _cache_lock:
+        if _cache_loaded:
+            return sorted(
+                (_copy_record(rec) for rec in _pending_by_node.values()),
+                key=lambda r: r.get("created_at", ""),
+            )
+        if not _dir().exists():
+            _pending_by_node.clear()
+            _cache_loaded = True
+            return []
+        out: list[dict] = []
+        _pending_by_node.clear()
+        for path in _dir().glob("*.json"):
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if rec.get("status") != "pending":
+                continue
+            node_id = rec.get("node_id")
+            if isinstance(node_id, str):
+                _pending_by_node[node_id] = _copy_record(rec)
+                out.append(_copy_record(rec))
+        out.sort(key=lambda r: r.get("created_at", ""))
+        _cache_loaded = True
+        return out
 
 
 def _transition_locked(node_id: str, new_status: str) -> tuple[Optional[dict], str]:
@@ -177,6 +205,8 @@ def _transition_locked(node_id: str, new_status: str) -> tuple[Optional[dict], s
                 f.seek(0)
                 f.truncate()
                 f.write(json.dumps(rec, indent=2))
+                with _cache_lock:
+                    _pending_by_node.pop(node_id, None)
                 return rec, "ok"
         finally:
             portable_lock.unlock(fd)
@@ -204,6 +234,8 @@ def delete(node_id: str) -> bool:
         return False
     try:
         path.unlink()
+        with _cache_lock:
+            _pending_by_node.pop(node_id, None)
         return True
     except OSError:
         return False
@@ -221,6 +253,8 @@ def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
             if path.stat().st_mtime < cutoff_ts:
                 path.unlink()
                 deleted += 1
+                with _cache_lock:
+                    _pending_by_node.pop(path.stem, None)
         except OSError:
             continue
     return deleted
