@@ -18,6 +18,7 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from cli_paths import resolve_cli_binary
 from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
+from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
 _CONVERSATION_RE = re.compile(
@@ -37,7 +38,7 @@ def _new_uuid() -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def _assistant_event(text: str, *, model: Optional[str], parent_uuid: str) -> dict[str, Any]:

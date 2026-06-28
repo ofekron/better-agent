@@ -161,9 +161,12 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    """Crash-safe JSON write for run-dir state. Thin alias over the single
+    canonical writer in `json_store` so run-dir and store writes share one
+    atomicity recipe."""
+    from json_store import write_json
+
+    write_json(path, data)
 
 
 def pid_alive(pid: Optional[int]) -> bool:
