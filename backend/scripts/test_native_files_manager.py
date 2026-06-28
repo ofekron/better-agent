@@ -260,6 +260,44 @@ async def test_run_state_lookup_is_targeted_and_cached() -> None:
     print("PASS test_run_state_lookup_is_targeted_and_cached")
 
 
+async def test_run_state_lookup_coalesces_concurrent_scans() -> None:
+    from runs_dir import runs_root
+    import threading
+    import time
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_INFLIGHT.clear()
+    root = runs_root()
+    run_dir = root / "run-coalesced"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        '{"session_id":"COALESCED-SID","jsonl_path":"/tmp/coalesced.jsonl"}',
+        encoding="utf-8",
+    )
+    original_state_files = nfm_mod._state_files_for_sid
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def slow_state_files(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.1)
+        return original_state_files(*args, **kwargs)
+
+    nfm_mod._state_files_for_sid = slow_state_files  # type: ignore
+    try:
+        results = await asyncio.gather(*[
+            asyncio.to_thread(nfm_mod._scan_run_state_for_jsonl, "COALESCED-SID")
+            for _ in range(8)
+        ])
+    finally:
+        nfm_mod._state_files_for_sid = original_state_files  # type: ignore
+    assert {str(path) for path in results} == {"/tmp/coalesced.jsonl"}
+    assert calls == 1, f"expected one scan, got {calls}"
+    print("PASS test_run_state_lookup_coalesces_concurrent_scans")
+
+
 async def test_run_state_lookup_checks_recent_dirs_before_rg() -> None:
     from runs_dir import runs_root
 
@@ -451,6 +489,7 @@ if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
+    asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_lookup_checks_recent_dirs_before_rg())
     asyncio.run(test_persisted_native_path_skips_run_state_lookup())
     asyncio.run(test_codex_primary_not_tailed_by_claude_tailer())
