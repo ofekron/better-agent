@@ -51,6 +51,7 @@ import provider_runtime
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 
+import git_policy
 logger = logging.getLogger(__name__)
 
 
@@ -353,6 +354,7 @@ class ClaudeProvider(Provider):
             "disallowed_tools": list(dict.fromkeys(
                 (disallowed_tools or DEFAULT_DISALLOWED_TOOLS)
                 + list(TIMER_TOOLS)
+                + git_policy.claude_disallowed_extra(_sess_rec)
             )),
             "setting_sources": setting_sources,
             "backend_url": resolved_backend_url,
