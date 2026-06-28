@@ -34,6 +34,7 @@ type SessionRow = {
   node_id?: string;
   is_running?: boolean;
   unread_count?: number;
+  pending_user_input_count?: number;
 };
 
 function stubSessionsResponse(sessions: SessionRow[]) {
@@ -132,6 +133,23 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).unread_count).toBe(0);
   });
 
+  it("session_user_input_changed updates pending input count", () => {
+    const sid = "sess-input-1";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_user_input_changed", {
+      session_id: sid,
+      pending_user_input_count: 2,
+    });
+    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(2);
+    eventBus.publish("session_user_input_changed", {
+      session_id: sid,
+      pending_user_input_count: 0,
+    });
+    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(0);
+  });
+
   it("session_deleted drops the sid's cached meta", () => {
     const sid = "sess-doomed";
     eventBus.publish("session_created", {
@@ -150,9 +168,11 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(a).toEqual({
       is_running: false,
       unread_count: 0,
+      pending_user_input_count: 0,
       monitoring_state: "stopped",
       markers: {},
       testape_active: false,
+      has_error: false,
     });
   });
 
@@ -471,10 +491,11 @@ describe("sessionRegistry — bootstrap mechanics", () => {
 describe("status rank (mirror of backend _session_status_rank)", () => {
   const m = (tag: string) => ({ ext: { color: "#x", tooltip: "t", tag } });
 
-  it("buckets: 4 running, 3 needs, 2 new, 1 done, 0 none — highest wins", () => {
+  it("buckets: 5 waiting-for-user, 4 running, 3 needs, 2 new, 1 done, 0 none — highest wins", () => {
     expect(statusRankOf({ monitoring_state: "active" })).toBe(4);
     expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(4);
-    expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(3);
+    expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(5);
+    expect(statusRankOf({ pending_user_input_count: 1 })).toBe(5);
     expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(3);
     expect(statusRankOf({ unread_count: 2 })).toBe(2);
     expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
@@ -502,6 +523,7 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
   it("statusRankForRow falls back to row fields when the sid is unseeded", async () => {
     await resetRegistry();
     expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(4);
+    expect(statusRankForRow({ id: "deep-page-input", pending_user_input_count: 1 })).toBe(5);
     expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(2);
     expect(statusRankForRow({ id: "deep-page-3" })).toBe(0);
   });

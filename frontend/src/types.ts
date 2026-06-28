@@ -174,6 +174,8 @@ export type WSEventType =
   // Per-session unseen-error transition. Set when a turn ends in an
   // unrecoverable error, cleared on view-ack or next successful turn.
   | "session_error_changed"
+  // Per-session pending request_user_input count changed.
+  | "session_user_input_changed"
   // Extension attention marker on a session changed (set/cleared).
   | "session_marker_changed"
   // Multi-machine: live up/down transitions of worker-nodes.
@@ -1056,6 +1058,7 @@ export interface Session {
   is_running?: boolean;
   monitoring_state?: string;
   unread_count?: number;
+  pending_user_input_count?: number;
   markers?: Record<string, { color: string; tooltip: string; sound?: boolean; tag?: string }>;
 }
 

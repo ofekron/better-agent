@@ -62,6 +62,7 @@ SCANNED_FILES = [
     Path(_BACKEND) / "provider_config_sync_api.py",
     Path(_BACKEND) / "project_structure_edit_session.py",
     Path(_BACKEND) / "extension_api.py",
+    Path(_BACKEND) / "session_search.py",
 ]
 
 # f-strings whose interpolations CANNOT be statically enumerated from
@@ -74,7 +75,7 @@ FSTRING_EXPANSIONS: dict[str, list[str]] = {
     # session_manager.py:486-492; the only call sites at
     # session_manager.py:484 and :490 pass literal "started" and
     # "finished".
-    "main.py:2533 f'session_processing_{kind}'": [
+    "main.py:4175 f'session_processing_{kind}'": [
         "session_processing_started",
         "session_processing_finished",
     ],
@@ -84,13 +85,21 @@ FSTRING_EXPANSIONS: dict[str, list[str]] = {
 # to only produce allowlisted types in practice. Adding a new entry
 # REQUIRES a one-line audit explanation.
 KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
-    "main.py:679": (
+    "main.py:826": (
         "_on_node_registration receives only node_registration_requested "
         "or node_registration_resolved from node_link.set_registration_listener"
     ),
-    "main.py:5545": (
+    "main.py:884": (
+        "_broadcast_install is registered as provider_setup callback; provider_setup "
+        "emits only provider_install_progress/provider_install_finished"
+    ),
+    "main.py:7952": (
         "virtual-session upsert broadcasts either session_metadata_updated "
         "for existing sessions or session_created for new sessions"
+    ),
+    "session_search.py:468": (
+        "_broadcast_global_later is module-local and all call sites pass literal "
+        "Ask session event types verified by the literal-site scan"
     ),
     # `_dispatch` is the generic fan-out used by SessionWSBroadcaster's
     # typed mapping. The payload's `"type"` field is hard-coded in the
@@ -98,7 +107,7 @@ KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
     # `on_change` and `_dispatch` callers); every literal is in
     # the allowlist by construction. The dispatcher is dead-end
     # plumbing — typing it dynamically here is OK.
-    "session_ws_broadcaster.py:512": (
+    "session_ws_broadcaster.py:573": (
         "_dispatch fed by typed on_change mapping; payload['type'] is "
         "always a literal in the mapping construction"
     ),
@@ -275,6 +284,9 @@ def _run() -> bool:
     results.append(
         ("`session_marker_changed` in allowlist",
          "session_marker_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`session_user_input_changed` in allowlist",
+         "session_user_input_changed" in ALLOWLIST, "missing"))
     results.append(
         ("`message_auto_retry_changed` in allowlist",
          "message_auto_retry_changed" in ALLOWLIST, "missing"))

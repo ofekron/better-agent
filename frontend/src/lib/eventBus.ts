@@ -38,6 +38,13 @@ export interface BusEventMap {
     session_id: string;
     has_error: boolean;
   };
+  // A request_user_input prompt is pending/resolved for a session. The backend
+  // sends the authoritative pending count, so badges converge even if multiple
+  // input requests overlap.
+  session_user_input_changed: {
+    session_id: string;
+    pending_user_input_count: number;
+  };
   // An extension attention marker on a session changed. `marker` null
   // clears that extension's marker.
   session_marker_changed: {

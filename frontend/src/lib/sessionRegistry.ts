@@ -5,8 +5,8 @@
  * Architecture (per CLAUDE.md state-ownership rule):
  *
  *   • Backend owns per-session state: `is_running`, `unread_count`,
- *     `cwd`, `node_id`. We snapshot from `GET /api/sessions` at
- *     bootstrap, then apply WS deltas.
+ *     `pending_user_input_count`, `cwd`, `node_id`. We snapshot from
+ *     `GET /api/sessions` at bootstrap, then apply WS deltas.
  *
  *   • Per-project aggregates are PURE DERIVATIONS from the per-session
  *     state — we derive locally instead of re-fetching `/api/projects`.
@@ -50,7 +50,7 @@
  *      already applying directly).
  *
  * Two consumer hooks:
- *   • `useSessionMeta(sid)` — `{ is_running, unread_count }` for one sid.
+ *   • `useSessionMeta(sid)` — session status fields for one sid.
  *   • `useProjectAggregate(path, nodeId)` — `{ running_count,
  *     unread_session_count }` for one project (matched by cwd + node_id).
  */
@@ -80,6 +80,7 @@ export interface MarkerInfo {
 export interface SessionMeta {
   is_running: boolean;
   unread_count: number;
+  pending_user_input_count: number;
   monitoring_state: MonitoringState;
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
@@ -99,6 +100,7 @@ export interface ProjectAggregate {
 // `SessionMeta`.
 interface SessionEntry {
   unread_count: number;
+  pending_user_input_count: number;
   monitoring_state: MonitoringState;
   cwd: string;
   node_id: string;
@@ -128,6 +130,7 @@ const EMPTY_MARKERS: Record<string, MarkerInfo> = {};
 const EMPTY_SESSION: SessionMeta = {
   is_running: false,
   unread_count: 0,
+  pending_user_input_count: 0,
   monitoring_state: "stopped",
   markers: EMPTY_MARKERS,
   testape_active: false,
@@ -145,6 +148,7 @@ type BufferedDelta =
   | { type: "run_state"; payload: RunStatePayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
   | { type: "session_error_changed"; payload: SessionErrorPayload }
+  | { type: "session_user_input_changed"; payload: SessionUserInputPayload }
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
   | { type: "session_deleted"; payload: SessionDeletedPayload }
@@ -181,20 +185,28 @@ interface SessionErrorPayload {
   cwd?: string;
   node_id?: string;
 }
+interface SessionUserInputPayload {
+  session_id?: string;
+  app_session_id?: string;
+  pending_user_input_count: number;
+  cwd?: string;
+  node_id?: string;
+}
 interface SessionMarkerPayload {
   session_id: string;
   extension_id: string;
   marker: MarkerInfo | null;
 }
 interface SessionCreatedPayload {
-  session: {
-    id: string;
-    cwd?: string;
-    node_id?: string;
-    is_running?: boolean;
-    unread_count?: number;
-  };
-}
+    session: {
+      id: string;
+      cwd?: string;
+      node_id?: string;
+      is_running?: boolean;
+      unread_count?: number;
+      pending_user_input_count?: number;
+    };
+  }
 interface SessionDeletedPayload {
   session_id?: string;
 }
@@ -255,6 +267,9 @@ class SessionRegistry {
       }],
       ["session_error_changed", (p) => {
         this.dispatch("session_error_changed", p as SessionErrorPayload);
+      }],
+      ["session_user_input_changed", (p) => {
+        this.dispatch("session_user_input_changed", p as SessionUserInputPayload);
       }],
       ["session_marker_changed", (p) => {
         this.dispatch("session_marker_changed", p as SessionMarkerPayload);
@@ -329,6 +344,7 @@ class SessionRegistry {
       id?: string;
       is_running?: boolean;
       unread_count?: number;
+      pending_user_input_count?: number;
       cwd?: string;
       node_id?: string;
       monitoring_state?: string;
@@ -345,6 +361,7 @@ class SessionRegistry {
         || (s.is_running ? "active" : "stopped");
       nextSessions.set(s.id, {
         unread_count: Math.max(0, Number(s.unread_count) || 0),
+        pending_user_input_count: Math.max(0, Number(s.pending_user_input_count) || 0),
         monitoring_state: ms,
         cwd: s.cwd ?? "",
         node_id: s.node_id || "primary",
@@ -398,6 +415,8 @@ class SessionRegistry {
         return this.onUnread(ev.payload);
       case "session_error_changed":
         return this.onError(ev.payload);
+      case "session_user_input_changed":
+        return this.onUserInput(ev.payload);
       case "session_marker_changed":
         return this.onMarker(ev.payload);
       case "session_created":
@@ -452,6 +471,18 @@ class SessionRegistry {
     this.sessions.set(d.session_id, { ...prev, has_error: next });
     this.version += 1;
     this.notifySession(d.session_id);
+  }
+
+  private onUserInput(d: SessionUserInputPayload) {
+    const sid = d.session_id || d.app_session_id || "";
+    if (!sid) return;
+    const prev = this.sessions.get(sid);
+    if (!prev) return; // input dot doesn't materialize a session
+    const next = Math.max(0, Number(d.pending_user_input_count) || 0);
+    if (prev.pending_user_input_count === next) return;
+    this.sessions.set(sid, { ...prev, pending_user_input_count: next });
+    this.version += 1;
+    this.notifySession(sid);
   }
 
   private onMarker(d: SessionMarkerPayload) {
@@ -530,6 +561,7 @@ class SessionRegistry {
       if (!payloadCwd) return;
       const inserted: SessionEntry = {
         unread_count: patch.unread_count ?? 0,
+        pending_user_input_count: 0,
         monitoring_state: patch.monitoring_state ?? "stopped",
         cwd: payloadCwd,
         node_id: payloadNode,
@@ -559,6 +591,7 @@ class SessionRegistry {
 
     this.sessions.set(sid, {
       unread_count: nextUnread,
+      pending_user_input_count: prev.pending_user_input_count,
       monitoring_state: nextState,
       cwd: payloadCwd,
       node_id: payloadNode,
@@ -594,6 +627,7 @@ class SessionRegistry {
     if (this.sessions.has(sess.id)) return;
     const entry: SessionEntry = {
       unread_count: Math.max(0, Number(sess.unread_count) || 0),
+      pending_user_input_count: Math.max(0, Number(sess.pending_user_input_count) || 0),
       monitoring_state: sess.is_running ? "active" : "stopped",
       cwd: sess.cwd ?? "",
       node_id: sess.node_id || "primary",
@@ -732,6 +766,7 @@ class SessionRegistry {
     if (
       cached &&
       cached.unread_count === e.unread_count &&
+      cached.pending_user_input_count === e.pending_user_input_count &&
       cached.monitoring_state === e.monitoring_state &&
       cached.markers === e.markers &&
       cached.testape_active === testapeActive &&
@@ -742,6 +777,7 @@ class SessionRegistry {
     const next: SessionMeta = {
       is_running: isRunning(e.monitoring_state),
       unread_count: e.unread_count,
+      pending_user_input_count: e.pending_user_input_count,
       monitoring_state: e.monitoring_state,
       markers: e.markers,
       testape_active: testapeActive,
@@ -774,6 +810,7 @@ class SessionRegistry {
     id?: string;
     is_running?: boolean;
     unread_count?: number;
+    pending_user_input_count?: number;
     cwd?: string;
     node_id?: string;
     monitoring_state?: string;
@@ -787,6 +824,7 @@ class SessionRegistry {
         || (s.is_running ? "active" : "stopped");
       this.sessions.set(s.id, {
         unread_count: Math.max(0, Number(s.unread_count) || 0),
+        pending_user_input_count: Math.max(0, Number(s.pending_user_input_count) || 0),
         monitoring_state: ms,
         cwd: s.cwd ?? "",
         node_id: s.node_id || "primary",
@@ -862,15 +900,16 @@ const RUNNING_STATES = new Set<string>(["active", "waiting_on_background"]);
 interface StatusFields {
   monitoring_state?: string;
   unread_count?: number;
+  pending_user_input_count?: number;
   markers?: Record<string, MarkerInfo>;
 }
 
-/** Status bucket (5 waiting-for-approval → 0 none) for a session's live or
+/** Status bucket (5 waiting-for-user → 0 none) for a session's live or
  * row-snapshot status fields. Higher sorts first. Mirrors the backend rank
- * exactly. A pending approval sorts above even a running turn. */
+ * exactly. A pending approval/input request sorts above even a running turn. */
 export function statusRankOf(s: StatusFields): number {
   const state = s.monitoring_state ?? "stopped";
-  if (state === "blocked_on_user") return 5;
+  if (state === "blocked_on_user" || (s.pending_user_input_count ?? 0) > 0) return 5;
   if (RUNNING_STATES.has(state)) return 4;
   const tags = new Set(
     Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
@@ -888,6 +927,7 @@ export function statusRankForRow(session: {
   id: string;
   monitoring_state?: string;
   unread_count?: number;
+  pending_user_input_count?: number;
   markers?: Record<string, MarkerInfo>;
 }): number {
   const live = sessionRegistry.peekMeta(session.id);
@@ -895,6 +935,7 @@ export function statusRankForRow(session: {
   return statusRankOf({
     monitoring_state: session.monitoring_state,
     unread_count: session.unread_count,
+    pending_user_input_count: session.pending_user_input_count,
     markers: session.markers,
   });
 }

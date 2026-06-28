@@ -1771,6 +1771,7 @@ def _decorate_local_sidebar_sessions(sessions: list[dict]) -> list[dict]:
         with perf.timed("sessions.list.local.decorate.state"):
             running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
             unread_by_sid = session_manager.unread_counts_snapshot()
+            pending_input_by_sid = user_input_store.pending_counts_by_session()
             sessions_dir = _root_sessions_dir_path()
         for s in sessions:
             with perf.timed("sessions.list.local.decorate.payload"):
@@ -1795,6 +1796,7 @@ def _decorate_local_sidebar_sessions(sessions: list[dict]) -> list[dict]:
                 "is_running": sid in running_sids,
                 "monitoring_state": monitoring_by_sid.get(sid, "stopped"),
                 "unread_count": unread_by_sid.get(sid, 0),
+                "pending_user_input_count": pending_input_by_sid.get(sid, 0),
                 "has_error": bool(s.get("unseen_error")),
                 "file_path": f"{sessions_dir}/{sid}.json",
             })
@@ -2811,18 +2813,28 @@ def _session_status_rank(
     session: dict,
     monitoring_by_sid: dict[str, str],
     unread_by_sid: dict[str, int],
+    pending_input_by_sid: dict[str, int] | None = None,
 ) -> int:
     """Status bucket for the status-sort option (higher sorts first under
-    reverse=True): 5 waiting-for-approval, 4 running, 3 needs-user-decision,
+    reverse=True): 5 waiting-for-user, 4 running, 3 needs-user-decision,
     2 has-new, 1 all-tasks-done, 0 none. Highest applicable bucket wins."""
     sid = session.get("id") or ""
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
     # aren't in the local snapshot.
     state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
-    # A pending approval blocks everything else — it sorts above even a
-    # running turn so the user sees it first.
-    if state == "blocked_on_user":
+    pending_inputs = None
+    if pending_input_by_sid is not None:
+        pending_inputs = pending_input_by_sid.get(sid)
+    if pending_inputs is None:
+        pending_inputs = session.get("pending_user_input_count", 0)
+    try:
+        pending_input_count = max(0, int(pending_inputs or 0))
+    except (TypeError, ValueError):
+        pending_input_count = 0
+    # A pending approval or explicit request_user_input question blocks
+    # everything else — it sorts above even a running turn so the user sees it.
+    if state == "blocked_on_user" or pending_input_count > 0:
         return 5
     if state in _RUNNING_STATES:
         return 4
@@ -2852,6 +2864,7 @@ def _session_list_sort_key(
     status_sort: bool = False,
     monitoring_by_sid: dict[str, str] | None = None,
     unread_by_sid: dict[str, int] | None = None,
+    pending_input_by_sid: dict[str, int] | None = None,
 ) -> tuple:
     # empty-new and pinned stay above status; status is the strongest key
     # below them, time the tie-break: (isEmpty, pinned, [status], ts).
@@ -2861,7 +2874,12 @@ def _session_list_sort_key(
     )
     if status_sort:
         inner += (
-            _session_status_rank(session, monitoring_by_sid or {}, unread_by_sid or {}),
+            _session_status_rank(
+                session,
+                monitoring_by_sid or {},
+                unread_by_sid or {},
+                pending_input_by_sid or {},
+            ),
         )
     inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:
@@ -3028,6 +3046,7 @@ def _session_filtered_sort_key(
     status_sort: bool = False,
     monitoring_by_sid: dict[str, str] | None = None,
     unread_by_sid: dict[str, int] | None = None,
+    pending_input_by_sid: dict[str, int] | None = None,
 ) -> tuple:
     # In search mode relevance dominates; status only breaks ties below the
     # search score: (pinned, score>0, score, [status], ts).
@@ -3039,7 +3058,12 @@ def _session_filtered_sort_key(
     )
     if status_sort:
         inner += (
-            _session_status_rank(session, monitoring_by_sid or {}, unread_by_sid or {}),
+            _session_status_rank(
+                session,
+                monitoring_by_sid or {},
+                unread_by_sid or {},
+                pending_input_by_sid or {},
+            ),
         )
     inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:
@@ -3089,9 +3113,11 @@ def _filter_sort_sessions_for_list(
     # view between fetches (see useSession debounced refetch).
     monitoring_by_sid: dict[str, str] = {}
     unread_by_sid: dict[str, int] = {}
+    pending_input_by_sid: dict[str, int] = {}
     if status_sort:
         _, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
         unread_by_sid = session_manager.unread_counts_snapshot()
+        pending_input_by_sid = user_input_store.pending_counts_by_session()
     out.sort(
         key=(
             (lambda session: _session_filtered_sort_key(
@@ -3103,6 +3129,7 @@ def _filter_sort_sessions_for_list(
                 status_sort=status_sort,
                 monitoring_by_sid=monitoring_by_sid,
                 unread_by_sid=unread_by_sid,
+                pending_input_by_sid=pending_input_by_sid,
             ))
             if search and search.strip()
             else (lambda session: _session_list_sort_key(
@@ -3112,6 +3139,7 @@ def _filter_sort_sessions_for_list(
                 status_sort=status_sort,
                 monitoring_by_sid=monitoring_by_sid,
                 unread_by_sid=unread_by_sid,
+                pending_input_by_sid=pending_input_by_sid,
             ))
         ),
         reverse=True,
@@ -8587,7 +8615,21 @@ def _validate_user_input_questions(raw_questions: Any) -> list[dict[str, Any]]:
 
 
 async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> None:
-    await coordinator.broadcast_global(event_type, payload)
+    app_session_id = str(payload.get("app_session_id") or "").strip()
+    if not app_session_id:
+        return
+    await coordinator.dispatch_raw(app_session_id, {"type": event_type, "data": payload})
+
+
+async def _broadcast_user_input_state(app_session_id: str) -> None:
+    sid = str(app_session_id or "").strip()
+    if not sid:
+        return
+    await coordinator.broadcast_global("session_user_input_changed", {
+        "session_id": sid,
+        "app_session_id": sid,
+        "pending_user_input_count": user_input_store.pending_count_for_session(sid),
+    })
 
 
 @app.get("/api/user-input/pending")
@@ -8626,6 +8668,7 @@ async def resolve_user_input(request_id: str, body: dict):
         "app_session_id": resolved.get("app_session_id"),
         "status": resolved.get("status"),
     })
+    await _broadcast_user_input_state(str(resolved.get("app_session_id") or ""))
     return {"success": True, "status": resolved.get("status")}
 
 
@@ -8644,6 +8687,7 @@ async def cancel_user_input(request_id: str, body: dict):
         "app_session_id": resolved.get("app_session_id"),
         "status": resolved.get("status"),
     })
+    await _broadcast_user_input_state(str(resolved.get("app_session_id") or ""))
     return {"success": True, "status": resolved.get("status")}
 
 
@@ -8678,6 +8722,7 @@ async def internal_request_user_input(
         timeout_seconds=timeout_seconds,
     )
     await _broadcast_user_input("user_input_requested", public_req)
+    await _broadcast_user_input_state(app_session_id)
     completed = await user_input_store.wait_for_completion(
         public_req["request_id"],
         timeout_seconds,
@@ -8685,6 +8730,7 @@ async def internal_request_user_input(
     if completed is None:
         return {"success": False, "error": "request not found"}
     if completed.get("status") == "resolved":
+        await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
         return {
             "success": True,
             "request_id": completed["request_id"],
@@ -8695,6 +8741,7 @@ async def internal_request_user_input(
         "app_session_id": completed.get("app_session_id"),
         "status": completed.get("status"),
     })
+    await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
     return {
         "success": False,
         "request_id": completed.get("request_id"),

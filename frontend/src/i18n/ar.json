@@ -466,6 +466,7 @@
   "session.noMatch": "لا جلسات مطابقة",
   "session.running": "قيد التشغيل",
   "session.awaitingApproval": "بانتظار الموافقة",
+  "session.inputNeeded": "بحاجة إلى إدخال",
   "session.error": "فشل الدور الأخير",
   "session.unread_1": "حدث جديد واحد",
   "session.unread_other": "{{count}} أحداث جديدة",
