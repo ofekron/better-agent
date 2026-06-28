@@ -3497,12 +3497,17 @@ def _build_local_sessions_page_for_list(
     virtual_sessions: list[dict] = []
     if search_query:
         selected_search_fields = _split_session_search_fields(search_fields)
+        content_max_wait_seconds = (
+            _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
+            if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}
+            else None
+        )
         with perf.timed("sessions.list.search_scores"):
             content_scores = session_store.grep_session_scores(
                 search_query,
                 selected_search_fields,
                 content_limit=max(offset + limit, 1),
-                content_max_wait_seconds=_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS,
+                content_max_wait_seconds=content_max_wait_seconds,
             )
         with perf.timed("sessions.list.search_local"):
             out = _local_session_summaries_by_ids_for_sidebar(list(content_scores))
@@ -3584,12 +3589,17 @@ async def _sidebar_search_scores(
     content_limit: int,
 ) -> dict[str, int]:
     selected_search_fields = _split_session_search_fields(search_fields)
+    content_max_wait_seconds = (
+        _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
+        if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}
+        else None
+    )
     return await asyncio.to_thread(
         session_store.grep_session_scores,
         search_query,
         selected_search_fields,
         content_limit=content_limit,
-        content_max_wait_seconds=_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS,
+        content_max_wait_seconds=content_max_wait_seconds,
     )
 
 
