@@ -4916,14 +4916,25 @@ class SessionManager:
         )
 
     def set_continuation_requested(
-        self, sid: str, prompt: str, reason: str = "agent_requested",
+        self, sid: str, prompt: str, *,
+        reason: str = "agent_requested",
+        when: str = "next_turn",
     ) -> Optional[dict]:
-        """Agent-requested continuation flag. Read+cleared by the turn loop
-        on a successful turn: the next provider subprocess starts fresh under
-        the SAME Better Agent session (continuation_chain extended) with
-        `prompt`. Lives on the session record so it survives the tool-call →
-        turn-end gap."""
-        requested = {"prompt": str(prompt or ""), "reason": str(reason or "agent_requested")}
+        """Agent-requested continuation flag. Read+cleared by the turn loop.
+
+        `when="next_turn"`: the current turn completes normally; the success
+        path starts a fresh provider subprocess under the SAME session with
+        `prompt`.
+        `when="now"`: the in-flight run is aborted and the cancel path starts
+        the continuation immediately.
+
+        Lives on the session record so it survives the tool-call → turn-end
+        gap (and the cancel-drain gap for `when="now"`)."""
+        requested = {
+            "prompt": str(prompt or ""),
+            "reason": str(reason or "agent_requested"),
+            "when": str(when or "next_turn"),
+        }
         def _do(s: dict) -> None:
             s["continuation_requested"] = requested
         return self._run(

@@ -2030,21 +2030,35 @@ async def internal_session_control_continue_fresh(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     """`continue_in_fresh_context` tool backing. Sets the agent-requested
-    continuation flag on the CALLER'S OWN session. The turn loop honors it
-    on the next successful turn: a fresh provider subprocess starts under
-    the SAME Better Agent session (continuation_chain extended) running the
-    queued prompt. The agent can only continue its own session."""
+    continuation flag on the CALLER'S OWN session.
+
+    `when="next_turn"` (default): the current turn completes normally, then a
+    fresh provider subprocess starts under the SAME session running the queued
+    prompt. `when="now"`: abort the in-flight run immediately and start that
+    fresh subprocess right away (same session, continuation_chain extended).
+
+    The agent can only continue its own session."""
     _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sid = str((body or {}).get("app_session_id") or "").strip()
     prompt = str((body or {}).get("prompt") or "").strip()
+    when = str((body or {}).get("when") or "next_turn").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="app_session_id is required")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
-    session_manager.set_continuation_requested(sid, prompt)
-    return {"ok": True, "session_id": sid}
+    if when == "now":
+        landed = coordinator.turn_manager.request_immediate_continuation(sid, prompt)
+        # If no live turn is running to abort, fall back to next-turn semantics
+        # so the request is never silently lost.
+        if landed:
+            return {"ok": True, "session_id": sid, "when": "now"}
+        when = "next_turn"
+    if when == "next_turn":
+        session_manager.set_continuation_requested(sid, prompt, when="next_turn")
+        return {"ok": True, "session_id": sid, "when": "next_turn"}
+    raise HTTPException(status_code=400, detail="when must be 'next_turn' or 'now'")
 
 
 @app.post("/api/internal/project-updates/count")

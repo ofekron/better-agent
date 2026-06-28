@@ -45,14 +45,17 @@ def switch_model_response(
         return {"success": False, "error": str(exc)}
 
 
-def continue_in_fresh_context_response(prompt: str) -> dict[str, Any]:
+def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> dict[str, Any]:
     prompt = str(prompt or "").strip()
+    when = str(when or "next_turn").strip()
     if not prompt:
         return {"success": False, "error": "prompt is required"}
+    if when not in ("next_turn", "now"):
+        return {"success": False, "error": "when must be 'next_turn' or 'now'"}
     try:
         return Client().call_internal(
             "/api/internal/session-control/continue-fresh",
-            {"prompt": prompt},
+            {"prompt": prompt, "when": when},
             timeout=_TIMEOUT,
         )
     except Exception as exc:  # tool boundary: surface transport failures, never crash
@@ -76,14 +79,21 @@ def build_server() -> FastMCP:
         return switch_model_response(model, provider_id, reasoning_effort)
 
     @server.tool()
-    def continue_in_fresh_context(prompt: str) -> dict[str, Any]:
-        """Request a continuation: after the current turn finishes, start a FRESH
-        provider subprocess under the SAME session (chained to the prior one) and
-        run `prompt` in it. Use this when the context window is filling up and you
-        want to shed history while keeping the same session. Provide the prompt the
-        fresh subprocess should continue with (gather any needed prior context
-        yourself via your tools first)."""
-        return continue_in_fresh_context_response(prompt)
+    def continue_in_fresh_context(prompt: str, when: str = "next_turn") -> dict[str, Any]:
+        """Request a continuation: start a FRESH provider subprocess under the
+        SAME session (chained to the prior one) and run `prompt` in it. Use this
+        when the context window is filling up and you want to shed history while
+        keeping the same session. Provide the prompt the fresh subprocess should
+        continue with (gather any needed prior context yourself via your tools
+        first).
+
+        `when`:
+        - "next_turn" (default): let the current turn finish naturally, then run
+          the continuation. Non-disruptive.
+        - "now": abort the current run immediately and start the continuation
+          right away. Use when the current response is going off-track or
+          burning tokens you don't need."""
+        return continue_in_fresh_context_response(prompt, when)
 
     return server
 

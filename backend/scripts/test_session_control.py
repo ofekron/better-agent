@@ -41,10 +41,13 @@ def test_continuation_requested_flag_roundtrip() -> None:
     sid = session_manager.manager.create(name="sc", cwd=str(TMP_HOME))["id"]
     try:
         assert session_manager.manager.pop_continuation_requested(sid) is None
-        session_manager.manager.set_continuation_requested(sid, "keep going", "agent_requested")
+        session_manager.manager.set_continuation_requested(sid, "keep going", when="next_turn")
         popped = session_manager.manager.pop_continuation_requested(sid)
-        check(popped == {"prompt": "keep going", "reason": "agent_requested"},
-              "pop returns the queued continuation request")
+        check(popped == {"prompt": "keep going", "reason": "agent_requested", "when": "next_turn"},
+              "pop returns the queued next_turn request")
+        session_manager.manager.set_continuation_requested(sid, "now-prompt", when="now")
+        popped = session_manager.manager.pop_continuation_requested(sid)
+        check(popped.get("when") == "now", "flag carries when=now")
         check(session_manager.manager.pop_continuation_requested(sid) is None,
               "pop clears the flag (second pop is None)")
     finally:
@@ -104,16 +107,52 @@ def test_endpoints() -> None:
 
         sid = session_manager.manager.create(name="sc-ep", cwd=str(TMP_HOME))["id"]
         try:
-            # continue-fresh: sets the continuation flag on the caller's session.
+            # continue-fresh next_turn (default): sets the flag, no live turn.
             resp = client.post(
                 "/api/internal/session-control/continue-fresh",
                 headers={"X-Internal-Token": internal_token},
                 json={"app_session_id": sid, "prompt": "next step"},
             )
-            check(resp.status_code == 200, f"continue-fresh ok ({resp.status_code})")
+            check(resp.status_code == 200, f"continue-fresh next_turn ok ({resp.status_code})")
+            check(resp.json().get("when") == "next_turn", "next_turn reflected in response")
             req = (session_manager.manager.get(sid) or {}).get("continuation_requested")
-            check(req == {"prompt": "next step", "reason": "agent_requested"},
-                  "continue-fresh set the continuation flag")
+            check(req == {"prompt": "next step", "reason": "agent_requested", "when": "next_turn"},
+                  "continue-fresh next_turn set the flag")
+
+            # continue-fresh with when="now" but NO live turn → falls back to next_turn.
+            resp = client.post(
+                "/api/internal/session-control/continue-fresh",
+                headers={"X-Internal-Token": internal_token},
+                json={"app_session_id": sid, "prompt": "p", "when": "now"},
+            )
+            check(resp.status_code == 200, f"continue-fresh now-no-turn ok ({resp.status_code})")
+            check(resp.json().get("when") == "next_turn", "now with no live turn falls back to next_turn")
+
+            # continue-fresh with when="now" AND a live cancel_event → aborts + flag=now.
+            import asyncio
+            tm = main.coordinator.turn_manager
+            tm.cancel_events[sid] = asyncio.Event()
+            try:
+                resp = client.post(
+                    "/api/internal/session-control/continue-fresh",
+                    headers={"X-Internal-Token": internal_token},
+                    json={"app_session_id": sid, "prompt": "abort and restart", "when": "now"},
+                )
+                check(resp.status_code == 200, f"continue-fresh now-live ok ({resp.status_code})")
+                check(resp.json().get("when") == "now", "now reflected when a live turn is aborted")
+                check(tm.cancel_events[sid].is_set(), "now sets the cancel event (aborts in-flight run)")
+                req = (session_manager.manager.get(sid) or {}).get("continuation_requested")
+                check(req.get("when") == "now", "continue-fresh now set the flag with when=now")
+            finally:
+                tm.cancel_events.pop(sid, None)
+
+            # continue-fresh rejects an invalid when.
+            resp = client.post(
+                "/api/internal/session-control/continue-fresh",
+                headers={"X-Internal-Token": internal_token},
+                json={"app_session_id": sid, "prompt": "x", "when": "bogus"},
+            )
+            check(resp.status_code == 400, "continue-fresh rejects invalid when")
 
             # continue-fresh rejects a missing prompt.
             resp = client.post(
