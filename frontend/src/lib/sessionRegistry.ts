@@ -830,15 +830,17 @@ interface StatusFields {
   markers?: Record<string, MarkerInfo>;
 }
 
-/** Status bucket (4 running → 0 none) for a session's live or row-snapshot
- * status fields. Higher sorts first. Mirrors the backend rank exactly. */
+/** Status bucket (5 waiting-for-approval → 0 none) for a session's live or
+ * row-snapshot status fields. Higher sorts first. Mirrors the backend rank
+ * exactly. A pending approval sorts above even a running turn. */
 export function statusRankOf(s: StatusFields): number {
   const state = s.monitoring_state ?? "stopped";
+  if (state === "blocked_on_user") return 5;
   if (RUNNING_STATES.has(state)) return 4;
   const tags = new Set(
     Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
   );
-  if (state === "blocked_on_user" || tags.has(MARKER_TAG_NEEDS_DECISION)) return 3;
+  if (tags.has(MARKER_TAG_NEEDS_DECISION)) return 3;
   if ((s.unread_count ?? 0) > 0) return 2;
   if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;
   return 0;

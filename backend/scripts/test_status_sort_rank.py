@@ -1,9 +1,10 @@
 """Status-sort rank + sort-key regression tests.
 
 Locks the backend half of the "group by status" sort option:
-  1. `_session_status_rank` buckets correctly (4 running, 3 needs-decision,
-     2 has-new, 1 all-done, 0 none) with highest-wins precedence, reading
-     monitoring snapshot first then row fallback, and marker TAG (not color).
+  1. `_session_status_rank` buckets correctly (5 waiting-for-approval,
+     4 running, 3 needs-decision, 2 has-new, 1 all-done, 0 none) with
+     highest-wins precedence, reading monitoring snapshot first then row
+     fallback, and marker TAG (not color).
   2. `_session_list_sort_key` puts status BELOW empty-new + pinned and ABOVE
      the timestamp (the decided precedence: empty > pinned > status > ts),
      and only when status_sort=True.
@@ -55,7 +56,7 @@ unread = {"new": 3}
 
 check("rank.running.active", main._session_status_rank({"id": "run"}, mon, unread) == 4)
 check("rank.running.waiting_bg", main._session_status_rank({"id": "bg"}, mon, unread) == 4)
-check("rank.needs.blocked_state", main._session_status_rank({"id": "blocked"}, mon, unread) == 3)
+check("rank.approval.blocked_state", main._session_status_rank({"id": "blocked"}, mon, unread) == 5)
 check(
     "rank.needs.marker_tag",
     main._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 3,
@@ -67,6 +68,17 @@ check(
 )
 check("rank.none", main._session_status_rank({"id": "idle"}, mon, unread) == 0)
 
+# precedence: waiting-for-approval beats running (both via the snapshot)
+check(
+    "rank.precedence.approval_over_running",
+    main._session_status_rank({"id": "blocked"}, mon, unread)
+    > main._session_status_rank({"id": "run"}, mon, unread),
+)
+# row fallback: a remote row reporting blocked_on_user is rank 5
+check(
+    "rank.row_fallback.blocked",
+    main._session_status_rank({"id": "remote", "monitoring_state": "blocked_on_user"}, {}, {}) == 5,
+)
 # precedence: running beats a needs-decision marker on the same session
 check(
     "rank.precedence.running_over_marker",

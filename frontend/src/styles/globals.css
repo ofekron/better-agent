@@ -11437,6 +11437,18 @@ pre .inline-tag-highlight {
   vertical-align: middle;
 }
 
+.session-status-approval {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-inline-start: 0;
+  border-radius: 50%;
+  background: var(--error, #f85149);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--error, #f85149) 65%, transparent);
+  animation: pulse-badge 1.6s ease-in-out infinite;
+  vertical-align: middle;
+}
+
 .session-status-unread {
   display: inline-block;
   width: 8px;

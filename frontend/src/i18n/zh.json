@@ -465,6 +465,7 @@
   "session.createTag": "创建“{{name}}”",
   "session.noMatch": "没有匹配的会话",
   "session.running": "运行中",
+  "session.awaitingApproval": "等待批准",
   "session.unread_1": "1 条新事件",
   "session.unread_other": "{{count}} 条新事件",
   "projects.header": "项目",
