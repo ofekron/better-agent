@@ -1153,30 +1153,19 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
         check("better-agent-coordination" in servers, f"{provider_name} gets coordination through public extension")
 
 
-def t_get_requirements_internal_tool_is_processor_scoped() -> None:
+def t_requirements_mcp_uses_private_extension() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("requirement_analysis")
-    normal = builtin_mcp_config.with_builtin_mcp_servers({
+    config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "normal-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
         "mode": "native",
     }, {})
-    processor = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
-        "app_session_id": "processor-caller",
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "secret",
-        "mode": "native",
-        "worker_working_mode": "get_requirements_processor",
-    }, {})
-    normal_servers = normal["mcp_servers"]
-    processor_servers = processor["mcp_servers"]
-    check("get-requirements" not in normal_servers, "normal runs do not use the public requirements MCP")
-    check("better-agent-requirements" in normal_servers, "normal runs use private requirements MCP")
-    check("get-requirements" not in processor_servers, "processor runs do not use the public requirements MCP")
-    check("better-agent-requirements" in processor_servers, "processor runs use private requirements MCP")
+    servers = config["mcp_servers"]
+    check("get-requirements" not in servers, "normal runs do not use the public requirements MCP")
+    check("better-agent-requirements" in servers, "normal runs use private requirements MCP")
 
 
 def t_native_requirements_mcp_injected_with_run_auth() -> None:
@@ -1356,7 +1345,7 @@ def main() -> int:
         ("installed extension mcp servers are injected", t_installed_extension_mcp_servers_are_injected),
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
-        ("get-requirements internal tool is processor scoped", t_get_requirements_internal_tool_is_processor_scoped),
+        ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
         ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
