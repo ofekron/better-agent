@@ -14,12 +14,21 @@ _LOCK = threading.RLock()
 _SCHEMA_VERSION = 1
 _COUNTS_LOADED_PATH: Path | None = None
 _PENDING_COUNTS_BY_SESSION: dict[str, int] = {}
+_PATH_CACHE_HOME: Path | None = None
+_PATH_CACHE_VALUE: Path | None = None
 
 
 def _path() -> Path:
-    root = ba_home() / "user_inputs"
+    global _PATH_CACHE_HOME, _PATH_CACHE_VALUE
+    home = ba_home()
+    if _PATH_CACHE_HOME == home and _PATH_CACHE_VALUE is not None:
+        return _PATH_CACHE_VALUE
+    root = home / "user_inputs"
     root.mkdir(parents=True, exist_ok=True)
-    return root / "requests.json"
+    path = root / "requests.json"
+    _PATH_CACHE_HOME = home
+    _PATH_CACHE_VALUE = path
+    return path
 
 
 def _now() -> float:
@@ -52,9 +61,9 @@ def _rebuild_counts_locked(data: dict[str, Any], path: Path | None = None) -> No
 
 
 def _ensure_counts_locked() -> None:
-    path = _path()
-    if _COUNTS_LOADED_PATH == path:
+    if _COUNTS_LOADED_PATH is not None:
         return
+    path = _path()
     _rebuild_counts_locked(_read_locked(), path)
 
 
