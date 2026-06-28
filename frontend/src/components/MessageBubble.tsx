@@ -890,6 +890,11 @@ function groupEvents(
     // Non-todo event — flush pending todo run before processing.
     flushTodoRun();
 
+    if (ev.type === "tool_result" && ev.data?.paired_tool_result) {
+      i++;
+      continue;
+    }
+
     if (ev.type === "tool_call") {
       // Prefer the id-based lookup (native claude shape); fall back to
       // the positional "next is output" pairing (legacy translator shape).
@@ -916,8 +921,14 @@ function groupEvents(
       groups.push({ kind: "tool", idx: startIdx, event: ev, result });
     } else {
       // Deduplicate output/thinking events with identical text
-      if (ev.type === "output" || ev.type === "thinking") {
-        const raw = (ev.type === "output" ? ev.data.output : ev.data.thought) as string;
+      if (ev.type === "output" || ev.type === "thinking" || ev.type === "tool_result") {
+        const raw = (
+          ev.type === "output"
+            ? ev.data.output
+            : ev.type === "thinking"
+              ? ev.data.thought
+              : ev.data.output
+        ) as string;
         const normalized = normalizeForDedup(raw || "");
         if (normalized && seenTexts.has(normalized)) {
           i++;
@@ -1041,6 +1052,8 @@ function renderSingleEvent(
       return <ThinkingBlock key={idx} thought={thought} onFileClick={onFileClick} />;
     }
     case "output":
+      return <OutputEvent key={idx} text={event.data.output as string} nested={nested} collapsible={collapsibleProse} onFileClick={onFileClick} />;
+    case "tool_result":
       return <OutputEvent key={idx} text={event.data.output as string} nested={nested} collapsible={collapsibleProse} onFileClick={onFileClick} />;
     case "steer_prompt":
       return (

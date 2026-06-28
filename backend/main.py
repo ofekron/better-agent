@@ -22,7 +22,7 @@ except Exception:
     _GIT_SHA = "dev"
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from pathlib import Path
@@ -9874,8 +9874,62 @@ async def internal_list_workers_for_cwd(
             "last_active": w.get("last_active"),
             "delegation_count": w.get("delegation_count", 0),
             "token_usage": w.get("token_usage"),
+            "tags": _ws.normalize_tags(w.get("tags")),
         })
-    return {"workers": out}
+    return {
+        "workers": out,
+        "pools": _worker_pool_projection(out, raw.get("pool_queues") or {}),
+        "teams": _worker_team_projection(out),
+    }
+
+
+def _worker_pool_projection(workers: list[dict], pool_queues: dict) -> list[dict]:
+    by_tag: dict[str, list[dict]] = {}
+    for worker in workers:
+        for tag in worker.get("tags") or []:
+            by_tag.setdefault(str(tag), []).append(worker)
+    pools = []
+    for tag, tagged_workers in sorted(by_tag.items()):
+        queue = pool_queues.get(tag)
+        pools.append({
+            "tag": tag,
+            "workers": tagged_workers,
+            "queued_count": len(queue) if isinstance(queue, list) else 0,
+        })
+    return pools
+
+
+def _worker_team_projection(workers: list[dict]) -> list[dict]:
+    import team_store
+
+    workers_by_id = {worker.get("agent_session_id"): worker for worker in workers}
+    teams = []
+    for team in team_store.list_all():
+        members = team_store.ordered_members(team)
+        bound_ids = {
+            member.get("agent_session_id")
+            for member in members
+            if member.get("type") == "worker" and member.get("agent_session_id")
+        }
+        worker_rows = []
+        for member in members:
+            if member.get("type") != "worker":
+                continue
+            sid = member.get("agent_session_id")
+            worker = workers_by_id.get(sid)
+            if worker:
+                worker_rows.append({**worker, "team_binding": "bound", "team_role": member.get("role")})
+        for worker in workers:
+            if worker.get("agent_session_id") in bound_ids:
+                continue
+            worker_rows.append({**worker, "team_binding": "available", "team_role": ""})
+        teams.append({
+            "id": team.get("id"),
+            "name": team.get("definition_ref") or team.get("profile") or team.get("id"),
+            "root_session_id": team.get("root_session_id"),
+            "workers": worker_rows,
+        })
+    return teams
 
 
 @app.post("/api/internal/workers/create")
@@ -9928,10 +9982,93 @@ async def internal_provision_workers(
 # means asyncio.Lock is sufficient — the event loop can't context-switch
 # inside the synchronous setdefault that creates a new lock.
 _PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
+_POOL_PROCESSORS: dict[str, asyncio.Task] = {}
 
 
 def _provision_lock(name: str, cwd: str) -> asyncio.Lock:
     return _PROVISION_LOCKS.setdefault(f"{name}\0{cwd}", asyncio.Lock())
+
+
+@app.post("/api/internal/worker-pools/enqueue")
+async def internal_enqueue_worker_pool_prompt(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_team_orchestration_internal(x_internal_token)
+    from stores import worker_store as _ws
+
+    tag = str((body or {}).get("tag") or "").strip()
+    sender_session_id = str((body or {}).get("sender_session_id") or "").strip()
+    prompt = str((body or {}).get("prompt") or "").strip()
+    if not tag or not sender_session_id or not prompt:
+        raise HTTPException(status_code=400, detail="tag, sender_session_id, and prompt are required")
+    if not await _session_lite(sender_session_id):
+        raise HTTPException(status_code=404, detail="sender_session_id does not exist")
+    item = {
+        "id": str(uuid.uuid4()),
+        "tag": tag,
+        "sender_session_id": sender_session_id,
+        "prompt": prompt,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    queued = await asyncio.to_thread(_ws.enqueue_pool_task, tag, item)
+    _ensure_worker_pool_processor(tag)
+    await coordinator.broadcast_workers_changed(None)
+    return {"success": True, **queued}
+
+
+def _ensure_worker_pool_processor(tag: str) -> None:
+    clean = str(tag or "").strip()
+    if not clean:
+        return
+    task = _POOL_PROCESSORS.get(clean)
+    if task is None or task.done():
+        _POOL_PROCESSORS[clean] = asyncio.create_task(
+            _process_worker_pool_queue(clean),
+            name=f"worker-pool-{clean}",
+        )
+
+
+async def _process_worker_pool_queue(tag: str) -> None:
+    from stores import worker_store as _ws
+
+    while True:
+        item = await asyncio.to_thread(_ws.peek_pool_task, tag)
+        if not item:
+            return
+        target = await asyncio.to_thread(_pick_idle_pool_worker, tag)
+        if not target:
+            await asyncio.sleep(1)
+            continue
+        await coordinator.submit_team_message(
+            sender_session_id=str(item.get("sender_session_id") or ""),
+            target_session_id=target["agent_session_id"],
+            message=str(item.get("prompt") or ""),
+            detach=True,
+        )
+        await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
+        await coordinator.broadcast_workers_changed(None)
+
+
+def _pick_idle_pool_worker(tag: str) -> dict | None:
+    from stores import worker_store as _ws
+
+    candidates = []
+    for worker in _ws.list_workers(""):
+        if tag not in _ws.normalize_tags(worker.get("tags")):
+            continue
+        sid = str(worker.get("agent_session_id") or "")
+        session = session_manager.get_lite(sid)
+        if not session:
+            continue
+        if coordinator.turn_manager.is_running_cached(sid):
+            continue
+        if session.get("queued_prompts"):
+            continue
+        candidates.append({**worker, "name": session.get("name") or worker.get("name")})
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item.get("last_active") or "")[0]
 
 
 async def _provision_workers_from_body(body: dict):
@@ -9976,6 +10113,7 @@ async def _provision_workers_from_body(body: dict):
                     "reasoning_effort": spec.get("reasoning_effort"),
                     "node_id": spec.get("node_id"),
                     "role_key": key,
+                    "tags": spec.get("tags"),
                     "bare_config": bool(spec.get("bare_config", body_bare)),
                     "provision_prompt": spec.get("provision_prompt"),
                     "capability_contexts": spec.get("capability_contexts"),
@@ -10102,6 +10240,7 @@ def _create_pending_worker_from_body(body: dict):
         node_id=node_id,
         name=body.get("name"),
         role_key=body.get("role_key"),
+        tags=body.get("tags"),
     )
     return {
         "agent_session_id": bc["id"],
@@ -10115,6 +10254,7 @@ def _create_pending_worker_from_body(body: dict):
         "initialized": False,
         "diverged": False,
         "delegation_count": rec.get("delegation_count", 0),
+        "tags": rec.get("tags") or [],
     }
 
 
@@ -10180,6 +10320,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         node_id=node_id,
         name=body.get("name"),
         role_key=body.get("role_key"),
+        tags=body.get("tags"),
     )
     if broadcast:
         await coordinator.broadcast_workers_changed(None)
@@ -10195,6 +10336,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         "initialized": True,
         "diverged": False,
         "delegation_count": rec.get("delegation_count", 0),
+        "tags": rec.get("tags") or [],
     }
 
 
@@ -10266,6 +10408,7 @@ async def internal_register_existing_session_as_worker(
         # The worker runs wherever its Better Agent session lives — the session
         # record is the single source of truth for its node binding.
         node_id=bc.get("node_id") or "primary",
+        tags=(body or {}).get("tags"),
     )
     await coordinator.broadcast_workers_changed(None)
     return {
@@ -10278,6 +10421,7 @@ async def internal_register_existing_session_as_worker(
         "initialized": True,
         "diverged": False,
         "delegation_count": rec.get("delegation_count", 0),
+        "tags": rec.get("tags") or [],
     }
 
 

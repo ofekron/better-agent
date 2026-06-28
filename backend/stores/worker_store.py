@@ -86,7 +86,7 @@ def _workers_dir() -> Path:
     return ba_home() / "workers"
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _now() -> str:
@@ -98,7 +98,22 @@ def _path() -> Path:
 
 
 def _empty() -> dict:
-    return {"version": SCHEMA_VERSION, "workers": [], "forks": {}}
+    return {"version": SCHEMA_VERSION, "workers": [], "forks": {}, "pool_queues": {}}
+
+
+def normalize_tags(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    raw = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        tag = str(item or "").strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
 
 
 def _read(cwd: str = "") -> dict:
@@ -135,6 +150,7 @@ def _read(cwd: str = "") -> dict:
         return _empty()
     raw.setdefault("workers", [])
     raw.setdefault("forks", {})
+    raw.setdefault("pool_queues", {})
     return raw
 
 
@@ -162,6 +178,23 @@ def list_workers(cwd: str) -> list[dict]:
         workers = [w for w in workers if w.get("cwd") == cwd]
     workers.sort(key=lambda w: w.get("last_active", ""), reverse=True)
     return workers
+
+
+def list_pools(cwd: str = "") -> list[dict]:
+    by_tag: dict[str, list[dict]] = {}
+    for worker in list_workers(cwd):
+        for tag in normalize_tags(worker.get("tags")):
+            by_tag.setdefault(tag, []).append(worker)
+    queues = _read().get("pool_queues") or {}
+    pools = []
+    for tag, workers in sorted(by_tag.items()):
+        queue = queues.get(tag) if isinstance(queues.get(tag), list) else []
+        pools.append({
+            "tag": tag,
+            "workers": workers,
+            "queued_count": len(queue),
+        })
+    return pools
 
 
 def get_worker(cwd: str, agent_session_id: str) -> Optional[dict]:
@@ -211,6 +244,7 @@ def upsert_worker(
     node_id: str = "primary",
     name: Optional[str] = None,
     role_key: Optional[str] = None,
+    tags: Optional[list[str]] = None,
 ) -> dict:
     if orchestration_mode == "manager":
         orchestration_mode = "team"
@@ -232,6 +266,8 @@ def upsert_worker(
                     w["name"] = name
                 if role_key:
                     w["role_key"] = role_key
+                if tags is not None:
+                    w["tags"] = normalize_tags(tags)
                 _write(cwd, registry)
                 return w
         record = {
@@ -246,10 +282,58 @@ def upsert_worker(
             "last_active": now,
             "delegation_count": 0,
             "token_usage": {},
+            "tags": normalize_tags(tags),
         }
         registry["workers"].append(record)
         _write(cwd, registry)
         return record
+
+
+def enqueue_pool_task(tag: str, item: dict) -> dict:
+    clean = str(tag or "").strip()
+    if not clean:
+        raise ValueError("pool tag is required")
+    if not isinstance(item, dict) or not item.get("id"):
+        raise ValueError("pool queue item id is required")
+    with _lock_for():
+        registry = _read()
+        queue = registry.setdefault("pool_queues", {}).setdefault(clean, [])
+        queue.append(item)
+        _write("", registry)
+        return {"tag": clean, "queued_count": len(queue), "item": item}
+
+
+def peek_pool_task(tag: str) -> Optional[dict]:
+    clean = str(tag or "").strip()
+    if not clean:
+        return None
+    with _lock_for():
+        queue = (_read().get("pool_queues") or {}).get(clean)
+        if isinstance(queue, list) and queue:
+            return queue[0]
+    return None
+
+
+def pop_pool_task(tag: str, item_id: str) -> bool:
+    clean = str(tag or "").strip()
+    iid = str(item_id or "").strip()
+    if not clean or not iid:
+        return False
+    with _lock_for():
+        registry = _read()
+        queues = registry.get("pool_queues") or {}
+        queue = queues.get(clean)
+        if not isinstance(queue, list):
+            return False
+        before = len(queue)
+        queues[clean] = [item for item in queue if item.get("id") != iid]
+        if not queues[clean]:
+            queues.pop(clean, None)
+        registry["pool_queues"] = queues
+        if len(queues.get(clean, [])) == before:
+            return False
+        _write("", registry)
+        return True
 
 
 @perf.timed_fn("store.worker.touch")

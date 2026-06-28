@@ -87,31 +87,45 @@ def test_query_path_has_no_inline_extraction() -> None:
     check(not hasattr(rc, "_sync_requirement_units"), "inline unit-sync helper removed")
 
 
-def test_public_get_requirements_is_local_read_only() -> None:
+def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
     import requirement_context as rc
-    from requirement_analysis.prephase import prephase_batches_path, units_path
 
     saved = {
         "prepare": rc.prepare_requirements_context,
+        "local_prepare": rc.prepare_requirements_local_read_context,
+        "run_sync": rc.provisioning.run_sync,
         "ensure_importable": rc._ensure_requirements_importable,
         "freshness": rc._requirement_unit_freshness,
         "background": rc._ensure_background_extraction,
     }
-    units_path().parent.mkdir(parents=True, exist_ok=True)
-    units_path().write_text(
-        '{"source_key":"s1:1:unit:0","text":"Performance logs must drive RCA before fixes.",'
-        '"kind":"explicit","polarity":"positive","strength":"high","source":"user","cwd":"/repo"}\n',
-        encoding="utf-8",
-    )
-    prephase_batches_path().write_text(
-        '{"version":1,"handled_session_counts":{},"batched_session_counts":{},"batches":[]}',
-        encoding="utf-8",
-    )
+    order: list[str] = []
 
     def fail(*_args, **_kwargs):
-        raise AssertionError("public requirements lookup must not call sync or worker")
+        raise AssertionError("public requirements lookup must not run sync preparation")
+
+    class _Result:
+        value = {
+            "requirements": [{
+                "text": "Semantic processor keeps requirements feature intact.",
+                "kind": "explicit",
+                "polarity": "positive",
+                "strength": "high",
+                "source": "user",
+                "cwd": "/repo",
+            }]
+        }
+
+    def local_prepare(**_kwargs):
+        order.append("local_prepare")
+        return {"success": True, "sync": {"skipped": "local_read"}, "freshness": {"fresh": True}}
+
+    def run_sync(spec, query, ctx):
+        order.append("processor")
+        return _Result()
 
     rc.prepare_requirements_context = fail
+    rc.prepare_requirements_local_read_context = local_prepare
+    rc.provisioning.run_sync = run_sync
     rc._ensure_requirements_importable = lambda: None
     rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
     rc._ensure_background_extraction = lambda: {"running": True}
@@ -119,54 +133,26 @@ def test_public_get_requirements_is_local_read_only() -> None:
         result = rc.get_processed_requirements(query="performance logs rca", cwd="/repo")
     finally:
         rc.prepare_requirements_context = saved["prepare"]
+        rc.prepare_requirements_local_read_context = saved["local_prepare"]
+        rc.provisioning.run_sync = saved["run_sync"]
         rc._ensure_requirements_importable = saved["ensure_importable"]
         rc._requirement_unit_freshness = saved["freshness"]
         rc._ensure_background_extraction = saved["background"]
 
-    check(result["success"] is True, "public get-requirements succeeds from local corpus")
-    check(result["count"] == 1, "public get-requirements returns local matches")
-    check(result["requirements"][0]["text"].startswith("Performance logs"), "public result returns requirement text")
+    check(order == ["local_prepare", "processor"], "public get-requirements uses processor after local prep")
+    check(result["success"] is True, "public get-requirements succeeds through semantic processor")
+    check(result["count"] == 1, "public get-requirements returns processor result")
+    check(result["requirements"][0]["text"].startswith("Semantic processor"), "semantic processor result is returned")
     check("rg_args" not in result, "public result does not expose raw rg args")
     check("command" not in result, "public result does not expose command")
 
 
-def test_public_get_requirements_ranks_noisy_queries() -> None:
+def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
-    from requirement_analysis.prephase import prephase_batches_path, units_path
 
-    saved = {
-        "ensure_importable": rc._ensure_requirements_importable,
-        "freshness": rc._requirement_unit_freshness,
-        "background": rc._ensure_background_extraction,
-    }
-    units_path().parent.mkdir(parents=True, exist_ok=True)
-    units_path().write_text(
-        "\n".join([
-            '{"source_key":"s1:1:unit:0","text":"Auth settings must be backend-owned.",'
-            '"kind":"explicit","source":"user","cwd":"/repo"}',
-            '{"source_key":"s2:1:unit:0","text":"Generic work items should stay concise.",'
-            '"kind":"explicit","source":"user","cwd":"/repo"}',
-        ]) + "\n",
-        encoding="utf-8",
-    )
-    prephase_batches_path().write_text(
-        '{"version":1,"handled_session_counts":{},"batched_session_counts":{},"batches":[]}',
-        encoding="utf-8",
-    )
+    prompt = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_provision_prompt({})
 
-    rc._ensure_requirements_importable = lambda: None
-    rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
-    rc._ensure_background_extraction = lambda: {"running": True}
-    try:
-        result = rc.get_processed_requirements(query="how does auth work", cwd="/repo", max_matches=2)
-    finally:
-        rc._ensure_requirements_importable = saved["ensure_importable"]
-        rc._requirement_unit_freshness = saved["freshness"]
-        rc._ensure_background_extraction = saved["background"]
-
-    check(result["success"] is True, "noisy public query succeeds")
-    check(result["count"] == 1, "stopword-heavy query avoids generic work-only match")
-    check(result["requirements"][0]["text"].startswith("Auth settings"), "most relevant requirement ranks first")
+    check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
 
 
 def test_prepare_orchestration_is_cheap_and_nonblocking() -> None:
@@ -246,8 +232,8 @@ def run() -> None:
     test_greedy_packing_respects_capacity_and_cap()
     test_milp_failure_falls_back_to_greedy()
     test_query_path_has_no_inline_extraction()
-    test_public_get_requirements_is_local_read_only()
-    test_public_get_requirements_ranks_noisy_queries()
+    test_public_get_requirements_keeps_processor_off_sync_path()
+    test_processor_prompt_is_available_to_running_backend()
     test_prepare_orchestration_is_cheap_and_nonblocking()
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()

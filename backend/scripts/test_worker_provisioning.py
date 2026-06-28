@@ -217,6 +217,73 @@ def test_provision_workers_allows_per_worker_cwd():
     ]
 
 
+def test_worker_list_projects_pools_from_tags():
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    payload = {
+        "cwd": "/tmp/pool-project",
+        "workers": [
+            {"role_key": "review-a", "orchestration_mode": "native", "tags": ["review"]},
+            {"role_key": "review-b", "orchestration_mode": "native", "tags": ["review"]},
+            {"role_key": "build", "orchestration_mode": "native", "tags": ["build"]},
+        ],
+    }
+
+    response = _post_team_ui_provision(client, payload)
+    assert response.status_code == 200, response.text
+
+    listed = client.post(
+        "/api/internal/workers/list",
+        json={"cwd": "/tmp/pool-project"},
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert listed.status_code == 200, listed.text
+    pools = {pool["tag"]: pool for pool in listed.json()["pools"]}
+    assert [worker["name"] for worker in pools["review"]["workers"]] == [
+        "worker:review-b",
+        "worker:review-a",
+    ]
+    assert len(pools["build"]["workers"]) == 1
+
+
+def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker(monkeypatch):
+    dispatched = []
+
+    async def fake_submit_team_message(**kwargs):
+        dispatched.append(kwargs)
+        return {"success": True, "queued_id": "queued"}
+
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    monkeypatch.setattr(main.coordinator, "submit_team_message", fake_submit_team_message)
+    client = _client()
+    sender = main.session_manager.create(
+        name="manager",
+        cwd="/tmp/pool-dispatch",
+        orchestration_mode="team",
+    )
+    provision = _post_team_ui_provision(client, {
+        "cwd": "/tmp/pool-dispatch",
+        "workers": [{"role_key": "idle-reviewer", "orchestration_mode": "native", "tags": ["review"]}],
+    })
+    assert provision.status_code == 200, provision.text
+
+    response = client.post(
+        "/api/internal/worker-pools/enqueue",
+        json={"tag": "review", "sender_session_id": sender["id"], "prompt": "review this"},
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert response.status_code == 200, response.text
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.05))
+    assert dispatched
+    assert dispatched[0]["sender_session_id"] == sender["id"]
+    assert dispatched[0]["message"] == "review this"
+    assert dispatched[0]["detach"] is True
+
+
 def test_internal_provision_workers_requires_internal_token():
     broadcasts = []
 

@@ -107,6 +107,17 @@ def get(team_id: str) -> dict[str, Any] | None:
     return data
 
 
+def list_all() -> list[dict[str, Any]]:
+    if not _root().exists():
+        return []
+    teams: list[dict[str, Any]] = []
+    for path in sorted(_root().glob("*.json")):
+        data = read_json(path, {})
+        if data.get("schema_version") == SCHEMA_VERSION and isinstance(data.get("members"), dict):
+            teams.append(data)
+    return teams
+
+
 def upsert_member(
     team_id: str,
     *,

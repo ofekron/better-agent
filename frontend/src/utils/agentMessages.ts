@@ -135,6 +135,7 @@ function deriveTs(ev: WSEvent): string | undefined {
 export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
   const flat: WSEvent[] = [];
   const toolResultById = new Map<string, string>();
+  const knownToolUseIds = new Set<string>();
   const agentToolUseIds = new Set<string>();
   const agentToolUseIdByAgentId = new Map<string, string>();
   const renderedTexts = new Set<string>();
@@ -151,6 +152,9 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
     for (const raw of content) {
       if (!raw || typeof raw !== "object") continue;
       const block = raw as { type?: string; id?: string; name?: string };
+      if ((block.type === "tool_use" || block.type === "server_tool_use") && typeof block.id === "string") {
+        knownToolUseIds.add(block.id);
+      }
       if (block.type === "tool_use" && block.name === "Agent" && typeof block.id === "string") {
         agentToolUseIds.add(block.id);
       }
@@ -235,6 +239,18 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
               toolUseId,
               resultText,
             );
+            const paired = knownToolUseIds.has(toolUseId);
+            const _ts = deriveTs(ev);
+            flat.push({
+              type: "tool_result",
+              data: {
+                output: resultText,
+                tool_use_id: toolUseId,
+                paired_tool_result: paired,
+                orphan_tool_result: !paired,
+              },
+              _ts,
+            });
           }
         }
       }
@@ -309,10 +325,19 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
       } else if (btype === "tool_result") {
         const tr = raw as { tool_use_id?: string; content?: unknown };
         if (typeof tr.tool_use_id === "string") {
-          toolResultById.set(
-            tr.tool_use_id,
-            toolResultContentToString(tr.content),
-          );
+          const resultText = toolResultContentToString(tr.content);
+          toolResultById.set(tr.tool_use_id, resultText);
+          const paired = knownToolUseIds.has(tr.tool_use_id);
+          flat.push({
+            type: "tool_result",
+            data: {
+              output: resultText,
+              tool_use_id: tr.tool_use_id,
+              paired_tool_result: paired,
+              orphan_tool_result: !paired,
+            },
+            _ts,
+          });
         }
       } else {
         flat.push({

@@ -1,12 +1,3 @@
-"""Unit tests for stores/task_store.py — durable, project-scoped, reusable
-task DEFINITIONS that launch autonomous sessions on demand.
-
-Locks: CRUD, project-scoped listing, validation bounds (name/prompt/cwd
-required, mode/policy enums, per-project cap), update re-validation,
-run-breadcrumb recording (counter bump + recent-runs cap + singleton
-binding), session-reference cleanup, and the loud-empty behavior on
-schema-version mismatch.
-"""
 import os
 import shutil
 import sys
@@ -34,7 +25,6 @@ def main() -> int:
     print("T1 CRUD + project scoping")
     t1 = task_store.create(cwd="/proj", name="Run tests", prompt="pytest -q")
     check(task_store.get(t1["id"]) is not None, "create+get")
-    # Unattended defaults.
     check(t1["orchestration_mode"] == "native", "default mode native")
     check(t1["worker_creation_policy"] == "approve", "default policy approve")
     check(t1["run_count"] == 0 and t1["recent_runs"] == [], "fresh run state")
@@ -45,7 +35,7 @@ def main() -> int:
     check(task_store.list_for_project("/proj", "node2") == [], "scoped by node")
     removed = task_store.delete(t1["id"])
     check(removed is not None and task_store.get(t1["id"]) is None, "delete")
-    check(task_store.delete("nope") is None, "delete unknown → None")
+    check(task_store.delete("nope") is None, "delete unknown -> None")
 
     print("T2 validation bounds")
     bads = [
@@ -57,7 +47,7 @@ def main() -> int:
         dict(cwd="/p", name="x" * (task_store.MAX_NAME_LEN + 1), prompt="x"),
         dict(cwd="/p", name="n", prompt="x" * (task_store.MAX_PROMPT_LEN + 1)),
         dict(cwd="/p", name="n", prompt="x", permission="not-a-dict"),
-        dict(cwd="/p", name="n", prompt="x", permission={"a": 1}),  # non-str value
+        dict(cwd="/p", name="n", prompt="x", permission={"a": 1}),
     ]
     for bad in bads:
         try:
@@ -66,9 +56,8 @@ def main() -> int:
         except ValueError:
             check(True, f"rejected: {str(bad)[:60]}")
 
-    # manager alias normalizes to team
     tm = task_store.create(cwd="/p", name="m", prompt="x", orchestration_mode="manager")
-    check(tm["orchestration_mode"] == "team", "manager → team")
+    check(tm["orchestration_mode"] == "team", "manager -> team")
 
     print("T3 update re-validates")
     upd = task_store.update(tm["id"], {"name": "renamed", "singleton": True})
@@ -78,8 +67,7 @@ def main() -> int:
         check(False, "update accepted empty name")
     except ValueError:
         check(True, "update rejects empty name")
-    check(task_store.update("nope", {"name": "x"}) is None, "update unknown → None")
-    # cwd is immutable via update (not in editable fields)
+    check(task_store.update("nope", {"name": "x"}) is None, "update unknown -> None")
     upd2 = task_store.update(tm["id"], {"cwd": "/evil"})
     check(upd2 is not None and upd2["cwd"] == "/p", "cwd immutable via update")
 
@@ -91,12 +79,10 @@ def main() -> int:
     check(rec["recent_runs"][0]["session_id"] == "sessA", "recent_runs prepended")
     check(rec["last_run_at"] is not None, "last_run_at stamped")
     check(rec["singleton_session_id"] == "sessA", "singleton binding set")
-    # recent_runs cap + newest-first + dedup
     for i in range(task_store.MAX_RECENT_RUNS + 3):
         task_store.record_run(rt["id"], f"sess{i}")
     rec = task_store.get(rt["id"])
     check(len(rec["recent_runs"]) == task_store.MAX_RECENT_RUNS, "recent_runs capped")
-    # re-running an existing session id doesn't duplicate the entry
     before = len(task_store.get(rt["id"])["recent_runs"])
     task_store.record_run(rt["id"], rec["recent_runs"][0]["session_id"])
     after = len(task_store.get(rt["id"])["recent_runs"])
@@ -122,7 +108,7 @@ def main() -> int:
     except ValueError:
         check(True, f"per-project cap enforced at {task_store.MAX_PER_PROJECT}")
 
-    print("T7 schema-version mismatch → loud empty")
+    print("T7 schema-version mismatch -> loud empty")
     task_store._path().write_text('{"version": 999, "tasks": [{}]}')
     check(task_store.list_for_project("/proj") == [],
           "bad version reads as empty (wipe to start fresh)")
