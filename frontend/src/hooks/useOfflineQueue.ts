@@ -129,19 +129,5 @@ export function useOfflineQueue() {
     }));
   }, [mutate]);
 
-  const replaceBySession = useCallback((sessionId: string, entry: OfflinePromptEntry) => {
-    mutate((prev) => {
-      const index = prev.findIndex(
-        (item) => item.type !== "create_session" && item.sessionId === sessionId,
-      );
-      if (index < 0) return [...prev, entry];
-      const next = prev.filter(
-        (item) => item.type === "create_session" || item.sessionId !== sessionId,
-      );
-      next.splice(index, 0, entry);
-      return next;
-    });
-  }, [mutate]);
-
-  return { queue, enqueue, getAll, remove, removeBySessionAndClient, replaceBySession };
+  return { queue, enqueue, getAll, remove, removeBySessionAndClient };
 }

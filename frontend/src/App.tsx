@@ -124,7 +124,6 @@ import {
   setSelectedProject,
   type UiSelectionSnapshot,
 } from "./utils/uiSelection";
-import { buildSendPromptForm, mergeQueuedAttachments } from "./utils/sendPromptForm";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import {
@@ -172,6 +171,28 @@ interface ViewingFile {
   focus?: FileFocus;
 }
 
+type QueuedBannerState = {
+  id: string;
+  preview: string;
+  images?: PastedImage[];
+  imagesCount?: number;
+  files?: FileAttachment[];
+  filesCount?: number;
+};
+
+type PendingQueueDraft = QueuedBannerState & {
+  clientId: string | null;
+};
+
+function queuedPromptToBanner(prompt: QueuedPrompt): QueuedBannerState {
+  return {
+    id: prompt.id,
+    preview: prompt.content,
+    imagesCount: prompt.images_count,
+    filesCount: prompt.files_count,
+  };
+}
+
 // Frozen module-level empty arrays so the no-data branches of props
 // passed into <Chat> hand referentially-stable values across renders.
 // A fresh `[]` per render would invalidate `memo(MessageGroup)` and
@@ -181,7 +202,6 @@ const EMPTY_RUNS_PROP: readonly import("./types").RunInfo[] = Object.freeze([]);
 const EMPTY_EVENTS: readonly import("./types").WSEvent[] = Object.freeze([]);
 const EMPTY_INLINE_TAGS: readonly import("./types/inlineTag").InlineTag[] =
   Object.freeze([]);
-const MIN_TAB_WIDTH_PX = 90;
 const MAX_TAB_CAP = 15;
 
 const ProviderConfigSyncPage = lazyWithRetry(() =>
@@ -551,6 +571,7 @@ function AppMain({
   const screenPanelModules = useExtensionFrontendModules("right-panel-screen");
   const askGreetingModules = useExtensionFrontendModules("ask-greeting");
   const askSessionPickerModules = useExtensionFrontendModules("ask-session-picker");
+  const assistantSummaryModules = useExtensionFrontendModules("assistant-summary");
   const sessionActionModalModules = useExtensionFrontendModules("session-action-modal");
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
   const sessionDragOverlayModules = useExtensionFrontendModules("session-drag-overlay");
@@ -1242,10 +1263,8 @@ function AppMain({
   );
 
   const initialOfflineState = useMemo(() => {
-    const pendingQueueText: Record<string, string> = {};
+    const pendingQueueDrafts: Record<string, PendingQueueDraft[]> = {};
     const pendingBySession: Record<string, ChatMessage[]> = {};
-    const pendingImages: Record<string, PastedImage[]> = {};
-    const pendingFiles: Record<string, FileAttachment[]> = {};
     try {
       const raw = localStorage.getItem("better_agent_offline_queue");
       if (raw) {
@@ -1265,24 +1284,28 @@ function AppMain({
             }];
             
             if (entry.type !== "create_session" && entry.sendMode === "queue") {
-              pendingQueueText[sessionId] = entry.prompt;
-              if (entry.images?.length) {
-                pendingImages[sessionId] = entry.images.map(img => ({
-                  mediaType: img.media_type,
-                  base64: img.data,
-                  dataUrl: `data:${img.media_type};base64,${img.data}`,
-                  file: new File([], "image"), // dummy file for typing
-                }));
-              }
-              if (entry.files?.length) {
-                pendingFiles[sessionId] = entry.files.map(f => ({
-                  name: f.name,
-                  mediaType: f.media_type,
-                  base64: f.data,
-                  size: f.size,
-                  file: new File([], f.name), // dummy file
-                }));
-              }
+              pendingQueueDrafts[sessionId] = [...(pendingQueueDrafts[sessionId] ?? []), {
+                id: entry.clientId,
+                clientId: entry.clientId,
+                preview: entry.prompt,
+                ...(entry.images?.length ? {
+                  images: entry.images.map(img => ({
+                    mediaType: img.media_type,
+                    base64: img.data,
+                    dataUrl: `data:${img.media_type};base64,${img.data}`,
+                    file: new File([], "image"), // dummy file for typing
+                  })),
+                } : {}),
+                ...(entry.files?.length ? {
+                  files: entry.files.map(f => ({
+                    name: f.name,
+                    mediaType: f.media_type,
+                    base64: f.data,
+                    size: f.size,
+                    file: new File([], f.name), // dummy file
+                  })),
+                } : {}),
+              }];
             }
           }
         }
@@ -1290,7 +1313,7 @@ function AppMain({
     } catch (err) {
       void err;
     }
-    return { pendingQueueText, pendingBySession, pendingImages, pendingFiles };
+    return { pendingQueueDrafts, pendingBySession };
   }, []);
 
   // Optimistic user bubbles, keyed by app_session_id. Declared up here
@@ -1342,62 +1365,60 @@ function AppMain({
     },
     [setPendingForSession]
   );
-  // Textbox-merge slot: the full text of the most recent in-flight send
-  // per session, set synchronously in handleSend BEFORE the backend acks
-  // queued vs immediate. The queue banner (`queuedBySession`) is a pure
-  // backend mirror — set only on `prompt_queued`. This slot bridges the
-  // gap so a fast double-send can merge against the previous text even
-  // before the backend ack arrives. Cleared on `prompt_queued` (text
-  // moves into `queuedBySession.preview`) or `user_message_persisted`
-  // (immediate dispatch, no merge needed).
-  const [pendingQueueTextBySession, setPendingQueueTextBySession] = useState<
-    Record<string, string>
-  >(initialOfflineState.pendingQueueText);
-  // Ref mirror so the WS closure handlers can read the latest map
-  // without re-subscribing on every keystroke. Ref must be updated
-  // SYNCHRONOUSLY at every write site — a `useEffect`-based mirror
-  // races against the network: a fast `prompt_queued` arriving in
-  // the same tick as the corresponding `setState` would see the
-  // stale ref (effect runs after commit, network roundtrip can
-  // beat it on localhost). Helper below enforces ref-then-state
-  // ordering at every mutation site.
-  const pendingQueueTextRef = useRef<Record<string, string>>(initialOfflineState.pendingQueueText);
+  // Pre-ack queue previews are ordered by send time and matched to backend
+  // acks by client_id. The backend owns the real queue; this preserves full
+  // text/attachments until `queued_prompts` snapshots catch up.
+  const pendingQueueDraftsRef = useRef<Record<string, PendingQueueDraft[]>>(initialOfflineState.pendingQueueDrafts);
   // Catch the restart regression's other half: a queue-mode offline backlog
   // entry that survived (was never acked) and is re-injected into the
   // composer/pending surfaces on this mount. Logs once per mount. No content
   // — sid + text length only.
   useEffect(() => {
-    for (const [sid, text] of Object.entries(initialOfflineState.pendingQueueText)) {
+    for (const [sid, drafts] of Object.entries(initialOfflineState.pendingQueueDrafts)) {
       logDurable("queue-diag", "offline_queue_text_reinjected_on_mount", {
         sid,
-        text_length: text.length,
+        count: drafts.length,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const writePendingQueueText = useCallback(
-    (sid: string, value: string | null) => {
-      const prev = pendingQueueTextRef.current;
-      let next: Record<string, string>;
-      if (value === null) {
-        if (!(sid in prev)) return;
-        const { [sid]: _drop, ...rest } = prev;
-        void _drop;
-        next = rest;
-      } else {
-        if (prev[sid] === value) return;
-        next = { ...prev, [sid]: value };
-      }
-      pendingQueueTextRef.current = next;
-      setPendingQueueTextBySession(next);
+  const appendPendingQueueDraft = useCallback(
+    (sid: string, draft: PendingQueueDraft) => {
+      const prev = pendingQueueDraftsRef.current;
+      pendingQueueDraftsRef.current = {
+        ...prev,
+        [sid]: [...(prev[sid] ?? []), draft],
+      };
     },
     [],
   );
-  // Stash images/files sent with an in-flight queued prompt so the banner can
-  // display thumbnails. Cleared when prompt_queued ack arrives (they
-  // move into queuedBySession) or on user_message_persisted / cancel.
-  const pendingQueueImagesRef = useRef<Record<string, PastedImage[]>>(initialOfflineState.pendingImages);
-  const pendingQueueFilesRef = useRef<Record<string, FileAttachment[]>>(initialOfflineState.pendingFiles);
+  const takePendingQueueDraft = useCallback(
+    (sid: string, clientId: string | null | undefined) => {
+      const drafts = pendingQueueDraftsRef.current[sid] ?? [];
+      if (drafts.length === 0) return null;
+      const index = clientId ? drafts.findIndex((draft) => draft.clientId === clientId) : 0;
+      const resolvedIndex = index >= 0 ? index : 0;
+      const [draft] = drafts.slice(resolvedIndex, resolvedIndex + 1);
+      const nextDrafts = drafts.filter((_, i) => i !== resolvedIndex);
+      const prev = pendingQueueDraftsRef.current;
+      if (nextDrafts.length === 0) {
+        const { [sid]: _drop, ...rest } = prev;
+        void _drop;
+        pendingQueueDraftsRef.current = rest;
+      } else {
+        pendingQueueDraftsRef.current = { ...prev, [sid]: nextDrafts };
+      }
+      return draft ?? null;
+    },
+    [],
+  );
+  const clearPendingQueueDrafts = useCallback((sid: string) => {
+    const prev = pendingQueueDraftsRef.current;
+    if (!(sid in prev)) return;
+    const { [sid]: _drop, ...rest } = prev;
+    void _drop;
+    pendingQueueDraftsRef.current = rest;
+  }, []);
   const offlineQueue = useOfflineQueue();
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
@@ -1433,26 +1454,8 @@ function AppMain({
       });
       ackedRef.current.add(userMessage.id);
       addMessages(sessionId, [userMessage]);
-      // A queued prompt being persisted means it was actually sent to the
-      // agent — clear the queued banner for this session.
-      setQueuedForSession(sessionId, null, "user_message_persisted");
-      // The textbox-merge slot is the pre-ack mirror for this very prompt
-      // — once it lands as a persisted user message, the slot has served
-      // its purpose. Clear it so a later send doesn't re-merge against
-      // text that's already in the timeline.
-      writePendingQueueText(sessionId, null);
-      // Clear stashed queue attachments for this session.
-      if (sessionId in pendingQueueImagesRef.current) {
-        const { [sessionId]: _drop, ...rest } = pendingQueueImagesRef.current;
-        void _drop;
-        pendingQueueImagesRef.current = rest;
-      }
-      if (sessionId in pendingQueueFilesRef.current) {
-        const { [sessionId]: _drop, ...rest } = pendingQueueFilesRef.current;
-        void _drop;
-        pendingQueueFilesRef.current = rest;
-      }
       const cid = userMessage.client_id ?? null;
+      takePendingQueueDraft(sessionId, cid);
       if (cid) {
         ackedClientIdsRef.current.add(cid);
         offlineDispatchedRef.current.delete(cid);
@@ -1477,7 +1480,7 @@ function AppMain({
       // Refresh sidebar so timestamps + sort order update immediately.
       refreshSessions();
     },
-    [addMessages, refreshSessions, writePendingQueueText, removeAckedOfflineAction, removePendingForSessionByClientId]
+    [addMessages, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
   );
   const handleSteerPromptPersisted = useCallback(
     (_sessionId: string, steerClientId?: string | null) => {
@@ -1590,10 +1593,11 @@ function AppMain({
       applySessionMetadata(sessionId, toApply);
       if ("queued_prompts" in patch) {
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
-        const first = queuedPrompts[0] ?? null;
-        setQueuedForSession(sessionId, first
-          ? { id: first.id, preview: first.content }
-          : null, "session_metadata_updated");
+        setQueuedForSession(
+          sessionId,
+          queuedPrompts.map(queuedPromptToBanner),
+          "session_metadata_updated",
+        );
       }
     },
     onSessionForked: appendFork,
@@ -1618,33 +1622,15 @@ function AppMain({
         client_id: data.client_id ?? null,
         send_mode: data.send_mode,
         queue_position: data.queue_position,
-        pending_queue_text: data.app_session_id in pendingQueueTextRef.current,
+        pending_queue_drafts: pendingQueueDraftsRef.current[data.app_session_id]?.length ?? 0,
       });
-      // The backend just confirmed the queue entry. Prefer the full
-      // text we stashed at send time over the backend's truncated
-      // prompt_preview, then drop the textbox-merge slot — the banner
-      // now owns the canonical preview.
-      const fullText = pendingQueueTextRef.current[data.app_session_id];
-      const queuedImages = pendingQueueImagesRef.current[data.app_session_id];
-      const queuedFiles = pendingQueueFilesRef.current[data.app_session_id];
-      setQueuedForSession(data.app_session_id, {
+      const pendingDraft = takePendingQueueDraft(data.app_session_id, data.client_id);
+      appendQueuedForSession(data.app_session_id, {
         id: data.queued_id,
-        preview: fullText ?? data.prompt_preview,
-        ...(queuedImages?.length ? { images: queuedImages } : {}),
-        ...(queuedFiles?.length ? { files: queuedFiles } : {}),
+        preview: pendingDraft?.preview ?? data.prompt_preview,
+        ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
+        ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
       }, "prompt_queued");
-      writePendingQueueText(data.app_session_id, null);
-      // Clear stashed attachments — they've moved into queuedBySession.
-      if (data.app_session_id in pendingQueueImagesRef.current) {
-        const { [data.app_session_id]: _drop, ...rest } = pendingQueueImagesRef.current;
-        void _drop;
-        pendingQueueImagesRef.current = rest;
-      }
-      if (data.app_session_id in pendingQueueFilesRef.current) {
-        const { [data.app_session_id]: _drop, ...rest } = pendingQueueFilesRef.current;
-        void _drop;
-        pendingQueueFilesRef.current = rest;
-      }
       // Remove the optimistic pending message bubble — the queued banner
       // on top of the input area is the single surface for queued state.
       // The real message will appear via user_message_persisted when the
@@ -1692,11 +1678,12 @@ function AppMain({
           break;
       }
     },
-    onTurnStarted: (appSessionId: string) => {
-      setQueuedForSession(appSessionId, null, "turn_started");
-    },
+    onTurnStarted: () => {},
     onQueueConsumed: (data) => {
-      setQueuedForSession(data.app_session_id, null, "queue_consumed");
+      setQueuedForSession(data.app_session_id, (prev) => {
+        if (!data.queued_id) return [];
+        return prev.filter((item) => item.id !== data.queued_id);
+      }, "queue_consumed");
     },
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
@@ -2037,18 +2024,16 @@ function AppMain({
   const [selectedProjectNodeId, setSelectedProjectNodeId] = useState(() => {
     return localStorage.getItem("better-agent-selected-project-node") || "primary";
   });
-  type QueuedBannerState = { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number };
   const [queuedBySession, setQueuedBySession] = useState<
-    Record<string, QueuedBannerState>
+    Record<string, QueuedBannerState[] | null>
   >({});
-  const persistedQueuedPrompt = useMemo((): QueuedBannerState | null => {
-    const first = currentSession?.queued_prompts?.[0];
-    return first ? { id: first.id, preview: first.content, imagesCount: first.images_count, filesCount: first.files_count } : null;
+  const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
+    return (currentSession?.queued_prompts ?? []).map(queuedPromptToBanner);
   }, [currentSession?.queued_prompts]);
   const queuedPrompt = currentSession
     ? (currentSession.id in queuedBySession
-        ? queuedBySession[currentSession.id] ?? null
-        : persistedQueuedPrompt)
+        ? queuedBySession[currentSession.id]?.[0] ?? null
+        : persistedQueuedPrompts[0] ?? null)
     : null;
   // Smoking-gun detector: backend says a prompt is queued (REST
   // queued_prompts), but a local null in queuedBySession masks the banner so
@@ -2056,8 +2041,8 @@ function AppMain({
   // every render. This is the exact signature of the restart regression.
   const sid = currentSession?.id ?? null;
   const maskedQueueId = sid && sid in queuedBySession
-    && queuedBySession[sid] == null && persistedQueuedPrompt != null
-    ? persistedQueuedPrompt.id : null;
+    && queuedBySession[sid] == null && persistedQueuedPrompts.length > 0
+    ? persistedQueuedPrompts[0].id : null;
   useEffect(() => {
     if (!sid || !maskedQueueId) return;
     logDurable("queue-diag", "banner_masked_by_local_null", {
@@ -2069,29 +2054,43 @@ function AppMain({
     (
       sessionId: string,
       value:
-        | QueuedBannerState
+        | QueuedBannerState[]
         | null
-        | ((prev: QueuedBannerState | null) => QueuedBannerState | null),
+        | ((prev: QueuedBannerState[]) => QueuedBannerState[] | null),
       reason: string,
     ) => {
-      setQueuedBySession((all): Record<string, QueuedBannerState> => {
-        const current = all[sessionId] ?? null;
+      setQueuedBySession((all): Record<string, QueuedBannerState[] | null> => {
+        const current = all[sessionId] ?? [];
         const resolved = typeof value === "function" ? value(current) : value;
         logDurable("queue-diag", "set_queued_banner", {
           sid: sessionId,
           reason,
-          from_id: current?.id ?? null,
-          to_id: resolved?.id ?? null,
+          from_ids: current.map((item) => item.id),
+          to_ids: resolved?.map((item) => item.id) ?? [],
           to_null: !resolved,
         });
         if (!resolved) {
           if (all[sessionId] === null) return all;
-          return { ...all, [sessionId]: null } as Record<string, QueuedBannerState>;
+          return { ...all, [sessionId]: null };
         }
         return { ...all, [sessionId]: resolved };
       });
     },
     [],
+  );
+  const appendQueuedForSession = useCallback(
+    (sessionId: string, item: QueuedBannerState, reason: string) => {
+      const persistedBase = getNode(sessionId)?.queued_prompts?.map(queuedPromptToBanner) ?? [];
+      setQueuedForSession(sessionId, (prev) => {
+        const base = prev.length > 0 ? prev : persistedBase;
+        const existingIndex = base.findIndex((queued) => queued.id === item.id);
+        if (existingIndex >= 0) {
+          return base.map((queued, index) => index === existingIndex ? item : queued);
+        }
+        return [...base, item];
+      }, reason);
+    },
+    [getNode, setQueuedForSession],
   );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
@@ -3204,7 +3203,28 @@ function AppMain({
   ]);
 
   const [openSessionRecords, setOpenSessionRecords] = useState<Record<string, Session>>({});
+  const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
+  const markSessionKnown = useCallback((id: string) => {
+    if (!id) return;
+    setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+  }, []);
   const [missingOpenSessionIds, setMissingOpenSessionIds] = useState<Record<string, true>>({});
+
+  useEffect(() => {
+    const confirmed = new Set(sessions.map((s) => s.id));
+    if (currentTree?.id) confirmed.add(currentTree.id);
+    for (const id of Object.keys(openSessionRecords)) confirmed.add(id);
+    setKnownRoutedSessionIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const id of Object.keys(next)) {
+        if (!confirmed.has(id)) continue;
+        delete next[id];
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [currentTree?.id, openSessionRecords, sessions]);
 
   // -------------------------------------------------------------------
   // Route ↔ session sync
@@ -3242,7 +3262,8 @@ function AppMain({
       route.sessionId === editSingletonId() ||
       route.sessionId === currentTree?.id ||
       sessions.some((s) => s.id === route.sessionId) ||
-      openSessionRecords[route.sessionId];
+      openSessionRecords[route.sessionId] ||
+      knownRoutedSessionIds[route.sessionId];
     if (!exists) {
       navigate("/");
       return;
@@ -3255,6 +3276,7 @@ function AppMain({
     sessionsLoaded,
     sessions,
     openSessionRecords,
+    knownRoutedSessionIds,
     currentTree,
     clearCurrentSession,
     navigate,
@@ -3420,29 +3442,28 @@ function AppMain({
     sessionsLoaded,
   ]);
 
-  // When a session is selected, add it to the open tabs (LRU order).
-  // Evict the least-recently-used tab when exceeding the available space.
-  const maxOpenTabs = useMemo(() => {
-    const rightPanelOpenForSizing =
-      !promptEngState &&
-      !fileEditingState &&
-      (isMobile
-        ? mobileRightOpen
-        : (localRightPanelStates[currentSession?.id ?? ""]?.open ?? false) && !!currentSession);
-    const occupied = isMobile ? 0 : sidebar.size + (rightPanelOpenForSizing ? rightPanel.size : 0);
-    const panelWidth = Math.max(200, viewport.width - occupied);
-    return Math.min(MAX_TAB_CAP, Math.max(1, Math.floor(panelWidth / MIN_TAB_WIDTH_PX)));
+  const [visibleOpenTabCapacity, setVisibleOpenTabCapacity] = useState(MAX_TAB_CAP);
+
+  useEffect(() => {
+    setVisibleOpenTabCapacity(MAX_TAB_CAP);
   }, [
-    currentSession,
+    currentSession?.id,
     fileEditingState,
     isMobile,
-    localRightPanelStates,
     mobileRightOpen,
     promptEngState,
     rightPanel.size,
+    rightPanelVisible,
+    sessionTabsSort,
+    sessionTabsStatusSort,
     sidebar.size,
     viewport.width,
   ]);
+
+  const handleTabCapacityChange = useCallback((capacity: number) => {
+    const next = Math.min(MAX_TAB_CAP, Math.max(1, Math.floor(capacity)));
+    setVisibleOpenTabCapacity((prev) => (prev === next ? prev : next));
+  }, []);
 
   useEffect(() => {
     if (currentTree?.id) {
@@ -3456,19 +3477,11 @@ function AppMain({
         } else {
           next = [...prev, id];
         }
-        while (next.length > maxOpenTabs) next.shift();
+        while (next.length > MAX_TAB_CAP) next.shift();
         return next;
       });
     }
-  }, [currentTree?.id, maxOpenTabs]);
-
-  // Re-evict tabs when viewport shrinks (sidebar drag, window resize, right panel toggle).
-  useEffect(() => {
-    setOpenSessionIds((prev) => {
-      if (prev.length <= maxOpenTabs) return prev;
-      return prev.slice(prev.length - maxOpenTabs);
-    });
-  }, [maxOpenTabs]);
+  }, [currentTree?.id]);
 
   useEffect(() => {
     if (sessionsLoaded) {
@@ -3538,6 +3551,10 @@ function AppMain({
     sessionTabsStatusSort,
     tabsStatusTick,
   ]);
+  const visibleOpenSessions = useMemo(
+    () => sortedOpenSessions.slice(0, visibleOpenTabCapacity),
+    [sortedOpenSessions, visibleOpenTabCapacity],
+  );
 
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
@@ -3817,89 +3834,19 @@ function AppMain({
         ? `${openFilesPreamble}\n${withTags}`
         : withTags;
 
-      let sendForm = buildSendPromptForm({ finalPrompt, sendMode });
-      if (sendMode === "queue") {
-        // Queue merging: backend decides queued vs immediate via
-        // `coordinator.has_active_turn(app_session_id)`. The frontend
-        // does NOT guess — it always sends with `send_mode=queue` and
-        // lets the backend route. For merge UX, read the canonical
-        // text from either source: `queuedBySession` (backend-confirmed
-        // queue entry) or `pendingQueueTextBySession` (the in-flight
-        // textbox-merge slot for a send that hasn't been acked yet).
-        const existingQueued = queuedBySession[currentSession.id];
-        const existingPendingText =
-          pendingQueueTextBySession[currentSession.id];
-        sendForm = buildSendPromptForm({
-          finalPrompt,
-          sendMode,
-          existingQueuedPreview: existingQueued?.preview,
-          existingPendingText,
-        });
-        if (sendForm.replacedQueuedPrompt) {
-          // The merge cancels the previously-queued backend entry and
-          // re-dispatches a single merged prompt. Carry the previous
-          // prompt's attachments forward (mirroring the text merge) so the
-          // re-dispatch doesn't drop them. Source priority matches the text
-          // merge: backend-confirmed queue entry first, else the not-yet-
-          // acked stash slot. Both hold PastedImage/FileAttachment shapes.
-          const prevImages =
-            (existingQueued?.images as PastedImage[] | undefined) ??
-            pendingQueueImagesRef.current[currentSession.id];
-          const prevFiles =
-            (existingQueued?.files as FileAttachment[] | undefined) ??
-            pendingQueueFilesRef.current[currentSession.id];
-          const merged = mergeQueuedAttachments(
-            prevImages,
-            prevFiles,
-            images,
-            files,
-          );
-          effImages = merged.images;
-          effFiles = merged.files;
-          imagePayloads = effImages.map(toImagePayload);
-          filePayloads = effFiles.map(toFilePayload);
-          // Drop the backend-confirmed entry (if any) so we re-submit a
-          // single merged prompt. If only the textbox-merge slot is
-          // populated (no backend ack yet), there's nothing to cancel on
-          // the backend — the slot is cleared synchronously below.
-          if (existingQueued) {
-            sendCancelQueued(currentSession.id);
-          }
-          // Remove any pending bubbles for the previous prompt — the merged
-          // bubble replaces them. Without this, the old bubble leaks when
-          // prompt_queued arrives for the OLD client_id but the merged prompt
-          // carries a NEW client_id.
-          setPendingBySession((all) => {
-            const prev = all[currentSession.id];
-            if (!prev || prev.length === 0) return all;
-            const { [currentSession.id]: _drop, ...rest } = all;
-            void _drop;
-            return rest;
-          });
-        }
-
-        // Synchronously seed the textbox-merge slot with the full text so
-        // a fast double-send can merge against it before the backend ack
-        // arrives. `writePendingQueueText` updates BOTH the ref and the
-        // state in a single tick — closes the race where `prompt_queued`
-        // arrives before React commits and `onPromptQueued` would read
-        // a stale ref. Cleared on `prompt_queued` (text moves into
-        // `queuedBySession.preview`) or `user_message_persisted`.
-        writePendingQueueText(currentSession.id, sendForm.prompt);
-        // Stash attachments for the banner alongside the merge-slot text.
-        pendingQueueImagesRef.current = {
-          ...pendingQueueImagesRef.current,
-          [currentSession.id]: effImages.length > 0 ? effImages : [],
-        };
-        pendingQueueFilesRef.current = {
-          ...pendingQueueFilesRef.current,
-          [currentSession.id]: effFiles.length > 0 ? effFiles : [],
-        };
-      }
-
+      const sendForm = { prompt: finalPrompt };
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
       const clientIdForMsg = `pending-${Date.now()}`;
+      if (sendMode === "queue") {
+        appendPendingQueueDraft(currentSession.id, {
+          id: clientIdForMsg,
+          clientId: clientIdForMsg,
+          preview: sendForm.prompt,
+          ...(effImages.length > 0 ? { images: effImages } : {}),
+          ...(effFiles.length > 0 ? { files: effFiles } : {}),
+        });
+      }
 
       const sessionId = currentSession.id;
       const capabilityContexts = turnCapabilityContextsBySession[sessionId] ?? [];
@@ -3915,7 +3862,6 @@ function AppMain({
         image_count: imagePayloads.length,
         file_count: filePayloads.length,
         capability_context_count: capabilityContexts.length,
-        replaced_queued_prompt: sendForm.replacedQueuedPrompt,
       });
       // Always add an optimistic user bubble. Backend will either
       // echo `user_message_persisted` (immediate dispatch) which
@@ -3972,11 +3918,7 @@ function AppMain({
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
         capabilityContexts,
       };
-      if (sendMode === "queue") {
-        offlineQueue.replaceBySession(sessionId, offlineEntry);
-      } else {
-        offlineQueue.enqueue(offlineEntry);
-      }
+      offlineQueue.enqueue(offlineEntry);
 
       if (currentSession.offline_pending) {
         logPromptSend("app_offline_pending_session", {
@@ -4056,7 +3998,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, sendCancelQueued, queuedBySession, pendingQueueTextBySession, writePendingQueueText, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user
@@ -4283,42 +4225,68 @@ function AppMain({
     stopStreaming(currentSession.id);
   }, [currentSession, stopStreaming]);
 
+  const handleContinueRateLimitOnAnotherProvider = useCallback(
+    async (assistantMessage: ChatMessage) => {
+      if (!currentSession) return;
+      const currentProviderId = currentSession.provider_id ?? defaultProviderId;
+      const nextProvider = providers.find((provider) => {
+        if (provider.id === currentProviderId) return false;
+        return !!(provider.last_model || provider.default_model);
+      });
+      if (!nextProvider) return;
+      const nextModel = nextProvider.last_model || nextProvider.default_model;
+      try {
+        await progressTrackedFetch(
+          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              assistant_message_id: assistantMessage.id,
+              provider_id: nextProvider.id,
+              model: nextModel,
+              client_id: clientId,
+            }),
+          },
+        );
+        await refreshSessions();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [clientId, currentSession, defaultProviderId, providers, refreshSessions],
+  );
+
   const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt") => {
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action);
     if (!sent) return;
     if (action === "steer") return;
-    setQueuedForSession(currentSession.id, null, "promote");
-    // Drop the textbox-merge slot too — once promoted, there's no
-    // pre-ack text to merge against on a future send.
-    writePendingQueueText(currentSession.id, null);
-    delete pendingQueueImagesRef.current[currentSession.id];
-    delete pendingQueueFilesRef.current[currentSession.id];
-  }, [currentSession, sendPromoteQueued, setQueuedForSession, writePendingQueueText]);
+    setQueuedForSession(currentSession.id, (prev) => prev.slice(1), "promote");
+  }, [currentSession, sendPromoteQueued, setQueuedForSession]);
 
   const handleCancelQueued = useCallback(() => {
     if (!currentSession) return;
     const sent = sendCancelQueued(currentSession.id);
     if (!sent) return;
     setQueuedForSession(currentSession.id, null, "cancel");
-    writePendingQueueText(currentSession.id, null);
-    delete pendingQueueImagesRef.current[currentSession.id];
-    delete pendingQueueFilesRef.current[currentSession.id];
-  }, [currentSession, sendCancelQueued, setQueuedForSession, writePendingQueueText]);
+    clearPendingQueueDrafts(currentSession.id);
+  }, [currentSession, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
 
   const handleQueuedTextEdit = useCallback(
     (text: string) => {
       if (!currentSession) return;
-      const existing = queuedBySession[currentSession.id];
+      const existing = queuedBySession[currentSession.id]?.[0] ?? persistedQueuedPrompts[0] ?? null;
       if (!existing) return;
       const sent = sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
-      setQueuedForSession(currentSession.id, {
-        id: existing.id,
-        preview: text,
+      setQueuedForSession(currentSession.id, (prev) => {
+        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+        return base.map((item, index) => index === 0 ? { ...item, preview: text } : item);
       }, "text_edit");
     },
-    [currentSession, queuedBySession, setQueuedForSession, sendUpdateQueued]
+    [currentSession, persistedQueuedPrompts, queuedBySession, setQueuedForSession, sendUpdateQueued]
   );
 
   /** Rewind past a stopped/failed assistant turn and immediately re-send
@@ -4690,8 +4658,9 @@ function AppMain({
       cwd: selectedProjectPath || cwd || "",
       openAsk: handleAsk,
       askSessionPath: sessionPath(ASK_SINGLETON_ID),
+      markSessionKnown,
     }),
-    [navigate, selectedProjectPath, cwd, handleAsk],
+    [navigate, selectedProjectPath, cwd, handleAsk, markSessionKnown],
   );
   const teamSidebarContext = useMemo(
     () => ({
@@ -5849,6 +5818,25 @@ function AppMain({
                 ? <div className="ask-hero-wrap">{askGreetingSlots}</div>
                 : askGreetingSlots
               : undefined;
+          const isAssistantView = !isAskView && currentSession?.name === "Assistant";
+          const assistantSummarySlots = isAssistantView
+            ? assistantSummaryModules.map((module) => (
+                <ExtensionModuleSlot
+                  key={`${module.extension_id}:${module.id}`}
+                  module={module}
+                  context={{
+                    sessionId: currentSession?.id ?? "",
+                    sessionName: currentSession?.name ?? "",
+                    isAssistantSession: true,
+                    allSessions: sessions,
+                  }}
+                />
+              ))
+            : null;
+          const headerNode =
+            askDescriptionNode || assistantSummarySlots
+              ? <>{askDescriptionNode}{assistantSummarySlots}</>
+              : undefined;
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
@@ -5868,7 +5856,7 @@ function AppMain({
               }}
             >
             <Chat
-              headerNode={askDescriptionNode}
+              headerNode={headerNode}
               getGroupClassName={(g) => {
                 if (!isAskView) return undefined;
                 const ar = g.assistantMessage?.ask_result;
@@ -5938,10 +5926,11 @@ function AppMain({
                 );
               }}
               openSessions={
-                isAskView || currentSession?.name === "Assistant" ? [] : sortedOpenSessions
+                isAskView || currentSession?.name === "Assistant" ? [] : visibleOpenSessions
               }
               sessionTabsVisible={sessionTabsVisible}
               sessionTabsSort={sessionTabsSort}
+              onTabCapacityChange={handleTabCapacityChange}
               providers={providers}
               onCloseTab={handleCloseTab}
               onSelectTab={handleSelectTab}
@@ -5973,6 +5962,7 @@ function AppMain({
               onStop={handleStop}
               onRetry={handleRetry}
               onRetryStopped={handleRetryStopped}
+              onContinueRateLimitOnAnotherProvider={handleContinueRateLimitOnAnotherProvider}
               onFileClick={handleFileClick}
               onViewDiff={handleViewDiff}
               disabled={!currentSession}
