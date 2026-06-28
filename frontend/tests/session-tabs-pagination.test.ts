@@ -53,4 +53,26 @@ describe("session tabs with paged sessions", () => {
     expect(window.location.pathname).toBe("/s/sess-60");
     h.unmount();
   });
+
+  it("hides open-session tabs for the Assistant session", async () => {
+    const assistant = makeSession({
+      id: "assistant-session",
+      name: "Assistant",
+      cwd: "/tmp/project-a",
+    });
+    const work = makeSession({
+      id: "work-session",
+      name: "Work",
+      cwd: "/tmp/project-a",
+    });
+    const h = await renderApp({ seed: { sessions: [assistant, work] } });
+
+    await h.selectSession(work.id);
+    expect(h.$(".session-tabs")?.textContent).toContain("Work");
+
+    await h.selectSession(assistant.id);
+    expect(h.$(".session-tabs")).toBeNull();
+
+    h.unmount();
+  });
 });
