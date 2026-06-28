@@ -1906,57 +1906,14 @@ def _require_project_structure_internal(x_internal_token: str) -> None:
 
 
 def _require_capabilities_internal(x_internal_token: str) -> None:
+    """Capabilities are managed by the Better Agent builtin MCP that runs inside
+    the runner and calls back over the internal loopback. Gate on a valid
+    internal token only."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
-    if (
-        coordinator.principal_extension_id(x_internal_token)
-        != extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
-    ):
-        raise HTTPException(status_code=403, detail="provider-config-sync extension is required")
 
 
-@app.post("/api/internal/sessions/{sid}/capabilities")
-async def internal_session_capabilities(
-    sid: str,
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Load/release a scoped capability for a session. Core owns the write
-    (session_manager.active_capability_ids); the provider-config-sync extension
-    is the only authorized caller. Delivery follows on the next turn — the
-    capability's MCP self-gates on the active set, skills merge at assembly."""
-    _require_capabilities_internal(x_internal_token)
-    action = str((body or {}).get("action") or "").strip()
-    capability_id = str((body or {}).get("capability_id") or "").strip()
-    if action not in ("load", "release"):
-        raise HTTPException(status_code=400, detail="action must be load or release")
-    if not capability_id:
-        raise HTTPException(status_code=400, detail="capability_id is required")
-    if not extension_store.get_capability(capability_id):
-        raise HTTPException(status_code=404, detail="unknown capability")
-    if not session_manager.get(sid):
-        raise HTTPException(status_code=404, detail="unknown session")
-    if action == "load":
-        updated = session_manager.add_active_capability(sid, capability_id)
-    else:
-        updated = session_manager.remove_active_capability(sid, capability_id)
-    return {
-        "ok": True,
-        "active_capability_ids": (updated or {}).get("active_capability_ids") or [],
-    }
-
-
-@app.get("/api/internal/sessions/{sid}/capabilities")
-async def internal_session_capabilities_list(
-    sid: str,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Catalog + the session's active set, for the capabilities management MCP."""
-    _require_capabilities_internal(x_internal_token)
-    sess = session_manager.get(sid)
-    if not sess:
-        raise HTTPException(status_code=404, detail="unknown session")
+def _capabilities_snapshot(sess: dict) -> dict:
     active = [
         str(c) for c in (sess.get("active_capability_ids") or []) if str(c or "").strip()
     ]
@@ -1972,6 +1929,41 @@ async def internal_session_capabilities_list(
         })
     catalog.sort(key=lambda c: c["id"])
     return {"capabilities": catalog, "active_capability_ids": active}
+
+
+@app.post("/api/internal/sessions/{sid}/capabilities")
+async def internal_session_capabilities(
+    sid: str,
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """List/load/release scoped capabilities for a session. Core owns the write
+    (session_manager.active_capability_ids); callers are internal loopback only
+    (the Better Agent capabilities builtin MCP). Delivery follows on the next
+    turn — the capability's MCP self-gates on the active set, skills merge at
+    assembly."""
+    _require_capabilities_internal(x_internal_token)
+    action = str((body or {}).get("action") or "").strip()
+    if action not in ("list", "load", "release"):
+        raise HTTPException(status_code=400, detail="action must be list, load or release")
+    sess = session_manager.get(sid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="unknown session")
+    if action == "list":
+        return {"ok": True, **_capabilities_snapshot(sess)}
+    capability_id = str((body or {}).get("capability_id") or "").strip()
+    if not capability_id:
+        raise HTTPException(status_code=400, detail="capability_id is required")
+    if not extension_store.get_capability(capability_id):
+        raise HTTPException(status_code=404, detail="unknown capability")
+    if action == "load":
+        updated = session_manager.add_active_capability(sid, capability_id)
+    else:
+        updated = session_manager.remove_active_capability(sid, capability_id)
+    return {
+        "ok": True,
+        "active_capability_ids": (updated or {}).get("active_capability_ids") or [],
+    }
 
 
 @app.post("/api/internal/project-updates/count")
