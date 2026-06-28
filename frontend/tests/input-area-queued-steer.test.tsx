@@ -23,7 +23,6 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
   const onSteer = vi.fn();
   const onInterrupt = vi.fn();
   const onPromoteQueued = vi.fn();
-  const onSteerQueued = vi.fn();
   const onCancelQueued = vi.fn();
   const result = render(
     <InputArea
@@ -37,31 +36,26 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
       onDraftChange={vi.fn()}
       queuedPrompt={{ id: "q1", preview: "queued work" }}
       onPromoteQueued={onPromoteQueued}
-      onSteerQueued={onSteerQueued}
       onCancelQueued={onCancelQueued}
       {...extra}
     />,
   );
-  return { ...result, onSend, onSteer, onInterrupt, onPromoteQueued, onSteerQueued, onCancelQueued };
+  return { ...result, onSend, onSteer, onInterrupt, onPromoteQueued, onCancelQueued };
 }
 
 describe("InputArea queued prompt promote action", () => {
-  it("shows both Steer and Interrupt on queued prompts when the active provider supports steering", () => {
-    const { onPromoteQueued, onSteerQueued } = renderInputArea(true);
+  it("keeps queued prompts separate from draft steering when the provider supports steering", () => {
+    const { onPromoteQueued } = renderInputArea(true);
 
     const banner = screen.getByTestId("queued-prompt-banner");
-    const steer = within(banner).getByRole("button", { name: "Steer" });
     const interrupt = within(banner).getByRole("button", { name: "⚡ Interrupt" });
-    expect(steer.getAttribute("title")).toBe("Send into the active Codex turn");
-    expect(steer.classList.contains("steer")).toBe(true);
+    expect(within(banner).queryByRole("button", { name: "Steer" })).toBeNull();
     expect(interrupt.getAttribute("title")).toBe(
       "Cancel current turn and send this prompt immediately",
     );
     expect(interrupt.classList.contains("interrupt")).toBe(true);
 
-    fireEvent.click(steer);
     fireEvent.click(interrupt);
-    expect(onSteerQueued).toHaveBeenCalledTimes(1);
     expect(onPromoteQueued).toHaveBeenCalledTimes(1);
   });
 
@@ -77,11 +71,11 @@ describe("InputArea queued prompt promote action", () => {
     expect(button.classList.contains("interrupt")).toBe(true);
   });
 
-  it("shows separate active Steer and Interrupt buttons while streaming", () => {
+  it("shows separate active Queue, Steer, and Interrupt buttons while streaming", () => {
     renderInputArea(true, "active work");
 
-    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
-    expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
+    expect(screen.getByTestId("send-btn").textContent).toBe("Queue");
+    expect(screen.getByTestId("steer-btn").textContent).toBe("Steer");
     expect(screen.getByTestId("interrupt-btn").textContent).toBe("Interrupt");
   });
 
@@ -95,20 +89,20 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).toBeNull();
   });
 
-  it("moves active Codex alternatives into the prompt overflow menu on mobile", () => {
+  it("moves active Steer and Interrupt into the prompt overflow menu on mobile", () => {
     setViewportWidth(390);
     const firstStop = vi.fn();
     const first = renderInputArea(true, "active work", { onStop: firstStop });
 
-    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
-    expect(screen.queryByTestId("queue-btn")).toBeNull();
+    expect(screen.getByTestId("send-btn").textContent).toBe("Queue");
+    expect(screen.queryByTestId("steer-btn")).toBeNull();
     expect(screen.queryByTestId("interrupt-btn")).toBeNull();
     expect(screen.queryByTestId("stop-btn")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByTestId("queue-btn"));
-    expect(first.onSend).toHaveBeenCalledTimes(1);
-    expect(first.onSteer).toHaveBeenCalledTimes(0);
+    fireEvent.click(screen.getByTestId("steer-btn"));
+    expect(first.onSteer).toHaveBeenCalledTimes(1);
+    expect(first.onSend).toHaveBeenCalledTimes(0);
 
     cleanup();
     setViewportWidth(390);
@@ -129,14 +123,26 @@ describe("InputArea queued prompt promote action", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
-  it("uses Steer as the primary active Codex action", async () => {
-    const { onSteer } = renderInputArea(true, "active work");
+  it("uses Queue as the primary active Codex action", async () => {
+    const { onSend, onSteer } = renderInputArea(true, "active work");
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("send-btn"));
     });
 
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses the explicit Steer button for active Codex steering", async () => {
+    const { onSend, onSteer } = renderInputArea(true, "active work");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("steer-btn"));
+    });
+
     expect(onSteer).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledTimes(0);
   });
 
   it("does not submit Steer twice on rapid double click", async () => {
@@ -146,31 +152,28 @@ describe("InputArea queued prompt promote action", () => {
     renderInputArea(true, "active work", { onSteer });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("send-btn"));
-      fireEvent.click(screen.getByTestId("send-btn"));
+      fireEvent.click(screen.getByTestId("steer-btn"));
+      fireEvent.click(screen.getByTestId("steer-btn"));
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
     expect(onSteer).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps queued Interrupt primary and moves queued Steer into overflow on mobile", () => {
+  it("keeps queued Interrupt primary and leaves queued Steer unavailable on mobile", () => {
     setViewportWidth(390);
-    const { onPromoteQueued, onSteerQueued, onCancelQueued } = renderInputArea(true);
+    const { onPromoteQueued, onCancelQueued } = renderInputArea(true);
 
     const banner = screen.getByTestId("queued-prompt-banner");
     expect(within(banner).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
     expect(within(banner).queryByRole("button", { name: "Steer" })).toBeNull();
 
     fireEvent.click(within(banner).getByRole("button", { name: "More queued actions" }));
-    fireEvent.click(within(banner).getByRole("button", { name: "Steer" }));
-    expect(onSteerQueued).toHaveBeenCalledTimes(1);
+    expect(within(banner).queryByRole("button", { name: "Steer" })).toBeNull();
+    fireEvent.click(within(banner).getByRole("button", { name: "Cancel" }));
+    expect(onCancelQueued).toHaveBeenCalledTimes(1);
 
     fireEvent.click(within(banner).getByRole("button", { name: "⚡ Interrupt" }));
     expect(onPromoteQueued).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(within(banner).getByRole("button", { name: "More queued actions" }));
-    fireEvent.click(within(banner).getByRole("button", { name: "Cancel" }));
-    expect(onCancelQueued).toHaveBeenCalledTimes(1);
   });
 });

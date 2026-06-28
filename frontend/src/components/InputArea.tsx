@@ -85,7 +85,6 @@ interface Props {
   forkTargetLabel?: string;
   queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
   onPromoteQueued: () => void;
-  onSteerQueued?: () => void;
   onCancelQueued?: () => void;
   onQueuedTextEdit?: (text: string) => void;
   onReviewLastWork?: () => void;
@@ -154,7 +153,6 @@ export function InputArea({
   forkTargetLabel,
   queuedPrompt,
   onPromoteQueued,
-  onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
   onReviewLastWork,
@@ -607,14 +605,10 @@ export function InputArea({
   // When nothing is streaming, the button is a plain "Send" — queue
   // is irrelevant. Only expose that distinction while a turn is active.
   const somethingRunning = _isStreaming;
-  const steerIsPrimary = somethingRunning && canSteer && !!onSteer;
-  const handlePrimarySend = steerIsPrimary ? handleSteer : handleSend;
-  const primarySendLabel = steerIsPrimary
-    ? t("input.steerButton")
-    : somethingRunning
-      ? t("input.queueSendButton")
-      : t("input.sendButton");
-  const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const canShowSteerAction = somethingRunning && canSteer && !!onSteer;
+  const primarySendLabel = somethingRunning
+    ? t("input.queueSendButton")
+    : t("input.sendButton");
 
   return (
     <div className="input-area" data-testid="input-area">
@@ -660,14 +654,11 @@ export function InputArea({
           files={queuedPrompt.files}
           filesCount={queuedPrompt.filesCount}
           onPromote={onPromoteQueued}
-          onSteer={canSteer ? onSteerQueued : undefined}
           onCancel={onCancelQueued!}
           onEdit={onQueuedTextEdit}
           onSaveToNote={onQueuedToNote ?? undefined}
           interruptLabel={t("input.interruptButton")}
           interruptTitle={t("input.interruptTitle")}
-          steerLabel={t("input.steerButton")}
-          steerTitle={t("input.steerTitle")}
           cancelLabel={t("app.cancel")}
           queuedLabel={t("input.queuedLabel")}
           compactActions={compactActionMenus}
@@ -766,22 +757,22 @@ export function InputArea({
           />
         ))}
         <button
-          onClick={handlePrimarySend}
+          onClick={handleSend}
           disabled={!canSend}
-          className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+          className={`send-btn${somethingRunning ? " queue" : ""}`}
           data-testid="send-btn"
-          title={primarySendTitle}
         >
           {primarySendLabel}
         </button>
-        {somethingRunning && canSteer && onSteer && !compactActionMenus && (
+        {canShowSteerAction && !compactActionMenus && (
           <button
-            onClick={handleSend}
+            onClick={handleSteer}
             disabled={!canSend}
-            className="send-btn queue"
-            data-testid="queue-btn"
+            className="send-btn steer"
+            data-testid="steer-btn"
+            title={t("input.steerTitle")}
           >
-            {t("input.queueSendButton")}
+            {t("input.steerButton")}
           </button>
         )}
         {somethingRunning && onInterrupt && !compactActionMenus && (
@@ -823,14 +814,15 @@ export function InputArea({
                   {overflowPanelNode}
                 </div>
               ) : null}
-              {compactActionMenus && somethingRunning && canSteer && onSteer && (
+              {compactActionMenus && canShowSteerAction && (
                 <button
                   className="overflow-menu-item"
-                  data-testid="queue-btn"
-                  onClick={() => { setMenuOpen(false); handleSend(); }}
+                  data-testid="steer-btn"
+                  onClick={() => { setMenuOpen(false); handleSteer(); }}
                   disabled={!canSend}
+                  title={t("input.steerTitle")}
                 >
-                  {t("input.queueSendButton")}
+                  {t("input.steerButton")}
                 </button>
               )}
               {compactActionMenus && somethingRunning && onInterrupt && (
@@ -1001,14 +993,11 @@ function QueuedPromptBanner({
   files,
   filesCount,
   onPromote,
-  onSteer,
   onCancel,
   onEdit,
   onSaveToNote,
   interruptLabel,
   interruptTitle,
-  steerLabel,
-  steerTitle,
   cancelLabel,
   queuedLabel,
   compactActions = false,
@@ -1019,14 +1008,11 @@ function QueuedPromptBanner({
   files?: FileAttachment[];
   filesCount?: number;
   onPromote: () => void;
-  onSteer?: () => void;
   onCancel: () => void;
   onEdit?: (text: string) => void;
   onSaveToNote?: (text: string) => void;
   interruptLabel: string;
   interruptTitle: string;
-  steerLabel: string;
-  steerTitle: string;
   cancelLabel: string;
   queuedLabel: string;
   compactActions?: boolean;
@@ -1121,19 +1107,6 @@ function QueuedPromptBanner({
                 <Icon name="memo" size={15} />
               </button>
             )}
-            {onSteer && (
-              <button
-                className="promote-btn steer"
-                data-testid="queued-steer-btn"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onSteer();
-                }}
-                title={steerTitle}
-              >
-                {steerLabel}
-              </button>
-            )}
           </>
         )}
         <button
@@ -1153,9 +1126,6 @@ function QueuedPromptBanner({
             setOpen={setActionsOpen}
             onCancel={onCancel}
             cancelLabel={cancelLabel}
-            onSteer={onSteer}
-            steerLabel={steerLabel}
-            steerTitle={steerTitle}
             onSaveToNote={
               onSaveToNote ? () => onSaveToNote(editText.trim() || preview) : undefined
             }
@@ -1242,16 +1212,6 @@ function QueuedPromptBanner({
                 <Icon name="memo" size={15} />
               </button>
             )}
-            {onSteer && (
-              <button
-                className="promote-btn steer"
-                data-testid="queued-steer-btn"
-                onClick={onSteer}
-                title={steerTitle}
-              >
-                {steerLabel}
-              </button>
-            )}
           </>
         )}
         <button
@@ -1268,9 +1228,6 @@ function QueuedPromptBanner({
             setOpen={setActionsOpen}
             onCancel={onCancel}
             cancelLabel={cancelLabel}
-            onSteer={onSteer}
-            steerLabel={steerLabel}
-            steerTitle={steerTitle}
             onSaveToNote={onSaveToNote ? () => onSaveToNote(preview) : undefined}
           />
         )}
@@ -1284,18 +1241,12 @@ function QueuedPromptOverflowMenu({
   setOpen,
   onCancel,
   cancelLabel,
-  onSteer,
-  steerLabel,
-  steerTitle,
   onSaveToNote,
 }: {
   open: boolean;
   setOpen: (open: boolean | ((open: boolean) => boolean)) => void;
   onCancel: () => void;
   cancelLabel: string;
-  onSteer?: () => void;
-  steerLabel: string;
-  steerTitle: string;
   onSaveToNote?: () => void;
 }) {
   return (
@@ -1329,19 +1280,6 @@ function QueuedPromptOverflowMenu({
               }}
             >
               <Icon name="memo" size={14} /> Save to notes
-            </button>
-          )}
-          {onSteer && (
-            <button
-              className="overflow-menu-item"
-              data-testid="queued-steer-btn"
-              onClick={() => {
-                setOpen(false);
-                onSteer();
-              }}
-              title={steerTitle}
-            >
-              {steerLabel}
             </button>
           )}
         </div>

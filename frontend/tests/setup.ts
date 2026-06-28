@@ -21,7 +21,7 @@ class MemoryStorage implements Storage {
   }
 }
 
-beforeEach(() => {
+function installMemoryStorage() {
   Object.defineProperty(globalThis, "localStorage", {
     value: new MemoryStorage(),
     writable: true,
@@ -32,6 +32,12 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+}
+
+installMemoryStorage();
+
+beforeEach(() => {
+  installMemoryStorage();
 });
 
 afterEach(() => {

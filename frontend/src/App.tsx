@@ -6110,11 +6110,6 @@ function AppMain({
               onForkAndSend={handleForkAndSend}
               queuedPrompt={queuedPrompt}
               onPromoteQueued={() => handlePromoteQueued("interrupt")}
-              onSteerQueued={
-                currentSessionCanSteer
-                  ? () => handlePromoteQueued("steer")
-                  : undefined
-              }
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
               onReviewLastWork={
