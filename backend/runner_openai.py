@@ -1395,7 +1395,24 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # from bare (TestApe-isolated) sessions, matching runner.py / the stdio
     # capabilities MCP injected for the CLI providers.
     capabilities_enabled = interactive and not bool(inputs.get("bare_config"))
-    tool_schemas = _tool_schemas_for_run(capabilities_enabled=capabilities_enabled)
+    # Feature flags mirror _build_loopback_tool_handlers' registration conditions
+    # so the model only sees schemas for tools that actually have a handler
+    # wired (ask/mssg/delegate/create_*/file-panel). Team-manager requires
+    # manager mode; file_editing is the working_mode the file-panel edits in.
+    mode = inputs.get("mode") or "native"
+    loopback_enabled = capabilities_enabled
+    team_manager_enabled = mode == "manager"
+    open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
+    file_editing_mode = inputs.get("working_mode") == "file_editing"
+    tool_schemas = _tool_schemas_for_run(
+        inputs=inputs,
+        capabilities_enabled=capabilities_enabled,
+        loopback_enabled=loopback_enabled,
+        team_manager_enabled=team_manager_enabled,
+        open_file_panel_enabled=open_file_panel_enabled,
+        file_editing_mode=file_editing_mode,
+    )
+    loopback_handlers = _build_loopback_tool_handlers(inputs, cwd=str(cwd), model=model)
     resume_sid = inputs.get("session_id")
 
     session_id, messages = _load_history(resume_sid)
@@ -1472,6 +1489,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 result = await _dispatch_tool(
                     call, cwd, app_session_id, run_dir, bypass,
                     interactive, backend_url, internal_token, emitter,
+                    loopback_handlers,
                 )
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
@@ -1553,7 +1571,7 @@ async def _one_round(
 async def _dispatch_tool(
     call: dict, cwd: Path, app_session_id: str, run_dir: Path,
     bypass: bool, interactive: bool, backend_url: str, internal_token: str,
-    emitter: EventEmitter,
+    emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
 ) -> str:
     name = call["name"]
     try:
@@ -1570,6 +1588,21 @@ async def _dispatch_tool(
             internal_token=internal_token, app_session_id=app_session_id,
             interactive=interactive, emitter=emitter, tool_call_id=call["id"],
         )
+
+    # Loopback/orchestration/file-panel tools (ask, mssg, delegate_task,
+    # create_worker/create_session/create_sub_session, open_file_panel,
+    # request_user_input, start_file_discussion). No filesystem side effects →
+    # no permission gate; the handler owns auth via the backend loopback and
+    # returns a self-describing result string.
+    lb_handler = loopback_handlers.get(name)
+    if lb_handler is not None:
+        try:
+            result = await lb_handler(args)
+        except Exception as e:
+            logger.exception("loopback tool %s failed", name)
+            result = f"Error: {type(e).__name__}: {e}"
+        emitter.emit_tool_result(call["id"], result)
+        return result
 
     # permission gate: non-bypass runs ask the backend before risky tools
     if not bypass and name in {"Bash", "Write", "Edit"}:

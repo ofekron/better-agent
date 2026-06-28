@@ -48,7 +48,10 @@ def test_approval_routes_through_http_client_approved(monkeypatch):
     assert calls[0]["backend_url"] == "http://backend"
     assert calls[0]["internal_token"] == "tok"
     assert calls[0]["tool_name"] == "Bash"
-    assert calls[0]["summary"] == {"tool": "Bash", "args": {"command": "ls"}}
+    # Unified summary shape shared with the Claude/Codex runners: {"tool",
+    # "input"} with every arg stringified + capped, so the one frontend card
+    # renders them. (Was a divergent {"tool", "args"} the UI couldn't read.)
+    assert calls[0]["summary"] == {"tool": "Bash", "input": {"command": "ls"}}
 
 
 def test_approval_routes_through_http_client_denied(monkeypatch):
@@ -137,7 +140,7 @@ def test_dispatch_tool_gates_bash_and_emits_denial(monkeypatch):
         call, cwd=Path(_TMP_HOME), app_session_id="sid-5",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
         backend_url="http://backend", internal_token="tok",
-        emitter=em,
+        emitter=em, loopback_handlers={},
     ))
     assert res == "Error: tool use denied by user"
     assert em.results == [("c1", "Error: tool use denied by user")]
@@ -158,7 +161,7 @@ def test_dispatch_tool_non_interactive_fails_closed_without_blaming_user(monkeyp
         call, cwd=Path(_TMP_HOME), app_session_id="sid-6",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=False,
         backend_url="", internal_token="",
-        emitter=em,
+        emitter=em, loopback_handlers={},
     ))
     assert "approval channel unavailable" in res
     assert "denied by user" not in res
@@ -179,7 +182,7 @@ def test_dispatch_tool_bypass_runs_handler(monkeypatch):
         call, cwd=Path(_TMP_HOME), app_session_id="sid-7",
         run_dir=Path(_TMP_HOME), bypass=True, interactive=False,
         backend_url="", internal_token="",
-        emitter=em,
+        emitter=em, loopback_handlers={},
     ))
     assert res == "ok"
     assert fired == [{"command": "ls"}]
