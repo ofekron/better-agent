@@ -146,7 +146,7 @@ async def publish_event(
 ) -> EventWritten:
     """Publish an event fact and wait for the journal writer acknowledgement."""
     resolved_event_id = event_id or str(uuid.uuid4())
-    if bus_instance is bus and event_journal_writer._bus is not bus:
+    if bus_instance is bus:
         return await event_journal_writer.submit_event_async(Event(
             root_id=session_id,
             sid=context_id or session_id,
