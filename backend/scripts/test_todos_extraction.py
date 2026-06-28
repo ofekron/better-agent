@@ -1041,6 +1041,62 @@ def test_load_derives_current_todos_from_orphan_rows() -> bool:
     return True
 
 
+def test_hydration_skips_irrelevant_rows_before_projection() -> bool:
+    from event_ingester import event_ingester
+    import session_local_projection
+
+    sid, _msg = _mk_session("native")
+    todos = [{"content": "Relevant", "status": "in_progress", "activeForm": "r"}]
+    for idx in range(20):
+        event_ingester.ingest(
+            sid, sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": f"noise-{idx}",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"plain text {idx}"}],
+                },
+            },
+            source="test_noise", run_id=None, msg_id=None,
+        )
+    event = _claude_todowrite_native("u-relevant", todos, tool_id="tu_relevant")
+    event_ingester.ingest(
+        sid, sid=sid,
+        event_type="agent_message", data=event["data"],
+        source="test_relevant", run_id=None, msg_id=None,
+    )
+
+    original_project = session_local_projection.project_event_fields
+    calls = {"n": 0}
+
+    def counting_project(*args, **kwargs):
+        calls["n"] += 1
+        return original_project(*args, **kwargs)
+
+    rid = session_manager._root_id_for(sid)
+    with session_manager._lock_for_root(rid):
+        session_manager._roots.pop(rid, None)
+        session_manager._event_hydrated_roots.discard(rid)
+
+    session_local_projection.project_event_fields = counting_project
+    try:
+        with session_manager._lock_for_root(rid):
+            sess = session_manager._load_root(sid) or {}
+            got = sess.get("current_todos") or []
+    finally:
+        session_local_projection.project_event_fields = original_project
+
+    if calls["n"] != 1:
+        print(f"  expected 1 projection call, got {calls['n']}")
+        return False
+    if got != todos:
+        print(f"  expected relevant todos after filtered hydration, got {got}")
+        return False
+    return True
+
+
 def test_cli_prompt_open_todos_only() -> bool:
     """The helper injects only unfinished todos and otherwise no-ops."""
     from turn_helpers import _append_todo_reminder
@@ -2253,6 +2309,7 @@ TESTS = [
     ("hydration loads current_todos from events.jsonl", test_hydration_loads_current_todos_from_events_jsonl),
     ("Gemini re-emission preserves completed", test_gemini_reemission_preserves_completed_status),
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
+    ("hydration skips irrelevant rows before projection", test_hydration_skips_irrelevant_rows_before_projection),
     ("cli_prompt reminder: open todos only", test_cli_prompt_open_todos_only),
     ("ALL_TASKS__DONE marker completes todos and suppresses reminder", test_all_tasks_done_marker_completes_todos_and_suppresses_reminder),
     ("dispatch supervisor branch passes user_initiated=True", test_dispatch_supervisor_branch_passes_user_initiated),
