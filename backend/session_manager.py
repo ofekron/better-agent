@@ -3957,12 +3957,31 @@ class SessionManager:
 
     def has_unseen_error(self, sid: str) -> bool:
         """Cheap (stale-tolerant) read of whether this session currently
-        has an unseen turn-error dot. For sidebar snapshot enrichment."""
+        has an unseen turn-error dot. For sidebar snapshot enrichment.
+
+        Two signals, OR'd conservatively (show the dot if either fires):
+          1. The `unseen_error` flag — the fast live projection, set by
+             `_finalize_turn_messages` on every failure path.
+          2. The last assistant message's `error` field — the durable
+             source of truth, so sessions that errored via a path the
+             flag missed (run-recovery, or errors from before the flag
+             existed) still show the dot.
+
+        Both clear in sync at turn-start: the flag is cleared explicitly
+        AND the newly-appended non-error assistant message becomes the
+        last, so the derivation returns False too."""
         rid = self._root_id_for(sid)
         if rid is None:
             return False
         sess = self._cached(sid)
-        return bool(sess and sess.get("unseen_error"))
+        if not sess:
+            return False
+        if sess.get("unseen_error"):
+            return True
+        for m in reversed(sess.get("messages") or []):
+            if m.get("role") == "assistant":
+                return bool(m.get("error"))
+        return False
 
     def _clear_view_markers(self, sid: str) -> None:
         """On a view-ack, clear any marker on `sid` owned by an extension
