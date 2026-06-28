@@ -71,6 +71,17 @@ describe("overlay extension-module-slot has no flow footprint", () => {
     expect(childBody).toMatch(/min-height:\s*0/);
   });
 
+  it("composer action slots hug button-sized extension controls", () => {
+    const body = ruleBody(".extension-module-slot--composer-actions {");
+    expect(body).toMatch(/display:\s*inline-flex/);
+    expect(body).toMatch(/min-height:\s*0/);
+    expect(body).toMatch(/width:\s*auto/);
+
+    const mobileBody = ruleBody(".extension-module-slot--composer-actions,");
+    expect(mobileBody).toMatch(/min-height:\s*0/);
+    expect(mobileBody).toMatch(/width:\s*auto/);
+  });
+
   it("ExtensionModuleSlot forwards the right-panel fill variant class onto its container", () => {
     const { container } = render(
       <ExtensionModuleSlot

@@ -5274,6 +5274,7 @@ button.run-badge-clickable:focus-visible {
 
 .input-row {
   --input-prompt-font-size: calc(14px * var(--app-font-scale));
+  --input-prompt-max-height: 200px;
   display: flex;
   gap: 2px;
   align-items: flex-end;
@@ -5342,7 +5343,7 @@ button.run-badge-clickable:focus-visible {
   word-break: normal;
   tab-size: 4;
   min-height: 40px;
-  max-height: 200px;
+  max-height: var(--input-prompt-max-height);
 }
 
 .input-prompt-highlight {
@@ -5360,7 +5361,7 @@ button.run-badge-clickable:focus-visible {
   word-break: normal;
   tab-size: 4;
   min-height: 40px;
-  max-height: 200px;
+  max-height: var(--input-prompt-max-height);
   overflow: hidden;
   pointer-events: none;
 }
@@ -7520,6 +7521,14 @@ button.run-badge-clickable:focus-visible {
   display: contents;
   min-height: 0;
   width: auto;
+}
+
+.extension-module-slot--composer-actions {
+  min-height: 0;
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 /* Overlay-slot modules (e.g. machine-node approvals) render position:fixed
@@ -13907,6 +13916,7 @@ button.progress-inflight {
 
   .extension-module-slot--toolbar,
   .extension-module-slot--topbar,
+  .extension-module-slot--composer-actions,
   .extension-module-slot.extension-quick-button--module {
     min-height: 0;
     width: auto;
@@ -14206,6 +14216,7 @@ button.progress-inflight {
        field force-zooms the viewport (and the zoom does not undo on
        blur). */
     --input-prompt-font-size: calc(16px * var(--app-font-scale));
+    --input-prompt-max-height: 112px;
   }
   .send-btn,
   .input-row .stop-btn {

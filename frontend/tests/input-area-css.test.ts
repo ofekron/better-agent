@@ -35,7 +35,9 @@ function mediaBody(query: string): string {
 
 describe("InputArea prompt text metrics", () => {
   it("keeps textarea and highlight font size tied to the same responsive source", () => {
-    expect(ruleBody(".input-row")).toContain("--input-prompt-font-size: 14px");
+    expect(ruleBody(".input-row")).toContain(
+      "--input-prompt-font-size: calc(14px * var(--app-font-scale))",
+    );
     expect(ruleBody(".input-row textarea")).toContain(
       "font-size: var(--input-prompt-font-size)",
     );
@@ -43,7 +45,20 @@ describe("InputArea prompt text metrics", () => {
       "font-size: var(--input-prompt-font-size)",
     );
     expect(mediaBody("@media (max-width: 700px)")).toContain(
-      "--input-prompt-font-size: 16px",
+      "--input-prompt-font-size: calc(16px * var(--app-font-scale))",
+    );
+  });
+
+  it("keeps the mobile composer from consuming the viewport", () => {
+    expect(ruleBody(".input-row")).toContain("--input-prompt-max-height: 200px");
+    expect(ruleBody(".input-row textarea")).toContain(
+      "max-height: var(--input-prompt-max-height)",
+    );
+    expect(ruleBody(".input-prompt-highlight")).toContain(
+      "max-height: var(--input-prompt-max-height)",
+    );
+    expect(mediaBody("@media (max-width: 700px)")).toContain(
+      "--input-prompt-max-height: 112px",
     );
   });
 });

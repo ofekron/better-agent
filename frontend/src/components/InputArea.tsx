@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
 import { useLocalStorage } from "../hooks/useLocalStorage";
@@ -264,12 +264,17 @@ export function InputArea({
   }, [onImagesChange]);
 
   // Resize the textarea to fit content whenever it changes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 200) + "px";
-  }, [localDraft]);
+    const style = window.getComputedStyle(el);
+    const minHeight = Number.parseFloat(style.minHeight) || 40;
+    const maxHeight = Number.parseFloat(style.maxHeight) || 200;
+    el.style.height = "0px";
+    const contentHeight = el.scrollHeight;
+    el.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxHeight)}px`;
+    el.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+  }, [localDraft, sessionId, disabled]);
 
   // Auto-focus the prompt input whenever the session changes or the
   // component first mounts with a valid session. Skips when the user
