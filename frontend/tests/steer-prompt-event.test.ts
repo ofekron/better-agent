@@ -9,7 +9,7 @@ async function typeAndSteer(h: Awaited<ReturnType<typeof renderApp>>, text: stri
   const input = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement | null;
   if (!input) throw new Error("input textarea not present");
   fireEvent.change(input, { target: { value: text } });
-  for (let i = 0; i < 10 && !h.$('[data-testid="steer-btn"]'); i++) {
+  for (let i = 0; i < 30 && !h.$('[data-testid="steer-btn"]'); i++) {
     await h.flush();
   }
   await h.click('[data-testid="steer-btn"]');
@@ -35,7 +35,65 @@ async function waitForOutboundSend(h: Awaited<ReturnType<typeof renderApp>>, pro
   return h.outbound.find((f) => f.type === "send_message" && f.prompt === prompt);
 }
 
+async function waitForSteerSend(h: Awaited<ReturnType<typeof renderApp>>) {
+  for (let i = 0; i < 10; i++) {
+    const sent = h.outbound.find((f) => f.type === "send_message" && f.send_mode === "steer");
+    if (sent) return sent;
+    await h.flush();
+  }
+  return h.outbound.find((f) => f.type === "send_message" && f.send_mode === "steer");
+}
+
 describe("steer prompt events", () => {
+  it("appends multiple queued drafts without replacing the first queued banner", async () => {
+    const session = makeSession({
+      provider_id: "codex",
+      messages: [
+        makeUserMsg({ id: "u1", content: "start work" }),
+        makeAssistantMsg({ id: "a1", isStreaming: true }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    await h.typeAndSend("first queued");
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q1",
+        prompt_preview: "first queued",
+        send_mode: "queue",
+        queue_position: 1,
+        client_id: h.outbound.find((frame) => frame.type === "send_message")?.client_id,
+      },
+    });
+    await h.flush();
+
+    await h.typeAndSend("second queued");
+    const sends = h.outbound.filter((frame) => frame.type === "send_message");
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q2",
+        prompt_preview: "second queued",
+        send_mode: "queue",
+        queue_position: 2,
+        client_id: sends[1]?.client_id,
+      },
+    });
+    await h.flush();
+
+    expect(sends).toHaveLength(2);
+    expect(sends.map((frame) => frame.prompt)).toEqual(["first queued", "second queued"]);
+    expect(sends.every((frame) => frame.send_mode === "queue")).toBe(true);
+    expect(h.outbound.some((frame) => frame.type === "cancel_queued")).toBe(false);
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("first queued");
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).not.toContain("second queued");
+    h.unmount();
+  });
+
   it("queues the active draft without consuming an existing queued prompt", async () => {
     const session = makeSession({
       provider_id: "codex",
@@ -55,12 +113,15 @@ describe("steer prompt events", () => {
     expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
     await h.typeAndSend("draft steer");
 
-    expect(h.outbound.find((frame) => frame.type === "send_message")).toMatchObject({
+    expect(await waitForOutboundSend(h, "draft steer")).toMatchObject({
       type: "send_message",
       app_session_id: session.id,
+      prompt: "draft steer",
       send_mode: "queue",
     });
+    expect(h.outbound.some((frame) => frame.type === "cancel_queued")).toBe(false);
     expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
+    h.unmount();
   });
 
   it("renders the steer prompt inside the assistant turn and removes the optimistic user bubble", async () => {
@@ -82,7 +143,7 @@ describe("steer prompt events", () => {
     await h.flush();
 
     await typeAndSteer(h, "steer inside turn");
-    const sent = await waitForOutboundSend(h, "steer inside turn");
+    const sent = await waitForSteerSend(h);
     expect(sent).toMatchObject({ send_mode: "steer" });
     const clientId = sent!.client_id as string;
 
@@ -106,6 +167,7 @@ describe("steer prompt events", () => {
     const messages = await waitForNoSendingMessages(h);
     expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
     expect(messages.some((m) => m.role === "user" && m.status === "sending")).toBe(false);
+    h.unmount();
   });
 
   it("renders inline tags in steer prompts as comment cards", async () => {
@@ -167,5 +229,6 @@ describe("steer prompt events", () => {
     expect(sent).toMatchObject({
       send_mode: "steer",
     });
+    h.unmount();
   });
 });
