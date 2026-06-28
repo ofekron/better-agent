@@ -2612,7 +2612,7 @@ class SessionManager:
                     return
                 _persist_inflight.add(root_id)
                 _persist_last_at[root_id] = time.monotonic()
-            sess = copy.deepcopy(pending)
+            sess = session_store.copy_persistable_tree(pending)
         # bump=False — `updated_at` was set at queue time under
         # the caller's lock.
         try:
