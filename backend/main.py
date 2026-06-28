@@ -3194,23 +3194,31 @@ def _session_matches_list_filters(
         if source not in sources and user_aware_bucket not in sources:
             return False
     if tag_ids:
-        manual_tags = {
-            tag.get("id")
-            for tag in session.get("session_tags") or []
-            if isinstance(tag, dict)
-        }
-        requirement_tags = {
-            f"req:{tag.get('kind')}:{tag.get('id')}"
-            for tag in session.get("requirement_tags") or []
-            if isinstance(tag, dict)
-        }
-        if not tag_ids.issubset(manual_tags | requirement_tags):
+        filter_ids = session.get("tag_filter_ids")
+        if not isinstance(filter_ids, list):
+            filter_ids = _session_tag_filter_ids(session)
+        if not tag_ids.issubset(filter_ids):
             return False
     q = (search or "").strip().lower()
     if q:
         if not (content_scores and session.get("id") in content_scores):
             return False
     return True
+
+
+def _session_tag_filter_ids(session: dict) -> set[str]:
+    ids: set[str] = set()
+    for tag in session.get("session_tags") or []:
+        if isinstance(tag, dict) and isinstance(tag.get("id"), str):
+            ids.add(tag["id"])
+    for tag in session.get("requirement_tags") or []:
+        if not isinstance(tag, dict):
+            continue
+        kind = tag.get("kind")
+        tag_id = tag.get("id")
+        if isinstance(kind, str) and isinstance(tag_id, str):
+            ids.add(f"req:{kind}:{tag_id}")
+    return ids
 
 
 def _session_filtered_sort_key(
