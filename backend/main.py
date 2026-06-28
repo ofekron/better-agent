@@ -3399,6 +3399,7 @@ async def get_sessions(
         effective_sort_by,
         effective_status_sort,
         tuple(sorted(connected)),
+        session_store.summary_version(),
     )
     cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:

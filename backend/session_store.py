@@ -174,6 +174,8 @@ _summary_index_loaded = False
 _summary_index_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_cache: list[dict] = []
+_summary_projected_cache_version = -1
+_summary_projected_cache: list[dict] = []
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -343,6 +345,11 @@ def _markers_snapshot() -> dict[str, dict[str, dict]]:
             sid: {k: dict(v) for k, v in per.items()}
             for sid, per in _markers_by_session.items()
         }
+
+
+def summary_version() -> int:
+    with _summary_index_lock:
+        return _summary_index_version
 
 
 def markers_for_extension_purge(extension_id: str) -> list[str]:
@@ -2810,9 +2817,8 @@ def list_sessions() -> list[dict]:
     must not mutate them, but no current caller does.
     """
     global _summary_sorted_cache_version, _summary_sorted_cache
+    global _summary_projected_cache_version, _summary_projected_cache
     _ensure_summary_index(blocking=False)
-    requirement_tags = _requirement_tags_snapshot()
-    markers = _markers_snapshot()
     with _summary_index_lock:
         if _summary_sorted_cache_version != _summary_index_version:
             _summary_sorted_cache = sorted(
@@ -2824,8 +2830,12 @@ def list_sessions() -> list[dict]:
                 reverse=True,
             )
             _summary_sorted_cache_version = _summary_index_version
+        if _summary_projected_cache_version == _summary_index_version:
+            return list(_summary_projected_cache)
         items = list(_summary_sorted_cache)
-    return [
+    requirement_tags = _requirement_tags_snapshot()
+    markers = _markers_snapshot()
+    projected = [
         {
             **summary,
             "requirement_tags": requirement_tags.get(summary.get("id", ""), []),
@@ -2833,6 +2843,11 @@ def list_sessions() -> list[dict]:
         }
         for summary in items
     ]
+    with _summary_index_lock:
+        if _summary_index_version == _summary_sorted_cache_version:
+            _summary_projected_cache = projected
+            _summary_projected_cache_version = _summary_index_version
+    return list(projected)
 
 
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
