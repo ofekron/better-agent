@@ -256,6 +256,7 @@ def _build_summary_for_root(root: dict) -> dict:
         _newer_timestamp(_stored_updated, _last_msg_ts)
         if _last_msg_ts else _stored_updated
     )
+    requirement_tags = _requirement_tags_for_session(root["id"])
     summary = {
         "id": root["id"],
         "name": root.get("name") or t("session.untitled"),
@@ -301,13 +302,36 @@ def _build_summary_for_root(root: dict) -> dict:
         "working_mode_meta": root.get("working_mode_meta"),
         "pending_eng_session_id": None,
         "worker_count": _worker_summary_count(),
-        "requirement_tags": _requirement_tags_for_session(root["id"]),
+        "requirement_tags": requirement_tags,
         "markers": _markers_for_session(root["id"]),
         "pinned": bool(root.get("pinned", False)),
         "archived": bool(root.get("archived", False)),
         "worker_eligible": bool(root.get("worker_eligible", False)),
     }
-    return session_organization_store.enrich_session_summary(summary)
+    summary = session_organization_store.enrich_session_summary(summary)
+    summary["tag_filter_ids"] = _tag_filter_ids(
+        summary.get("session_tags") or [],
+        requirement_tags,
+    )
+    return summary
+
+
+def _tag_filter_ids(session_tags: list[dict], requirement_tags: list[dict]) -> list[str]:
+    ids: set[str] = set()
+    for tag in session_tags:
+        if not isinstance(tag, dict):
+            continue
+        tag_id = tag.get("id")
+        if isinstance(tag_id, str) and tag_id:
+            ids.add(tag_id)
+    for tag in requirement_tags:
+        if not isinstance(tag, dict):
+            continue
+        kind = tag.get("kind")
+        tag_id = tag.get("id")
+        if isinstance(kind, str) and isinstance(tag_id, str) and kind and tag_id:
+            ids.add(f"req:{kind}:{tag_id}")
+    return sorted(ids)
 
 
 def set_requirement_tags_projection(tags_by_session: dict[str, list[dict]]) -> None:
@@ -329,7 +353,14 @@ def set_requirement_tags_projection(tags_by_session: dict[str, list[dict]]) -> N
                     continue
                 tags = clean.get(sid, [])
                 if summary.get("requirement_tags") != tags:
-                    _summary_index[sid] = {**summary, "requirement_tags": tags}
+                    _summary_index[sid] = {
+                        **summary,
+                        "requirement_tags": tags,
+                        "tag_filter_ids": _tag_filter_ids(
+                            summary.get("session_tags") or [],
+                            tags,
+                        ),
+                    }
                     _summary_index_version += 1
         else:
             _summary_index_version += 1
@@ -748,15 +779,18 @@ def _do_build_summary_index_unsafe() -> None:
         for sid, summary in list(_summary_index.items()):
             tags = requirement_tags.get(sid, [])
             marker = markers.get(sid, {})
+            tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
             if (
                 summary.get("requirement_tags") == tags
                 and summary.get("markers") == marker
+                and summary.get("tag_filter_ids") == tag_filter_ids
             ):
                 continue
             _summary_index[sid] = {
                 **summary,
                 "requirement_tags": tags,
                 "markers": marker,
+                "tag_filter_ids": tag_filter_ids,
             }
             _summary_index_version += 1
         _summary_index_loaded = True

@@ -361,6 +361,21 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     assert "_markers_snapshot()" not in list_source
 
 
+def test_session_tag_filter_uses_summary_projection() -> None:
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert '"tag_filter_ids": _tag_filter_ids(' in store_source
+    assert 'summary["tag_filter_ids"] = _tag_filter_ids(' in store_source
+    assert '"tag_filter_ids": tag_filter_ids' in store_source
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    match_start = main_source.index("def _session_matches_list_filters(")
+    match_end = main_source.index("def _session_filtered_sort_key(", match_start)
+    match_source = main_source[match_start:match_end]
+    assert 'filter_ids = session.get("tag_filter_ids")' in match_source
+    assert "_session_tag_filter_ids(session)" in match_source
+    assert "manual_tags = {" not in match_source
+    assert "requirement_tags = {" not in match_source
+
+
 def test_session_timestamp_sort_value_is_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "from functools import lru_cache" in source
