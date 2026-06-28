@@ -531,28 +531,33 @@ def _upsert_summary(root: dict) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_metadata_version
-    summary = _build_summary_for_root(root)
+    with perf.timed("store.session.summary.build"):
+        summary = _build_summary_for_root(root)
     # Preserve pending_eng_session_id from the existing index entry —
     # _build_summary_for_root can't compute it (it requires cross-session
     # lookup) and it must survive across writes to the parent session.
-    with _summary_index_lock:
-        existing = _summary_index.get(root["id"])
-        if existing and existing.get("pending_eng_session_id"):
-            summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
-        if existing == summary:
-            summary_changed = False
-        else:
-            _summary_index[root["id"]] = summary
-            _summary_index_version += 1
-            summary_changed = True
-            if _summary_metadata_changed(existing, summary):
-                _summary_metadata_version += 1
+    with perf.timed("store.session.summary.index"):
+        with _summary_index_lock:
+            existing = _summary_index.get(root["id"])
+            if existing and existing.get("pending_eng_session_id"):
+                summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
+            if existing == summary:
+                summary_changed = False
+            else:
+                _summary_index[root["id"]] = summary
+                _summary_index_version += 1
+                summary_changed = True
+                if _summary_metadata_changed(existing, summary):
+                    _summary_metadata_version += 1
     # Write lightweight summary file AFTER the in-memory update. Uses
     # atomic write (tmpfile + os.replace) so a crash mid-write leaves the
     # previous file intact. Non-fatal — in-memory index is authoritative.
     try:
-        if summary_changed or not _touch_summary_file_current(root["id"]):
-            _write_summary_file(root["id"], summary)
+        with perf.timed("store.session.summary.sidecar_stat"):
+            sidecar_current = _touch_summary_file_current(root["id"])
+        if summary_changed or not sidecar_current:
+            with perf.timed("store.session.summary.sidecar_write"):
+                _write_summary_file(root["id"], summary)
     except Exception:
         # Summary file write failure is non-fatal — in-memory index is
         # authoritative. Next write will overwrite.
