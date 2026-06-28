@@ -6572,6 +6572,7 @@ function AppMain({
                   <ExtensionModuleSlot
                     key={`${module.extension_id}:${module.id}`}
                     module={module}
+                    className="extension-module-slot--right-panel-fill"
                     context={{ sessionId: currentSession.id }}
                   />
                 ))

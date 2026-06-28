@@ -7505,6 +7505,19 @@ button.run-badge-clickable:focus-visible {
   width: 100%;
 }
 
+.extension-module-slot--right-panel-fill {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+}
+.extension-module-slot--right-panel-fill > div {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+}
+
 .extension-module-slot.extension-quick-button--module {
   min-height: 0;
   width: auto;
