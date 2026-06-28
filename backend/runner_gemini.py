@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from continuation import normalize_context_overflow_error
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
+from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
 from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
@@ -149,12 +150,6 @@ def _resolve_gemini_cli() -> Optional[str]:
     from cli_paths import resolve_cli_binary
 
     return resolve_cli_binary("gemini")
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _new_uuid() -> str:
@@ -812,7 +807,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 discovered_sid = sid
                                 state["session_id"] = sid
                                 state["jsonl_path"] = str(events_path)
-                                _atomic_write_json(state_path, state)
+                                atomic_write_json(state_path, state)
                             init_model = raw_event.get("model")
                             if init_model:
                                 _resolved_model = init_model
@@ -1047,7 +1042,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if discovered_sid and not state.get("session_id"):
         state["session_id"] = discovered_sid
     try:
-        _atomic_write_json(state_path, state)
+        atomic_write_json(state_path, state)
     except Exception:
         log.exception("failed to finalize state.json")
 
