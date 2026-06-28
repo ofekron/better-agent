@@ -83,6 +83,7 @@ export interface SessionMeta {
   monitoring_state: MonitoringState;
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
+  has_error: boolean;
 }
 
 export interface ProjectAggregate {
@@ -103,6 +104,7 @@ interface SessionEntry {
   node_id: string;
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
+  has_error: boolean;
 }
 
 /** The one place `is_running` is defined: a session is running iff its
@@ -129,6 +131,7 @@ const EMPTY_SESSION: SessionMeta = {
   monitoring_state: "stopped",
   markers: EMPTY_MARKERS,
   testape_active: false,
+  has_error: false,
 };
 const EMPTY_AGGREGATE: ProjectAggregate = {
   running_count: 0,
@@ -141,6 +144,7 @@ type BufferedDelta =
   | { type: "session_monitoring_changed"; payload: SessionMonitoringPayload }
   | { type: "run_state"; payload: RunStatePayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
+  | { type: "session_error_changed"; payload: SessionErrorPayload }
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
   | { type: "session_deleted"; payload: SessionDeletedPayload }
@@ -168,6 +172,12 @@ interface RunStatePayload {
 interface SessionUnreadPayload {
   session_id: string;
   unread_count: number;
+  cwd?: string;
+  node_id?: string;
+}
+interface SessionErrorPayload {
+  session_id: string;
+  has_error: boolean;
   cwd?: string;
   node_id?: string;
 }
@@ -242,6 +252,9 @@ class SessionRegistry {
       }],
       ["session_unread_changed", (p) => {
         this.dispatch("session_unread_changed", p as SessionUnreadPayload);
+      }],
+      ["session_error_changed", (p) => {
+        this.dispatch("session_error_changed", p as SessionErrorPayload);
       }],
       ["session_marker_changed", (p) => {
         this.dispatch("session_marker_changed", p as SessionMarkerPayload);
@@ -320,6 +333,7 @@ class SessionRegistry {
       node_id?: string;
       monitoring_state?: string;
       markers?: Record<string, MarkerInfo>;
+      has_error?: boolean;
     }>;
 
     const nextSessions = new Map<string, SessionEntry>();
@@ -336,6 +350,7 @@ class SessionRegistry {
         node_id: s.node_id || "primary",
         markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
         testape_active: false,
+        has_error: !!s.has_error,
       });
     }
     this.sessions = nextSessions;
@@ -381,6 +396,8 @@ class SessionRegistry {
         return this.onRunState(ev.payload);
       case "session_unread_changed":
         return this.onUnread(ev.payload);
+      case "session_error_changed":
+        return this.onError(ev.payload);
       case "session_marker_changed":
         return this.onMarker(ev.payload);
       case "session_created":
@@ -424,6 +441,17 @@ class SessionRegistry {
     this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
       unread_count: Math.max(0, Number(d.unread_count) || 0),
     });
+  }
+
+  private onError(d: SessionErrorPayload) {
+    if (!d.session_id) return;
+    const prev = this.sessions.get(d.session_id);
+    if (!prev) return; // error dot doesn't materialize a session
+    const next = !!d.has_error;
+    if (prev.has_error === next) return;
+    this.sessions.set(d.session_id, { ...prev, has_error: next });
+    this.version += 1;
+    this.notifySession(d.session_id);
   }
 
   private onMarker(d: SessionMarkerPayload) {
@@ -507,6 +535,7 @@ class SessionRegistry {
         node_id: payloadNode,
         markers: {},
         testape_active: false,
+        has_error: false,
       };
       this.sessions.set(sid, inserted);
       this.recomputeProject(payloadCwd, payloadNode);
@@ -535,6 +564,7 @@ class SessionRegistry {
       node_id: payloadNode,
       markers: prev.markers,
       testape_active: prev.testape_active ?? false,
+      has_error: prev.has_error,
     });
     this.version += 1;
     this.notifySession(sid);
@@ -569,6 +599,7 @@ class SessionRegistry {
       node_id: sess.node_id || "primary",
       markers: {},
       testape_active: false,
+      has_error: false,
     };
     this.sessions.set(sess.id, entry);
     this.recomputeAndNotifySession(sess.id, entry.cwd, entry.node_id);
@@ -703,7 +734,8 @@ class SessionRegistry {
       cached.unread_count === e.unread_count &&
       cached.monitoring_state === e.monitoring_state &&
       cached.markers === e.markers &&
-      cached.testape_active === testapeActive
+      cached.testape_active === testapeActive &&
+      cached.has_error === e.has_error
     ) {
       return cached;
     }
@@ -713,6 +745,7 @@ class SessionRegistry {
       monitoring_state: e.monitoring_state,
       markers: e.markers,
       testape_active: testapeActive,
+      has_error: e.has_error,
     };
     this.metaCache.set(sid, next);
     return next;
@@ -745,6 +778,7 @@ class SessionRegistry {
     node_id?: string;
     monitoring_state?: string;
     markers?: Record<string, MarkerInfo>;
+    has_error?: boolean;
   }>): void {
     let changed = false;
     for (const s of rows) {
@@ -758,6 +792,7 @@ class SessionRegistry {
         node_id: s.node_id || "primary",
         markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
         testape_active: false,
+        has_error: !!s.has_error,
       });
       this.recomputeProject(s.cwd ?? "", s.node_id || "primary");
       this.notifySession(s.id);

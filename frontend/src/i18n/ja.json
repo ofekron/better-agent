@@ -466,6 +466,7 @@
   "session.noMatch": "一致するセッションはありません",
   "session.running": "実行中",
   "session.awaitingApproval": "承認待ち",
+  "session.error": "最後のターンが失敗しました",
   "session.unread_1": "1 件の新規イベント",
   "session.unread_other": "{{count}} 件の新規イベント",
   "projects.header": "プロジェクト",

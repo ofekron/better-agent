@@ -466,6 +466,7 @@
   "session.noMatch": "Aucune session correspondante",
   "session.running": "En cours",
   "session.awaitingApproval": "En attente d'approbation",
+  "session.error": "Le dernier tour a échoué",
   "session.unread_1": "1 nouvel événement",
   "session.unread_other": "{{count}} nouveaux événements",
   "projects.header": "Projets",

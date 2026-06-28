@@ -171,6 +171,9 @@ export type WSEventType =
   // Authoritative state is `session_manager._unread_counts`
   // (lazy-hydrated from the persisted `last_seen_event_uid`).
   | "session_unread_changed"
+  // Per-session unseen-error transition. Set when a turn ends in an
+  // unrecoverable error, cleared on view-ack or next successful turn.
+  | "session_error_changed"
   // Extension attention marker on a session changed (set/cleared).
   | "session_marker_changed"
   // Multi-machine: live up/down transitions of worker-nodes.
