@@ -90,7 +90,7 @@ _session_event_meta_cache: dict[
 ] = {}
 _sessions_list_response_cache: dict[
     tuple,
-    tuple[float, dict],
+    tuple[float, bytes],
 ] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
@@ -141,25 +141,35 @@ def _machine_nodes_enabled_cached() -> bool:
     return enabled
 
 
-def _sessions_list_cache_get(key: tuple) -> dict | None:
+def _sessions_list_response(content: bytes) -> Response:
+    return Response(content=content, media_type="application/json")
+
+
+def _sessions_list_cache_get(key: tuple) -> Response | None:
     cached = _sessions_list_response_cache.get(key)
     if cached is None:
         return None
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _sessions_list_response_cache.pop(key, None)
         return None
-    return copy.deepcopy(cached[1])
+    return _sessions_list_response(cached[1])
 
 
-def _sessions_list_cache_put(key: tuple, value: dict) -> dict:
+def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
     if len(_sessions_list_response_cache) >= 64:
         oldest = min(
             _sessions_list_response_cache,
             key=lambda item: _sessions_list_response_cache[item][0],
         )
         _sessions_list_response_cache.pop(oldest, None)
-    _sessions_list_response_cache[key] = (time.monotonic(), copy.deepcopy(value))
-    return value
+    content = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _sessions_list_response_cache[key] = (time.monotonic(), content)
+    return _sessions_list_response(content)
 
 _GIT_STATUS_TTL_SECONDS = 2.0
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
@@ -341,7 +351,7 @@ async def _prompt_kill_runners() -> None:
             if not task.done():
                 task.cancel()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException, Body, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException, Body, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse
