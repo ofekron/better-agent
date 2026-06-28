@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 import _test_home
@@ -208,6 +209,54 @@ def grep_sessions_passes_bounded_limit_test() -> bool:
     return ok
 
 
+def identical_searches_coalesce_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+    calls = 0
+    calls_lock = threading.Lock()
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def slow_candidate_scores(_conn, _query, _limit):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.1)
+        return [("sid-coalesced", 3)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = slow_candidate_scores
+    try:
+        results = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(session_search_index.search("same-query", limit=5))
+            )
+            for _ in range(6)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_inflight.clear()
+    ok = calls == 1 and len(results) == 6 and all(
+        result == [{"session_id": "sid-coalesced", "score": 3}]
+        for result in results
+    )
+    print(f"{PASS if ok else FAIL} identical cold searches coalesce -- calls={calls}")
+    return ok
+
+
 def content_search_caps_matched_rows_test() -> bool:
     class FakeConn:
         def __init__(self):
@@ -239,6 +288,7 @@ if __name__ == "__main__":
         ok = index_event_nonblocking_test()
         ok = search_does_not_wait_for_pending_index_test() and ok
         ok = grep_sessions_passes_bounded_limit_test() and ok
+        ok = identical_searches_coalesce_test() and ok
         ok = content_search_caps_matched_rows_test() and ok
         ok = main_test() and ok
         sys.exit(0 if ok else 1)

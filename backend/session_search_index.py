@@ -20,6 +20,7 @@ _worker_started = False
 _worker_lock = threading.Lock()
 _search_cache_lock = threading.Lock()
 _search_cache: dict[tuple[str, int], tuple[int, float, list[tuple[str, int]]]] = {}
+_search_inflight: dict[tuple[str, int], threading.Event] = {}
 _SEARCH_CACHE_MAX = 128
 _SEARCH_CACHE_STALE_SECONDS = 5.0
 _index_generation = 0
@@ -157,27 +158,40 @@ def search(query: str, limit: int = 50) -> list[dict[str, Any]]:
     q = query.strip()
     if not q:
         return []
-    now = time.monotonic()
-    with _search_cache_lock:
-        cache_key = (q, limit)
-        cached = _search_cache.get(cache_key)
-        if cached is not None:
-            generation, cached_at, rows = cached
-            if generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS:
-                return [{"session_id": sid, "score": score} for sid, score in rows]
-    conn = _connect_readonly()
-    if conn is None:
-        return []
+    cache_key = (q, limit)
+    while True:
+        now = time.monotonic()
+        with _search_cache_lock:
+            cached = _search_cache.get(cache_key)
+            if cached is not None:
+                generation, cached_at, rows = cached
+                if generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS:
+                    return [{"session_id": sid, "score": score} for sid, score in rows]
+            event = _search_inflight.get(cache_key)
+            if event is None:
+                event = threading.Event()
+                _search_inflight[cache_key] = event
+                break
+        event.wait()
     try:
-        scores = _candidate_scores(conn, q, limit)
+        conn = _connect_readonly()
+        if conn is None:
+            scores: list[tuple[str, int]] = []
+        else:
+            try:
+                scores = _candidate_scores(conn, q, limit)
+            finally:
+                conn.close()
+        with _search_cache_lock:
+            _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
+            if len(_search_cache) > _SEARCH_CACHE_MAX:
+                _search_cache.pop(next(iter(_search_cache)))
+        return [{"session_id": sid, "score": score} for sid, score in scores]
     finally:
-        conn.close()
-    with _search_cache_lock:
-        _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
-        if len(_search_cache) > _SEARCH_CACHE_MAX:
-            _search_cache.pop(next(iter(_search_cache)))
-    return [{"session_id": sid, "score": score} for sid, score in scores]
-
+        with _search_cache_lock:
+            event = _search_inflight.pop(cache_key, None)
+        if event is not None:
+            event.set()
 
 def has_indexed_rows() -> bool:
     conn = _connect_readonly()
