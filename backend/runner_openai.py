@@ -49,6 +49,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from orchestration_tool_descriptions import (
+    ASYNC_COMMUNICATE_DESCRIPTION as _ASYNC_COMMUNICATE_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -801,6 +802,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "async_communicate",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -809,9 +811,9 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
 })
 
 _ORCHESTRATION_TOOL_NAMES = frozenset({
-    "mssg", "ask", "delegate_task", "create_session", "create_sub_session",
-    "create_worker", "ensure_named_worker", "open_file_panel", "request_user_input",
-    "start_file_discussion",
+    "mssg", "async_communicate", "ask", "delegate_task", "create_session",
+    "create_sub_session", "create_worker", "ensure_named_worker",
+    "open_file_panel", "request_user_input", "start_file_discussion",
 })
 
 # Better Agent runtime-capability management. Available only when the backend
@@ -907,6 +909,12 @@ def _tool_schemas_for_run(
         if mssg_sender_session_id:
             if "mssg" not in disabled:
                 schemas.append(_function_tool_schema("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA))
+            if "async_communicate" not in disabled:
+                schemas.append(_function_tool_schema(
+                    "async_communicate",
+                    _ASYNC_COMMUNICATE_DESCRIPTION,
+                    _MSSG_INPUT_SCHEMA,
+                ))
             if "ask" not in disabled:
                 schemas.append(_function_tool_schema("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA))
         if "delegate_task" not in disabled:
@@ -1156,6 +1164,31 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
+    async def async_communicate(params: dict) -> str:
+        args = _args(params)
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not target_session_id or not message:
+            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "sender_session_id": mssg_sender_session_id,
+                    "target_session_id": target_session_id,
+                    "message": message,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/async-communicate",
+                timeout_s=30.0,
+            )
+        except Exception as e:
+            logger.exception("async_communicate dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"async_communicate failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
     async def ask(params: dict) -> str:
         args = _args(params)
         target_session_id = str(args.get("target_session_id") or "").strip()
@@ -1393,6 +1426,8 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
     if mssg_sender_session_id:
         if "mssg" not in disabled:
             handlers["mssg"] = mssg
+        if "async_communicate" not in disabled:
+            handlers["async_communicate"] = async_communicate
         if "ask" not in disabled:
             handlers["ask"] = ask
     if "delegate_task" not in disabled:

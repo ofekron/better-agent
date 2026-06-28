@@ -315,6 +315,7 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         assert dispatched[0]["sender_session_id"] == sender["id"]
         assert dispatched[0]["message"] == "review this"
         assert dispatched[0]["detach"] is True
+        assert dispatched[0]["expect_mssg_response"] is True
     finally:
         main.coordinator.submit_team_message = real_submit
 

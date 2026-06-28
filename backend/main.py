@@ -8759,6 +8759,33 @@ async def internal_mssg(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/internal/async-communicate")
+async def internal_async_communicate(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    sender_session_id = str(body.get("sender_session_id") or "").strip()
+    target_session_id = str(body.get("target_session_id") or "").strip()
+    message = str(body.get("message") or "").strip()
+    if not sender_session_id or not target_session_id or not message:
+        raise HTTPException(
+            status_code=400,
+            detail="sender_session_id, target_session_id and message are required",
+        )
+    try:
+        return await coordinator.submit_team_message(
+            sender_session_id=sender_session_id,
+            target_session_id=target_session_id,
+            message=message,
+            detach=True,
+            expect_mssg_response=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/internal/ask")
 async def internal_ask(
     body: dict,
@@ -10222,6 +10249,7 @@ async def _process_worker_pool_queue(tag: str) -> None:
             target_session_id=target["agent_session_id"],
             message=str(item.get("prompt") or ""),
             detach=True,
+            expect_mssg_response=True,
         )
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)

@@ -112,7 +112,14 @@ def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
     disabled_tools = [
         str(item).strip()
         for item in (inputs.get("disabled_builtin_tools") or [])
-        if str(item or "").strip() in {"ask", "create_session", "create_sub_session", "delegate_task", "mssg"}
+        if str(item or "").strip() in {
+            "ask",
+            "async_communicate",
+            "create_session",
+            "create_sub_session",
+            "delegate_task",
+            "mssg",
+        }
     ]
 
     config = {

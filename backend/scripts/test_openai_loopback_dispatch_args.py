@@ -197,6 +197,59 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
     assert captured[0][1]["message"] == "review"
 
 
+def test_real_async_communicate_handler_accepts_dispatched_args() -> None:
+    captured: list[tuple[str, dict]] = []
+    original_post = runner_openai._post_loopback_sync
+
+    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+        captured.append((kwargs["url_path"], payload))
+        return {"success": True, "queued_id": "queued-1", "expects_response": True}
+
+    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    try:
+        handlers = runner_openai._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://backend",
+                "internal_token": "tok",
+                "app_session_id": "sender-1",
+            },
+            cwd="/tmp/project",
+            model="model-x",
+        )
+        emitter = _make_emitter()
+        call = {
+            "id": "call_async",
+            "name": "async_communicate",
+            "arguments": json.dumps(
+                {"target_session_id": "w1", "message": "run async"}
+            ),
+        }
+        result = asyncio.run(
+            runner_openai._dispatch_tool(
+                call,
+                Path("/tmp"),
+                "sender-1",
+                Path("/tmp"),
+                True,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                handlers,
+            )
+        )
+    finally:
+        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+
+    parsed = json.loads(result)
+    assert parsed["expects_response"] is True
+    assert captured, "async_communicate handler never posted to backend"
+    assert captured[0][0] == "/api/internal/async-communicate"
+    assert captured[0][1]["sender_session_id"] == "sender-1"
+    assert captured[0][1]["target_session_id"] == "w1"
+    assert captured[0][1]["message"] == "run async"
+
+
 def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
     original_post = runner_openai._post_loopback_sync

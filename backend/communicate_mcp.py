@@ -12,6 +12,7 @@ from env_compat import get_env, require_env
 from mcp.server.fastmcp import FastMCP
 
 from orchestration_tool_descriptions import (
+    ASYNC_COMMUNICATE_DESCRIPTION,
     ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION,
@@ -42,6 +43,7 @@ def _env_required(name: str) -> str:
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "async_communicate",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -96,6 +98,19 @@ def mssg_response(target_session_id: str, message: str) -> dict[str, Any]:
         return {"success": False, "error": "target_session_id and message are required"}
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
     return _post_json("/api/internal/mssg", {
+        "sender_session_id": sender_session_id,
+        "target_session_id": target_session_id,
+        "message": message,
+    }, timeout=30.0)
+
+
+def async_communicate_response(target_session_id: str, message: str) -> dict[str, Any]:
+    target_session_id = (target_session_id or "").strip()
+    message = (message or "").strip()
+    if not target_session_id or not message:
+        return {"success": False, "error": "target_session_id and message are required"}
+    sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
+    return _post_json("/api/internal/async-communicate", {
         "sender_session_id": sender_session_id,
         "target_session_id": target_session_id,
         "message": message,
@@ -318,7 +333,9 @@ def build_server() -> FastMCP:
         "communicate",
         instructions=(
             "Team tools for Better Agent sessions: mssg (queued message, "
-            "joined to your turn), delegate_task (detached handoff — offload "
+            "joined to your turn), async_communicate (detached message to a "
+            "known session that expects a later mssg reply), delegate_task "
+            "(detached handoff — offload "
             "heavy tangential/off-topic real work so you can remain focused; "
             "not for reviews; auto-routing may run session search and has a "
             "cost; set target_session_id only when you already know the target "
@@ -338,6 +355,11 @@ def build_server() -> FastMCP:
         @server.tool(description=MSSG_DESCRIPTION)
         def mssg(target_session_id: str, message: str) -> dict[str, Any]:
             return _safe_result(mssg_response)(target_session_id, message)
+
+    if "async_communicate" not in disabled_tools:
+        @server.tool(description=ASYNC_COMMUNICATE_DESCRIPTION)
+        def async_communicate(target_session_id: str, message: str) -> dict[str, Any]:
+            return _safe_result(async_communicate_response)(target_session_id, message)
 
     if "delegate_task" not in disabled_tools:
         @server.tool(description=DELEGATE_TASK_DESCRIPTION)
