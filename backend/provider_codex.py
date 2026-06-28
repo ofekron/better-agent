@@ -262,8 +262,10 @@ class CodexProvider(Provider):
     # (Fugu) override this.
     RUNNER_KIND: ClassVar[str] = "codex"
     # CLI binary the codex runner resolves and spawns in app-server mode.
-    # Fugu overrides this to `codex-fugu` (which runs `codex -p fugu`).
     CODEX_BINARY: ClassVar[str] = "codex"
+    # Optional codex profile selected via `-p`. Subclasses that target a
+    # config.toml profile (Fugu) set this; everything else reuses `codex`.
+    CODEX_PROFILE: ClassVar[Optional[str]] = None
 
     # Codex forks via the app-server `thread/fork`, which branches a
     # previous session's rollout into a new, isolated thread.
@@ -381,6 +383,7 @@ class CodexProvider(Provider):
             "mode": runner_mode,
             "provider_kind": self.KIND,
             "codex_binary": self.CODEX_BINARY,
+            "codex_profile": self.CODEX_PROFILE,
             "app_session_id": app_session_id,
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],

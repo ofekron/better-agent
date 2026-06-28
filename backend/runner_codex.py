@@ -1094,6 +1094,26 @@ class _AppServerProcess:
         return code
 
 
+def _build_app_server_argv(
+    codex_bin: str,
+    profile: Optional[str],
+    config_overrides: Optional[list[str]] = None,
+) -> list[str]:
+    """Build the `codex app-server` invocation.
+
+    `profile` selects a codex profile (e.g. `fugu`) via `-p`, so providers
+    that differ only by config.toml profile reuse the single `codex` binary
+    instead of shipping a launcher. Global flags precede the subcommand.
+    """
+    argv = [codex_bin]
+    if profile:
+        argv += ["-p", profile]
+    for override in config_overrides or []:
+        argv += ["-c", override]
+    argv.append("app-server")
+    return argv
+
+
 async def _start_app_server(
     codex_bin: str,
     *,
@@ -1112,11 +1132,9 @@ async def _start_app_server(
     approval_policy: str = "never",
     sandbox: str = "danger-full-access",
     approval_ctx: Optional[dict] = None,
+    profile: Optional[str] = None,
 ) -> _AppServerProcess:
-    argv = [codex_bin]
-    for override in config_overrides or []:
-        argv += ["-c", override]
-    argv.append("app-server")
+    argv = _build_app_server_argv(codex_bin, profile, config_overrides)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,
@@ -1202,9 +1220,9 @@ logger = logging.getLogger(__name__)
 def _resolve_codex_cli(inputs: Optional[dict[str, Any]] = None) -> Optional[str]:
     """Find the codex CLI binary.
 
-    Honors `inputs["codex_binary"]` so the Fugu provider can resolve its
-    `codex-fugu` launcher (which runs `codex -p fugu`) without forking the
-    runner. Defaults to `codex`.
+    Honors `inputs["codex_binary"]` (defaults to `codex`). Provider-specific
+    selection that differs only by config.toml profile is handled separately
+    via `inputs["codex_profile"]`, so every provider reuses the one binary.
     """
     from cli_paths import resolve_cli_binary
 
@@ -2492,6 +2510,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     and backend_url and internal_token and app_session_id
                     else None
                 ),
+                profile=(inputs or {}).get("codex_profile") or None,
             )
 
             cancel_seen = asyncio.Event()
