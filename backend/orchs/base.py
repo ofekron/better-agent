@@ -34,6 +34,8 @@ import perf
 from session_manager import manager as session_manager
 from user_msg_lifecycle import emit_received
 
+_ALL_TASKS_DONE_MARKER_TAG = "ALL_TASKS__DONE"
+
 
 def _sum_token_usage(usages: list[dict]) -> Optional[dict]:
     """Sum a list of token_usage dicts field-wise. Returns None if the
@@ -174,6 +176,19 @@ def _agent_message_text(data: dict) -> str:
             if isinstance(text, str):
                 parts.append(text)
     return "\n".join(parts)
+
+
+def _complete_current_todos(session_id: str) -> None:
+    current = session_manager.get_current_todos_snapshot(session_id)
+    if not current:
+        return
+    completed = [
+        {**todo, "status": "completed"}
+        for todo in current
+        if isinstance(todo, dict)
+    ]
+    if completed and completed != current:
+        session_manager.set_current_todos(session_id, completed)
 
 
 def _unwrap_typed_worker_envelope(event: dict) -> dict:
@@ -1123,6 +1138,8 @@ class OrchestrationStrategy(ABC):
             for ext_id, marker in attention_markers:
                 if ext_id:
                     session_manager.set_marker(app_session_id, ext_id, marker)
+                if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
+                    _complete_current_todos(app_session_id)
 
             import session_event_extensions
             session_event_extensions.apply_event(
