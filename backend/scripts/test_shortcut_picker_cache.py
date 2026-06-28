@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import _test_home
@@ -23,6 +24,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 class _ProviderHandler(BaseHTTPRequestHandler):
     calls = 0
+    delay = 0.0
     lock = threading.Lock()
 
     def do_POST(self):
@@ -31,6 +33,8 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             self.rfile.read(length)
         with self.lock:
             type(self).calls += 1
+        if type(self).delay:
+            time.sleep(type(self).delay)
         body = json.dumps({"content": [{"text": "[0]"}]}).encode("utf-8")
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -53,6 +57,7 @@ async def _run() -> bool:
 
     shortcut_picker._cache.clear()
     shortcut_picker._inflight.clear()
+    shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.2
     shortcut_picker.user_prefs.get_shortcut_responses = lambda: ["TLDR", "/Adv"]
     shortcut_picker.config_store.get_default_provider = lambda: {
         "id": "test-provider",
@@ -80,6 +85,20 @@ async def _run() -> bool:
         third = await shortcut_picker.pick_shortcuts("different output")
         if third != ["TLDR"] or _ProviderHandler.calls != 2:
             print(f"{FAIL} distinct input result={third!r} calls={_ProviderHandler.calls}")
+            return False
+
+        _ProviderHandler.delay = 0.4
+        slow_start = time.monotonic()
+        slow = await shortcut_picker.pick_shortcuts("slow output")
+        elapsed = time.monotonic() - slow_start
+        if slow != ["TLDR", "/Adv"] or elapsed > 0.35:
+            print(f"{FAIL} slow picker did not fall back quickly result={slow!r} elapsed={elapsed:.3f}")
+            return False
+        await asyncio.sleep(0.35)
+        _ProviderHandler.delay = 0.0
+        cached_slow = await shortcut_picker.pick_shortcuts("slow output")
+        if cached_slow != ["TLDR"]:
+            print(f"{FAIL} timed-out picker did not populate cache: {cached_slow!r}")
             return False
 
         print(f"{PASS} shortcut picker coalesces and caches exact duplicate requests")

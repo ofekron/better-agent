@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECS = 300.0
 _CACHE_MAX = 128
+_PICK_WAIT_TIMEOUT_SECS = 1.5
 _cache: dict[str, tuple[float, list[str]]] = {}
 _inflight: dict[str, asyncio.Task[list[str]]] = {}
 _lock = asyncio.Lock()
@@ -175,7 +176,13 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
             return result if result else all_shortcuts
 
     try:
-        return await _cached_pick(key, _pick_uncached)
+        return await asyncio.wait_for(
+            asyncio.shield(_cached_pick(key, _pick_uncached)),
+            timeout=_PICK_WAIT_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        logger.debug("Shortcut picker call still running, returning all shortcuts")
+        return all_shortcuts
     except Exception:
         logger.debug("Shortcut picker call failed, returning all shortcuts", exc_info=True)
         return all_shortcuts
