@@ -3527,21 +3527,19 @@ async def get_sessions(
     sort_by: str | None = Query(None),
 ):
     search_query = (search or "").strip()
-    with perf.timed("sessions.list.nodes_ready"):
-        nodes_ready = (
-            False if search_query else _machine_nodes_enabled_cached()
-        )
-    connected: list[str] = []
-    if nodes_ready:
-        with perf.timed("sessions.list.node_snapshot"):
+    connected_version = 0
+    connected: tuple[str, ...] = ()
+    if not search_query:
+        with perf.timed("sessions.list.connected_nodes"):
             try:
                 import node_store as _ns
-                connected = [
-                    n["id"] for n in _ns.snapshot()
-                    if n.get("state") == "connected" and n.get("role") != "primary"
-                ]
+                connected_version, connected = _ns.connected_worker_node_ids_snapshot()
             except Exception:
-                logger.debug("get_sessions: node snapshot failed", exc_info=True)
+                logger.debug("get_sessions: connected node snapshot failed", exc_info=True)
+    if connected:
+        with perf.timed("sessions.list.nodes_ready"):
+            if not _machine_nodes_enabled_cached():
+                connected = ()
     with perf.timed("sessions.list.filters"):
         effective_folder_view = (
             folder_view if folder_view is not None else user_prefs.get_folder_view_enabled()
@@ -3586,7 +3584,8 @@ async def get_sessions(
         search_fields,
         effective_sort_by,
         effective_status_sort,
-        tuple(sorted(connected)),
+        connected_version,
+        connected,
         session_store.summary_version(),
     )
     cached_response = _sessions_list_cache_get(cache_key)

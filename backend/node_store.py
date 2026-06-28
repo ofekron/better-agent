@@ -81,6 +81,7 @@ class NodeConnection:
 # the node disappearing. We never drop a key once it's been seen.
 _state: dict[str, str] = {}
 _conns: dict[str, NodeConnection] = {}
+_state_version = 0
 # Subscribers fire on every transition. List of async callables.
 _listeners: list[Callable[[str, str], Awaitable[None]]] = []
 
@@ -405,9 +406,12 @@ async def register(spec: NodeSpec, ws: Any) -> NodeConnection:
         last_seen=now,
         last_acked_offset=persisted,
     )
+    global _state_version
     _conns[spec.id] = conn
     prev = _state.get(spec.id)
     _state[spec.id] = "connected"
+    if prev != "connected":
+        _state_version += 1
     if prev != "connected":
         await _fire(spec.id, "connected")
     return conn
@@ -435,9 +439,12 @@ async def unregister(node_id: str) -> None:
     # everything else alone.
     if _conns.get(node_id) is not leaving:
         return
+    global _state_version
     _conns.pop(node_id, None)
     prev = _state.get(node_id)
     _state[node_id] = "disconnected"
+    if prev != "disconnected":
+        _state_version += 1
     if prev != "disconnected":
         await _fire(node_id, "disconnected")
 
@@ -450,8 +457,12 @@ async def forget(node_id: str) -> None:
     """Remove all in-memory state for a node and broadcast disconnected.
     Used after a node is deleted from the registry/topology so snapshot()
     won't re-materialize it from the orphan-fallback path."""
+    global _state_version
+    had_state = node_id in _state or node_id in _conns
     _conns.pop(node_id, None)
     _state.pop(node_id, None)
+    if had_state:
+        _state_version += 1
     await _fire(node_id, "disconnected")
 
 
@@ -532,6 +543,19 @@ def snapshot() -> list[dict]:
     return out
 
 
+def connected_worker_node_ids_snapshot() -> tuple[int, tuple[str, ...]]:
+    return (
+        _state_version,
+        tuple(
+            sorted(
+                node_id
+                for node_id, conn in _conns.items()
+                if _state.get(node_id) == "connected" and conn.spec.role != "primary"
+            )
+        ),
+    )
+
+
 def touch_last_seen(node_id: str) -> None:
     """Bump last_seen on every inbound message — heartbeat tracking."""
     conn = _conns.get(node_id)
@@ -546,12 +570,13 @@ def reset_for_tests() -> None:
     deterministic stop should await `stop_offset_flush_loop` instead.
     Callers expecting a fully fresh process should also nuke
     `ba_home()/node_store/` if BETTER_CLAUDE_HOME is shared."""
-    global _flush_task
+    global _flush_task, _state_version
     if _flush_task is not None and not _flush_task.done():
         _flush_task.cancel()
     _flush_task = None
     _conns.clear()
     _state.clear()
+    _state_version += 1
     _listeners.clear()
     _dirty_nodes.clear()
     _flush_locks.clear()
