@@ -47,6 +47,12 @@ def _provider_model(client: TestClient, provider: dict) -> str:
     return models[0] if models else provider.get("default_model") or ""
 
 
+def _provider_models(client: TestClient, provider: dict) -> list[str]:
+    r = client.get(f"/api/providers/{provider['id']}/models")
+    assert r.status_code == 200, r.text
+    return [m for m in r.json().get("models") or [] if isinstance(m, str) and m]
+
+
 def test_create_session_records_last_model(client: TestClient) -> bool:
     claude = _provider_by_name(client, "Claude")
     r = client.post(
@@ -227,6 +233,48 @@ def test_provider_patch_without_model_uses_new_provider_default(client: TestClie
     return True
 
 
+def test_provider_patch_without_model_prefers_last_model(client: TestClient) -> bool:
+    claude = _provider_by_name(client, "Claude")
+    candidates = [p for p in _providers(client)["providers"] if p["id"] != claude["id"]]
+    target = None
+    remembered = ""
+    for provider in candidates:
+        default = provider.get("default_model")
+        alternate = next((m for m in _provider_models(client, provider) if m != default), "")
+        if alternate:
+            target = provider
+            remembered = alternate
+            break
+    if not target:
+        print("  no provider exposes an alternate valid model")
+        return False
+    if not user_prefs.set_last_model(target["id"], remembered):
+        print("  failed to seed last_model")
+        return False
+    r = client.post(
+        "/api/sessions",
+        json={
+            "model": _provider_model(client, claude),
+            "cwd": "/tmp",
+            "provider_id": claude["id"],
+            "orchestration_mode": "native",
+        },
+    )
+    sid = r.json()["id"]
+    r = client.patch(
+        f"/api/sessions/{sid}/selectors",
+        json={"provider_id": target["id"]},
+    )
+    if r.status_code != 200:
+        print(f"  patch failed: {r.status_code} {r.text}")
+        return False
+    body = r.json().get("updates") or {}
+    if body.get("model") != remembered:
+        print(f"  last_model not preferred: {body!r}, expected {remembered!r}")
+        return False
+    return True
+
+
 def test_junk_prefs_shape_is_ignored(client: TestClient) -> bool:
     prefs_path = ba_home() / "user_prefs.json"
     prefs = json.loads(prefs_path.read_text()) if prefs_path.exists() else {}
@@ -268,6 +316,7 @@ TESTS = [
     ("provider+model PATCH allowed with active run marker", test_provider_model_patch_allowed_with_active_run_marker),
     ("selectors PATCH rejects unknown provider", test_selectors_patch_rejects_unknown_provider),
     ("provider PATCH without model uses new provider default", test_provider_patch_without_model_uses_new_provider_default),
+    ("provider PATCH without model prefers last_model", test_provider_patch_without_model_prefers_last_model),
     ("junk prefs shape is ignored", test_junk_prefs_shape_is_ignored),
     ("set_last_model change detection", test_set_last_model_change_detection),
 ]

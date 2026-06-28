@@ -90,6 +90,8 @@ _INTERNAL_KINDS = {
     "messages_truncated",
     "agent_sid_on_msg_set",
     "msg_transient_attempt_set",
+    "continuation_requested_set",
+    "continuation_requested_cleared",
 }
 
 

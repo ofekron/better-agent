@@ -2094,6 +2094,7 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("caller_agent_session_id", None)
     session.setdefault("parent_line_count_at_fork", None)
     session.setdefault("continuation_chain", [])
+    session.setdefault("continuation_requested", None)
     # Fork-point seq — the parent's last persisted message seq at fork
     # time. None on roots. Frontend uses this to slice the rendered
     # messages for split-pane rendering.
