@@ -21,6 +21,7 @@ import shutil
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-latency-")
@@ -117,6 +118,45 @@ def _run() -> bool:
             f"content={disk_msg.get('content')!r} dirty={disk_msg.get('_content_dirty')!r}",
         )
     )
+
+    root["draft_input"] = "draft"
+    msg["isStreaming"] = True
+    msg["_uid_idx"] = {"u-new": 0}
+    original_deepcopy = session_store.copy.deepcopy
+
+    def guarded_deepcopy(value):
+        if (
+            isinstance(value, list)
+            and len(value) > 100
+            and all(isinstance(item, dict) and item.get("type") for item in value[:5])
+        ):
+            raise AssertionError("assistant event list was deep-copied")
+        return original_deepcopy(value)
+
+    with patch("session_store.copy.deepcopy", side_effect=guarded_deepcopy):
+        copied = session_store.copy_persistable_tree(root)
+    copied_msg = copied["messages"][-1]
+    results.append(
+        (
+            "persistable copy strips volatile fields before deepcopy",
+            "events" not in copied_msg
+            and "_uid_idx" not in copied_msg
+            and "isStreaming" not in copied_msg
+            and "draft_input" not in copied
+            and msg.get("events")
+            and msg.get("_uid_idx") == {"u-new": 0}
+            and msg.get("isStreaming") is True
+            and root.get("draft_input") == "draft",
+            (
+                f"copied_keys={sorted(copied_msg)} "
+                f"live_events={len(msg.get('events') or [])} "
+                f"live_draft={root.get('draft_input')!r}"
+            ),
+        )
+    )
+    root.pop("draft_input", None)
+    msg.pop("isStreaming", None)
+    msg.pop("_uid_idx", None)
 
     # Concurrent contention: alternating writer + reader on the same
     # session. Writer goes through `set_pinned` which acquires

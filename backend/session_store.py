@@ -2812,6 +2812,16 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         m["_content_dirty"] = value
 
 
+def copy_persistable_tree(root: dict) -> dict:
+    with perf.timed("store.session.copy_persistable.strip"):
+        popped = _strip_volatile_from_tree(root)
+    try:
+        with perf.timed("store.session.copy_persistable.deepcopy"):
+            return copy.deepcopy(root)
+    finally:
+        _restore_volatile_to_tree(popped)
+
+
 @perf.timed_fn("store.session.write_full")
 def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
     """Write the whole ROOT tree to disk. Caller MUST pass a root dict
