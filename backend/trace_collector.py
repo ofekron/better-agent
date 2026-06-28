@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from paths import ba_home
-from typing import Awaitable, Callable, Iterator, Optional
+from typing import Awaitable, Callable, Iterable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,45 @@ def _normalize_token_usage(usage: object) -> Optional[dict]:
     if not any(k in usage for k in TOKEN_USAGE_KEYS):
         return None
     return {k: int(usage.get(k) or 0) for k in TOKEN_USAGE_KEYS}
+
+
+def _merge_usage(usages: Iterable[dict]) -> Optional[dict]:
+    total = {k: 0 for k in TOKEN_USAGE_KEYS}
+    saw_any = False
+    for usage in usages:
+        normalized = _normalize_token_usage(usage)
+        if normalized is None:
+            continue
+        saw_any = True
+        for key in TOKEN_USAGE_KEYS:
+            total[key] += normalized[key]
+    return total if saw_any else None
+
+
+def aggregate_claude_usage_snapshots(
+    snapshots: Iterable[tuple[Optional[str], object]],
+) -> Optional[dict]:
+    keyed: dict[str, dict] = {}
+    unkeyed: list[dict] = []
+    for message_id, usage in snapshots:
+        normalized = _normalize_token_usage(usage)
+        if normalized is None:
+            continue
+        if message_id:
+            keyed[str(message_id)] = normalized
+        else:
+            unkeyed.append(normalized)
+    return _merge_usage([*keyed.values(), *unkeyed])
+
+
+def aggregate_claude_turn_usage(
+    assistant_snapshots: Iterable[tuple[Optional[str], object]],
+    result_usage: object = None,
+) -> Optional[dict]:
+    normalized_result = _normalize_token_usage(result_usage)
+    if normalized_result is not None:
+        return normalized_result
+    return aggregate_claude_usage_snapshots(assistant_snapshots)
 
 
 def _traces_dir() -> Path:
@@ -251,8 +290,7 @@ def extract_token_usage(events: list[dict]) -> Optional[dict]:
                 return tu
 
     # 2) Fallback: aggregate assistant.message.usage across agent_message events.
-    agg: dict[str, int] = {}
-    saw_any = False
+    snapshots: list[tuple[Optional[str], object]] = []
     for e in events:
         if not isinstance(e, dict):
             continue
@@ -267,12 +305,8 @@ def extract_token_usage(events: list[dict]) -> Optional[dict]:
         usage = message.get("usage")
         if not isinstance(usage, dict):
             continue
-        for k in TOKEN_USAGE_KEYS:
-            v = usage.get(k)
-            if isinstance(v, int):
-                agg[k] = agg.get(k, 0) + v
-                saw_any = True
-    return agg if saw_any else None
+        snapshots.append((message.get("id"), usage))
+    return aggregate_claude_usage_snapshots(snapshots)
 
 
 def extract_provider_result_token_usage(result: dict) -> Optional[dict]:
