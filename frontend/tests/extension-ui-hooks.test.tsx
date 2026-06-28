@@ -19,7 +19,7 @@ function mockHooksFetch() {
                 extension_id: "test.assistant",
                 extension_name: "Assistant",
                 label: "Assistant",
-                icon: "sparkles",
+                icon: "assistant-start",
                 action: {
                   type: "ensure",
                   endpoint: "/api/assistant/ensure",
@@ -51,6 +51,7 @@ describe("ExtensionQuickButtons", () => {
     render(<ExtensionQuickButtons context={{ navigate, cwd: "/repo" }} variant="toolbar" />);
 
     const button = await screen.findByRole("button", { name: "Assistant" });
+    expect(button.className).toContain("extension-quick-button--icon-assistant-start");
     fireEvent.click(button);
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/s/assistant-session"));

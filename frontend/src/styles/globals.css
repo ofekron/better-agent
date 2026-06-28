@@ -7275,6 +7275,18 @@ button.run-badge-clickable:focus-visible {
   border-color: var(--accent);
 }
 
+.extension-quick-button--icon-assistant-start {
+  color: var(--purple-80);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--border));
+}
+
+.extension-quick-button--icon-assistant-start:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-hover));
+  border-color: var(--purple-80);
+}
+
 .extension-quick-button--topbar {
   border: none;
   padding: 2px 6px;
