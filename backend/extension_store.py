@@ -146,6 +146,7 @@ BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
 BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
 BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
+BUILTIN_ASSISTANT_EXTENSION_ID = _pid("assistant")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
@@ -219,6 +220,7 @@ _FRONTEND_BUILTIN_KEYS = {
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
     "testape": BUILTIN_TESTAPE_EXTENSION_ID,
     "scheduler": BUILTIN_SCHEDULER_EXTENSION_ID,
+    "assistant": BUILTIN_ASSISTANT_EXTENSION_ID,
 }
 
 
