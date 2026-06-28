@@ -432,6 +432,8 @@
   "session.aiSearchDetailsTitle": "AI search details",
   "session.aiSearchQueryLabel": "Query",
   "session.aiSearchReasoningLabel": "Reasoning",
+  "session.globalFilters": "Global",
+  "session.projectFilters": "Project",
   "session.searchIn": "Search in",
   "session.sortBy": "Sort by",
   "session.sortByModified": "Last modified",

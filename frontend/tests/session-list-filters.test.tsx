@@ -119,6 +119,82 @@ describe("SessionList advanced filters", () => {
     expect(onPin).toHaveBeenCalledWith("pinned", false);
   });
 
+  it("splits advanced search filters into global and project sections", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/session-organization")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                schema_version: 1,
+                folders: [
+                  {
+                    id: "folder-client",
+                    project_id: "/tmp/project",
+                    parent_folder_id: null,
+                    name: "Client",
+                    order: 0,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                tags: [
+                  {
+                    id: "tag-important",
+                    project_id: "/tmp/project",
+                    name: "Important",
+                    color: null,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                assignments: {},
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    render(
+      <SessionList
+        sessions={[makeSession({ id: "alpha", name: "Alpha", cwd: "/tmp/project" })]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onDetails={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+
+    const globalSection = await screen.findByText("session.globalFilters");
+    const projectSection = await screen.findByText("session.projectFilters");
+    const global = globalSection.closest(".session-filter-section");
+    const project = projectSection.closest(".session-filter-section");
+
+    expect(global).toBeTruthy();
+    expect(project).toBeTruthy();
+    expect(within(global as HTMLElement).getByText("session.searchIn")).toBeTruthy();
+    expect(within(global as HTMLElement).getByText("session.providerFilter")).toBeTruthy();
+    expect(within(project as HTMLElement).getByText("session.folder")).toBeTruthy();
+    expect(within(project as HTMLElement).getByText("session.tags")).toBeTruthy();
+  });
+
   it("sends provider, model, and mode chips to backend filters", async () => {
     const onBackendFiltersChange = vi.fn();
     renderList(
