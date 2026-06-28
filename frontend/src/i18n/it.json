@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "Revisione config-sync",
   "settings.internalLlmTask.session_search_worker": "Worker Search / Ask",
   "settings.internalLlmTask.project_structure_edit": "Modifica struttura progetto",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "Elimina automaticamente sessioni più vecchie di",
   "settings.sessionAutoDeleteNever": "Mai",
   "settings.sessionAutoDeleteHint": "Giorni. Lascia vuoto per non eliminare mai le sessioni.",

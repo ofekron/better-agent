@@ -586,6 +586,7 @@ INTERNAL_LLM_TASKS = (
     "provider_config_sync_review",
     "session_search_worker",
     "project_structure_edit",
+    "assistant",
 )
 _INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort")
 

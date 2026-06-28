@@ -107,6 +107,12 @@ def test_board_spec_shape() -> bool:
     if spec.worker_creation_policy != "deny":
         print(f"{FAIL} board spec must deny sub-workers")
         ok = False
+    # The board fork resolves its model from the dedicated `assistant`
+    # internal-LLM task (its own row in Internal LLM settings), NOT the
+    # generic default_session it previously borrowed.
+    if spec.task_key != "assistant":
+        print(f"{FAIL} board spec task_key={spec.task_key!r} (want 'assistant')")
+        ok = False
     # Per-fork instruction is the identity payload (contract is in the base).
     if spec.build_instructions("hello", {}) != "hello":
         print(f"{FAIL} board spec build_instructions is not identity")

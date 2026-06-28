@@ -283,6 +283,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "סקירת סנכרון קונפיג",
   "settings.internalLlmTask.session_search_worker": "עובד חיפוש / Ask",
   "settings.internalLlmTask.project_structure_edit": "עריכת מבנה פרויקט",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "מחיקה אוטומטית של סשנים ישנים מ-",
   "settings.sessionAutoDeleteNever": "אף פעם",
   "settings.sessionAutoDeleteHint": "ימים. השאר ריק כדי לא למחוק סשנים אוטומטית.",

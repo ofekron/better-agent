@@ -282,6 +282,7 @@
   "settings.internalLlmTask.provider_config_sync_review": "配置同步审查",
   "settings.internalLlmTask.session_search_worker": "搜索 / 询问 worker",
   "settings.internalLlmTask.project_structure_edit": "项目结构编辑",
+  "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "自动删除早于以下时间的会话",
   "settings.sessionAutoDeleteNever": "从不",
   "settings.sessionAutoDeleteHint": "天数。留空则从不自动删除会话。",

@@ -247,14 +247,14 @@ class AssistantBoardSpec(ProvisionedSessionSpec):
     Mirrors `session_search.SessionSearchSpec` (fork off a primed base) but is
     tool-free: `bare_config` (no skills) + `machine_completion` (raw-instruction
     prompt, no team-context wrapper) because the fork only reads text it is
-    handed and emits JSON. `default_session` task key → honors the user's
-    default internal-LLM provider/model."""
+    handed and emits JSON. `assistant` task key → honors the user's dedicated
+    Assistant internal-LLM provider/model (its own row in Internal LLM settings)."""
 
     key = "assistant_board"
     version = 1
     name = "assistant-board-worker"
     env_prefix = "ASSISTANT_BOARD"
-    task_key = "default_session"
+    task_key = "assistant"
     orchestration_mode = "native"
     bare_config = True              # pure text→JSON; no skills / CLAUDE.md
     worker_creation_policy = "deny"  # isolated analyzer — no sub-workers
