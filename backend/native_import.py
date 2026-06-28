@@ -18,6 +18,7 @@ faithfully within that constraint.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -64,7 +65,24 @@ class NativeSession:
 
     @property
     def registry_key(self) -> str:
+        return f"{self.provider_id or self.provider_kind}:{self.provider_kind}:{self.source_identity_hash}"
+
+    @property
+    def legacy_registry_key(self) -> str:
         return f"{self.provider_kind}:{self.native_id}"
+
+    @property
+    def source_identity_hash(self) -> str:
+        return hashlib.sha256(self.source_identity.encode("utf-8")).hexdigest()[:24]
+
+    @property
+    def source_identity(self) -> str:
+        if self.jsonl_path:
+            try:
+                return str(Path(self.jsonl_path).expanduser().resolve())
+            except OSError:
+                return str(Path(self.jsonl_path).expanduser())
+        return self.native_id
 
 
 def _provider_records(provider_ids: Optional[list[str]]) -> list[dict]:
@@ -238,8 +256,7 @@ def _claude_projects_dir(provider: dict) -> Path:
     if cfg:
         base = Path(os.path.expandvars(cfg)).expanduser()
     else:
-        raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
-        base = Path(os.path.expandvars(raw)).expanduser() if raw else Path.home() / ".claude"
+        base = Path.home() / ".claude"
     return base / "projects"
 
 
@@ -589,6 +606,7 @@ def _gemini_native_events(path: Path) -> list[dict]:
 @dataclass
 class _Turn:
     prompt: str = ""
+    timestamp: str = ""
     events: list[dict] = field(default_factory=list)
 
 
@@ -627,6 +645,56 @@ def _extract_text(data: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _event_timestamp(event: dict) -> str:
+    data = _event_data(event)
+    containers = [data, event]
+    message = data.get("message")
+    if isinstance(message, dict):
+        containers.append(message)
+    for container in containers:
+        raw = container.get("timestamp") or container.get("created_at")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ""
+
+
+def _local_iso(raw: str) -> Optional[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.isoformat()
+
+
+def _fallback_prompt(sess: NativeSession) -> str:
+    return (sess.title or "").strip()
+
+
+_INTERNAL_IMPORT_PROMPT_SIGNATURES = (
+    "Better Agent run.sh startup checker",
+    "startup checker for Z.AI",
+    "direct Claude Code CLI process configured for the Z.AI Claude-compatible provider",
+    "machine completion worker for the requirement-analysis pipeline",
+    "You are an adversarial reviewer for Better Agent",
+)
+
+
+class SkippedNativeSession(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _is_internal_import_prompt(prompt: str) -> bool:
+    text = prompt.strip()
+    return any(sig in text for sig in _INTERNAL_IMPORT_PROMPT_SIGNATURES)
+
+
 def _segment_turns(events: list[dict]) -> list[_Turn]:
     """Group a flat event stream into user-prompt → assistant-event turns.
 
@@ -647,10 +715,12 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
         data = _event_data(event)
         if _is_user_prompt(data):
             prompt = _extract_text(data)
+            timestamp = _event_timestamp(event)
             if turns and not turns[-1].events:
                 turns[-1].prompt = prompt  # collapse consecutive prompt-only turn
+                turns[-1].timestamp = timestamp
             else:
-                turns.append(_Turn(prompt=prompt))
+                turns.append(_Turn(prompt=prompt, timestamp=timestamp))
                 if leading:
                     turns[-1].events[:0] = leading
                     leading = []
@@ -658,26 +728,20 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
             turns[-1].events.append(event)
         else:
             leading.append(event)
-    if not turns and leading:
-        turns.append(_Turn(events=leading))  # no prompt at all → one synthetic turn
     return turns
 
 
-def _native_created_iso(sess: NativeSession) -> Optional[str]:
+def _native_created_iso(sess: NativeSession, turns: Optional[list[_Turn]] = None) -> Optional[str]:
     """The native conversation's creation time as a naive-local ISO string
     matching the session-record convention, so analytics bucket imported
     sessions under their REAL date, not the import time. Native timestamps
     are UTC (ISO, often trailing 'Z'); convert to local. None when unknown."""
-    raw = (sess.created_at or "").strip()
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
-    return dt.isoformat()
+    if turns:
+        for turn in turns:
+            created = _local_iso(turn.timestamp)
+            if created:
+                return created
+    return _local_iso(sess.created_at)
 
 
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
@@ -698,7 +762,7 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
     """
     with _import_lock_for(sess.registry_key):
         if not force:
-            existing = _registry_get(sess.registry_key)
+            existing = _registry_get_for(sess)
             if existing:
                 return existing
         return _import_session_locked(sess)
@@ -707,10 +771,17 @@ def import_session(sess: NativeSession, *, force: bool = False) -> str:
 def _import_session_locked(sess: NativeSession) -> str:
     events = _replay_events(sess)
     turns = _segment_turns(events)
-    # Drop turns that carry neither a prompt nor any events (noise).
-    turns = [t for t in turns if t.prompt or t.events]
+    fallback_prompt = _fallback_prompt(sess)
+    if not turns and fallback_prompt and events:
+        turns = [_Turn(prompt=fallback_prompt, timestamp=sess.created_at, events=events)]
+    if fallback_prompt and turns and not turns[0].prompt:
+        turns[0].prompt = fallback_prompt
+    turns = [t for t in turns if t.prompt]
     if not turns:
-        raise ValueError("native session has no importable events")
+        raise SkippedNativeSession("native session has no recovered user prompt")
+    first_prompt = next((t.prompt for t in turns if t.prompt), "")
+    if _is_internal_import_prompt(first_prompt):
+        raise SkippedNativeSession("internal Better Agent native session")
 
     created = session_manager.create(
         name=_derive_title(sess, turns),
@@ -726,7 +797,7 @@ def _import_session_locked(sess: NativeSession) -> str:
         user_initiated=True,
         # Preserve the native conversation's date so usage analytics bucket it
         # under when it actually happened, not the import moment.
-        created_at=_native_created_iso(sess),
+        created_at=_native_created_iso(sess, turns),
     )
     root_id = created["id"]
 
@@ -744,9 +815,9 @@ def _import_session_locked(sess: NativeSession) -> str:
             user_msg = {
                 "id": str(__import__("uuid").uuid4()),
                 "role": "user",
-                "content": turn.prompt or "(imported turn)",
+                "content": turn.prompt,
                 "events": [],
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": _native_created_iso(sess, [turn]) or datetime.now().isoformat(),
                 "isStreaming": False,
                 "agent_message_uuid": None,
                 "source": "native_import",
@@ -792,7 +863,7 @@ def _import_session_locked(sess: NativeSession) -> str:
         raise ValueError("native session has no importable events")
 
     _repair_updated_at_to_last_activity(root_id, _max_event_timestamp(events))
-    _registry_set(sess.registry_key, root_id)
+    _registry_set_for(sess, root_id)
     if failures:
         logger.warning(
             "native_import: %s applied with %d failed event(s)", sess.registry_key, failures,
@@ -855,6 +926,24 @@ def _registry_set(key: str, root_id: str) -> None:
         _registry_save(data)
 
 
+def _registry_get_for(sess: NativeSession) -> Optional[str]:
+    with _REGISTRY_LOCK:
+        data = _registry_load()
+        return data.get(sess.registry_key) or data.get(sess.legacy_registry_key) or None
+
+
+def _registry_set_for(sess: NativeSession, root_id: str) -> None:
+    with _REGISTRY_LOCK:
+        data = _registry_load()
+        data[sess.registry_key] = root_id
+        data.pop(sess.legacy_registry_key, None)
+        _registry_save(data)
+
+
+def _is_imported(sess: NativeSession, keys: set[str]) -> bool:
+    return sess.registry_key in keys or sess.legacy_registry_key in keys
+
+
 def already_imported_keys() -> set[str]:
     with _REGISTRY_LOCK:
         return set(_registry_load().keys())
@@ -877,7 +966,7 @@ def count_native_sessions(provider_ids: Optional[list[str]] = None) -> dict:
             s.provider_kind, {"total": 0, "imported": 0, "pending": 0}
         )
         g["total"] += 1
-        if s.registry_key in imported:
+        if _is_imported(s, imported):
             g["imported"] += 1
         else:
             g["pending"] += 1
@@ -1027,7 +1116,7 @@ def _run_import(
         for sess in sessions:
             if limit is not None and status.imported >= limit:
                 break  # cap reached — stop importing new sessions
-            if sess.registry_key in imported_keys:
+            if _is_imported(sess, imported_keys):
                 status.skipped += 1
             else:
                 status.current = sess.registry_key
@@ -1039,6 +1128,9 @@ def _run_import(
                     # bounded — without this the loop would hold every imported
                     # session in RAM and OOM on a large import.
                     session_manager.trim_resident_roots(keep_rid=rid)
+                except SkippedNativeSession as exc:
+                    status.skipped += 1
+                    logger.info("native_import: skipped %s: %s", sess.registry_key, exc.reason)
                 except Exception as exc:
                     status.failed += 1
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})
