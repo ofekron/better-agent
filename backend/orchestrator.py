@@ -1160,6 +1160,7 @@ class Coordinator:
         target_session_id: str,
         message: str,
         detach: bool = False,
+        expect_mssg_response: bool = False,
     ) -> dict:
         import uuid
         import team_messaging
@@ -1172,6 +1173,9 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if expect_mssg_response:
+            metadata["expects_response"] = True
+            metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
         queue_item_id = str(uuid.uuid4())
         lifecycle_msg_id = str(uuid.uuid4())
         panel = await self._start_team_message_panel(
@@ -1243,6 +1247,7 @@ class Coordinator:
             "success": True,
             "queued_id": queue_item_id,
             "target_session_id": target_session_id,
+            "expects_response": expect_mssg_response,
         }
 
     def register_mssg_turn_waiter(

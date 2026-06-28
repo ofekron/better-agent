@@ -51,6 +51,7 @@ import extension_store
 from env_compat import get_env
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
+    ASYNC_COMMUNICATE_DESCRIPTION as _ASYNC_COMMUNICATE_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -344,6 +345,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "async_communicate",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -896,6 +898,50 @@ def _build_mssg_tool(
         return _tool_success_result(result)
 
     return mssg
+
+
+def _build_async_communicate_tool(
+    *,
+    sender_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_async_communicate_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/async-communicate",
+            timeout=30,
+            non_json_t_key="runner.mssg_non_json",
+            log_prefix="async_communicate POST",
+            backoff_cap=5.0,
+        )
+
+    @tool("async_communicate", _ASYNC_COMMUNICATE_DESCRIPTION, _MSSG_INPUT_SCHEMA)
+    async def async_communicate(args: dict[str, Any]) -> dict[str, Any]:
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not target_session_id or not message:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "target_session_id and message are required",
+                }],
+                "is_error": True,
+            }
+        payload = {
+            "sender_session_id": sender_session_id,
+            "target_session_id": target_session_id,
+            "message": message,
+        }
+        try:
+            result = await asyncio.to_thread(_post_async_communicate_sync, payload)
+        except Exception as e:
+            return _tool_error_response("async_communicate", e)
+        return _tool_success_result(result)
+
+    return async_communicate
 
 
 def _build_delegate_task_tool(
@@ -2058,6 +2104,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         communicate_tools = []
         if "mssg" not in disabled_builtin_tools:
             communicate_tools.append(_build_mssg_tool(
+                sender_session_id=str(mssg_sender_session_id),
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "async_communicate" not in disabled_builtin_tools:
+            communicate_tools.append(_build_async_communicate_tool(
                 sender_session_id=str(mssg_sender_session_id),
                 backend_url=backend_url,
                 internal_token=internal_token,

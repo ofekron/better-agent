@@ -153,6 +153,43 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert "idempotency_key" not in queued[0]
 
 
+def test_submit_team_message_can_expect_async_mssg_response(monkeypatch):
+    sender = session_manager.create(
+        name="manager",
+        cwd="/repo",
+        orchestration_mode="manager",
+    )
+    target = session_manager.create(
+        name="worker",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    def fake_submit_prompt(sid: str, params: dict) -> str:
+        captured["sid"] = sid
+        captured["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+
+    result = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="run test",
+        detach=True,
+        expect_mssg_response=True,
+    ))
+
+    metadata = captured["params"]["team_message"]["metadata"]
+    assert result["expects_response"] is True
+    assert metadata["expects_response"] is True
+    assert metadata["response_mode"] == team_messaging.MSSG_RESPONSE_MODE
+    assert 'expects_response="true"' in captured["params"]["cli_prompt"]
+    assert f'mssg(target_session_id="{sender["id"]}"' in captured["params"]["cli_prompt"]
+
+
 def test_submit_team_message_can_target_sub_session(monkeypatch):
     sender = session_manager.create(
         name="manager",

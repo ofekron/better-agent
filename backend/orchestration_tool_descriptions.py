@@ -1,6 +1,6 @@
 """Single source of truth for the model-facing descriptions of the
-session-orchestration tools (mssg / ask / delegate_task / create_session /
-create_sub_session / create_worker).
+session-orchestration tools (mssg / async_communicate / ask / delegate_task /
+create_session / create_sub_session / create_worker).
 
 All three provider runners import these constants so the descriptions cannot
 drift per provider:
@@ -24,6 +24,13 @@ MSSG_DESCRIPTION = (
     "coordination with a known team session, or a worker's final report to its "
     "manager. For a reply you read inline, use ask instead; to fire-and-forget "
     "without waiting, use delegate_task."
+)
+
+ASYNC_COMMUNICATE_DESCRIPTION = (
+    "Send a queued message to an EXISTING Better Agent session and return "
+    "immediately. The target is expected to report back later with mssg to the "
+    "sender; use this for async worker-pool style work where you do not want to "
+    "hold your current turn open."
 )
 
 ASK_DESCRIPTION = (

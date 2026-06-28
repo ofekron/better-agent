@@ -128,6 +128,24 @@ def test_parallel_asks_share_entry_keep_firing_order():
     print("ok: parallel asks in one entry keep firing order after the entry")
 
 
+def test_async_communicate_anchors_like_mssg():
+    msg = {
+        "events": [
+            _text("before"),
+            _assistant_tool_use(("mcp__communicate__async_communicate", "ac1")),
+            _tool_result("queued"),
+        ],
+        "workers": [
+            {"delegation_id": "async_1", "panel_kind": "sub_session",
+             "run_mode": "team_message", "insert_at": 0,
+             "events": [_worker_event("ASYNC_WORK")]},
+        ],
+    }
+    labels = [_text_of(e) for e in render_stub.timeline_events(msg)]
+    assert labels == ["before", None, "ASYNC_WORK", "queued"], labels
+    print("ok: async_communicate panel anchors after the tool call")
+
+
 def test_panel_without_tool_use_falls_back_to_stored_insert_at():
     # A Codex-native-style panel with no MCP tool_use in the stream: keeps
     # its stored insert_at instead of being dropped or crashing.
@@ -167,6 +185,7 @@ def test_create_worker_tool_use_is_ignored_does_not_desync_ask():
 if __name__ == "__main__":
     test_create_sub_session_then_ask_orders_panel_after_ask()
     test_parallel_asks_share_entry_keep_firing_order()
+    test_async_communicate_anchors_like_mssg()
     test_panel_without_tool_use_falls_back_to_stored_insert_at()
     test_create_worker_tool_use_is_ignored_does_not_desync_ask()
     print("ALL PASS")

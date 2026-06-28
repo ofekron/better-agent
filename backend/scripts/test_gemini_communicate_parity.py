@@ -126,6 +126,17 @@ def test_mssg_still_routes_to_mssg_endpoint():
     assert captured[0][2] == 30.0
 
 
+def test_async_communicate_routes_to_async_endpoint():
+    captured = _instrument()
+    communicate_mcp.async_communicate_response("w", "run in background")
+    endpoint, payload, timeout = captured[0]
+    assert endpoint == "/api/internal/async-communicate"
+    assert payload["sender_session_id"] == "mgr-session"
+    assert payload["target_session_id"] == "w"
+    assert payload["message"] == "run in background"
+    assert timeout == 30.0
+
+
 def test_delegate_task_routes_to_delegate_task_endpoint():
     captured = _instrument()
     res = communicate_mcp.delegate_task_response(

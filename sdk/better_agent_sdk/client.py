@@ -959,6 +959,18 @@ class Client:
             timeout=30.0,
         )
 
+    def async_communicate(self, target_session_id: str, message: str) -> dict[str, Any]:
+        """Send a detached message to a session that should report back with mssg."""
+        return self._post(
+            "/api/internal/async-communicate",
+            {
+                "sender_session_id": self.app_session_id,
+                "target_session_id": target_session_id,
+                "message": message,
+            },
+            timeout=30.0,
+        )
+
     def ask_propose(
         self, session_ids: list[str], *, reasoning: str = "", proposed_project_path: str = ""
     ) -> dict[str, Any]:

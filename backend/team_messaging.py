@@ -12,6 +12,7 @@ from stores import worker_store
 
 SOURCE = "team_message"
 ASK_SOURCE = "team_ask"
+MSSG_RESPONSE_MODE = "mssg"
 
 
 def validate_message_route(
@@ -106,13 +107,23 @@ def format_team_message_prompt(
             "team/cross_cwd_note.md",
             {"sender_cwd": escape(str(metadata["sender_cwd"]))},
         )
+    response_contract = ""
+    if metadata.get("response_mode") == MSSG_RESPONSE_MODE and metadata.get("sender_session_id"):
+        response_contract = (
+            "\n\n<response_contract>\n"
+            "When the task is complete, call "
+            f'mssg(target_session_id="{escape(str(metadata["sender_session_id"]), quote=True)}", '
+            "message=<result>) to send the result back to the sender.\n"
+            "Use mssg for the final result even though this incoming message is asynchronous.\n"
+            "</response_contract>"
+        )
     team_context = _target_team_context(target_session_id)
     prompt = render_prompt(
         "team/message.md",
         {
             "rendered_attrs": rendered_attrs,
             "cross_cwd_note": cross_cwd_note,
-            "message": message,
+            "message": f"{message}{response_contract}",
         },
     )
     return f"{team_context}\n\n{prompt}" if team_context else prompt
