@@ -40,14 +40,26 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 
-from tool_approval_client import request_tool_approval
+from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_openai")
 
 _BASH_TIMEOUT_S = 120
 _MAX_OUTPUT_CHARS = 40_000
-_MAX_TOOL_LOOPS = 40
+# Safety bound on the agent tool loop. runner_openai IS the agent host (no
+# external CLI like claude/codex/gemini to impose its own limits), so it needs
+# an in-process runaway guard. High enough that agentic models (e.g. Sakana
+# Fugu, a tool-heavy multi-agent system that routinely needs >40 tool rounds)
+# finish naturally; overridable per-run via inputs["max_tool_loops"]. When the
+# cap IS hit, the turn is reported as not-completed (see _run's for/else),
+# never silently as a successful completion.
+_MAX_TOOL_LOOPS = 200
 _SESSIONS_SUBDIR = "openai_sessions"
+_TOOL_ENV_DENY_EXACT = {
+    "better_claude_internal_token",
+    "better_agent_internal_token",
+}
+_TOOL_ENV_DENY_PREFIXES = ("anthropic", "openai")
 
 
 # --------------------------------------------------------------------------
@@ -287,13 +299,31 @@ def _truncate(text: str) -> str:
     return text[:_MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text)} total chars]"
 
 
+def _tool_subprocess_env() -> dict[str, str]:
+    """Environment visible to model-run shell commands.
+
+    Provider credentials and BA loopback tokens authenticate the runner itself;
+    tools must not inherit them. Keep this denylist intentionally broad for
+    OpenAI/Anthropic-style env vars and exact for internal-token names so a
+    Bash tool cannot read or exfiltrate provider/backend secrets.
+    """
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        lowered = key.lower()
+        if lowered in _TOOL_ENV_DENY_EXACT:
+            continue
+        if lowered.startswith(_TOOL_ENV_DENY_PREFIXES):
+            continue
+        env[key] = value
+    return env
+
+
 def _tool_bash(args: dict, cwd: Path) -> str:
     command = (args.get("command") or "").strip()
     if not command:
         return "Error: empty command"
     timeout = min(int(args.get("timeout") or _BASH_TIMEOUT_S), _BASH_TIMEOUT_S)
-    env = {k: v for k, v in os.environ.items()
-           if not k.lower().startswith(("anthropic", "openai"))}
+    env = _tool_subprocess_env()
     try:
         proc = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -454,6 +484,43 @@ TOOL_SCHEMAS = [
             "required": ["pattern"]}}},
 ]
 
+# Better Agent runtime-capability management. Available only when the backend
+# loopback channel exists (non-bare, internal sessions); these tools let the
+# model scope its own session. Core owns the active-capability write — the tools
+# just POST the trigger. Dispatched in `_dispatch_tool`, no permission gate.
+_CAPABILITY_TOOL_NAMES = frozenset({
+    "list_capabilities", "load_capability", "release_capability",
+})
+_CAPABILITY_TOOL_SCHEMAS = [
+    {"type": "function", "function": {
+        "name": "list_capabilities",
+        "description": "List the scoped capabilities loadable in this session and which are active.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "load_capability",
+        "description": ("Load a scoped capability into this session. Its MCP + skill become "
+                        "available on the next turn. Pass the full capability id "
+                        "(e.g. 'ofek.testape:testape')."),
+        "parameters": {"type": "object", "properties": {
+            "capability_id": {"type": "string"}}, "required": ["capability_id"]}}},
+    {"type": "function", "function": {
+        "name": "release_capability",
+        "description": ("Release a previously loaded capability from this session. Pass the "
+                        "full capability id (e.g. 'ofek.testape:testape')."),
+        "parameters": {"type": "object", "properties": {
+            "capability_id": {"type": "string"}}, "required": ["capability_id"]}}},
+]
+
+
+def _tool_schemas_for_run(*, capabilities_enabled: bool) -> list[dict]:
+    """Coding tools always; capability-management tools only when the backend
+    loopback channel exists for a non-bare session (mirrors the other runners,
+    where the capabilities stdio MCP is injected under the same condition)."""
+    schemas = list(TOOL_SCHEMAS)
+    if capabilities_enabled:
+        schemas += _CAPABILITY_TOOL_SCHEMAS
+    return schemas
+
 
 def _is_bypass(permission: Optional[dict]) -> bool:
     if not permission:
@@ -535,6 +602,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # can't surface a prompt — fail closed with a clear message rather than a
     # user-blaming "denied" (mirrors runner.py's interactive_permissions guard).
     interactive = bool(backend_url) and bool(internal_token) and bool(app_session_id)
+    # Capability-management tools ride the same backend channel and are stripped
+    # from bare (TestApe-isolated) sessions, matching runner.py / the stdio
+    # capabilities MCP injected for the CLI providers.
+    capabilities_enabled = interactive and not bool(inputs.get("bare_config"))
+    tool_schemas = _tool_schemas_for_run(capabilities_enabled=capabilities_enabled)
     resume_sid = inputs.get("session_id")
 
     session_id, messages = _load_history(resume_sid)
@@ -559,15 +631,25 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     usage_acc = {"input_tokens": 0, "output_tokens": 0,
                  "cache_read_input_tokens": 0, "total_tokens": 0}
     error: Optional[str] = None
+    try:
+        max_loops = int(inputs.get("max_tool_loops") or _MAX_TOOL_LOOPS)
+    except (TypeError, ValueError):
+        max_loops = _MAX_TOOL_LOOPS
 
     try:
-        for _ in range(_MAX_TOOL_LOOPS):
+        for _ in range(max_loops):
             if (run_dir / "cancel").exists():
                 error = "cancelled"
                 break
             finish_reason, tool_calls, asst_text, chunk_usage = await _one_round(
-                base_url, api_key, model, messages, emitter, run_dir,
+                base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
             )
+            if (run_dir / "cancel").exists():
+                # `_one_round` breaks promptly on the cancel sentinel without
+                # raising. Do not save a partial assistant chunk as a successful
+                # turn; surface the cancellation and exit non-zero.
+                error = "cancelled"
+                break
             if chunk_usage:
                 usage_acc["input_tokens"] += chunk_usage.get("prompt_tokens", 0)
                 usage_acc["output_tokens"] += chunk_usage.get("completion_tokens", 0)
@@ -607,6 +689,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 })
             if error:
                 break
+        else:
+            # Loop exhausted the cap without the model emitting a terminal
+            # response (finish_reason "stop" / no tool_calls) and without a
+            # cancel — i.e. it was still mid-task when the budget ran out.
+            # Surface this honestly as a not-completed turn instead of letting
+            # error stay None and reporting a truncated turn as success.
+            error = (
+                f"max tool loops ({max_loops}) reached without the model "
+                "ending the turn; raise max_tool_loops or let the model finish"
+            )
 
         _save_history(session_id, messages)
     except Exception as e:
@@ -632,13 +724,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
 async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
-    emitter: EventEmitter, run_dir: Path,
+    emitter: EventEmitter, run_dir: Path, tool_schemas: list[dict] = TOOL_SCHEMAS,
 ) -> tuple[Optional[str], list[dict], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
     Returns (finish_reason, finalized_tool_calls, assistant_text, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for chunk in _stream_chat(base_url, api_key, model, messages, TOOL_SCHEMAS):
+    async for chunk in _stream_chat(base_url, api_key, model, messages, tool_schemas):
         if (run_dir / "cancel").exists():
             break
         if chunk.get("usage"):
@@ -680,6 +772,15 @@ async def _dispatch_tool(
     except json.JSONDecodeError as e:
         emitter.emit_tool_result(call["id"], f"Error: bad arguments json: {e}")
         return f"Error: bad arguments json: {e}"
+
+    # Capability management tools — no filesystem side effects, no permission
+    # gate. They POST to the core capabilities endpoint over the loopback.
+    if name in _CAPABILITY_TOOL_NAMES:
+        return await _dispatch_capability_tool(
+            name=name, args=args, backend_url=backend_url,
+            internal_token=internal_token, app_session_id=app_session_id,
+            interactive=interactive, emitter=emitter, tool_call_id=call["id"],
+        )
 
     # permission gate: non-bypass runs ask the backend before risky tools
     if not bypass and name in {"Bash", "Write", "Edit"}:
@@ -727,6 +828,56 @@ async def _wait_cancel(cancel_path: Path) -> bool:
         await asyncio.sleep(0.5)
 
 
+def _capabilities_endpoint_post(
+    *, backend_url: str, internal_token: str, app_session_id: str, payload: dict,
+) -> str:
+    """POST a capability action (list/load/release) to the core endpoint and
+    return a JSON-string result. Core owns the active-capability write; this is
+    the authorized trigger. Errors are returned as text, never raised, so a
+    failed call doesn't abort the turn."""
+    url = backend_url.rstrip("/") + f"/api/internal/sessions/{app_session_id}/capabilities"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Token": internal_token,
+    }
+    try:
+        resp = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+        if resp.status_code >= 400:
+            return f"Error: HTTP {resp.status_code}: {resp.text[:500]}"
+        return resp.text or "{}"
+    except Exception as e:  # noqa: BLE001 — surface to the model
+        return f"Error: {type(e).__name__}: {e}"
+
+
+async def _dispatch_capability_tool(
+    *, name: str, args: dict, backend_url: str, internal_token: str,
+    app_session_id: str, interactive: bool, emitter: EventEmitter, tool_call_id: str,
+) -> str:
+    if not interactive:
+        msg = "Error: capabilities require the backend channel (unavailable for this run)"
+        emitter.emit_tool_result(tool_call_id, msg)
+        return msg
+    if name == "list_capabilities":
+        payload = {"action": "list"}
+    else:
+        capability_id = str(args.get("capability_id") or "").strip()
+        if not capability_id:
+            msg = "Error: capability_id is required"
+            emitter.emit_tool_result(tool_call_id, msg)
+            return msg
+        action = "load" if name == "load_capability" else "release"
+        payload = {"action": action, "capability_id": capability_id}
+    result = await asyncio.to_thread(
+        _capabilities_endpoint_post,
+        backend_url=backend_url,
+        internal_token=internal_token,
+        app_session_id=app_session_id,
+        payload=payload,
+    )
+    emitter.emit_tool_result(tool_call_id, result)
+    return result
+
+
 async def _request_approval(
     *,
     app_session_id: str, run_id: str, tool_name: str, args: dict,
@@ -745,7 +896,10 @@ async def _request_approval(
         run_id=run_id,
         provider_kind="openai",
         tool_name=tool_name,
-        summary={"tool": tool_name, "args": args},
+        # Same capped {"tool", "input"} shape as the Claude/Codex runners so
+        # the one frontend card renders every argument (was a divergent,
+        # un-truncated {"tool", "args"} the UI couldn't read).
+        summary=describe_tool_call(tool_name, args),
     ))
     cancel_task = asyncio.ensure_future(_wait_cancel(cancel_path))
     done, pending = await asyncio.wait(
