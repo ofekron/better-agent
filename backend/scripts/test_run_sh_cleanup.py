@@ -84,6 +84,25 @@ def main() -> int:
         failures,
     )
     check(
+        "graceful restart timeout is configurable",
+        'GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"' in text
+        and "restart_limit=$((GRACEFUL_RESTART_TIMEOUT_SECONDS * 4))" in text,
+        failures,
+    )
+    check(
+        "restart waits gracefully before force kill",
+        "wait_for_backend_exit() {" in text
+        and "Restart requested — waiting up to ${GRACEFUL_RESTART_TIMEOUT_SECONDS}s for graceful shutdown..." in text
+        and "Graceful restart timeout expired; forcing backend shutdown." in text
+        and 'kill -9 "$BACKEND_PID"' in text,
+        failures,
+    )
+    check(
+        "main loop uses bounded backend exit wait",
+        "wait_for_backend_exit" in text[text.index("while true; do"):],
+        failures,
+    )
+    check(
         "Z.AI startup checker calls claude CLI directly",
         'claude = shutil.which("claude")' in zai_check
         and '"--model", "glm-5.2"' in zai_check
