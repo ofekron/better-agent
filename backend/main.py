@@ -271,6 +271,7 @@ from fastapi.responses import FileResponse
 import config_store
 import shortcut_picker
 import user_prefs
+import auto_restart_on_idle
 import ui_selection
 
 # Apply saved auth env vars at import time so any code path that still
@@ -1511,6 +1512,11 @@ async def patch_user_prefs(body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("voice_close_on_background must be a boolean")
             user_prefs.set_voice_close_on_background(val)
+        if "auto_restart_on_idle" in body:
+            val = body["auto_restart_on_idle"]
+            if not isinstance(val, bool):
+                raise ValueError("auto_restart_on_idle must be a boolean")
+            user_prefs.set_auto_restart_on_idle(val)
         return user_prefs.get_all()
 
     try:
@@ -5633,7 +5639,25 @@ async def admin_restart(body: dict | None = None):
         await _wait_for_all_agents_idle()
 
     restarted_nodes = await _restart_connected_worker_nodes()
+    await _trigger_supervisor_restart(request_id)
+    return {
+        "status": "rebuilding",
+        "request_id": request_id,
+        "restarted_nodes": restarted_nodes,
+    }
 
+
+async def _trigger_supervisor_restart(request_id: str) -> None:
+    """Write the restart flag and SIGTERM uvicorn so the run.sh supervisor
+    rebuilds the frontend and restarts the backend. Caller is responsible
+    for the supervisor-env guard (`BETTER_CLAUDE_RUN_SH_SUPERVISOR=1`) —
+    restarting without the supervisor would just kill the server with
+    nothing to respawn it.
+
+    Runner processes survive: SIGTERM (not SIGINT) leaves
+    `_intentional_shutdown` false, so `on_shutdown` skips
+    `provider.cancel_all` and run_recovery re-attaches the still-alive
+    runners on the next boot."""
     accepted_payload = {
         "request_id": request_id,
         "accepted_at": datetime.now().astimezone().isoformat(),
@@ -5654,11 +5678,6 @@ async def admin_restart(body: dict | None = None):
         os.kill(pid, signal.SIGTERM)
 
     asyncio.create_task(_restart())
-    return {
-        "status": "rebuilding",
-        "request_id": request_id,
-        "restarted_nodes": restarted_nodes,
-    }
 
 
 async def _wait_for_all_agents_idle() -> None:
@@ -5678,6 +5697,21 @@ def _has_restart_blocking_agent_work() -> bool:
     active_sids.update(getattr(coordinator, "_prompt_queues", {}).keys())
     active_sids.update(coordinator.turn_manager._run_state.keys())
     return any(coordinator.turn_manager.has_active_runs(sid) for sid in active_sids)
+
+
+def _system_busy_for_auto_restart() -> bool:
+    """Fresh snapshot of "is any agent work running right now", for the
+    auto-restart-on-idle monitor. Refreshes the turn-manager cache first so
+    dead PIDs are pruned before the check."""
+    coordinator.turn_manager._refresh_cache()
+    return _has_restart_blocking_agent_work()
+
+
+_auto_restart_on_idle_monitor = auto_restart_on_idle.AutoRestartOnIdleMonitor(
+    is_busy=_system_busy_for_auto_restart,
+    trigger_restart=_trigger_supervisor_restart,
+    is_enabled=user_prefs.get_auto_restart_on_idle,
+)
 
 
 async def _restart_connected_worker_nodes() -> list[str]:
@@ -6991,6 +7025,12 @@ async def on_startup():
     # GET /api/sessions and GET /api/projects read via
     # is_running_cached / monitoring_state_cached.
     coordinator.turn_manager.start_background_tick()
+
+    # Auto-restart-on-idle: when the user enables the pref, fire a
+    # supervisor restart every time the system goes idle after work, so
+    # code changes are picked up without a manual reload. Inert unless
+    # `auto_restart_on_idle` is on AND we're under the run.sh supervisor.
+    _auto_restart_on_idle_monitor.start()
 
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.

@@ -4,6 +4,7 @@ import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } f
 import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
+import { AutoRestartOnIdleSetting } from "./AutoRestartOnIdleSetting";
 import { ContextStrategySetting } from "./ContextStrategySetting";
 import { SessionTabsSettings } from "./SessionTabsSettings";
 import { VoiceSettings } from "./VoiceSettings";
@@ -1491,7 +1492,13 @@ function ProvidersList({
         </div>
       )}
       {section === "appearance" && <AppearanceSetting />}
-      {section === "desktop" && <DesktopAppSettingsSection />}
+      {section === "desktop" && (
+        <>
+          <DesktopAppSettingsSection />
+          <div className="setup-divider" />
+          <AutoRestartOnIdleSetting />
+        </>
+      )}
       {section === "shortcuts" && <ShortcutSettings />}
       {section === "delegation" && teamEnabled && (
         <>
