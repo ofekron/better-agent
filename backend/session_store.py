@@ -437,6 +437,11 @@ def summary_version() -> int:
         return _summary_index_version
 
 
+def search_metadata_version() -> int:
+    with _summary_index_lock:
+        return _summary_metadata_version
+
+
 def markers_for_extension_purge(extension_id: str) -> list[str]:
     """Drop ``extension_id`` from every session's markers. Returns the
     affected session ids."""
