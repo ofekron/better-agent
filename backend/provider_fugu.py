@@ -76,8 +76,10 @@ class FuguProvider(CodexProvider):
     RUNNER_KIND: ClassVar[str] = "fugu"
     CODEX_BINARY: ClassVar[str] = "codex-fugu"
 
-    # Fugu orchestrates its own model pool; a per-turn reasoning-effort
-    # dial is not a real capability of the launcher, so do not expose one.
-    supports_reasoning_effort: ClassVar[bool] = False
-    reasoning_effort_options: ClassVar[tuple[str, ...]] = ()
-    default_reasoning_effort: ClassVar[str] = ""
+    # Sakana's `codex-fugu debug models` catalog advertises exactly two
+    # reasoning levels for both Fugu and Fugu Ultra — `high` and `xhigh`.
+    # The launcher forwards args to codex unchanged, so codex's
+    # `model_reasoning_effort` config reaches the model; expose the dial.
+    supports_reasoning_effort: ClassVar[bool] = True
+    reasoning_effort_options: ClassVar[tuple[str, ...]] = ("high", "xhigh")
+    default_reasoning_effort: ClassVar[str] = "high"
