@@ -99,6 +99,22 @@ def _run() -> bool:
         (f"median write_session_full < 15ms", median < 15.0,
          f"got median={median:.2f}ms samples={[f'{s:.1f}' for s in samples]}"))
 
+    version_before = session_store.summary_version()
+
+    def fail_summary_rewrite(_root_id, _summary):
+        raise AssertionError("unchanged summary sidecar was rewritten")
+
+    with patch("session_store._write_summary_file", side_effect=fail_summary_rewrite):
+        session_store.write_session_full(root, bump_updated_at=False)
+    version_after = session_store.summary_version()
+    results.append(
+        (
+            "unchanged write does not rewrite summary projection",
+            version_after == version_before,
+            f"version before={version_before} after={version_after}",
+        )
+    )
+
     msg = root["messages"][-1]
     ctx = ApplyEventCtx(root_id=sid, run_id="run-heavy")
     get_strategy("native").apply_event(
