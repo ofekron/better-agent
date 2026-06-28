@@ -1,5 +1,5 @@
 """Single source of truth for the model-facing descriptions of the
-session-orchestration tools (mssg / async_communicate / ask / delegate_task /
+session-orchestration tools (mssg / async / ask / delegate_task /
 create_session / create_sub_session / create_worker).
 
 All three provider runners import these constants so the descriptions cannot
@@ -19,18 +19,19 @@ _PROVIDER_SELECTOR_NOTE = (
 )
 
 MSSG_DESCRIPTION = (
-    "Send a queued message to an EXISTING Better Agent session and BLOCK until "
-    "that session finishes — its completion joins your turn. Use for direct "
-    "coordination with a known team session, or a worker's final report to its "
-    "manager. For a reply you read inline, use ask instead; to fire-and-forget "
-    "without waiting, use delegate_task."
+    "Send a queued message to one target and BLOCK until it finishes — its "
+    "completion joins your turn. Target with exactly one of target_session_id, "
+    "target_worker_id, or target_worker_pool. Use for direct coordination or a "
+    "worker's final report to its manager. For a reply you read inline, use ask "
+    "instead; to fire-and-forget without waiting, use delegate_task."
 )
 
-ASYNC_COMMUNICATE_DESCRIPTION = (
-    "Send a queued message to an EXISTING Better Agent session and return "
-    "immediately. The target is expected to report back later with mssg to the "
-    "sender; use this for async worker-pool style work where you do not want to "
-    "hold your current turn open."
+ASYNC_DESCRIPTION = (
+    "Send a queued message to one target and return immediately. Target with "
+    "exactly one of target_session_id, target_worker_id, or target_worker_pool. "
+    "The target is expected to report back later with mssg to the sender; use "
+    "this for async worker-pool style work where you do not want to hold your "
+    "current turn open."
 )
 
 ASK_DESCRIPTION = (

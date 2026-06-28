@@ -44,7 +44,7 @@ import extension_store
 from runs_dir import atomic_write_json
 from env_compat import get_env
 from orchestration_tool_descriptions import (
-    ASYNC_COMMUNICATE_DESCRIPTION as _ASYNC_COMMUNICATE_DESCRIPTION,
+    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -235,9 +235,11 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "target_session_id": {"type": "string"},
+        "target_worker_id": {"type": "string"},
+        "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
     "additionalProperties": False,
 }
 
@@ -280,20 +282,22 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "target_session_id": {"type": "string"},
+        "target_worker_id": {"type": "string"},
+        "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
         "worker_description": {"type": "string"},
         "worker_registry_cwd": {"type": "string"},
         "ephemeral": {"type": "boolean"},
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
     "additionalProperties": False,
 }
 
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async_communicate",
+    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -542,10 +546,10 @@ def _build_mssg_dynamic_tool() -> dict:
     }
 
 
-def _build_async_communicate_dynamic_tool() -> dict:
+def _build_async_dynamic_tool() -> dict:
     return {
-        "name": "async_communicate",
-        "description": _ASYNC_COMMUNICATE_DESCRIPTION,
+        "name": "async",
+        "description": _ASYNC_DESCRIPTION,
         "inputSchema": _MSSG_INPUT_SCHEMA,
     }
 
@@ -593,10 +597,12 @@ def _build_mssg_tool_handler(
         if not isinstance(args, dict):
             return _dynamic_tool_text_result("mssg arguments must be an object", success=False)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result(
-                "target_session_id and message are required",
+                "one target and message are required",
                 success=False,
             )
         try:
@@ -605,6 +611,8 @@ def _build_mssg_tool_handler(
                 {
                     "sender_session_id": sender_session_id,
                     "target_session_id": target_session_id,
+                    "target_worker_id": target_worker_id,
+                    "target_worker_pool": target_worker_pool,
                     "message": message,
                 },
                 backend_url=backend_url,
@@ -621,21 +629,23 @@ def _build_mssg_tool_handler(
     return mssg
 
 
-def _build_async_communicate_tool_handler(
+def _build_async_tool_handler(
     *,
     sender_session_id: str,
     backend_url: str,
     internal_token: str,
 ):
-    async def async_communicate(params: dict) -> dict:
+    async def async_(params: dict) -> dict:
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
-            return _dynamic_tool_text_result("async_communicate arguments must be an object", success=False)
+            return _dynamic_tool_text_result("async arguments must be an object", success=False)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result(
-                "target_session_id and message are required",
+                "one target and message are required",
                 success=False,
             )
         try:
@@ -644,6 +654,8 @@ def _build_async_communicate_tool_handler(
                 {
                     "sender_session_id": sender_session_id,
                     "target_session_id": target_session_id,
+                    "target_worker_id": target_worker_id,
+                    "target_worker_pool": target_worker_pool,
                     "message": message,
                 },
                 backend_url=backend_url,
@@ -652,12 +664,12 @@ def _build_async_communicate_tool_handler(
                 timeout_s=30.0,
             )
         except Exception as e:
-            logger.exception("async_communicate dynamic tool handler failed")
-            return _dynamic_tool_text_result(f"async_communicate failed: {e}", success=False)
+            logger.exception("async dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"async failed: {e}", success=False)
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
-    return async_communicate
+    return async_
 
 
 def _build_delegate_task_tool_handler(
@@ -808,11 +820,13 @@ def _build_ask_tool_handler(
         if not isinstance(args, dict):
             return _dynamic_tool_text_result("ask arguments must be an object", success=False)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result(
-                "target_session_id and message are required",
+                "one target and message are required",
                 success=False,
             )
         if run_mode not in ("direct", "fork"):
@@ -825,6 +839,8 @@ def _build_ask_tool_handler(
             )
 
         if run_mode == "fork":
+            if not target_session_id:
+                return _dynamic_tool_text_result("run_mode='fork' requires target_session_id", success=False)
             # Fork reuses the delegation engine (per-(caller, session) branch +
             # byte-offset outcome). ask is the model-facing name; the fork
             # execution path stays single-source in run_delegation.
@@ -851,6 +867,8 @@ def _build_ask_tool_handler(
             payload = {
                 "sender_session_id": sender_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": ask_id,
             }
@@ -2467,12 +2485,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 ),
                 existing_tool_names=existing_tool_names,
             )
-        if "async_communicate" not in disabled_builtin_tools:
+        if "async" not in disabled_builtin_tools:
             _add_dynamic_tool(
                 dynamic_tools,
                 tool_handlers,
-                _build_async_communicate_dynamic_tool(),
-                _build_async_communicate_tool_handler(
+                _build_async_dynamic_tool(),
+                _build_async_tool_handler(
                     sender_session_id=mssg_sender_session_id,
                     backend_url=backend_url,
                     internal_token=internal_token,

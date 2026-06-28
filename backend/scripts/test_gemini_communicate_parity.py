@@ -37,7 +37,7 @@ def _instrument():
 
 def test_ask_direct_routes_to_ask_endpoint():
     captured = _instrument()
-    res = communicate_mcp.ask_response("worker-1", "hi")
+    res = communicate_mcp.ask_response("hi", target_session_id="worker-1")
     assert res["success"] is True
     assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["ask_id"].startswith("ask_")
@@ -48,7 +48,7 @@ def test_ask_direct_routes_to_ask_endpoint():
 def test_ask_fork_routes_to_delegate_engine():
     captured = _instrument()
     res = communicate_mcp.ask_response(
-        "worker-1", "audit auth", run_mode="fork",
+        "audit auth", target_session_id="worker-1", run_mode="fork",
         worker_description="auditor", worker_registry_cwd="/repo",
     )
     assert res["success"] is True
@@ -69,7 +69,7 @@ def test_ask_fork_routes_to_delegate_engine():
 def test_ask_fork_routes_ephemeral():
     captured = _instrument()
     res = communicate_mcp.ask_response(
-        "worker-1", "audit auth", run_mode="fork",
+        "audit auth", target_session_id="worker-1", run_mode="fork",
         worker_description="auditor", ephemeral=True,
     )
     assert res["success"] is True
@@ -80,14 +80,14 @@ def test_ask_fork_routes_ephemeral():
 
 def test_ask_direct_rejects_ephemeral():
     captured = _instrument()
-    res = communicate_mcp.ask_response("worker-1", "hi", ephemeral=True)
+    res = communicate_mcp.ask_response("hi", target_session_id="worker-1", ephemeral=True)
     assert res["success"] is False
     assert captured == []
 
 
 def test_ask_fork_allows_missing_worker_description():
     captured = _instrument()
-    res = communicate_mcp.ask_response("w", "x", run_mode="fork")
+    res = communicate_mcp.ask_response("x", target_session_id="w", run_mode="fork")
     assert res["success"] is True
     assert captured[0][0] == "/api/internal/ask-fork"
     assert captured[0][1]["worker_description"] == ""
@@ -121,18 +121,18 @@ def test_create_worker_rejects_missing_fields():
 
 def test_mssg_still_routes_to_mssg_endpoint():
     captured = _instrument()
-    communicate_mcp.mssg_response("w", "hello")
+    communicate_mcp.mssg_response("hello", target_session_id="w")
     assert captured[0][0] == "/api/internal/mssg"
     assert captured[0][2] == 30.0
 
 
-def test_async_communicate_routes_to_async_endpoint():
+def test_async_routes_to_async_endpoint():
     captured = _instrument()
-    communicate_mcp.async_communicate_response("w", "run in background")
+    communicate_mcp.async_communicate_response("run in background", target_worker_pool="testape")
     endpoint, payload, timeout = captured[0]
     assert endpoint == "/api/internal/async-communicate"
     assert payload["sender_session_id"] == "mgr-session"
-    assert payload["target_session_id"] == "w"
+    assert payload["target_worker_pool"] == "testape"
     assert payload["message"] == "run in background"
     assert timeout == 30.0
 

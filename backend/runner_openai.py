@@ -49,7 +49,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from orchestration_tool_descriptions import (
-    ASYNC_COMMUNICATE_DESCRIPTION as _ASYNC_COMMUNICATE_DESCRIPTION,
+    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -753,9 +753,11 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "target_session_id": {"type": "string"},
+        "target_worker_id": {"type": "string"},
+        "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
     "additionalProperties": False,
 }
 
@@ -790,19 +792,21 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "target_session_id": {"type": "string"},
+        "target_worker_id": {"type": "string"},
+        "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
         "worker_description": {"type": "string"},
         "worker_registry_cwd": {"type": "string"},
         "ephemeral": {"type": "boolean"},
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
     "additionalProperties": False,
 }
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async_communicate",
+    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -811,7 +815,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
 })
 
 _ORCHESTRATION_TOOL_NAMES = frozenset({
-    "mssg", "async_communicate", "ask", "delegate_task", "create_session",
+    "mssg", "async", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
     "open_file_panel", "request_user_input", "start_file_discussion",
 })
@@ -909,10 +913,10 @@ def _tool_schemas_for_run(
         if mssg_sender_session_id:
             if "mssg" not in disabled:
                 schemas.append(_function_tool_schema("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA))
-            if "async_communicate" not in disabled:
+            if "async" not in disabled:
                 schemas.append(_function_tool_schema(
-                    "async_communicate",
-                    _ASYNC_COMMUNICATE_DESCRIPTION,
+                    "async",
+                    _ASYNC_DESCRIPTION,
                     _MSSG_INPUT_SCHEMA,
                 ))
             if "ask" not in disabled:
@@ -1142,15 +1146,19 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
     async def mssg(params: dict) -> str:
         args = _args(params)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
-            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
+            return _dynamic_tool_text_result("one target and message are required", success=False)
         try:
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 {
                     "sender_session_id": mssg_sender_session_id,
                     "target_session_id": target_session_id,
+                    "target_worker_id": target_worker_id,
+                    "target_worker_pool": target_worker_pool,
                     "message": message,
                 },
                 backend_url=backend_url,
@@ -1164,18 +1172,22 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
-    async def async_communicate(params: dict) -> str:
+    async def async_(params: dict) -> str:
         args = _args(params)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
-            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
+            return _dynamic_tool_text_result("one target and message are required", success=False)
         try:
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 {
                     "sender_session_id": mssg_sender_session_id,
                     "target_session_id": target_session_id,
+                    "target_worker_id": target_worker_id,
+                    "target_worker_pool": target_worker_pool,
                     "message": message,
                 },
                 backend_url=backend_url,
@@ -1184,24 +1196,28 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
                 timeout_s=30.0,
             )
         except Exception as e:
-            logger.exception("async_communicate dynamic tool handler failed")
-            return _dynamic_tool_text_result(f"async_communicate failed: {e}", success=False)
+            logger.exception("async dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"async failed: {e}", success=False)
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
     async def ask(params: dict) -> str:
         args = _args(params)
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
-        if not target_session_id or not message:
-            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
+            return _dynamic_tool_text_result("one target and message are required", success=False)
         if run_mode not in ("direct", "fork"):
             return _dynamic_tool_text_result("run_mode must be 'direct' or 'fork'", success=False)
         ephemeral = bool(args.get("ephemeral"))
         if ephemeral and run_mode != "fork":
             return _dynamic_tool_text_result("ephemeral is only valid for run_mode='fork'", success=False)
         if run_mode == "fork":
+            if not target_session_id:
+                return _dynamic_tool_text_result("run_mode='fork' requires target_session_id", success=False)
             worker_registry_cwd = args.get("worker_registry_cwd")
             if worker_registry_cwd in ("", "null"):
                 worker_registry_cwd = None
@@ -1222,6 +1238,8 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
             payload = {
                 "sender_session_id": mssg_sender_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": f"ask_{uuid.uuid4().hex[:10]}",
             }
@@ -1426,8 +1444,8 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
     if mssg_sender_session_id:
         if "mssg" not in disabled:
             handlers["mssg"] = mssg
-        if "async_communicate" not in disabled:
-            handlers["async_communicate"] = async_communicate
+        if "async" not in disabled:
+            handlers["async"] = async_
         if "ask" not in disabled:
             handlers["ask"] = ask
     if "delegate_task" not in disabled:

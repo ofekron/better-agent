@@ -51,7 +51,7 @@ import extension_store
 from env_compat import get_env
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
-    ASYNC_COMMUNICATE_DESCRIPTION as _ASYNC_COMMUNICATE_DESCRIPTION,
+    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -220,14 +220,22 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "target_session_id": {
             "type": "string",
-            "description": "Better Agent session_id of the team member to message.",
+            "description": "Better Agent session_id of the target session.",
+        },
+        "target_worker_id": {
+            "type": "string",
+            "description": "Registered worker id, equal to that worker's agent_session_id.",
+        },
+        "target_worker_pool": {
+            "type": "string",
+            "description": "Worker-pool tag. The backend routes to an idle worker in that pool.",
         },
         "message": {
             "type": "string",
             "description": "Message to enqueue for the target session.",
         },
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
 }
 
 _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
@@ -305,6 +313,14 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "fork mode this is the session to branch from."
             ),
         },
+        "target_worker_id": {
+            "type": "string",
+            "description": "Registered worker id, equal to that worker's agent_session_id. Direct mode only.",
+        },
+        "target_worker_pool": {
+            "type": "string",
+            "description": "Worker-pool tag. The backend routes direct mode to an idle worker in that pool.",
+        },
         "message": {
             "type": "string",
             "description": "Message / full task instructions for the session.",
@@ -339,13 +355,13 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["target_session_id", "message"],
+    "required": ["message"],
 }
 
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async_communicate",
+    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -877,18 +893,22 @@ def _build_mssg_tool(
     @tool("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA)
     async def mssg(args: dict[str, Any]) -> dict[str, Any]:
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
                     "type": "text",
-                    "text": "target_session_id and message are required",
+                    "text": "one target and message are required",
                 }],
                 "is_error": True,
             }
         payload = {
             "sender_session_id": sender_session_id,
             "target_session_id": target_session_id,
+            "target_worker_id": target_worker_id,
+            "target_worker_pool": target_worker_pool,
             "message": message,
         }
         try:
@@ -900,7 +920,7 @@ def _build_mssg_tool(
     return mssg
 
 
-def _build_async_communicate_tool(
+def _build_async_tool(
     *,
     sender_session_id: str,
     backend_url: str,
@@ -914,34 +934,38 @@ def _build_async_communicate_tool(
             url_path="/api/internal/async-communicate",
             timeout=30,
             non_json_t_key="runner.mssg_non_json",
-            log_prefix="async_communicate POST",
+            log_prefix="async POST",
             backoff_cap=5.0,
         )
 
-    @tool("async_communicate", _ASYNC_COMMUNICATE_DESCRIPTION, _MSSG_INPUT_SCHEMA)
-    async def async_communicate(args: dict[str, Any]) -> dict[str, Any]:
+    @tool("async", _ASYNC_DESCRIPTION, _MSSG_INPUT_SCHEMA)
+    async def async_(args: dict[str, Any]) -> dict[str, Any]:
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
                     "type": "text",
-                    "text": "target_session_id and message are required",
+                    "text": "one target and message are required",
                 }],
                 "is_error": True,
             }
         payload = {
             "sender_session_id": sender_session_id,
             "target_session_id": target_session_id,
+            "target_worker_id": target_worker_id,
+            "target_worker_pool": target_worker_pool,
             "message": message,
         }
         try:
             result = await asyncio.to_thread(_post_async_communicate_sync, payload)
         except Exception as e:
-            return _tool_error_response("async_communicate", e)
+            return _tool_error_response("async", e)
         return _tool_success_result(result)
 
-    return async_communicate
+    return async_
 
 
 def _build_delegate_task_tool(
@@ -1187,13 +1211,15 @@ def _build_ask_tool(
     @tool("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA)
     async def ask(args: dict[str, Any]) -> dict[str, Any]:
         target_session_id = str(args.get("target_session_id") or "").strip()
+        target_worker_id = str(args.get("target_worker_id") or "").strip()
+        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
-        if not target_session_id or not message:
+        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
                     "type": "text",
-                    "text": "target_session_id and message are required",
+                    "text": "one target and message are required",
                 }],
                 "is_error": True,
             }
@@ -1213,6 +1239,11 @@ def _build_ask_tool(
             }
 
         if run_mode == "fork":
+            if not target_session_id:
+                return {
+                    "content": [{"type": "text", "text": "run_mode='fork' requires target_session_id"}],
+                    "is_error": True,
+                }
             # Fork reuses the delegation engine (per-(caller, session) branch +
             # structured jsonl-offset outcome). ask is the model-facing name;
             # the fork execution path stays single-source in run_delegation.
@@ -1260,6 +1291,8 @@ def _build_ask_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "target_session_id": target_session_id,
+            "target_worker_id": target_worker_id,
+            "target_worker_pool": target_worker_pool,
             "message": message,
             "ask_id": ask_id,
         }
@@ -2108,8 +2141,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))
-        if "async_communicate" not in disabled_builtin_tools:
-            communicate_tools.append(_build_async_communicate_tool(
+        if "async" not in disabled_builtin_tools:
+            communicate_tools.append(_build_async_tool(
                 sender_session_id=str(mssg_sender_session_id),
                 backend_url=backend_url,
                 internal_token=internal_token,

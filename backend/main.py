@@ -8863,14 +8863,14 @@ async def internal_mssg(
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sender_session_id = str(body.get("sender_session_id") or "").strip()
-    target_session_id = str(body.get("target_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
-    if not sender_session_id or not target_session_id or not message:
+    if not sender_session_id or not message:
         raise HTTPException(
             status_code=400,
-            detail="sender_session_id, target_session_id and message are required",
+            detail="sender_session_id, one target, and message are required",
         )
     try:
+        target_session_id = _resolve_communication_target(body)
         return await coordinator.submit_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -8888,14 +8888,31 @@ async def internal_async_communicate(
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sender_session_id = str(body.get("sender_session_id") or "").strip()
-    target_session_id = str(body.get("target_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
-    if not sender_session_id or not target_session_id or not message:
+    if not sender_session_id or not message:
         raise HTTPException(
             status_code=400,
-            detail="sender_session_id, target_session_id and message are required",
+            detail="sender_session_id, one target, and message are required",
         )
     try:
+        target_worker_pool = str(body.get("target_worker_pool") or "").strip()
+        has_exact_target = (
+            str(body.get("target_session_id") or "").strip()
+            or str(body.get("target_worker_id") or "").strip()
+        )
+        if target_worker_pool and not has_exact_target:
+            target = _pick_idle_pool_worker(target_worker_pool)
+            if not target:
+                queued = await _enqueue_worker_pool_message(
+                    tag=target_worker_pool,
+                    sender_session_id=sender_session_id,
+                    prompt=message,
+                    expect_mssg_response=True,
+                )
+                return {"success": True, "queued": True, **queued}
+            target_session_id = str(target.get("agent_session_id") or "")
+        else:
+            target_session_id = _resolve_communication_target(body)
         return await coordinator.submit_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -8907,6 +8924,26 @@ async def internal_async_communicate(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _resolve_communication_target(body: dict) -> str:
+    target_session_id = str((body or {}).get("target_session_id") or "").strip()
+    target_worker_id = str((body or {}).get("target_worker_id") or "").strip()
+    target_worker_pool = str((body or {}).get("target_worker_pool") or "").strip()
+    targets = [value for value in (target_session_id, target_worker_id, target_worker_pool) if value]
+    if len(targets) != 1:
+        raise HTTPException(status_code=400, detail="exactly one target is required")
+    if target_session_id:
+        return target_session_id
+    if target_worker_id:
+        worker = _find_worker_by_agent_session_id(target_worker_id)
+        if not worker:
+            raise HTTPException(status_code=404, detail="target_worker_id does not exist")
+        return str(worker.get("agent_session_id") or "")
+    target = _pick_idle_pool_worker(target_worker_pool)
+    if not target:
+        raise HTTPException(status_code=409, detail="no idle worker in target_worker_pool")
+    return str(target.get("agent_session_id") or "")
+
+
 @app.post("/api/internal/ask")
 async def internal_ask(
     body: dict,
@@ -8915,14 +8952,14 @@ async def internal_ask(
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sender_session_id = str(body.get("sender_session_id") or "").strip()
-    target_session_id = str(body.get("target_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
-    if not sender_session_id or not target_session_id or not message:
+    if not sender_session_id or not message:
         raise HTTPException(
             status_code=400,
-            detail="sender_session_id, target_session_id and message are required",
+            detail="sender_session_id, one target, and message are required",
         )
     try:
+        target_session_id = _resolve_communication_target(body)
         return await coordinator.ask_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -10320,7 +10357,6 @@ async def internal_enqueue_worker_pool_prompt(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_team_orchestration_internal(x_internal_token)
-    from stores import worker_store as _ws
 
     tag = str((body or {}).get("tag") or "").strip()
     sender_session_id = str((body or {}).get("sender_session_id") or "").strip()
@@ -10329,17 +10365,36 @@ async def internal_enqueue_worker_pool_prompt(
         raise HTTPException(status_code=400, detail="tag, sender_session_id, and prompt are required")
     if not await _session_lite(sender_session_id):
         raise HTTPException(status_code=404, detail="sender_session_id does not exist")
+    queued = await _enqueue_worker_pool_message(
+        tag=tag,
+        sender_session_id=sender_session_id,
+        prompt=prompt,
+        expect_mssg_response=bool((body or {}).get("expect_mssg_response")),
+    )
+    return {"success": True, **queued}
+
+
+async def _enqueue_worker_pool_message(
+    *,
+    tag: str,
+    sender_session_id: str,
+    prompt: str,
+    expect_mssg_response: bool,
+) -> dict:
+    from stores import worker_store as _ws
+
     item = {
         "id": str(uuid.uuid4()),
         "tag": tag,
         "sender_session_id": sender_session_id,
         "prompt": prompt,
+        "expect_mssg_response": expect_mssg_response,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     queued = await asyncio.to_thread(_ws.enqueue_pool_task, tag, item)
     _ensure_worker_pool_processor(tag)
     await coordinator.broadcast_workers_changed(None)
-    return {"success": True, **queued}
+    return queued
 
 
 def _ensure_worker_pool_processor(tag: str) -> None:
@@ -10370,7 +10425,7 @@ async def _process_worker_pool_queue(tag: str) -> None:
             target_session_id=target["agent_session_id"],
             message=str(item.get("prompt") or ""),
             detach=True,
-            expect_mssg_response=True,
+            expect_mssg_response=bool(item.get("expect_mssg_response")),
         )
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)
@@ -10395,6 +10450,18 @@ def _pick_idle_pool_worker(tag: str) -> dict | None:
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: item.get("last_active") or "")[0]
+
+
+def _find_worker_by_agent_session_id(agent_session_id: str) -> dict | None:
+    from stores import worker_store as _ws
+
+    wanted = str(agent_session_id or "").strip()
+    if not wanted:
+        return None
+    for worker in _ws.list_workers(""):
+        if str(worker.get("agent_session_id") or "") == wanted:
+            return worker
+    return None
 
 
 async def _provision_workers_from_body(body: dict):

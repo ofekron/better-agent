@@ -114,7 +114,7 @@ def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
         for item in (inputs.get("disabled_builtin_tools") or [])
         if str(item or "").strip() in {
             "ask",
-            "async_communicate",
+            "async",
             "create_session",
             "create_sub_session",
             "delegate_task",

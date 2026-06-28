@@ -932,40 +932,66 @@ class Client:
         return self._post("/api/internal/headless-run", payload, timeout=(timeout or 60.0) + 30.0)
 
     def ask(
-        self, target_session_id: str, message: str, *, ask_id: str = "", timeout: float = _LONG_TIMEOUT
+        self,
+        target_session_id: str = "",
+        message: str = "",
+        *,
+        target_worker_id: str = "",
+        target_worker_pool: str = "",
+        ask_id: str = "",
+        timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
-        """Send a message to a session and block until its response turn completes."""
+        """Send a message to one session, worker, or worker pool and block."""
         return self._post(
             "/api/internal/ask",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": ask_id,
             },
             timeout=timeout,
         )
 
-    def mssg(self, target_session_id: str, message: str) -> dict[str, Any]:
-        """Send a fire-and-forget message to a session (target's completion
-        joins the sender's turn)."""
+    def mssg(
+        self,
+        target_session_id: str = "",
+        message: str = "",
+        *,
+        target_worker_id: str = "",
+        target_worker_pool: str = "",
+    ) -> dict[str, Any]:
+        """Send a joined message to one session, worker, or worker pool."""
         return self._post(
             "/api/internal/mssg",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
                 "message": message,
             },
             timeout=30.0,
         )
 
-    def async_communicate(self, target_session_id: str, message: str) -> dict[str, Any]:
-        """Send a detached message to a session that should report back with mssg."""
+    def async_(
+        self,
+        target_session_id: str = "",
+        message: str = "",
+        *,
+        target_worker_id: str = "",
+        target_worker_pool: str = "",
+    ) -> dict[str, Any]:
+        """Send a detached message to one session, worker, or worker pool."""
         return self._post(
             "/api/internal/async-communicate",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,
+                "target_worker_id": target_worker_id,
+                "target_worker_pool": target_worker_pool,
                 "message": message,
             },
             timeout=30.0,
