@@ -242,6 +242,11 @@ function HookGlyph({ icon, label, size }: { icon?: string; label: string; size: 
   return <span className="extension-hook-glyph">{label.slice(0, 1).toUpperCase()}</span>;
 }
 
+function quickButtonIconClass(icon?: string): string {
+  if (!isKnownIcon(icon)) return "";
+  return `extension-quick-button--icon-${icon}`;
+}
+
 interface QuickButtonProps {
   context: HookActionContext;
   className?: string;
@@ -281,7 +286,7 @@ export function ExtensionQuickButtons({ context, className = "", variant }: Quic
           <button
             key={`${qb.extension_id}:quick-button`}
             type="button"
-            className={`extension-quick-button extension-quick-button--${variant}`}
+            className={`extension-quick-button extension-quick-button--${variant} ${quickButtonIconClass(qb.icon)}`}
             title={qb.label}
             aria-label={qb.label}
             onClick={() => void runHookAction(qb.action, context)}
