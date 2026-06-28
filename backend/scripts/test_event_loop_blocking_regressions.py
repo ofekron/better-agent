@@ -146,6 +146,8 @@ def test_session_content_search_uses_readonly_connection_without_writer_lock() -
 
 def test_session_search_delete_is_queued_projection_work() -> None:
     source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    assert "_writer_conn" in source
+    assert "def _writer_connection()" in source
     delete_start = source.index("def delete_session(")
     delete_end = source.index("def search(", delete_start)
     delete_source = source[delete_start:delete_end]
@@ -157,6 +159,9 @@ def test_session_search_delete_is_queued_projection_work() -> None:
     apply_source = source[apply_start:apply_end]
     assert "_queue.put((session_id, None))" in delete_source
     assert "with _lock:" not in delete_source
+    assert "conn = _writer_connection()" in apply_source
+    assert "conn.close()" not in apply_source
+    assert "conn = _connect()" not in apply_source
     assert "DELETE FROM session_event_fts" in apply_source
 
 

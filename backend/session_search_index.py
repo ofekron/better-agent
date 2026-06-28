@@ -18,6 +18,8 @@ _rebuild_lock = threading.Lock()
 _queue: queue.Queue[tuple[str, str | None] | None] = queue.Queue()
 _worker_started = False
 _worker_lock = threading.Lock()
+_writer_conn: sqlite3.Connection | None = None
+_writer_conn_path: Path | None = None
 _search_cache_lock = threading.Lock()
 _search_cache: dict[tuple[str, int], tuple[int, float, list[tuple[str, int]]]] = {}
 _search_inflight: dict[tuple[str, int], threading.Event] = {}
@@ -43,6 +45,32 @@ def _connect() -> sqlite3.Connection:
         "USING fts5(session_id UNINDEXED, text, tokenize='trigram')"
     )
     return conn
+
+
+def _writer_connection() -> sqlite3.Connection:
+    global _writer_conn, _writer_conn_path
+    path = _db_path()
+    if _writer_conn is not None and _writer_conn_path == path:
+        return _writer_conn
+    if _writer_conn is not None:
+        try:
+            _writer_conn.close()
+        except sqlite3.Error:
+            pass
+    _writer_conn = _connect()
+    _writer_conn_path = path
+    return _writer_conn
+
+
+def _close_writer_connection_locked() -> None:
+    global _writer_conn, _writer_conn_path
+    if _writer_conn is None:
+        return
+    try:
+        _writer_conn.close()
+    finally:
+        _writer_conn = None
+        _writer_conn_path = None
 
 
 def _connect_readonly() -> sqlite3.Connection | None:
@@ -124,24 +152,21 @@ def _apply_rows(rows: list[tuple[str, str | None]]) -> None:
         return
     global _index_generation
     with _lock:
-        conn = _connect()
-        try:
-            for session_id, text in rows:
-                if text is None:
-                    conn.execute(
-                        "DELETE FROM session_event_fts WHERE session_id = ?",
-                        (session_id,),
-                    )
-                    continue
+        conn = _writer_connection()
+        for session_id, text in rows:
+            if text is None:
                 conn.execute(
-                    "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
-                    (session_id, text),
+                    "DELETE FROM session_event_fts WHERE session_id = ?",
+                    (session_id,),
                 )
-            conn.commit()
-            with _search_cache_lock:
-                _index_generation += 1
-        finally:
-            conn.close()
+                continue
+            conn.execute(
+                "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
+                (session_id, text),
+            )
+        conn.commit()
+        with _search_cache_lock:
+            _index_generation += 1
 
 
 def _drain_pending() -> None:
@@ -265,6 +290,7 @@ def rebuild_from_disk() -> None:
             for fpath in sessions_dir.glob("*/events.jsonl"):
                 rows.extend(_index_file_rows(fpath.parent.name, fpath))
         with _lock:
+            _close_writer_connection_locked()
             conn = _connect()
             try:
                 conn.execute("DELETE FROM session_event_fts")
