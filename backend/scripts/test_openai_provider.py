@@ -37,9 +37,11 @@ def test_dispatch_resolves_openai():
     cls = provider._resolve_class("openai")
     assert cls.__name__ == "OpenAIProvider", cls
     assert cls.KIND == "openai"
-    assert cls.supports_fork is False
-    assert cls.supports_manager_mode is False
+    assert cls.supports_fork is True
+    assert cls.supports_manager_mode is True
     assert cls.supports_rewind is True
+    assert cls.supports_steering is True
+    assert cls.supports_reasoning_effort is True
 
 
 def test_recovery_family_and_version():
@@ -47,6 +49,19 @@ def test_recovery_family_and_version():
     ingestion = _mod("ingestion_versions")
     assert "openai" in pm.gemini_family_kinds()
     assert ingestion.current_ingestion_version("openai") >= 1
+
+
+def test_openai_permission_options_and_default():
+    permission = _mod("permission")
+    assert permission.permission_axes_for_kind("openai") == {
+        "mode": ("default", "bypassPermissions"),
+    }
+    assert permission.default_permission_for_kind("openai") == {
+        "mode": "bypassPermissions",
+    }
+    assert permission.resolve_permission("openai", {"mode": "default"}, None) == {
+        "mode": "default",
+    }
 
 
 def test_frozen_dispatch_accepts_openai():
@@ -79,6 +94,28 @@ def test_event_emitter_shapes():
     assert tr and tr[-1]["message"]["content"][0]["tool_use_id"] == "call_1"
     # parent chain advances across logical blocks.
     assert lines[-1]["parentUuid"] is not None
+
+
+def test_bash_tool_scrubs_provider_and_internal_secrets():
+    runner = _mod("runner_openai")
+    old_env = os.environ.copy()
+    os.environ.update({
+        "OPENAI_API_KEY": "sk-secret",
+        "ANTHROPIC_API_KEY": "ak-secret",
+        "BETTER_CLAUDE_INTERNAL_TOKEN": "bc-secret",
+        "BETTER_AGENT_INTERNAL_TOKEN": "ba-secret",
+        "SAFE_VISIBLE_FOR_TEST": "ok",
+    })
+    try:
+        env = runner._tool_subprocess_env()
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
+    assert "BETTER_AGENT_INTERNAL_TOKEN" not in env
+    assert env.get("SAFE_VISIBLE_FOR_TEST") == "ok"
 
 
 def test_tools_path_confinement():

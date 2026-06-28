@@ -27,6 +27,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
+import httpx
+
 from provider import (
     Provider,
     StreamEvent,
@@ -35,6 +37,12 @@ from provider import (
     runner_argv,
 )
 from provider_run_config import normalize_provider_run_config
+from ingestion_versions import OPENAI_INGESTION_VERSION, marker_matches_current
+from reasoning_effort import (
+    ALL_REASONING_EFFORTS,
+    DEFAULT_REASONING_EFFORT,
+    normalize_reasoning_effort,
+)
 from proc_control import process_control as _process_control
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
@@ -46,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 _RUNNER_PATH = Path(__file__).parent / "runner_openai.py"
+_HEADLESS_TIMEOUT_S = 60.0
 _TAIL_POLL_INTERVAL = 0.05
 _RUNNER_EVENT_TYPES = {"agent_message", "worker_start", "worker_event", "worker_complete"}
 
@@ -56,6 +65,41 @@ def runner_event_to_stream_event(event: dict) -> StreamEvent:
     if event_type in _RUNNER_EVENT_TYPES and isinstance(event_data, dict):
         return StreamEvent(event_type, event_data)
     return StreamEvent("agent_message", event)
+
+
+async def _openai_headless_completion(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    timeout_s: float,
+) -> tuple[str, dict]:
+    """Small non-streaming Chat Completions call used by run_headless."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {"model": model, "messages": messages, "stream": False}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(connect=15.0, read=timeout_s, write=30.0, pool=15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+        body = resp.json()
+    choices = body.get("choices") or []
+    message = (choices[0].get("message") if choices and isinstance(choices[0], dict) else {}) or {}
+    content = message.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+        )
+    else:
+        text = str(content or "")
+    return text, body.get("usage") or {}
 
 
 # ============================================================================
@@ -97,21 +141,21 @@ class OpenAIProvider(Provider):
 
     KIND: ClassVar[str] = "openai"
 
-    # The openai runner owns the agent loop; there is no external CLI
-    # fork primitive. Fork-using features (fork-and-send, adversarial
-    # sync, prompt-engineer refine, rearranger, manager-mode delegate-
-    # fork) read this flag and disable themselves for openai sessions.
-    supports_fork: ClassVar[bool] = False
-    # Manager mode requires the in-process SDK MCP registration path
-    # (claude-only). If orchestration mode is wanted for openai later,
-    # manager mode must be implemented separately (out of scope for v1).
-    supports_manager_mode: ClassVar[bool] = False
-    # Simulated rewind: clear the stored provider session id so the NEXT
-    # turn starts a fresh Chat Completions history.
+    # The OpenAI runner owns the agent loop/history, so features that are
+    # awkward CLI-specific hacks elsewhere are implemented directly here:
+    # fork = copy BA-owned message history to a fresh agent session,
+    # manager mode = expose the same loopback orchestration tools, and
+    # steering = append an in-flight user steering message on the next round.
+    supports_fork: ClassVar[bool] = True
+    supports_manager_mode: ClassVar[bool] = True
     supports_rewind: ClassVar[bool] = True
     rewind_requires_agent_identity: ClassVar[bool] = False
-    # No mapping to OpenAI's reasoning_effort param yet.
-    supports_reasoning_effort: ClassVar[bool] = False
+    supports_steering: ClassVar[bool] = True
+    supports_native_subagents: ClassVar[bool] = True
+    supports_reasoning_effort: ClassVar[bool] = True
+    reasoning_effort_options: ClassVar[tuple[str, ...]] = ALL_REASONING_EFFORTS
+    default_reasoning_effort: ClassVar[str] = DEFAULT_REASONING_EFFORT
+    supports_headless_no_tools: ClassVar[bool] = True
 
     def __init__(self, record: dict) -> None:
         super().__init__(record)
@@ -193,9 +237,11 @@ class OpenAIProvider(Provider):
                 f"provider {self.id} is defunct; cannot start new runs"
             )
         if reasoning_effort:
-            raise NotImplementedError(
-                f"{self.KIND} provider does not support reasoning effort."
-            )
+            normalized_effort = normalize_reasoning_effort(reasoning_effort)
+            if normalized_effort is None:
+                allowed = ", ".join(self.reasoning_effort_options)
+                raise ValueError(f"reasoning_effort must be one of: {allowed}")
+            reasoning_effort = normalized_effort
 
         # OpenAI is a generic endpoint kind: the valid model set is defined by
         # the remote endpoint (varies per deployment), not by a BA-owned
@@ -208,11 +254,9 @@ class OpenAIProvider(Provider):
             raise NotImplementedError(
                 f"{self.KIND} provider does not support team mode."
             )
-        # `fork` is gated by the class-level capability
-        # `supports_fork=False`. Backend callers (session_manager.fork,
-        # adv_sync, prompt-engineer-refine, rearranger) should check
-        # the capability and skip; if one of them still passes
-        # fork=True we fail loudly here as the last line of defence.
+        # `fork` is gated by the class-level capability. OpenAI supports it by
+        # copying BA-owned history in runner_openai, but keep the defensive gate
+        # so per-record capability overrides can still disable it cleanly.
         if fork and not self.supports_fork:
             raise NotImplementedError(
                 f"{self.KIND} provider does not support fork."
@@ -245,6 +289,11 @@ class OpenAIProvider(Provider):
             "session_id": session_id,
             "mode": runner_mode,
             "app_session_id": app_session_id,
+            "active_capability_ids": [
+                str(cid)
+                for cid in (_sess_rec.get("active_capability_ids") or [])
+                if str(cid or "").strip()
+            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -538,6 +587,8 @@ class OpenAIProvider(Provider):
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "provider_id": self.id,
+            "provider_kind": self.KIND,
+            "ingestion_version": OPENAI_INGESTION_VERSION,
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)
@@ -552,6 +603,36 @@ class OpenAIProvider(Provider):
                 rs.tailer.stop()
             except Exception:
                 pass
+
+    def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
+        """Append a steering message for a live OpenAI turn.
+
+        Chat Completions has no mid-token native steering primitive, but because
+        BA owns the loop we can cleanly append the user's steer payload as the
+        next user message before the next model round. This works during
+        tool-heavy/long-running turns and avoids provider-CLI hacks.
+        """
+        rs = self._runs.get(run_id)
+        images = images or []
+        if rs is None or rs.popen.poll() is not None or (not prompt.strip() and not images):
+            return False
+        state_path = rs.run_dir / "state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not state.get("session_id"):
+            return False
+        inbox = rs.run_dir / "steer.jsonl"
+        try:
+            with inbox.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"prompt": prompt, "images": images}) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            return True
+        except OSError:
+            logger.exception("openai steer_run failed for %s", run_id)
+            return False
 
     # ------------------------------------------------------------------
     # recover_in_flight
@@ -581,7 +662,8 @@ class OpenAIProvider(Provider):
                 continue
             if run_id_filter is not None and child.name not in run_id_filter:
                 continue
-            if (child / "reconciled.marker").exists():
+            marker_path = child / "reconciled.marker"
+            if marker_path.exists() and marker_matches_current(marker_path, self.KIND):
                 continue
             complete_path = child / "complete.json"
             has_complete_json = complete_path.exists()
@@ -658,6 +740,8 @@ class OpenAIProvider(Provider):
                 "cancelled": bool(bs.get("cancelled", False)),
                 "mode": bs.get("mode") or rs_disk.get("mode") or "native",
                 "provider_id": bs.get("provider_id") or self.id,
+                "provider_kind": bs.get("provider_kind") or self.KIND,
+                "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
                 "recovered_as": "live_orphan" if live_orphan else "dead_orphan",
@@ -692,12 +776,7 @@ class OpenAIProvider(Provider):
         return removed
 
     # ------------------------------------------------------------------
-    # run_headless — BA-owned one-shot. Delegated to runner_openai.py
-    # for the long-lived path; this synchronous one-shot envelope is not
-    # exercised by any current caller for openai, so it returns None
-    # (mirroring the other providers' "unsupported headless" return).
-    # If a headless openai path is needed later, implement it as a
-    # direct Chat Completions call here (no subprocess).
+    # run_headless — direct one-shot Chat Completions call.
     # ------------------------------------------------------------------
     async def run_headless(
         self,
@@ -710,8 +789,61 @@ class OpenAIProvider(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
-        logger.warning("OpenAIProvider.run_headless: not implemented for openai")
-        return None
+        """Run one tool-less OpenAI completion and return a Claude-shaped
+        headless envelope.
+
+        `fork=True` copies BA-owned OpenAI history to a fresh sid before the
+        prompt is appended, preserving rearranger/composer guarantees that the
+        source session is not mutated. `no_tools` is accepted for parity — this
+        path never sends tools.
+        """
+        del cwd, no_tools
+        rec = self.record
+        base_url = str(rec.get("base_url") or "").strip()
+        api_key = str(rec.get("api_key") or "").strip()
+        model = str(rec.get("default_model") or "").strip()
+        if not base_url or not api_key or not model:
+            logger.error("OpenAIProvider.run_headless: base_url/api_key/default_model missing")
+            return None
+
+        try:
+            import runner_openai as _ro
+            parent_sid = resume_sid or session_id
+            if fork:
+                sid, messages = _ro._load_history_for_run(parent_sid, fork=True)
+            else:
+                sid, messages = _ro._load_history(session_id or resume_sid)
+            if session_id and not resume_sid and sid != session_id:
+                sid = session_id
+            if not messages or messages[0].get("role") != "system":
+                messages.insert(0, {"role": "system", "content": _ro._SYSTEM_PROMPT})
+            messages.append({"role": "user", "content": prompt})
+
+            text, usage = await _openai_headless_completion(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                timeout_s=timeout or _HEADLESS_TIMEOUT_S,
+            )
+            messages.append({"role": "assistant", "content": text})
+            _ro._save_history(sid, messages)
+            mapped_usage = {
+                "input_tokens": int((usage or {}).get("prompt_tokens") or 0),
+                "output_tokens": int((usage or {}).get("completion_tokens") or 0),
+                "cache_read_input_tokens": int(((usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+                "total_tokens": int((usage or {}).get("total_tokens") or 0),
+            }
+            return {
+                "result": text,
+                "session_id": sid,
+                "usage": mapped_usage,
+                "total_cost_usd": 0.0,
+                "is_error": False,
+            }
+        except Exception:
+            logger.exception("OpenAIProvider.run_headless failed")
+            return None
 
     # ------------------------------------------------------------------
     # Rate-limit parsing — unblocks the orchestrator's rate-limit retry

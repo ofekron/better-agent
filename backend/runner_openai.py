@@ -273,6 +273,36 @@ def _steer_prompt(raw: str) -> str:
     return f"User steering update for this in-flight turn:\n\n{raw}"
 
 
+def _drain_steer_messages(run_dir: Path, offset: int, messages: list[dict]) -> tuple[int, int]:
+    """Append newly-written steer.jsonl payloads to Chat Completions history.
+
+    provider_openai.steer_run appends one JSON object per user steer. Chat
+    Completions cannot interrupt an active response stream, but BA owns the
+    loop, so the next model round can include every steer that arrived since
+    the last drain. Returns (new_byte_offset, appended_count).
+    """
+    inbox = run_dir / "steer.jsonl"
+    if not inbox.exists():
+        return offset, 0
+    appended = 0
+    try:
+        with inbox.open("r", encoding="utf-8") as f:
+            f.seek(offset)
+            for raw in f:
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                prompt = _steer_prompt(str(payload.get("prompt") or ""))
+                images = payload.get("images") if isinstance(payload.get("images"), list) else []
+                messages.append({"role": "user", "content": _build_user_content(prompt, images)})
+                appended += 1
+            return f.tell(), appended
+    except OSError:
+        logger.exception("failed to drain openai steer inbox %s", inbox)
+        return offset, appended
+
+
 # --------------------------------------------------------------------------
 # event emission (Claude-shaped lines -> session_events.jsonl)
 # --------------------------------------------------------------------------
@@ -1407,11 +1437,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     loopback_handlers = _build_loopback_tool_handlers(inputs, cwd=str(cwd), model=model)
     resume_sid = inputs.get("session_id")
 
-    session_id, messages = _load_history(resume_sid)
+    prompt = _prepend_capability_context(prompt, inputs)
+    prompt = _prepend_file_attachments(prompt, inputs.get("files") or [])
+    session_id, messages = _load_history_for_run(resume_sid, fork=bool(inputs.get("fork")))
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
+    if prompt or inputs.get("images"):
+        messages.append({"role": "user", "content": _build_user_content(prompt, inputs.get("images") or [])})
 
     events_path = run_dir / "session_events.jsonl"
     emitter = EventEmitter(events_path)
@@ -1433,14 +1465,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         max_loops = int(inputs.get("max_tool_loops") or _MAX_TOOL_LOOPS)
     except (TypeError, ValueError):
         max_loops = _MAX_TOOL_LOOPS
+    reasoning_effort = inputs.get("reasoning_effort") or None
+    steer_offset = 0
 
     try:
         for _ in range(max_loops):
             if (run_dir / "cancel").exists():
                 error = "cancelled"
                 break
+            steer_offset, _ = _drain_steer_messages(run_dir, steer_offset, messages)
             finish_reason, tool_calls, asst_text, chunk_usage = await _one_round(
                 base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
+                reasoning_effort=reasoning_effort,
             )
             if (run_dir / "cancel").exists():
                 # `_one_round` breaks promptly on the cancel sentinel without
@@ -1471,6 +1507,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 messages.append(asst_msg)
 
             if not tool_calls or finish_reason == "stop":
+                # A steer can arrive while the final response is streaming.
+                # Chat Completions cannot alter already-emitted tokens, but if
+                # we catch the steer before process exit we can run one more
+                # model round with the steering prompt in context instead of
+                # silently dropping it.
+                steer_offset, steered = _drain_steer_messages(run_dir, steer_offset, messages)
+                if steered:
+                    continue
                 break
 
             # execute tools
@@ -1524,12 +1568,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
     emitter: EventEmitter, run_dir: Path, tool_schemas: list[dict] = TOOL_SCHEMAS,
+    reasoning_effort: Optional[str] = None,
 ) -> tuple[Optional[str], list[dict], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
     Returns (finish_reason, finalized_tool_calls, assistant_text, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for chunk in _stream_chat(base_url, api_key, model, messages, tool_schemas):
+    async for chunk in _stream_chat(
+        base_url, api_key, model, messages, tool_schemas,
+        reasoning_effort=reasoning_effort,
+    ):
         if (run_dir / "cancel").exists():
             break
         if chunk.get("usage"):
