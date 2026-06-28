@@ -663,6 +663,23 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
     return turns
 
 
+def _native_created_iso(sess: NativeSession) -> Optional[str]:
+    """The native conversation's creation time as a naive-local ISO string
+    matching the session-record convention, so analytics bucket imported
+    sessions under their REAL date, not the import time. Native timestamps
+    are UTC (ISO, often trailing 'Z'); convert to local. None when unknown."""
+    raw = (sess.created_at or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.isoformat()
+
+
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
     if sess.title:
         return sess.title[:80]
@@ -707,6 +724,9 @@ def _import_session_locked(sess: NativeSession) -> str:
         # The user explicitly triggered the import; they are aware of and
         # own the resulting session.
         user_initiated=True,
+        # Preserve the native conversation's date so usage analytics bucket it
+        # under when it actually happened, not the import moment.
+        created_at=_native_created_iso(sess),
     )
     root_id = created["id"]
 
@@ -1012,9 +1032,13 @@ def _run_import(
             else:
                 status.current = sess.registry_key
                 try:
-                    import_session(sess)
+                    rid = import_session(sess)
                     status.imported += 1
                     imported_keys.add(sess.registry_key)
+                    # Unpin the just-imported root so the resident cache stays
+                    # bounded — without this the loop would hold every imported
+                    # session in RAM and OOM on a large import.
+                    session_manager.trim_resident_roots(keep_rid=rid)
                 except Exception as exc:
                     status.failed += 1
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})

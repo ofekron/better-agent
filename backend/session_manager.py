@@ -1095,6 +1095,14 @@ class SessionManager:
 
     # ── LRU eviction ───────────────────────────────────────────────
 
+    def trim_resident_roots(self, *, keep_rid: str) -> None:
+        """Public hook for bulk producers (native import) to bound the
+        resident-root cache. `create` inserts without enforcing the cap and
+        nothing cold-loads during a tight import loop, so `_roots` would grow
+        to every imported session and OOM. Calling this after each import
+        LRU-evicts back to the cap, keeping import RAM O(1)."""
+        self._enforce_root_cap(keep_rid=keep_rid)
+
     def _enforce_root_cap(self, *, keep_rid: str) -> None:
         """LRU-evict resident root trees beyond `_roots_max`, oldest
         first, skipping `keep_rid` and any pinned root. Each victim is
@@ -2620,6 +2628,7 @@ class SessionManager:
         user_initiated: bool = False,
         capability_contexts: Optional[list[dict]] = None,
         id: Optional[str] = None,
+        created_at: Optional[str] = None,
     ) -> dict:
         # bare_config marks a TestApe-isolated session: empty system prompt
         # (no skills / CLAUDE.md / injected instructions) and orchestration_mode
@@ -2645,6 +2654,7 @@ class SessionManager:
             bare_config=bare_config,
             user_initiated=user_initiated,
             id=id,
+            created_at=created_at,
         )
         sess["capability_contexts"] = list(capability_contexts or [])
         self._ensure_project_for_session(sess)
@@ -2776,6 +2786,7 @@ class SessionManager:
         name: Optional[str] = None,
         *,
         kind: Optional[str] = None,
+        user_initiated: Optional[bool] = None,
     ) -> dict:
         """Fork `parent_sid` (root or embedded fork). The new fork is
         appended to the parent's `forks` array within the same root
@@ -2785,7 +2796,11 @@ class SessionManager:
         fork. Used by orchs.adv_sync to mark its forks as
         `"adv_sync_fork"` *before* the `forked` broadcast fires so the
         frontend's first view of the fork already carries the right
-        kind (avoids a post-create kind flip race)."""
+        kind (avoids a post-create kind flip race).
+
+        `user_initiated` overrides the inherited default for agent-driven
+        forks (e.g. session-bridge ask/run fork) that should remain
+        non-user-aware even when they branch from a user session."""
         rid = self._root_id_for(parent_sid)
         if rid is None:
             raise KeyError(parent_sid)
@@ -2832,6 +2847,8 @@ class SessionManager:
                 # fork the user did not ask for — never user-facing.
                 if kind != "user":
                     child["user_initiated"] = False
+            if user_initiated is not None:
+                child["user_initiated"] = bool(user_initiated)
             # The new fork node is now live inside cached_root; register
             # its id→root mapping, then persist the tree exactly once.
             # Synchronous (not debounced): fork durability is part of the
@@ -5330,11 +5347,7 @@ class SessionManager:
             model=x_snap.get("model") or config_store.default_session_model(),
             cwd=cwd,
             orchestration_mode="native",
-            source=(
-                x_snap.get("source")
-                if x_snap.get("source") in ("web", "cli", "import")
-                else "web"
-            ),
+            source=x_snap.get("source") or "web",
             provider_id=x_snap.get("provider_id"),
             reasoning_effort=x_snap.get("reasoning_effort"),
             browser_harness_enabled=bool(x_snap.get("browser_harness_enabled")),
