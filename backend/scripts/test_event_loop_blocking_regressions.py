@@ -329,10 +329,13 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_summary_sorted_cache_version" in source
     assert "_summary_sorted_cache" in source
+    assert "_summary_projected_cache_version" in source
+    assert "_summary_projected_cache" in source
     start = source.index("def list_sessions()")
     end = source.index("def iter_all_sessions()", start)
     list_source = source[start:end]
     assert "_summary_sorted_cache_version != _summary_index_version" in list_source
+    assert "_summary_projected_cache_version == _summary_index_version" in list_source
     assert "sorted(\n                _summary_index.values()" in list_source
     assert "requirement_tags.get(summary.get(\"id\", \"\"), [])" in list_source
 
