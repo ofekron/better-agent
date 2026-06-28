@@ -141,6 +141,61 @@ def test_board_provision_prompt_is_stateless() -> bool:
     return ok
 
 
+def test_ensure_singleton_refreshes_only_when_preamble_changes() -> bool:
+    """The singleton's capability_contexts carry the stateless board item set;
+    repeated ensures with the same set must not rewrite the cached prompt
+    context, while a changed set must refresh it."""
+    _ensure_ext_id()
+    state_path = assistant_ui._state_path()
+    state_path.unlink(missing_ok=True)
+
+    class FakeSessionManager:
+        def __init__(self):
+            self.sess = None
+            self.created = 0
+            self.sets: list[list[dict]] = []
+
+        def get(self, sid):
+            return self.sess if self.sess and self.sess.get("id") == sid else None
+
+        def create(self, **kwargs):
+            self.created += 1
+            self.sess = {"id": "assistant-1", "name": kwargs.get("name"), "cwd": kwargs.get("cwd")}
+            self.sess["capability_contexts"] = kwargs.get("capability_contexts")
+            return self.sess
+
+        def set_capability_contexts(self, sid, caps):
+            if sid != "assistant-1":
+                raise AssertionError(f"unexpected sid {sid}")
+            self.sets.append(caps)
+            self.sess["capability_contexts"] = caps
+
+    fake = FakeSessionManager()
+    original = assistant_ui.session_manager
+    assistant_ui.session_manager = fake  # type: ignore[assignment]
+    try:
+        assistant_ui.ensure_singleton("<board>item-a</board>")
+        assistant_ui.ensure_singleton("<board>item-a</board>")
+        assistant_ui.ensure_singleton("<board>item-b</board>")
+        assistant_ui.ensure_singleton(None)  # omitted preamble keeps item-b, no wipe/rewrite
+    finally:
+        assistant_ui.session_manager = original  # type: ignore[assignment]
+    ok = True
+    if fake.created != 1:
+        print(f"{FAIL} ensure_singleton created {fake.created} sessions (want 1)")
+        ok = False
+    if len(fake.sets) != 1:
+        print(f"{FAIL} ensure_singleton set contexts {len(fake.sets)} times (want 1)")
+        ok = False
+    state = assistant_ui._read_state()
+    if state.get("board_preamble") != "<board>item-b</board>":
+        print(f"{FAIL} ensure_singleton did not preserve latest board_preamble: {state!r}")
+        ok = False
+    if ok:
+        print(f"{PASS} ensure_singleton refreshes contexts only on preamble change")
+    return ok
+
+
 # ──────────────────────────────────────────────────────────────────────
 # _normalize_classifications
 # ──────────────────────────────────────────────────────────────────────
@@ -381,6 +436,7 @@ def main_run() -> int:
         test_parse_board_json_shapes,
         test_board_spec_shape,
         test_board_provision_prompt_is_stateless,
+        test_ensure_singleton_refreshes_only_when_preamble_changes,
         test_normalize_classifications,
         test_classify_builds_instruction_and_normalizes,
         test_classify_empty_batch_short_circuits,

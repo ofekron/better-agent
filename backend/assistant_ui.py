@@ -13,6 +13,7 @@ board-update classify/rank fork lives elsewhere (TBD); this is the routing tier.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -98,26 +99,52 @@ def _write_state(data: dict) -> None:
     tmp.replace(path)
 
 
-def ensure_singleton() -> dict:
+def _caps_hash(caps: list[dict]) -> str:
+    raw = json.dumps(caps, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def ensure_singleton(board_preamble: str | None = None) -> dict:
     """Find-or-create the persistent assistant native session and refresh its
     capability_contexts so prompt/preamble edits take effect idempotently.
+
+    `board_preamble` is the stateless item set (ids + descriptions + source
+    sessions; no status). When omitted, keep the last known preamble so a bare
+    ensure call never wipes the cached board context. Capability contexts are
+    written only when their content hash changes, keeping the cached prompt
+    prefix byte-stable while the item set is unchanged.
     Returns the live session record."""
     with _LOCK:
         eid = _ext_id()
         if not eid:
             raise RuntimeError("assistant extension id not loaded (private registry absent)")
-        sid = _read_state().get("session_id")
+        state = _read_state()
+        sid = state.get("session_id")
         sess = session_manager.get(sid) if sid else None
-        caps = build_capability_contexts()
+        if board_preamble is None:
+            board_preamble = str(state.get("board_preamble") or "")
+        else:
+            board_preamble = str(board_preamble or "")
+        caps = build_capability_contexts(board_preamble)
+        cap_hash = _caps_hash(caps)
+        next_state = {
+            **state,
+            "board_preamble": board_preamble,
+            "capability_contexts_hash": cap_hash,
+        }
         if sess is None:
             sess = session_manager.create(
                 name="Assistant",
                 orchestration_mode="native",
                 capability_contexts=caps,
             )
-            _write_state({"session_id": sess["id"]})
-        elif caps:
+            next_state["session_id"] = sess["id"]
+            _write_state(next_state)
+        elif caps and state.get("capability_contexts_hash") != cap_hash:
             session_manager.set_capability_contexts(sess["id"], caps)
+            _write_state(next_state)
+        elif next_state != state:
+            _write_state(next_state)
         return sess
 
 
