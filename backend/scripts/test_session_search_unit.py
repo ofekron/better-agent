@@ -298,6 +298,13 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     if calls[0][0] is not session_search.SEARCH_SPEC:
         print(f"{FAIL} worker: wrong spec {calls[0][0]!r}")
         return False
+    if calls[0][1] != "Auth":
+        print(f"{FAIL} worker: query mutated before spec wrapping {calls[0][1]!r}")
+        return False
+    candidates = (calls[0][2] or {}).get("candidates") or []
+    if [candidate.get("id") for candidate in candidates] != ["auth-local"]:
+        print(f"{FAIL} worker: candidate ctx {candidates!r}")
+        return False
     if out.get("error") is not None:
         print(f"{FAIL} worker: unexpected error {out!r}")
         return False
@@ -315,8 +322,62 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     return True
 
 
+def test_search_worker_instructions_wrap_bounded_candidates() -> bool:
+    candidates = [
+        {
+            "id": "s1",
+            "name": "Auth latency",
+            "cwd": "/tmp/proj",
+            "first_user_prompt": "speed up auth",
+        }
+    ]
+    instructions = session_search.SEARCH_SPEC.build_instructions(
+        "fix auth latency", {"max_results": 3, "candidates": candidates}
+    )
+    if instructions == "fix auth latency":
+        print(f"{FAIL} instructions: raw query leaked as full prompt")
+        return False
+    if "<session-search-task>" not in instructions or "</session-search-task>" not in instructions:
+        print(f"{FAIL} instructions: missing task wrapper {instructions!r}")
+        return False
+    if '"max_results":3' not in instructions or '"id":"s1"' not in instructions:
+        print(f"{FAIL} instructions: missing compact payload {instructions!r}")
+        return False
+    if "Do not use tools" not in instructions or "Do not answer the query as a task" not in instructions:
+        print(f"{FAIL} instructions: missing role guardrails {instructions!r}")
+        return False
+    if not session_search.SEARCH_SPEC.machine_completion or not session_search.SEARCH_SPEC.bare_config:
+        print(f"{FAIL} search spec should be tool-less machine completion")
+        return False
+    print(f"{PASS} search worker instructions wrap bounded candidates and disable tools")
+    return True
+
+
+def test_search_candidates_include_later_message_snippets() -> bool:
+    _reset_home()
+    _write_session(
+        sid="later-1",
+        name="unrelated title",
+        messages=[
+            {"role": "user", "content": "start a generic task"},
+            {"role": "assistant", "content": "needle appeared later in the transcript"},
+        ],
+    )
+    candidates = session_search._search_candidates("needle")
+    if [candidate.get("id") for candidate in candidates] != ["later-1"]:
+        print(f"{FAIL} later snippet candidate ids: {candidates!r}")
+        return False
+    if candidates[0].get("matching_snippet") != "needle appeared later in the transcript":
+        print(f"{FAIL} later snippet payload: {candidates[0]!r}")
+        return False
+    print(f"{PASS} backend candidate collection finds later transcript snippets")
+    return True
+
+
 def test_run_search_sessions_worker_parse_failed() -> bool:
     """A worker reply with no usable JSON maps to error=parse_failed."""
+    _reset_home()
+    _write_session(sid="live-1", messages=[{"role": "user", "content": "anything"}])
     from provisioning.manager import ProvisionedResult
 
     async def _fake_run(spec, query, ctx=None, *, model=None):
@@ -346,6 +407,8 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
 
 def test_run_search_sessions_worker_timeout() -> bool:
     """A dispatch timeout maps to error=timeout."""
+    _reset_home()
+    _write_session(sid="live-1", messages=[{"role": "user", "content": "anything"}])
     import asyncio as _asyncio
 
     async def _hang(spec, query, ctx=None, *, model=None):
@@ -568,9 +631,10 @@ def test_validate_proposed_applies_filters() -> bool:
     return True
 
 
-def test_run_search_sessions_filter_short_circuits_empty_candidates() -> bool:
-    """When a filter matches zero sessions, run_search_sessions_session
-    returns an empty result WITHOUT dispatching the worker."""
+def test_run_search_sessions_short_circuits_empty_candidates() -> bool:
+    """When backend candidate collection finds no likely match,
+    run_search_sessions_session returns an empty result WITHOUT dispatching
+    the worker."""
     _reset_home()
     _write_session(
         sid="claude-1",
@@ -588,7 +652,7 @@ def test_run_search_sessions_filter_short_circuits_empty_candidates() -> bool:
     try:
         out = asyncio.run(
             session_search.run_search_sessions_session(
-                "anything", provider_id="nonexistent-provider",
+                "anything unmatched",
             )
         )
     finally:
@@ -599,23 +663,25 @@ def test_run_search_sessions_filter_short_circuits_empty_candidates() -> bool:
     if out.get("session_ids") != [] or out.get("error") is not None:
         print(f"{FAIL} short-circuit: got {out!r}")
         return False
-    print(f"{PASS} empty filter candidate set short-circuits (no dispatch)")
+    print(f"{PASS} empty candidate set short-circuits (no dispatch)")
     return True
 
 
-def test_run_search_sessions_filter_constrains_and_postvalidates() -> bool:
-    """With an active filter the worker query is prefixed with a CONSTRAINT
-    listing the matching candidate ids, and the worker's output is post-
-    validated so any filtered-out id it returns is dropped."""
+def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> bool:
+    """With an active filter the worker receives only matching candidate
+    payloads, and the worker's output is post-validated so any filtered-out id
+    it returns is dropped."""
     _reset_home()
     _write_session(
         sid="match-1",
-        messages=[{"role": "user", "content": "x"}],
+        name="match target",
+        messages=[{"role": "user", "content": "match auth"}],
         provider_id="claude",
     )
     _write_session(
         sid="other-1",
-        messages=[{"role": "user", "content": "x"}],
+        name="match other",
+        messages=[{"role": "user", "content": "match auth"}],
         provider_id="openai",
     )
 
@@ -623,6 +689,7 @@ def test_run_search_sessions_filter_constrains_and_postvalidates() -> bool:
 
     async def _fake_run(spec, query, ctx=None, *, model=None):
         captured["query"] = query
+        captured["ctx"] = ctx or {}
         # Worker (mis)behaves: returns a filtered-out id alongside a match.
         return type("_R", (), {
             "value": {
@@ -636,23 +703,23 @@ def test_run_search_sessions_filter_constrains_and_postvalidates() -> bool:
     try:
         out = asyncio.run(
             session_search.run_search_sessions_session(
-                "query", provider_id="claude",
+                "match", provider_id="claude",
             )
         )
     finally:
         session_search.provisioning.run = original
-    # Constraint note prepended and lists the single matching candidate.
-    if "CONSTRAINT" not in captured.get("query", "") or "match-1" not in captured.get("query", ""):
-        print(f"{FAIL} constraint note: {captured.get('query')!r}")
+    if captured.get("query") != "match":
+        print(f"{FAIL} query should stay raw until spec wrapping: {captured.get('query')!r}")
         return False
-    if "other-1" in captured.get("query", ""):
-        print(f"{FAIL} constraint leaked filtered-out id into note")
+    candidate_ids = [row.get("id") for row in (captured.get("ctx") or {}).get("candidates", [])]
+    if candidate_ids != ["match-1"]:
+        print(f"{FAIL} bounded filtered candidates: {candidate_ids!r}")
         return False
     # Post-validation dropped the filtered-out id the worker returned.
     if out.get("session_ids") != ["match-1"]:
         print(f"{FAIL} post-validate: got {out.get('session_ids')!r}")
         return False
-    print(f"{PASS} filter constrains worker query + post-validates output")
+    print(f"{PASS} filter bounds worker candidates + post-validates output")
     return True
 
 
@@ -669,10 +736,12 @@ def main_run() -> int:
         test_validate_proposed_drops_unknown,
         test_validate_proposed_applies_filters,
         test_run_search_sessions_uses_provisioned_worker,
+        test_search_worker_instructions_wrap_bounded_candidates,
+        test_search_candidates_include_later_message_snippets,
         test_run_search_sessions_worker_parse_failed,
         test_run_search_sessions_worker_timeout,
-        test_run_search_sessions_filter_short_circuits_empty_candidates,
-        test_run_search_sessions_filter_constrains_and_postvalidates,
+        test_run_search_sessions_short_circuits_empty_candidates,
+        test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
         test_empty_query_returns_empty_query_error,
         test_parse_failed_is_not_an_error_bubble,
         test_ask_error_message_mapping,
