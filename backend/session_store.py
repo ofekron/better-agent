@@ -3781,6 +3781,7 @@ def grep_session_scores(
     fields: Iterable[str] | None = None,
     *,
     content_limit: int = 10_000,
+    content_max_wait_seconds: float | None = None,
 ) -> dict[str, int]:
     selected_fields = _normalize_search_fields(fields)
     if not selected_fields:
@@ -3790,7 +3791,11 @@ def grep_session_scores(
         import session_search_index
         scores.update({
             str(item.get("session_id")): int(item.get("score") or 0)
-            for item in session_search_index.search(query, limit=content_limit)
+            for item in session_search_index.search(
+                query,
+                limit=content_limit,
+                max_wait_seconds=content_max_wait_seconds,
+            )
             if item.get("session_id")
         })
     for sid, score in _metadata_search_scores(query, selected_fields).items():
