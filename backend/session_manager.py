@@ -3909,9 +3909,6 @@ class SessionManager:
             )
             snapshot = copy.deepcopy(sess)
         self._clear_view_markers(sid)
-        # A view-ack also retires the unseen-error attention dot, mirroring
-        # how it zeros unread. Separate fire so each concern has its event.
-        self.clear_unseen_error(sid)
         return snapshot
 
     def set_unseen_error(self, sid: str, text: str) -> None:
@@ -3919,7 +3916,11 @@ class SessionManager:
         error. Persisted on the session record as `unseen_error` so it
         survives a backend restart, and fired as `error_changed` so the
         sidebar renders the red error dot. Change-gated so repeat fires
-        with the same text don't spam the WS bus."""
+        with the same text don't spam the WS bus.
+
+        Lifecycle: the dot stays as long as the last turn errored, and is
+        retired ONLY when the session resumes work (a new turn starts — see
+        `turn_manager`). It is deliberately NOT tied to view/seen state."""
         rid = self._root_id_for(sid)
         if rid is None:
             return
@@ -3938,8 +3939,8 @@ class SessionManager:
             )
 
     def clear_unseen_error(self, sid: str) -> None:
-        """Retire the unseen-error dot (on view-ack or a subsequent
-        successful turn). No-op + no fire when nothing was set."""
+        """Retire the unseen-error dot. Called when the session resumes work
+        (a new turn starts). No-op + no fire when nothing was set."""
         rid = self._root_id_for(sid)
         if rid is None:
             return

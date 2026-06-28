@@ -5,9 +5,11 @@
 2. Change-gate: re-setting the same text does NOT fire again.
 3. `clear_unseen_error` flips back to False and fires
    `error_changed{has_error: False}`; clearing when already clear is a no-op.
-4. `mark_seen` (view-ack) retires the dot, mirroring how it zeroes unread.
+4. Lifecycle: the dot is retired ONLY when the session resumes work
+   (`clear_unseen_error`, called at turn-start). It is decoupled from
+   view/seen state — `mark_seen` must NOT clear it.
 5. Persistence: the `unseen_error` field survives a backend "restart"
-   (drop the manager singleton, re-import).
+   (drop the in-memory roots, re-hydrate from disk).
 
 Run with:
     cd backend && .venv/bin/python scripts/test_unseen_error.py
@@ -97,21 +99,42 @@ def test_clear_fires_and_unflags() -> None:
     print(f"{PASS} clear_fires_and_unflags")
 
 
-def test_mark_seen_clears_error() -> None:
+def test_mark_seen_does_not_clear_error() -> None:
+    """The error dot is decoupled from view/seen state. Acking the session
+    (mark_seen) must leave the dot in place — it retires only when the
+    session resumes work (turn-start → clear_unseen_error)."""
     sid = _mk_session()
     session_manager.set_unseen_error(sid, "fail")
     assert session_manager.has_unseen_error(sid) is True
 
     fires, listener = _capture_fires()
     session_manager.mark_seen(sid, None)
+    assert session_manager.has_unseen_error(sid) is True, (
+        "mark_seen must NOT retire the unseen-error dot"
+    )
+    err_fires = [f for f in fires if f.get("kind") == "error_changed"]
+    assert err_fires == [], f"mark_seen fired error_changed: {err_fires}"
+
+    session_manager._listeners.remove(listener)
+    print(f"{PASS} mark_seen_does_not_clear_error")
+
+
+def test_clear_retires_dot() -> None:
+    """The turn-start hook (clear_unseen_error) is what retires the dot."""
+    sid = _mk_session()
+    session_manager.set_unseen_error(sid, "fail")
+    assert session_manager.has_unseen_error(sid) is True
+
+    fires, listener = _capture_fires()
+    session_manager.clear_unseen_error(sid)
     assert session_manager.has_unseen_error(sid) is False, (
-        "mark_seen must retire the unseen-error dot"
+        "clear_unseen_error must retire the dot"
     )
     err_fires = [f for f in fires if f.get("kind") == "error_changed"]
     assert len(err_fires) == 1 and err_fires[0]["has_error"] is False, err_fires
 
     session_manager._listeners.remove(listener)
-    print(f"{PASS} mark_seen_clears_error")
+    print(f"{PASS} clear_retires_dot")
 
 
 def test_persistence_across_reload() -> None:
@@ -132,7 +155,8 @@ def main() -> int:
     try:
         test_set_fires_and_flags()
         test_clear_fires_and_unflags()
-        test_mark_seen_clears_error()
+        test_mark_seen_does_not_clear_error()
+        test_clear_retires_dot()
         test_persistence_across_reload()
         print("ALL PASSED")
         return 0
