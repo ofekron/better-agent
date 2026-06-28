@@ -238,6 +238,7 @@ def ensure_named_worker_response(
         "description": (description or "").strip() or f"worker:{name}",
         "orchestration_mode": mode,
         "node_id": node_id.strip() or None,
+        "tags": [name],
     }
     if (provision_prompt or "").strip():
         spec["provision_prompt"] = provision_prompt.strip()

@@ -10238,6 +10238,7 @@ def _pick_idle_pool_worker(tag: str) -> dict | None:
 
 async def _provision_workers_from_body(body: dict):
     import team_store
+    from stores import worker_store as _ws
 
     cwd = str((body or {}).get("cwd") or "").strip()
     specs = (body or {}).get("workers") or []
@@ -10264,6 +10265,26 @@ async def _provision_workers_from_body(body: dict):
                 existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
                 if existing:
                     existing_cwd = existing.get("cwd") or existing.get("registry_cwd") or worker_cwd
+                    requested_tags = spec.get("tags")
+                    if requested_tags is not None:
+                        existing_tags = _ws.normalize_tags(existing.get("tags"))
+                        merged_tags = _ws.normalize_tags([*existing_tags, *requested_tags])
+                        if merged_tags != existing_tags:
+                            existing = await asyncio.to_thread(
+                                _ws.upsert_worker,
+                                agent_session_id=existing["agent_session_id"],
+                                name=existing.get("name") or name,
+                                cwd=existing_cwd,
+                                orchestration_mode=(
+                                    existing.get("orchestration_mode")
+                                    or spec.get("orchestration_mode")
+                                    or "native"
+                                ),
+                                agent_sid=existing.get("agent_sid"),
+                                node_id=existing.get("node_id"),
+                                role_key=existing.get("role_key") or key,
+                                tags=merged_tags,
+                            )
                     result = {**existing, "created": False, "role_key": key, "registry_cwd": existing_cwd}
                     _register_provisioned_team_member(team_store, body, spec, result, key)
                     results.append(result)

@@ -1098,6 +1098,7 @@ class OrchestrationStrategy(ABC):
                 # for every streaming snapshot.
                 self._replace_event(app_session_id, msg_id, normalized, ev_uuid)
                 evs[existing_idx] = normalized
+                msg["_content_dirty"] = True
                 # uid_idx[ev_uuid] unchanged — same uuid, same index.
                 # Fall through to side-effect blocks + ingest tail.
             else:
@@ -1129,6 +1130,7 @@ class OrchestrationStrategy(ABC):
                 if ev_uuid not in uid_idx:
                     uid_idx[ev_uuid] = len(evs)
                     evs.append(normalized)
+                msg["_content_dirty"] = True
                 if source_is_provider_stream:
                     session_manager.bump_unread(app_session_id, msg_id)
 
