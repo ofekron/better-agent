@@ -170,12 +170,38 @@ def test_active_pidless_turn_survives_prune() -> None:
     print(f"{PASS} active_pidless_turn_survives_prune")
 
 
+def test_duplicate_worker_run_id_updates_existing_entry() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(
+        sid,
+        run_id="worker-same",
+        kind="worker",
+        target_message_id="msg-1",
+        delegation_id="del-1",
+    )
+    coord.run_state_add(
+        sid,
+        run_id="worker-same",
+        kind="worker",
+        target_message_id="msg-1",
+        delegation_id="del-1",
+        pid=os.getpid(),
+    )
+    runs = coord.get_run_state(sid)
+    assert len(runs) == 1, f"duplicate worker run_id must not append: {runs}"
+    assert runs[0].get("pid") == os.getpid(), f"pid not updated: {runs}"
+    coord.run_state_remove(sid, "worker-same")
+    print(f"{PASS} duplicate_worker_run_id_updates_existing_entry")
+
+
 def main() -> int:
     try:
         test_run_start_fires_running_true()
         test_multiple_runs_single_fire()
         test_worker_fork_does_not_set_running()
         test_active_pidless_turn_survives_prune()
+        test_duplicate_worker_run_id_updates_existing_entry()
         print("ALL PASSED")
         return 0
     except AssertionError as e:
