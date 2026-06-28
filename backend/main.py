@@ -1963,6 +1963,10 @@ def _local_sessions_for_sidebar() -> list[dict]:
 
 _project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
 _project_aggregates_gen = 0
+_session_org_facets_cache: dict[
+    tuple[str | None, int, tuple[int, int] | None],
+    dict[str, Any],
+] = {}
 
 
 def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
@@ -3640,6 +3644,11 @@ def _session_organization_snapshot_with_facets(project_id: str | None) -> dict:
     sessions regardless of the active filter, keeping the filter options
     stable instead of collapsing to whatever the current page contains.
     """
+    org_token = session_organization_store.version_token()
+    cache_key = (project_id, session_store.summary_version(), org_token)
+    cached = _session_org_facets_cache.get(cache_key)
+    if cached is not None:
+        return cached
     snapshot = session_organization_store.snapshot(project_id)
     models: set[str] = set()
     for session in _local_session_summaries_for_sidebar():
@@ -3649,6 +3658,9 @@ def _session_organization_snapshot_with_facets(project_id: str | None) -> dict:
         if model:
             models.add(model)
     snapshot["models"] = sorted(models)
+    if len(_session_org_facets_cache) >= 16:
+        _session_org_facets_cache.pop(next(iter(_session_org_facets_cache)))
+    _session_org_facets_cache[cache_key] = snapshot
     return snapshot
 
 

@@ -307,6 +307,18 @@ def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
     assert "_load()" not in enrich_source
 
 
+def test_session_organization_facets_are_version_cached() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_session_org_facets_cache" in source
+    start = source.index("def _session_organization_snapshot_with_facets(")
+    end = source.index("@app.get(\"/api/session-organization\")", start)
+    facets_source = source[start:end]
+    assert "session_organization_store.version_token()" in facets_source
+    assert "session_store.summary_version()" in facets_source
+    assert "_session_org_facets_cache.get(cache_key)" in facets_source
+    assert "_local_session_summaries_for_sidebar()" in facets_source
+
+
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     start = main_source.index("def _decorate_local_sidebar_sessions(")
