@@ -1089,7 +1089,7 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
     ])
 
     strategy = get_strategy("native")
-    _apply(strategy, sid, msg, {
+    done_event = {
         "type": "agent_message",
         "data": {
             "uuid": "all_done_msg",
@@ -1104,7 +1104,21 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
                 ],
             },
         },
-    }, source_is_provider_stream=True)
+    }
+
+    import session_local_projection
+    projected = session_local_projection.project_event_fields(
+        done_event,
+        current_todos=[
+            {"content": "Cold-load stale", "status": "in_progress", "activeForm": None},
+        ],
+        current_tasks=[],
+    )
+    if [item.get("status") for item in projected.get("current_todos") or []] != ["completed"]:
+        print(f"  cold-load projection did not complete todos: {projected}")
+        return False
+
+    _apply(strategy, sid, msg, done_event, source_is_provider_stream=True)
 
     got = session_manager.get(sid).get("current_todos") or []
     if [item.get("status") for item in got] != ["completed", "completed"]:
