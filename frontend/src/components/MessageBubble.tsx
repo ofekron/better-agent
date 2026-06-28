@@ -764,13 +764,26 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const providerId = typeof data.provider_id === "string" ? data.provider_id : "";
   const previousModel = typeof data.previous_model === "string" ? data.previous_model : "";
   const previousProviderId = typeof data.previous_provider_id === "string" ? data.previous_provider_id : "";
-  if (!model && !providerId) return null;
+  const reasoningEffort = typeof data.reasoning_effort === "string" ? data.reasoning_effort : "";
+  const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
+  const changed = Array.isArray(data.changed) ? data.changed : [];
+  const hasModelChange = changed.includes("model") || changed.includes("provider_id");
+  const hasReasoningChange = changed.includes("reasoning_effort");
+  if (!model && !providerId && !reasoningEffort) return null;
   const from = [previousProviderId, previousModel].filter(Boolean).join(" / ");
   const to = [providerId, model].filter(Boolean).join(" / ");
+  const reasoning = previousReasoningEffort && reasoningEffort
+    ? `${previousReasoningEffort} to ${reasoningEffort}`
+    : reasoningEffort;
+  const label = hasModelChange || !hasReasoningChange ? "Model switched" : "Reasoning changed";
   return (
     <div className="event-model-switched">
-      <span>Model switched</span>
-      {from && to ? <span>{from} to {to}</span> : <span>{to}</span>}
+      <span>{label}</span>
+      {hasModelChange || !hasReasoningChange ? (
+        <span>{from && to ? `${from} to ${to}` : to}</span>
+      ) : (
+        <span>{reasoning}</span>
+      )}
     </div>
   );
 }

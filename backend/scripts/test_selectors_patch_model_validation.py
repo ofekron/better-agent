@@ -80,22 +80,22 @@ def main_test() -> int:
     rec = session_manager.get(sid) or {}
     assert rec["model"] == "model-b", rec.get("model")
     assert rec["provider_id"] == b_id, rec.get("provider_id")
-    assistant = next(m for m in rec["messages"] if m["id"] == "assistant-model-switch")
-    switch_events = [e for e in assistant["events"] if e.get("type") == "model_switched"]
-    assert len(switch_events) == 1, switch_events
-    assert switch_events[0]["data"]["previous_model"] == "model-a"
-    assert switch_events[0]["data"]["model"] == "model-b"
     rows = event_ingester.read_ws_events(sid, sid_filter=sid, msg_id_filter="assistant-model-switch")
     journal_switches = [e for e in rows if e.get("type") == "model_switched"]
     assert len(journal_switches) == 1, rows
+    assert journal_switches[0]["data"]["previous_model"] == "model-a"
     assert journal_switches[0]["data"]["model"] == "model-b"
 
     # 3) Same-provider model write still works.
     r = _patch(client, sid, {"model": "model-b"})
     assert r.status_code == 200, r.text
-    rec = session_manager.get(sid) or {}
-    assistant = next(m for m in rec["messages"] if m["id"] == "assistant-model-switch")
-    assert len([e for e in assistant["events"] if e.get("type") == "model_switched"]) == 1
+    rows = event_ingester.read_ws_events(sid, sid_filter=sid, msg_id_filter="assistant-model-switch")
+    assert len([e for e in rows if e.get("type") == "model_switched"]) == 1
+
+    r = _patch(client, sid, {"reasoning_effort": "high"})
+    assert r.status_code == 200, r.text
+    rows = event_ingester.read_ws_events(sid, sid_filter=sid, msg_id_filter="assistant-model-switch")
+    assert len([e for e in rows if e.get("type") == "model_switched"]) == 1
 
     # 4) Fail-closed: when the session record yields no provider_id (and the
     #    body carries none), validation must NOT fall through to the default

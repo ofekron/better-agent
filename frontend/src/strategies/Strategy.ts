@@ -52,6 +52,7 @@ export class Strategy implements OrchestrationStrategy {
     if (
       etype === "agent_message" ||
       etype === "manager_event" ||
+      etype === "model_switched" ||
       etype === "steer_prompt"
     ) {
       // agent_message / steer_prompt: canonical render payloads.

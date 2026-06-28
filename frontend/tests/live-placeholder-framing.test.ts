@@ -59,6 +59,31 @@ describe("applyLiveEventToMessages — phantom 'No output' placeholder guard", (
     expect(next[0].events?.length).toBe(1);
   });
 
+  it("DOES append live model switch events to the active assistant", () => {
+    const streaming = makeAssistantMsg({ id: "real-model", isStreaming: true, events: [] });
+    const event: WSEvent = {
+      type: "model_switched",
+      data: {
+        uuid: "model-switch-live",
+        msg_id: "real-model",
+        previous_provider_id: "claude",
+        previous_model: "sonnet",
+        provider_id: "codex",
+        model: "gpt-5-codex",
+        changed: ["provider_id", "model"],
+      },
+    };
+    const next = applyLiveEventToMessages(
+      [streaming],
+      event,
+      "real-model",
+      "native",
+      "live-model",
+    );
+    expect(next).toHaveLength(1);
+    expect(next[0].events).toEqual([event]);
+  });
+
   it("DOES spawn a placeholder for a worker_start first-frame (worker panel, no events/content)", () => {
     const workerStart: WSEvent = {
       type: "worker_start",

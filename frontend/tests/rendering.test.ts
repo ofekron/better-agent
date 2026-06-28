@@ -256,6 +256,7 @@ describe("message rendering", () => {
             previous_model: "sonnet",
             provider_id: "codex",
             model: "gpt-5-codex",
+            changed: ["provider_id", "model"],
           },
         },
       ],
