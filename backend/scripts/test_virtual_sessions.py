@@ -295,6 +295,35 @@ def test_list_all_cache_isolated_and_invalidated() -> bool:
     return True
 
 
+def test_list_all_summary_cache_skips_full_payload_copy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:summary-hot-path"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Summary hot path",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before cache test")
+        return False
+    original = virtual_session_store.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and isinstance(value.get("sessions"), dict):
+            raise AssertionError("list_all copied full virtual session store")
+        return original(value)
+
+    virtual_session_store.deepcopy = guarded_deepcopy
+    try:
+        cached = virtual_session_store.list_all()
+    finally:
+        virtual_session_store.deepcopy = original
+    return any(session.get("id") == sid for session in cached)
+
+
 def test_sdk_namespaces_short_virtual_ids_for_all_methods() -> bool:
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     client = SdkClient(extension_id=ext, internal_token="token")
@@ -384,6 +413,7 @@ TESTS = [
     ("metadata size is bounded", test_metadata_size_is_bounded),
     ("concurrent appends are not lost", test_concurrent_appends_are_not_lost),
     ("list_all cache is isolated + invalidated", test_list_all_cache_isolated_and_invalidated),
+    ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
     ("SDK namespaces short virtual ids for all methods", test_sdk_namespaces_short_virtual_ids_for_all_methods),
     ("internal API rejects extension without session_state", test_internal_api_rejects_extension_without_session_state),
     ("synthetic injection queues normal turn", test_synthetic_injection_queues_normal_turn),
