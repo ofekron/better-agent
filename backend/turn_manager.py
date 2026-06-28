@@ -1166,6 +1166,16 @@ class TurnManager:
                 manager_session_id=session.get(session_id_field),
             )
 
+            # The session is resuming work, so the prior turn (even if it
+            # errored) is no longer the "last" turn. Retire the error dot
+            # up-front; if THIS turn errors it gets re-set below. Deliberately
+            # NOT tied to view/seen state — the dot reflects "did the most
+            # recent turn error?", nothing else.
+            try:
+                session_manager.clear_unseen_error(app_session_id)
+            except Exception:
+                logger.debug("clear_unseen_error at turn start failed", exc_info=True)
+
             current_sid = session.get(session_id_field)
             forked_from_field = (
                 "forked_from_supervisor_agent_sid"
@@ -1300,13 +1310,6 @@ class TurnManager:
             # initiated is still running. Await those target turns before
             # emitting turn_complete (no-op when the sender fired none).
             await self._c.await_outstanding_mssg(app_session_id)
-
-            if primary_result.get("success"):
-                # A successful turn retires any prior unseen-error dot.
-                try:
-                    session_manager.clear_unseen_error(app_session_id)
-                except Exception:
-                    logger.debug("clear_unseen_error failed", exc_info=True)
 
             await ws_callback({"type": "turn_complete", "data": {
                 "app_session_id": persist_to,
