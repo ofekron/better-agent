@@ -9585,6 +9585,18 @@ async def internal_provision_workers(
     return await _provision_workers_from_body(body or {})
 
 
+# Serializes find-then-create per (name, cwd) so two concurrent provisions
+# of the same singleton worker can't both pass the find-None check and
+# create duplicates. Single uvicorn worker (assumed everywhere else too)
+# means asyncio.Lock is sufficient — the event loop can't context-switch
+# inside the synchronous setdefault that creates a new lock.
+_PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _provision_lock(name: str, cwd: str) -> asyncio.Lock:
+    return _PROVISION_LOCKS.setdefault(f"{name}\0{cwd}", asyncio.Lock())
+
+
 async def _provision_workers_from_body(body: dict):
     import team_store
 
@@ -9607,36 +9619,37 @@ async def _provision_workers_from_body(body: dict):
         if not worker_cwd:
             raise HTTPException(status_code=400, detail=t("error.cwd_required"))
         name = f"worker:{key}"
-        existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
-        if existing:
-            existing_cwd = existing.get("cwd") or existing.get("registry_cwd") or worker_cwd
-            result = {**existing, "created": False, "role_key": key, "registry_cwd": existing_cwd}
+        async with _provision_lock(name, worker_cwd):
+            existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
+            if existing:
+                existing_cwd = existing.get("cwd") or existing.get("registry_cwd") or worker_cwd
+                result = {**existing, "created": False, "role_key": key, "registry_cwd": existing_cwd}
+                _register_provisioned_team_member(team_store, body, spec, result, key)
+                results.append(result)
+                continue
+            create_body = {
+                "cwd": worker_cwd,
+                "name": name,
+                "description": spec.get("description") or name,
+                "orchestration_mode": spec.get("orchestration_mode") or "native",
+                "model": spec.get("model"),
+                "provider_id": spec.get("provider_id"),
+                "reasoning_effort": spec.get("reasoning_effort"),
+                "node_id": spec.get("node_id"),
+                "bare_config": bool(spec.get("bare_config", body_bare)),
+                "provision_prompt": spec.get("provision_prompt"),
+                "capability_contexts": spec.get("capability_contexts"),
+            }
+            if create_body["bare_config"]:
+                created = await asyncio.to_thread(
+                    _create_pending_worker_from_body,
+                    create_body,
+                )
+            else:
+                created = await _create_worker_from_body(create_body)
+            result = {**created, "created": True, "role_key": key, "registry_cwd": created.get("cwd") or worker_cwd}
             _register_provisioned_team_member(team_store, body, spec, result, key)
             results.append(result)
-            continue
-        create_body = {
-            "cwd": worker_cwd,
-            "name": name,
-            "description": spec.get("description") or name,
-            "orchestration_mode": spec.get("orchestration_mode") or "native",
-            "model": spec.get("model"),
-            "provider_id": spec.get("provider_id"),
-            "reasoning_effort": spec.get("reasoning_effort"),
-            "node_id": spec.get("node_id"),
-            "bare_config": bool(spec.get("bare_config", body_bare)),
-            "provision_prompt": spec.get("provision_prompt"),
-            "capability_contexts": spec.get("capability_contexts"),
-        }
-        if create_body["bare_config"]:
-            created = await asyncio.to_thread(
-                _create_pending_worker_from_body,
-                create_body,
-            )
-        else:
-            created = await _create_worker_from_body(create_body)
-        result = {**created, "created": True, "role_key": key, "registry_cwd": created.get("cwd") or worker_cwd}
-        _register_provisioned_team_member(team_store, body, spec, result, key)
-        results.append(result)
     return {"workers": results}
 
 
