@@ -70,12 +70,14 @@ def _write_record_locked(record: dict[str, Any]) -> None:
         raise
 
 
-def _user_message_keys(messages: Iterable[Any]) -> dict[str, list[str]]:
+def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
     client_ids: list[str] = []
     lifecycle_ids: list[str] = []
+    user_messages: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
+        user_messages.append(copy.deepcopy(msg))
         client_id = msg.get("client_id")
         if isinstance(client_id, str) and client_id:
             client_ids.append(client_id)
@@ -83,17 +85,10 @@ def _user_message_keys(messages: Iterable[Any]) -> dict[str, list[str]]:
         if isinstance(lifecycle_id, str) and lifecycle_id:
             lifecycle_ids.append(lifecycle_id)
     return {
+        "user_messages": user_messages,
         "user_client_ids": client_ids,
         "user_lifecycle_msg_ids": lifecycle_ids,
     }
-
-
-def _user_messages(messages: Iterable[Any]) -> list[dict[str, Any]]:
-    return [
-        copy.deepcopy(msg)
-        for msg in messages
-        if isinstance(msg, dict) and msg.get("role") == "user"
-    ]
 
 
 def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -105,13 +100,13 @@ def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
         for prompt in (session.get("queued_prompts") or [])
         if isinstance(prompt, dict)
     ]
+    user_projection = _user_message_projection(session.get("messages") or [])
     return {
         "id": sid,
         "model": session.get("model"),
         "cwd": session.get("cwd"),
         "queued_prompts": queued,
-        "user_messages": _user_messages(session.get("messages") or []),
-        **_user_message_keys(session.get("messages") or []),
+        **user_projection,
     }
 
 
