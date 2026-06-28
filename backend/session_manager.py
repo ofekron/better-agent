@@ -2068,44 +2068,42 @@ class SessionManager:
             node_sid = node_src.get("id")
             if node_sid:
                 attached += 1
-                node = session_store._find_in_tree(root, node_sid)
-                if node is not None:
-                    snapshot = self._get_cached_snapshot(
-                        node_sid, rid, node,
-                    )
-                    if snapshot is not None:
-                        all_msgs = snapshot["messages"]
-                        total = len(all_msgs)
-                        if exchange_count is not None:
-                            window = self._exchange_window(
-                                all_msgs, exchange_count, None,
-                            )
-                        else:
-                            window = all_msgs[-msg_limit:]
-                        oldest_seq = None
-                        if window:
-                            seqs = [
-                                m.get("seq") for m in window
-                                if m.get("seq") is not None
-                            ]
-                            if seqs:
-                                oldest_seq = min(seqs)
-                        has_older = False
-                        if oldest_seq is not None:
-                            has_older = any(
-                                (m.get("seq") or 0) < oldest_seq
-                                for m in all_msgs
-                            )
-                        node_dst["messages"] = window
-                        node_dst["pagination"] = {
-                            "total_messages": total,
-                            "oldest_loaded_seq": oldest_seq,
-                            "has_older": has_older,
-                        }
-                        node_dst["next_seq"] = snapshot["next_seq"]
-                    root_events = root_events_by_sid.get(node_sid) or []
-                    if root_events:
-                        node_dst["root_events"] = root_events
+                snapshot = self._get_cached_snapshot(
+                    node_sid, rid, node_src,
+                )
+                if snapshot is not None:
+                    all_msgs = snapshot["messages"]
+                    total = len(all_msgs)
+                    if exchange_count is not None:
+                        window = self._exchange_window(
+                            all_msgs, exchange_count, None,
+                        )
+                    else:
+                        window = all_msgs[-msg_limit:]
+                    oldest_seq = None
+                    if window:
+                        seqs = [
+                            m.get("seq") for m in window
+                            if m.get("seq") is not None
+                        ]
+                        if seqs:
+                            oldest_seq = min(seqs)
+                    has_older = False
+                    if oldest_seq is not None:
+                        has_older = any(
+                            (m.get("seq") or 0) < oldest_seq
+                            for m in all_msgs
+                        )
+                    node_dst["messages"] = window
+                    node_dst["pagination"] = {
+                        "total_messages": total,
+                        "oldest_loaded_seq": oldest_seq,
+                        "has_older": has_older,
+                    }
+                    node_dst["next_seq"] = snapshot["next_seq"]
+                root_events = root_events_by_sid.get(node_sid) or []
+                if root_events:
+                    node_dst["root_events"] = root_events
             for f_src, f_dst in zip(
                 node_src.get("forks") or [],
                 node_dst.get("forks") or [],
