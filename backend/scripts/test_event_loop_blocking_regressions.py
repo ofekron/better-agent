@@ -547,12 +547,15 @@ def test_sidebar_summary_omits_worker_refs() -> None:
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshots_if_any()" in source
+    assert "def _summary_has_projection(" in source
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
     assert "projection_snapshots = _projection_snapshots_if_any()" in build_source
     assert "summary_projection_present = False" in build_source
+    assert "if _summary_has_projection(summary):" in build_source
     assert "if projection_snapshots is not None or summary_projection_present:" in build_source
+    assert "summary_items = list(_summary_index.items())" in build_source
 
 
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
