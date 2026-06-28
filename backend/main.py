@@ -8987,10 +8987,14 @@ async def internal_coordination_lock_ops(
     _require_builtin_runtime_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    raw_keys = body.get("keys")
+    keys = raw_keys if isinstance(raw_keys, list) else None
     return await coordination.lock_ops(
         key=str(body.get("key") or ""),
+        keys=keys,
         release=bool(body.get("release") or False),
         holder_token=str(body.get("holder_token") or ""),
+        timeout_seconds=body.get("timeout_seconds"),
     )
 
 
