@@ -519,6 +519,22 @@ class TurnManager:
             if not self._run_state[app_session_id]:
                 self._run_state.pop(app_session_id, None)
         now = datetime.now().isoformat()
+        for entry in self._run_state.get(app_session_id) or []:
+            if entry.get("run_id") != run_id:
+                continue
+            entry.update({
+                "kind": kind,
+                "target_message_id": target_message_id,
+                "delegation_id": delegation_id,
+                "pid": pid,
+                "last_event_at": now,
+            })
+            self._maybe_flip_streaming(
+                app_session_id, target_message_id, True, kind,
+            )
+            session_manager.recompute_state(app_session_id)
+            self._dbg_runstate(app_session_id, f"add_existing:{run_id[:8]}:{kind}")
+            return entry
         entry = {
             "run_id": run_id,
             "kind": kind,
