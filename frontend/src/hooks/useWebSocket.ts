@@ -830,6 +830,7 @@ export function useWebSocket(
         } else if (
           event.type === "agent_message" ||
           event.type === "manager_event" ||
+          event.type === "model_switched" ||
           event.type === "steer_prompt" ||
           event.type === "worker_event" ||
           event.type === "turn_start" ||

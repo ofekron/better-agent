@@ -4662,8 +4662,14 @@ button.run-badge-clickable:focus-visible {
 }
 
 .event-model-switched span:first-child {
+  flex-shrink: 0;
   color: var(--text-secondary);
   font-weight: 600;
+}
+
+.event-model-switched span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .todos-snapshot {

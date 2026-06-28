@@ -118,7 +118,7 @@ def _record_model_switched_event(
     after: dict,
     updates: dict,
 ) -> None:
-    keys = ("model", "provider_id", "reasoning_effort")
+    keys = ("model", "provider_id")
     changed = [
         key for key in keys
         if key in updates and before.get(key) != after.get(key)
@@ -143,8 +143,6 @@ def _record_model_switched_event(
         "app_session_id": session_id,
         "msg_id": msg_id,
     }
-    event = {"type": "model_switched", "data": data}
-    session_manager.append_native_event(session_id, msg_id, event)
     from event_journal import publish_event_sync
     publish_event_sync(
         session_id=root_id,
