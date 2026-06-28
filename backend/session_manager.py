@@ -1977,6 +1977,7 @@ class SessionManager:
         from event_ingester import event_ingester
 
         node_keys = []
+        render_seq_by_sid = event_ingester.render_seq_by_sid(rid)
 
         def _visit(node: dict) -> None:
             node_sid = str(node.get("id") or "")
@@ -2008,7 +2009,7 @@ class SessionManager:
                     ),
                     bool(node.get("is_running")),
                     bool(node.get("right_panel_open")),
-                    int(event_ingester.render_seq_for_sid(rid, node_sid)),
+                    int(render_seq_by_sid.get(node_sid, 0)),
                     int(self._reconcile_gen.get(rid, 0)),
                     tuple(event_shape),
                 ))
