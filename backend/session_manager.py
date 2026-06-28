@@ -4085,9 +4085,9 @@ class SessionManager:
                     "unread_count": 0,
                 },
             )
-            snapshot = copy.deepcopy(sess)
+            result = {"last_seen_event_uid": resolved}
         self._clear_view_markers(sid)
-        return snapshot
+        return result
 
     def set_unseen_error(self, sid: str, text: str) -> None:
         """Mark this session's last turn as having ended in an unrecoverable
