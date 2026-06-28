@@ -24,15 +24,31 @@ export function SessionStatusBadge({
   showUnreadCount?: boolean;
 }) {
   const { t } = useTranslation();
-  const { is_running, unread_count, markers, testape_active } = useSessionMeta(sid);
+  const { is_running, unread_count, markers, testape_active, monitoring_state } =
+    useSessionMeta(sid);
   const debouncedRunning = useDebouncedFlag(is_running, 100);
   const markerEntries = Object.entries(markers);
+  const awaitingApproval = monitoring_state === "blocked_on_user";
 
-  if (!debouncedRunning && unread_count === 0 && markerEntries.length === 0 && !testape_active)
+  if (
+    !awaitingApproval &&
+    !debouncedRunning &&
+    unread_count === 0 &&
+    markerEntries.length === 0 &&
+    !testape_active
+  )
     return null;
 
   return (
     <>
+      {awaitingApproval && (
+        <span
+          className="session-status-approval"
+          title={t("session.awaitingApproval")}
+          data-testid="session-approval-pulse"
+          data-session-id={sid}
+        />
+      )}
       {testape_active && (
         <span
           className="session-status-testape"

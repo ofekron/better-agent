@@ -466,6 +466,7 @@
   "session.createTag": "צור \"{{name}}\"",
   "session.noMatch": "אין סשנים תואמים",
   "session.running": "פועל",
+  "session.awaitingApproval": "ממתין לאישור",
   "session.unread_1": "אירוע חדש אחד",
   "session.unread_other": "{{count}} אירועים חדשים",
   "projects.header": "פרויקטים",

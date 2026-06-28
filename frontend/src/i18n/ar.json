@@ -465,6 +465,7 @@
   "session.createTag": "إنشاء \"{{name}}\"",
   "session.noMatch": "لا جلسات مطابقة",
   "session.running": "قيد التشغيل",
+  "session.awaitingApproval": "بانتظار الموافقة",
   "session.unread_1": "حدث جديد واحد",
   "session.unread_other": "{{count}} أحداث جديدة",
   "projects.header": "المشاريع",

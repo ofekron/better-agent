@@ -465,6 +465,7 @@
   "session.createTag": "\"{{name}}\" 만들기",
   "session.noMatch": "일치하는 세션이 없습니다",
   "session.running": "실행 중",
+  "session.awaitingApproval": "승인 대기 중",
   "session.unread_1": "새 이벤트 1개",
   "session.unread_other": "새 이벤트 {{count}}개",
   "projects.header": "프로젝트",

@@ -465,6 +465,7 @@
   "session.createTag": "Crea \"{{name}}\"",
   "session.noMatch": "Nessuna sessione corrispondente",
   "session.running": "In esecuzione",
+  "session.awaitingApproval": "In attesa di approvazione",
   "session.unread_1": "1 nuovo evento",
   "session.unread_other": "{{count}} nuovi eventi",
   "projects.header": "Progetti",
