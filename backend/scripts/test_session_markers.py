@@ -81,10 +81,15 @@ def main() -> int:
         assert cleared and cleared[-1][1]["marker"] is None, coord.frames
 
         # clear_markers_for_extension purges across sessions + fires per sid.
+        session_store._ensure_summary_index(blocking=True)
         manager.set_marker(sid, "ext.a", marker)
+        summary_before_purge = next(s for s in session_store.list_sessions() if s["id"] == sid)
+        assert summary_before_purge["markers"] == {"ext.a": marker}, summary_before_purge["markers"]
         coord.frames.clear()
         manager.clear_markers_for_extension("ext.a")
         assert session_store._markers_for_session(sid) == {}
+        summary_after_purge = next(s for s in session_store.list_sessions() if s["id"] == sid)
+        assert summary_after_purge["markers"] == {}, summary_after_purge["markers"]
         assert any(
             f[0] == "session_marker_changed" and f[1]["session_id"] == sid
             for f in coord.frames
