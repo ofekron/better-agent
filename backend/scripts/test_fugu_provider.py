@@ -15,7 +15,7 @@ import models  # noqa: E402
 from provider import _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_fugu import FUGU_MODELS, FuguProvider, fetch_fugu_models  # noqa: E402
-from runner_codex import _resolve_codex_cli  # noqa: E402
+from runner_codex import _build_app_server_argv, _resolve_codex_cli  # noqa: E402
 
 
 def check(cond: bool, msg: str) -> None:
@@ -23,25 +23,26 @@ def check(cond: bool, msg: str) -> None:
         raise AssertionError(msg)
 
 
-def _make_fake_fugu(bin_dir: Path) -> Path:
-    """A fake `codex-fugu` that answers `debug models` with a JSON catalog."""
-    fugu = bin_dir / "codex-fugu"
+def _make_fake_codex(bin_dir: Path) -> Path:
+    """A fake `codex` that answers `-p fugu debug models` with a JSON catalog."""
+    codex = bin_dir / "codex"
     payload = json.dumps({"models": [
         {"slug": "fugu", "visibility": "show"},
         {"slug": "fugu-ultra", "visibility": "show"},
     ]})
-    fugu.write_text(
+    codex.write_text(
         "#!/usr/bin/env sh\n"
         "set -eu\n"
-        "if [ \"$1\" = \"debug\" ] && [ \"$2\" = \"models\" ]; then\n"
+        # Only the fugu profile's model catalog is emulated.
+        'if [ "$1" = "-p" ] && [ "$2" = "fugu" ] && [ "$3" = "debug" ] && [ "$4" = "models" ]; then\n'
         f"  printf '%s\\n' {json.dumps(payload)}\n"
         "  exit 0\n"
         "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
-    fugu.chmod(fugu.stat().st_mode | stat.S_IXUSR)
-    return fugu
+    codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+    return codex
 
 
 def test_registry_and_capabilities() -> None:
@@ -49,8 +50,12 @@ def test_registry_and_capabilities() -> None:
     check(cls is FuguProvider, "provider registry resolves fugu")
     check(issubclass(FuguProvider, CodexProvider), "fugu reuses CodexProvider")
     check(FuguProvider.KIND == "fugu", "fugu KIND")
-    check(FuguProvider.CODEX_BINARY == "codex-fugu", "fugu drives the codex-fugu launcher")
     check(FuguProvider.RUNNER_KIND == "fugu", "fugu has its own frozen runner dispatch")
+    # Fugu drives the SAME `codex` binary as generic Codex; only the profile
+    # differs — selected via `-p fugu`. No separate launcher binary.
+    check(FuguProvider.CODEX_BINARY == "codex", "fugu reuses the regular codex binary")
+    check(FuguProvider.CODEX_PROFILE == "fugu", "fugu selects the fugu profile via -p")
+    check(CodexProvider.CODEX_PROFILE is None, "generic codex has no profile override")
     # Fugu IS codex under the hood, so the codex app-server capabilities
     # (fork, steering, subagents, team mode) carry over unchanged.
     check(FuguProvider.supports_fork is True, "fugu inherits codex fork")
@@ -58,7 +63,7 @@ def test_registry_and_capabilities() -> None:
     check(FuguProvider.supports_steering is True, "fugu inherits codex steering")
     check(FuguProvider.supports_native_subagents is True, "fugu inherits codex subagents")
     # Sakana's catalog advertises exactly high + xhigh for Fugu/Fugu Ultra;
-    # the launcher forwards args to codex unchanged, so the effort dial works.
+    # the profile routes the call to Fugu, so the effort dial works.
     check(FuguProvider.supports_reasoning_effort is True, "fugu exposes the reasoning-effort dial")
     check(FuguProvider.reasoning_effort_options == ("high", "xhigh"), "fugu offers high + xhigh only")
     check(FuguProvider.default_reasoning_effort == "high", "fugu defaults to high")
@@ -70,20 +75,44 @@ def test_models_catalog() -> None:
     check(fetch is fetch_fugu_models, "fugu refresh resolves to fetch_fugu_models")
 
 
-def test_runner_resolves_fugu_binary() -> None:
+def test_argv_builder_selects_profile() -> None:
+    # Generic codex: no profile flag, just the subcommand.
+    check(_build_app_server_argv("codex", None) == ["codex", "app-server"], "generic argv has no -p")
+    # Fugu: -p fugu precedes the subcommand, ahead of any -c overrides.
+    fugu_argv = _build_app_server_argv("codex", "fugu", ["model_reasoning_effort=high"])
+    check(fugu_argv == ["codex", "-p", "fugu", "-c", "model_reasoning_effort=high", "app-server"],
+          "fugu argv selects the profile before the subcommand")
+    # Global flags precede the subcommand for any profile.
+    check(_build_app_server_argv("codex", "other") == ["codex", "-p", "other", "app-server"],
+          "arbitrary profile is forwarded")
+
+
+def test_fetch_uses_codex_with_fugu_profile() -> None:
     bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-bin-"))
     old_path = os.environ.get("PATH", "")
     try:
-        _make_fake_fugu(bin_dir)
+        _make_fake_codex(bin_dir)
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
-        resolved = _resolve_codex_cli({"codex_binary": "codex-fugu"})
-        check(resolved is not None and resolved.endswith("codex-fugu"), "runner honors codex_binary override")
-        # Default (no override) does not pick up codex-fugu specifically.
+        # The fetched models come from `codex -p fugu debug models`.
+        check(fetch_fugu_models() == ["fugu", "fugu-ultra"], "fetch_fugu_models parses the fugu profile catalog")
+    finally:
+        os.environ["PATH"] = old_path
+        shutil.rmtree(bin_dir, ignore_errors=True)
+
+
+def test_codex_binary_override_mechanism() -> None:
+    # The codex_binary override still works generically (independent of fugu),
+    # and defaults to plain `codex`.
+    bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-bin2-"))
+    old_path = os.environ.get("PATH", "")
+    try:
+        _make_fake_codex(bin_dir)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        resolved = _resolve_codex_cli({"codex_binary": "codex"})
+        check(resolved is not None and resolved.endswith("codex"), "runner honors codex_binary override")
         missing = _resolve_codex_cli({"codex_binary": "definitely-not-real-xyz"})
         check(missing is None, "runner returns None when the named binary is absent")
         check(_resolve_codex_cli() == _resolve_codex_cli({}), "default resolution is stable without an override")
-        # The fetched models come from the fugu launcher's debug output.
-        check(fetch_fugu_models() == ["fugu", "fugu-ultra"], "fetch_fugu_models parses the launcher catalog")
     finally:
         os.environ["PATH"] = old_path
         shutil.rmtree(bin_dir, ignore_errors=True)
@@ -103,8 +132,8 @@ def test_fugu_not_auto_installable() -> None:
 
 
 def test_fugu_models_fallback_without_binary() -> None:
-    # With no codex-fugu on PATH, fetch must degrade to the static list
-    # rather than raising — the dropdown always needs something.
+    # With no codex on PATH (or profile not installed), fetch must degrade to
+    # the static list rather than raising — the dropdown always needs something.
     bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-empty-"))
     old_path = os.environ.get("PATH", "")
     try:
@@ -119,7 +148,9 @@ def main() -> int:
     tests = [
         test_registry_and_capabilities,
         test_models_catalog,
-        test_runner_resolves_fugu_binary,
+        test_argv_builder_selects_profile,
+        test_fetch_uses_codex_with_fugu_profile,
+        test_codex_binary_override_mechanism,
         test_fugu_not_auto_installable,
         test_fugu_models_fallback_without_binary,
     ]
