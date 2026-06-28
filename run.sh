@@ -37,6 +37,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 PY="$DIR/backend/.venv/bin/python"
 BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-8000}}"
 FRONTEND_PORT="${BETTER_AGENT_FRONTEND_PORT:-${BETTER_CLAUDE_FRONTEND_PORT:-5173}}"
+GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"
+if ! [[ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" -lt 1 ]; then
+  GRACEFUL_RESTART_TIMEOUT_SECONDS=8
+fi
 # The venv is created by `uv`, which does not install `pip` into it. Drive
 # dependency installs through `uv pip` against the venv's interpreter.
 UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
@@ -468,6 +472,28 @@ wait_for_backend() {
   return 1
 }
 
+wait_for_backend_exit() {
+  local restart_attempts=0
+  local restart_limit=$((GRACEFUL_RESTART_TIMEOUT_SECONDS * 4))
+
+  while process_is_running "$BACKEND_PID"; do
+    if [ -f "$FLAG" ]; then
+      if [ "$restart_attempts" -eq 0 ]; then
+        echo "Restart requested — waiting up to ${GRACEFUL_RESTART_TIMEOUT_SECONDS}s for graceful shutdown..."
+      fi
+      if [ "$restart_attempts" -ge "$restart_limit" ]; then
+        echo "Graceful restart timeout expired; forcing backend shutdown."
+        kill -9 "$BACKEND_PID" 2>/dev/null || true
+        break
+      fi
+      restart_attempts=$((restart_attempts + 1))
+    fi
+    sleep 0.25
+  done
+
+  wait "$BACKEND_PID" || true
+}
+
 run_zai_startup_check() {
   local backend_healthy="${1:-0}"
   local log_path="$BA_HOME/zai_glm52_startup_check.log"
@@ -689,8 +715,9 @@ while true; do
     PENDING_REFRESH_ID=""
   fi
 
-  # Block until uvicorn exits (Ctrl+C, or SIGTERM from the restart flag).
-  wait "$BACKEND_PID" || true
+  # Block until uvicorn exits. Restart-requested exits are bounded so a stuck
+  # shutdown does not leave the UI waiting forever.
+  wait_for_backend_exit
 
   if [ -f "$FLAG" ]; then
     PENDING_REFRESH_ID="$(cat "$FLAG")"
