@@ -10,23 +10,29 @@ only `run_dir/session_events.jsonl` (Claude-shaped lines), `state.json`, and
 `complete.json`. The provider (provider_openai.py) tails session_events.jsonl
 with GeminiJsonlTailer and feeds apply_event.
 
-v1 scope (deliberate):
-  - native mode only (no team/manager orchestration).
+OpenAI is the clean path where BA owns the internals instead of adapting to
+provider-native CLI quirks:
+  - native and team/manager mode both run through this in-process loop.
   - in-process coding tools: Bash, Read, Write, Edit, Grep, Glob.
+  - BA loopback tools: mssg, ask, delegate_task, create_session,
+    create_sub_session, create_worker, open_file_panel, request_user_input,
+    start_file_discussion, and scoped capability load/release.
+  - fork is a pure history copy to a fresh BA-owned OpenAI agent session.
+  - steering is appended as the next user message before the next model round.
+  - text, file, and image attachments are encoded directly for Chat
+    Completions.
   - permission: honor the run's permission mode; gate risky tools behind the
     backend tool-approval round-trip (POST /api/internal/tool-approvals/request)
     unless the mode is bypass.
-  - text-only (no image/file attachments yet).
-  - per-agent-session OpenAI message history persisted under ba_home() so
-    multi-turn resume works (BA owns the conversation store for this kind).
-MCP tools + orchestration tools (ask/mssg/delegate) + manager mode are later
-phases.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import copy
+import http.client
 import json
 import logging
 import os
@@ -35,11 +41,22 @@ import subprocess
 import sys
 import time
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
+from orchestration_tool_descriptions import (
+    ASK_DESCRIPTION as _ASK_DESCRIPTION,
+    CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
+    CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
+    CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
+    DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
+    MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+)
+from prompt_templates import render_prompt
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_openai")
@@ -53,8 +70,10 @@ _MAX_OUTPUT_CHARS = 40_000
 # finish naturally; overridable per-run via inputs["max_tool_loops"]. When the
 # cap IS hit, the turn is reported as not-completed (see _run's for/else),
 # never silently as a successful completion.
-_MAX_TOOL_LOOPS = 200
+_MAX_TOOL_LOOPS = 1000
 _SESSIONS_SUBDIR = "openai_sessions"
+DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
+_OPEN_FILE_PANEL_HTTP_TIMEOUT_S = 30.0
 _TOOL_ENV_DENY_EXACT = {
     "better_claude_internal_token",
     "better_agent_internal_token",
@@ -119,15 +138,46 @@ def _session_path(agent_session_id: str) -> Path:
 def _load_history(agent_session_id: Optional[str]) -> tuple[str, list[dict]]:
     """Return (session_id, messages). Fresh if no prior history."""
     if agent_session_id:
-        p = _session_path(agent_session_id)
-        if p.exists():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                return data["session_id"], list(data["messages"])
-            except Exception:
-                logger.exception("corrupt openai history %s; starting fresh", p)
+        loaded = _load_history_file(agent_session_id)
+        if loaded is not None:
+            return loaded
     sid = agent_session_id or _new_uuid()
     return sid, []
+
+
+def _load_history_file(agent_session_id: str) -> Optional[tuple[str, list[dict]]]:
+    p = _session_path(agent_session_id)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        sid = str(data.get("session_id") or agent_session_id)
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("messages is not a list")
+        return sid, list(messages)
+    except Exception:
+        logger.exception("corrupt openai history %s; starting fresh", p)
+        return None
+
+
+def _load_history_for_run(resume_sid: Optional[str], *, fork: bool) -> tuple[str, list[dict]]:
+    """Load run history.
+
+    Normal resume continues the same BA-owned OpenAI agent session. A fork
+    copies the parent history into a fresh session id so the branch is isolated
+    from the parent's durable context without any provider-native hack.
+    """
+    if fork:
+        child_sid = _new_uuid()
+        if not resume_sid:
+            return child_sid, []
+        loaded = _load_history_file(str(resume_sid))
+        if loaded is None:
+            raise FileNotFoundError(f"cannot fork missing openai history: {resume_sid}")
+        _parent_sid, parent_messages = loaded
+        return child_sid, copy.deepcopy(parent_messages)
+    return _load_history(resume_sid)
 
 
 def _save_history(agent_session_id: str, messages: list[dict]) -> None:
@@ -135,6 +185,89 @@ def _save_history(agent_session_id: str, messages: list[dict]) -> None:
         _session_path(agent_session_id),
         {"session_id": agent_session_id, "messages": messages},
     )
+
+
+# --------------------------------------------------------------------------
+# prompt / attachment shaping
+# --------------------------------------------------------------------------
+
+
+def _prepend_capability_context(prompt: str, inputs: dict) -> str:
+    blocks: list[str] = []
+    for item in inputs.get("capability_contexts") or []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        name = str(item.get("name") or "Capability")
+        category = str(item.get("category") or "capability")
+        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
+    if not blocks:
+        return prompt
+    prefix = render_prompt(
+        "runner/capability_context.md",
+        {"blocks": "\n\n".join(blocks)},
+    )
+    return f"{prefix}\n\n{prompt}" if prompt else prefix
+
+
+def _prepend_file_attachments(prompt: str, files: list) -> str:
+    if not files:
+        return prompt
+    sections: list[str] = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("name") or "unknown")
+        try:
+            raw = base64.b64decode(str(f.get("data") or ""))
+        except Exception:
+            logger.warning("Skipping malformed file attachment: %s", name)
+            continue
+        try:
+            text = raw.decode("utf-8")
+            sections.append(f"<file name=\"{name}\">\n{text}\n</file>")
+        except UnicodeDecodeError:
+            size = f.get("size") if isinstance(f.get("size"), int) else len(raw)
+            sections.append(f"<file name=\"{name}\">[binary file, {size} bytes]</file>")
+    if not sections:
+        return prompt
+    preamble = "\n\n".join(sections)
+    return f"{preamble}\n\n{prompt}" if prompt else preamble
+
+
+def _image_part(img: dict) -> Optional[dict]:
+    if not isinstance(img, dict):
+        return None
+    data = img.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    media_type = str(img.get("media_type") or img.get("mime_type") or "image/png")
+    if not media_type.startswith("image/"):
+        media_type = "image/png"
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{data}"},
+    }
+
+
+def _build_user_content(prompt: str, images: list) -> str | list[dict]:
+    image_parts = [p for p in (_image_part(img) for img in (images or [])) if p]
+    if not image_parts:
+        return prompt
+    parts: list[dict] = []
+    if prompt:
+        parts.append({"type": "text", "text": prompt})
+    parts.extend(image_parts)
+    return parts
+
+
+def _steer_prompt(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return "User steering update. Adjust the current turn accordingly."
+    return f"User steering update for this in-flight turn:\n\n{raw}"
 
 
 # --------------------------------------------------------------------------
@@ -484,6 +617,181 @@ TOOL_SCHEMAS = [
             "required": ["pattern"]}}},
 ]
 
+
+def _function_tool_schema(name: str, description: str, parameters: dict) -> dict:
+    return {"type": "function", "function": {
+        "name": name,
+        "description": description,
+        "parameters": parameters,
+    }}
+
+
+_CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "worker_description": {"type": "string"},
+        "justification": {"type": "string"},
+        "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
+        "node_id": {"type": "string"},
+    },
+    "required": ["worker_description", "justification", "orchestration_mode"],
+    "additionalProperties": False,
+}
+
+_OPEN_FILE_PANEL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["panel", "inline"]},
+        "path": {"type": "string"},
+        "start_line": {"type": "integer"},
+        "end_line": {"type": "integer"},
+        "selected_start": {"type": "integer"},
+        "selected_end": {"type": "integer"},
+    },
+    "required": ["mode", "path"],
+    "additionalProperties": False,
+}
+
+_OPEN_FILE_PANEL_DESCRIPTION = (
+    "Show the user a specific location in a file — this is a communication "
+    "tool, not a file opener. Use mode='inline' to embed a file view in this "
+    "message or mode='panel' to open a persistent side panel."
+)
+
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "header": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                },
+                "required": ["id", "header", "question"],
+            },
+        },
+        "timeout_seconds": {"type": "number"},
+    },
+    "required": ["questions"],
+    "additionalProperties": False,
+}
+
+_REQUEST_USER_INPUT_DESCRIPTION = (
+    "Ask the user a bounded question and wait for their answer. Use this only "
+    "when you cannot continue safely without user input."
+)
+
+_START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file_path": {"type": "string"},
+        "line": {"type": "integer"},
+        "title": {"type": "string"},
+    },
+    "required": ["file_path", "line"],
+    "additionalProperties": False,
+}
+
+_START_FILE_DISCUSSION_DESCRIPTION = (
+    "Start an inline discussion attached to a specific line in file edit mode."
+)
+
+_MSSG_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_session_id": {"type": "string"},
+        "message": {"type": "string"},
+    },
+    "required": ["target_session_id", "message"],
+    "additionalProperties": False,
+}
+
+_DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "task": {"type": "string"},
+        "target_session_id": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
+        "sub_session": {"type": "boolean"},
+    },
+    "required": ["task"],
+    "additionalProperties": False,
+}
+
+_CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "orchestration_mode": {"type": "string", "enum": ["native", "team"]},
+        "node_id": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
+    },
+    "required": ["name"],
+    "additionalProperties": False,
+}
+
+_CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "description": {"type": "string"},
+        "node_id": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+_ASK_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_session_id": {"type": "string"},
+        "message": {"type": "string"},
+        "run_mode": {"type": "string", "enum": ["direct", "fork"]},
+        "worker_description": {"type": "string"},
+        "worker_registry_cwd": {"type": "string"},
+        "ephemeral": {"type": "boolean"},
+    },
+    "required": ["target_session_id", "message"],
+    "additionalProperties": False,
+}
+
+_DISABLEABLE_BUILTIN_TOOLS = frozenset({
+    "ask",
+    "create_session",
+    "create_sub_session",
+    "delegate_task",
+    "mssg",
+})
+
+_ORCHESTRATION_TOOL_NAMES = frozenset({
+    "mssg", "ask", "delegate_task", "create_session", "create_sub_session",
+    "create_worker", "open_file_panel", "request_user_input",
+    "start_file_discussion",
+})
+
 # Better Agent runtime-capability management. Available only when the backend
 # loopback channel exists (non-bare, internal sessions); these tools let the
 # model scope its own session. Core owns the active-capability write — the tools
@@ -512,11 +820,91 @@ _CAPABILITY_TOOL_SCHEMAS = [
 ]
 
 
-def _tool_schemas_for_run(*, capabilities_enabled: bool) -> list[dict]:
-    """Coding tools always; capability-management tools only when the backend
-    loopback channel exists for a non-bare session (mirrors the other runners,
-    where the capabilities stdio MCP is injected under the same condition)."""
-    schemas = list(TOOL_SCHEMAS)
+def _disabled_builtin_tools(inputs: dict) -> set[str]:
+    raw = inputs.get("disabled_builtin_tools")
+    if not isinstance(raw, list):
+        return set()
+    return {
+        str(item).strip()
+        for item in raw
+        if str(item or "").strip() in _DISABLEABLE_BUILTIN_TOOLS
+    }
+
+
+def _disallowed_tool_names(inputs: dict) -> set[str]:
+    raw = inputs.get("disallowed_tools")
+    if not isinstance(raw, list):
+        return set()
+    return {str(item or "").strip().lower() for item in raw if str(item or "").strip()}
+
+
+def _filtered_core_tool_schemas(inputs: dict) -> list[dict]:
+    blocked = _disallowed_tool_names(inputs)
+    if not blocked:
+        return list(TOOL_SCHEMAS)
+    out: list[dict] = []
+    for schema in TOOL_SCHEMAS:
+        name = str((schema.get("function") or {}).get("name") or "")
+        if name.lower() not in blocked:
+            out.append(schema)
+    return out
+
+
+def _tool_schemas_for_run(
+    *,
+    inputs: dict,
+    capabilities_enabled: bool,
+    loopback_enabled: bool,
+    team_manager_enabled: bool,
+    open_file_panel_enabled: bool,
+    file_editing_mode: bool,
+) -> list[dict]:
+    """Build this turn's Chat Completions tool list.
+
+    Core coding tools are always available unless explicitly disallowed. BA
+    loopback/orchestration tools require the backend channel and can be disabled
+    by the global built-in tool toggles.
+    """
+    schemas = _filtered_core_tool_schemas(inputs)
+    disabled = _disabled_builtin_tools(inputs)
+    if loopback_enabled:
+        if team_manager_enabled:
+            schemas.append(_function_tool_schema(
+                "create_worker", _CREATE_WORKER_DESCRIPTION, _CREATE_WORKER_INPUT_SCHEMA,
+            ))
+        mssg_sender_session_id = str(
+            inputs.get("mssg_sender_session_id") or inputs.get("app_session_id") or ""
+        ).strip()
+        if mssg_sender_session_id:
+            if "mssg" not in disabled:
+                schemas.append(_function_tool_schema("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA))
+            if "ask" not in disabled:
+                schemas.append(_function_tool_schema("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA))
+        if "delegate_task" not in disabled:
+            schemas.append(_function_tool_schema(
+                "delegate_task", _DELEGATE_TASK_DESCRIPTION, _DELEGATE_TASK_INPUT_SCHEMA,
+            ))
+        if "create_session" not in disabled:
+            schemas.append(_function_tool_schema(
+                "create_session", _CREATE_SESSION_DESCRIPTION, _CREATE_SESSION_INPUT_SCHEMA,
+            ))
+        if "create_sub_session" not in disabled:
+            schemas.append(_function_tool_schema(
+                "create_sub_session", _CREATE_SUB_SESSION_DESCRIPTION, _CREATE_SUB_SESSION_INPUT_SCHEMA,
+            ))
+        if open_file_panel_enabled:
+            schemas.append(_function_tool_schema(
+                "open_file_panel", _OPEN_FILE_PANEL_DESCRIPTION, _OPEN_FILE_PANEL_INPUT_SCHEMA,
+            ))
+            schemas.append(_function_tool_schema(
+                "request_user_input", _REQUEST_USER_INPUT_DESCRIPTION, _REQUEST_USER_INPUT_SCHEMA,
+            ))
+            if file_editing_mode:
+                schemas.append(_function_tool_schema(
+                    "start_file_discussion",
+                    _START_FILE_DISCUSSION_DESCRIPTION,
+                    _START_FILE_DISCUSSION_INPUT_SCHEMA,
+                ))
     if capabilities_enabled:
         schemas += _CAPABILITY_TOOL_SCHEMAS
     return schemas
@@ -531,12 +919,411 @@ def _is_bypass(permission: Optional[dict]) -> bool:
 
 
 # --------------------------------------------------------------------------
+# BA loopback/orchestration tools
+# --------------------------------------------------------------------------
+
+DynamicToolHandler = Callable[[dict], Awaitable[str]]
+
+
+def _dynamic_tool_text_result(text: str, *, success: bool) -> str:
+    prefix = "" if success else "Error: "
+    return prefix + text if not text.startswith("Error:") else text
+
+
+def _dynamic_tool_json_result(result: dict, *, success: bool) -> str:
+    if success:
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    return _dynamic_tool_text_result(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+        success=False,
+    )
+
+
+def _post_loopback_sync(
+    payload: dict,
+    *,
+    backend_url: str,
+    internal_token: str,
+    url_path: str,
+    timeout_s: float,
+) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    deadline = time.monotonic() + timeout_s
+    backoff = 1.0
+    while True:
+        req = urllib.request.Request(
+            backend_url.rstrip("/") + url_path,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": internal_token,
+            },
+        )
+        try:
+            remaining = max(1.0, deadline - time.monotonic())
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
+                raw = resp.read()
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                raise RuntimeError(f"loopback returned non-JSON: {e}; raw={raw[:200]!r}")
+        except urllib.error.HTTPError:
+            raise
+        except (
+            urllib.error.URLError,
+            http.client.RemoteDisconnected,
+            ConnectionError,
+            TimeoutError,
+        ) as e:
+            if time.monotonic() >= deadline:
+                raise
+            reason = getattr(e, "reason", e)
+            logger.warning(
+                "loopback POST %s failed (%s); retrying in %.1fs",
+                url_path,
+                reason,
+                backoff,
+            )
+            time.sleep(min(backoff, max(0.5, deadline - time.monotonic())))
+            backoff = min(backoff * 2, 60.0)
+
+
+def _args(params: dict) -> dict:
+    return params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+
+
+def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict[str, DynamicToolHandler]:
+    backend_url = inputs.get("backend_url") or ""
+    internal_token = inputs.get("internal_token") or ""
+    app_session_id = str(inputs.get("app_session_id") or "").strip()
+    if not backend_url or not internal_token or not app_session_id:
+        return {}
+    handlers: dict[str, DynamicToolHandler] = {}
+    disabled = _disabled_builtin_tools(inputs)
+    mssg_sender_session_id = str(
+        inputs.get("mssg_sender_session_id") or app_session_id or ""
+    ).strip()
+
+    async def create_worker(params: dict) -> str:
+        args = _args(params)
+        worker_description = str(args.get("worker_description") or "").strip()
+        justification = str(args.get("justification") or "").strip()
+        orchestration_mode = str(args.get("orchestration_mode") or "").strip()
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        if not worker_description or not justification or not orchestration_mode:
+            return _dynamic_tool_text_result(
+                "worker_description, justification and orchestration_mode are required",
+                success=False,
+            )
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "worker_description": worker_description,
+                    "justification": justification,
+                    "orchestration_mode": orchestration_mode,
+                    "cwd": cwd,
+                    "client_request_id": f"cw_{uuid.uuid4().hex[:10]}",
+                    "node_id": node_id,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/create-worker",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("create_worker dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"create_worker failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def mssg(params: dict) -> str:
+        args = _args(params)
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not target_session_id or not message:
+            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "sender_session_id": mssg_sender_session_id,
+                    "target_session_id": target_session_id,
+                    "message": message,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/mssg",
+                timeout_s=30.0,
+            )
+        except Exception as e:
+            logger.exception("mssg dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"mssg failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def ask(params: dict) -> str:
+        args = _args(params)
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
+        if not target_session_id or not message:
+            return _dynamic_tool_text_result("target_session_id and message are required", success=False)
+        if run_mode not in ("direct", "fork"):
+            return _dynamic_tool_text_result("run_mode must be 'direct' or 'fork'", success=False)
+        ephemeral = bool(args.get("ephemeral"))
+        if ephemeral and run_mode != "fork":
+            return _dynamic_tool_text_result("ephemeral is only valid for run_mode='fork'", success=False)
+        if run_mode == "fork":
+            worker_registry_cwd = args.get("worker_registry_cwd")
+            if worker_registry_cwd in ("", "null"):
+                worker_registry_cwd = None
+            payload = {
+                "app_session_id": app_session_id,
+                "instructions": message,
+                "worker_session_id": target_session_id,
+                "worker_description": str(args.get("worker_description") or "").strip(),
+                "model": model,
+                "cwd": cwd,
+                "client_delegation_id": f"del_{uuid.uuid4().hex[:10]}",
+                "run_mode": "fork",
+                "worker_registry_cwd": worker_registry_cwd,
+                "ephemeral": ephemeral,
+            }
+            url_path = "/api/internal/ask-fork"
+        else:
+            payload = {
+                "sender_session_id": mssg_sender_session_id,
+                "target_session_id": target_session_id,
+                "message": message,
+                "ask_id": f"ask_{uuid.uuid4().hex[:10]}",
+            }
+            url_path = "/api/internal/ask"
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                payload,
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path=url_path,
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("ask dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"ask failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def delegate_task(params: dict) -> str:
+        args = _args(params)
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return _dynamic_tool_text_result("task is required", success=False)
+        target = args.get("target_session_id")
+        if target in ("", "null"):
+            target = None
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "sender_session_id": app_session_id,
+                    "task": task,
+                    "target_session_id": target,
+                    "cwd": cwd,
+                    "provider_id": str(args.get("provider_id") or "").strip() or None,
+                    "model": str(args.get("model") or "").strip(),
+                    "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+                    "sub_session": args.get("sub_session") is not False,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/delegate-task",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("delegate_task dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"delegate_task failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def create_session(params: dict) -> str:
+        args = _args(params)
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return _dynamic_tool_text_result("name is required", success=False)
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "sender_session_id": app_session_id,
+                    "name": name,
+                    "cwd": cwd,
+                    "provider_id": str(args.get("provider_id") or "").strip() or None,
+                    "model": str(args.get("model") or "").strip(),
+                    "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+                    "orchestration_mode": args.get("orchestration_mode") or "native",
+                    "node_id": node_id,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/create-session",
+                timeout_s=30.0,
+            )
+        except Exception as e:
+            logger.exception("create_session dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"create_session failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def create_sub_session(params: dict) -> str:
+        args = _args(params)
+        node_id = args.get("node_id")
+        if node_id in ("", "null"):
+            node_id = None
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "sender_session_id": app_session_id,
+                    "description": str(args.get("description") or "").strip(),
+                    "cwd": cwd,
+                    "provider_id": str(args.get("provider_id") or "").strip() or None,
+                    "model": str(args.get("model") or "").strip(),
+                    "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+                    "node_id": node_id,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/create-sub-session",
+                timeout_s=30.0,
+            )
+        except Exception as e:
+            logger.exception("create_sub_session dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"create_sub_session failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def open_file_panel(params: dict) -> str:
+        args = _args(params)
+        mode = str(args.get("mode") or "").strip()
+        path = str(args.get("path") or "").strip()
+        if mode not in ("panel", "inline") or not path:
+            return _dynamic_tool_text_result("`mode` (panel|inline) and `path` are required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "mode": mode,
+                    "path": path,
+                    "start_line": args.get("start_line"),
+                    "end_line": args.get("end_line"),
+                    "selected_start": args.get("selected_start"),
+                    "selected_end": args.get("selected_end"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/open-file-panel",
+                timeout_s=_OPEN_FILE_PANEL_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("open_file_panel dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"open_file_panel failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def request_user_input(params: dict) -> str:
+        args = _args(params)
+        questions = args.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return _dynamic_tool_text_result("`questions` must be a non-empty array", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "questions": questions,
+                    "timeout_seconds": args.get("timeout_seconds"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/user-input/request",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("request_user_input dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"request_user_input failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def start_file_discussion(params: dict) -> str:
+        args = _args(params)
+        file_path = str(args.get("file_path") or "").strip()
+        line = args.get("line")
+        if not file_path or not isinstance(line, int) or line < 1:
+            return _dynamic_tool_text_result("`file_path` and `line >= 1` are required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "file_path": file_path,
+                    "line": line,
+                    "title": args.get("title") or "",
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/file-editor/start-discussion",
+                timeout_s=_OPEN_FILE_PANEL_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("start_file_discussion dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"start_file_discussion failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    try:
+        import extension_store
+        team_orchestration_ready = extension_store.is_extension_runtime_ready(
+            extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        )
+    except Exception:
+        team_orchestration_ready = False
+    if (inputs.get("mode") or "native") == "manager" and team_orchestration_ready:
+        handlers["create_worker"] = create_worker
+    if mssg_sender_session_id:
+        if "mssg" not in disabled:
+            handlers["mssg"] = mssg
+        if "ask" not in disabled:
+            handlers["ask"] = ask
+    if "delegate_task" not in disabled:
+        handlers["delegate_task"] = delegate_task
+    if "create_session" not in disabled:
+        handlers["create_session"] = create_session
+    if "create_sub_session" not in disabled:
+        handlers["create_sub_session"] = create_sub_session
+    if bool(inputs.get("open_file_panel_enabled")):
+        handlers["open_file_panel"] = open_file_panel
+        handlers["request_user_input"] = request_user_input
+        if inputs.get("working_mode") == "file_editing":
+            handlers["start_file_discussion"] = start_file_discussion
+    return handlers
+
+
+# --------------------------------------------------------------------------
 # Chat Completions streaming
 # --------------------------------------------------------------------------
 
 async def _stream_chat(
     base_url: str, api_key: str, model: str, messages: list[dict],
-    tools: list[dict],
+    tools: list[dict], reasoning_effort: Optional[str] = None,
 ) -> AsyncIterator[dict]:
     """Yield parsed SSE chunk dicts from a streaming Chat Completions call."""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -546,6 +1333,8 @@ async def _stream_chat(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if reasoning_effort and reasoning_effort != "none":
+        payload["reasoning_effort"] = reasoning_effort
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
