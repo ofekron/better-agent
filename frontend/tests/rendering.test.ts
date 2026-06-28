@@ -246,6 +246,32 @@ describe("message rendering", () => {
     unmount();
   });
 
+  it("renders model switch events", () => {
+    const message = makeAssistantMsg({
+      events: [
+        {
+          type: "model_switched",
+          data: {
+            previous_provider_id: "claude",
+            previous_model: "sonnet",
+            provider_id: "codex",
+            model: "gpt-5-codex",
+          },
+        },
+      ],
+    });
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message,
+        orchestrationMode: "native",
+      }),
+    );
+
+    expect(container.querySelector(".event-model-switched")?.textContent).toContain("Model switched");
+    expect(container.textContent).toContain("claude / sonnet to codex / gpt-5-codex");
+    unmount();
+  });
+
   it("dedups consecutive identical todo snapshots", () => {
     const todos = [
       { content: "Run targeted tests", status: "completed" as const },

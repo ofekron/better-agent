@@ -759,6 +759,22 @@ function CompleteEvent({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
+  const model = typeof data.model === "string" ? data.model : "";
+  const providerId = typeof data.provider_id === "string" ? data.provider_id : "";
+  const previousModel = typeof data.previous_model === "string" ? data.previous_model : "";
+  const previousProviderId = typeof data.previous_provider_id === "string" ? data.previous_provider_id : "";
+  if (!model && !providerId) return null;
+  const from = [previousProviderId, previousModel].filter(Boolean).join(" / ");
+  const to = [providerId, model].filter(Boolean).join(" / ");
+  return (
+    <div className="event-model-switched">
+      <span>Model switched</span>
+      {from && to ? <span>{from} to {to}</span> : <span>{to}</span>}
+    </div>
+  );
+}
+
 /** Normalize text for dedup comparison (strip leading emoji/whitespace) */
 function normalizeForDedup(text: string): string {
   return text.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\u200D]+\s*/u, "").trim();
@@ -1087,6 +1103,8 @@ function renderSingleEvent(
       return null;
     case "complete":
       return <CompleteEvent key={idx} data={event.data} />;
+    case "model_switched":
+      return <ModelSwitchedEvent key={idx} data={event.data ?? {}} />;
     case "lifecycle_notice":
       return <LifecycleNotice key={idx} data={event.data ?? {}} />;
     case "pr_link":

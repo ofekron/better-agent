@@ -4606,6 +4606,21 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
 }
 
+.event-model-switched {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 6px 0;
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+.event-model-switched span:first-child {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
 .todos-snapshot {
   padding: 8px 12px;
   margin: 6px 0;
