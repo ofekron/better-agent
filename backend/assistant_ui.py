@@ -66,19 +66,27 @@ def _system_prompt() -> str:
         return ""
 
 
-# Conversation providers the assistant session can run on. The role prompt is
-# provider-agnostic, so the same content is attached to every provider kind;
+# Every provider KIND the assistant session can run on. The role prompt is
+# provider-agnostic, so the same content is attached to every kind;
 # `provider_capability_contexts` selects per turn by the runner's provider_kind,
-# so an output must exist for each kind the session may use.
-_FALLBACK_PROVIDER_KINDS = ("claude", "codex", "gemini", "openai")
+# so an output must exist for each kind the session may use. This list is the
+# comprehensive fallback (and the stability anchor): the live registry is unioned
+# in, but since every registry KIND is already here, the merged set is constant
+# across calls → the capability_contexts hash stays byte-stable (no cache churn)
+# and coverage never depends on the registry being loaded. New provider KINDs
+# must be added here.
+_FALLBACK_PROVIDER_KINDS = (
+    "claude", "codex", "gemini", "openai",
+    "agy", "fugu", "claude-remote", "copilot",
+)
 
 
 def _provider_kinds() -> list[str]:
     """Deterministic list of provider KINDs to attach the role prompt to.
 
-    Sourced from the loaded provider registry when available, with a stable
-    fallback so the prompt still lands before providers load. Sorted so the
-    capability_contexts hash stays byte-stable regardless of registry order."""
+    The fallback list already covers every known KIND, so the registry is only
+    a safety net for a brand-new provider not yet listed above. Sorted so the
+    capability_contexts hash is byte-stable regardless of registry order."""
     kinds: list[str] = []
     try:
         from provider import known_providers
@@ -103,12 +111,19 @@ def build_capability_contexts(board_preamble: str = "") -> list[dict]:
 
     One output per provider kind: the runner's `provider_capability_contexts`
     filters by `provider_kind`, and a context with no matching output is silently
-    dropped — so a single `content` field (no `outputs`) delivers nothing."""
+    dropped — so a single `content` field (no `outputs`) delivers nothing.
+
+    Content is capped to the capability_contexts limit so this internal build
+    path is bound the same way the REST-supplied path is (the assistant store
+    bypasses normalize_capability_contexts, so enforce the bound here)."""
+    from capability_contexts import MAX_CAPABILITY_CONTENT_CHARS
     content = _system_prompt()
     if board_preamble:
         content = f"{content}\n\n{board_preamble}" if content else board_preamble
     if not content.strip():
         return []
+    if len(content) > MAX_CAPABILITY_CONTENT_CHARS:
+        content = content[:MAX_CAPABILITY_CONTENT_CHARS]
     outputs = [{"provider_kind": kind, "content": content} for kind in _provider_kinds()]
     return [{
         "source_id": "assistant",

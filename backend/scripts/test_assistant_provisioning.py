@@ -79,14 +79,18 @@ def test_capability_contexts_deliver_per_provider() -> bool:
         return False
 
     kinds = {o["provider_kind"] for o in ctx["outputs"]}
-    for required in ("claude", "codex", "gemini", "openai"):
+    # Every provider KIND the assistant can run on must be covered — a missing
+    # output means that provider silently gets no role prompt (the original bug).
+    for required in ("claude", "codex", "gemini", "openai", "agy", "fugu",
+                     "claude-remote", "copilot"):
         if required not in kinds:
             print(f"{FAIL} missing output for provider_kind {required!r}")
             ok = False
 
-    # The runner selects by provider_kind — every conversation provider must
-    # get the role prompt + preamble. This is the exact bug: pre-fix it was [].
-    for kind in ("claude", "codex", "gemini", "openai"):
+    # The runner selects by provider_kind — every provider must get the role
+    # prompt + preamble. This is the exact bug: pre-fix it was [].
+    for kind in ("claude", "codex", "gemini", "openai", "agy", "fugu",
+                 "claude-remote", "copilot"):
         selected = capability_contexts.provider_capability_contexts(caps, kind)
         if len(selected) != 1:
             print(f"{FAIL} provider {kind!r} got {len(selected)} contexts (want 1)")
@@ -120,17 +124,61 @@ def test_capability_contexts_hash_is_order_stable() -> bool:
     prompt prefix."""
     original = assistant_ui._system_prompt
     assistant_ui._system_prompt = lambda: _ROLE_PROMPT  # type: ignore[assignment]
+    import provider as provider_mod
+    real_known = provider_mod.known_providers
+
+    class _P:
+        def __init__(self, kind):
+            self.KIND = kind
+
     try:
         caps_a = assistant_ui.build_capability_contexts(board_preamble="")
         caps_b = assistant_ui.build_capability_contexts(board_preamble="")
+        h1 = assistant_ui._caps_hash(caps_a)
+        h2 = assistant_ui._caps_hash(caps_b)
+        # Set-stability: even if the live registry returns a varying subset, the
+        # merged set is anchored by the comprehensive fallback → same hash. This
+        # locks the cache-churn fix.
+        provider_mod.known_providers = lambda: [_P("claude"), _P("codex")]  # type: ignore[assignment]
+        h_subset = assistant_ui._caps_hash(assistant_ui.build_capability_contexts(board_preamble=""))
     finally:
         assistant_ui._system_prompt = original  # type: ignore[assignment]
-    h1 = assistant_ui._caps_hash(caps_a)
-    h2 = assistant_ui._caps_hash(caps_b)
+        provider_mod.known_providers = real_known  # type: ignore[assignment]
     if h1 != h2:
         print(f"{FAIL} caps hash not stable: {h1} != {h2}")
         return False
-    print(f"{PASS} capability_contexts hash is stable across calls")
+    if h_subset != h1:
+        print(f"{FAIL} caps hash changed with registry subset (cache churn): {h_subset} != {h1}")
+        return False
+    print(f"{PASS} capability_contexts hash is order- and set-stable")
+    return True
+
+
+def test_capability_contexts_content_is_bounded() -> bool:
+    """The internal build path bypasses normalize_capability_contexts, so the
+    content cap must be enforced in build — a runaway board_preamble can't grow
+    the cached prefix without bound."""
+    original = assistant_ui._system_prompt
+    big_preamble = "x" * (capability_contexts.MAX_CAPABILITY_CONTENT_CHARS + 5000)
+    assistant_ui._system_prompt = lambda: ""  # preamble-only content
+    try:
+        caps = assistant_ui.build_capability_contexts(board_preamble=big_preamble)
+    finally:
+        assistant_ui._system_prompt = original  # type: ignore[assignment]
+    if not caps:
+        print(f"{FAIL} bounded build returned no contexts")
+        return False
+    content = caps[0]["outputs"][0]["content"]
+    if len(content) > capability_contexts.MAX_CAPABILITY_CONTENT_CHARS:
+        print(f"{FAIL} content not capped: {len(content)} > {capability_contexts.MAX_CAPABILITY_CONTENT_CHARS}")
+        return False
+    # The capped shape must still pass the REST validator.
+    try:
+        capability_contexts.normalize_capability_contexts(caps)
+    except ValueError as exc:
+        print(f"{FAIL} capped caps rejected by normalize: {exc}")
+        return False
+    print(f"{PASS} capability_contexts content is capped to the bound")
     return True
 
 
@@ -176,6 +224,7 @@ def main_run() -> int:
     tests = [
         test_capability_contexts_deliver_per_provider,
         test_capability_contexts_hash_is_order_stable,
+        test_capability_contexts_content_is_bounded,
         test_rename_refused_when_locked,
     ]
     results = []
