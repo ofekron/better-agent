@@ -397,6 +397,49 @@ def _load_with_changes() -> tuple[dict[str, Any], bool, bool]:
         return data, changed, public_changed
 
 
+# Each private-repo HEAD commit and each public package-hash change produces a
+# new version snapshot dir under <install_root>/<id>/versions/. The active
+# version (the one referenced by the live record's install_path) is always
+# kept; this many most-recent prior snapshots are kept as fallbacks for
+# in-flight processes launched against an older version. Older ones are GC'd.
+_MAX_FALLBACK_VERSIONS = 3
+
+
+def _prune_extension_versions(data: dict[str, Any]) -> None:
+    """Delete stale on-disk version snapshots for every installed extension.
+
+    Pure disk GC — does not mutate store state. The active install_path is
+    always retained; among the remaining version dirs the N newest by mtime
+    are kept, the rest removed. Fails open per-dir so one broken entry never
+    blocks reconcile. Never deletes outside the extension's versions/ dir.
+    """
+    root = _install_root().resolve()
+    for extension_id, record in (data.get("extensions") or {}).items():
+        versions_dir = root / extension_id / "versions"
+        if not versions_dir.is_dir():
+            continue
+        try:
+            versions_resolved = versions_dir.resolve()
+            dirs = [p for p in versions_dir.iterdir() if p.is_dir() and not p.is_symlink()]
+        except OSError:
+            continue
+        active = Path(str((record.get("source") or {}).get("install_path") or "")).resolve()
+        fallbacks: list[Path] = []
+        for p in dirs:
+            try:
+                resolved = p.resolve()
+            except OSError:
+                continue
+            if resolved == active or not resolved.is_relative_to(versions_resolved):
+                continue
+            fallbacks.append(p)
+        if len(fallbacks) <= _MAX_FALLBACK_VERSIONS:
+            continue
+        fallbacks.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in fallbacks[_MAX_FALLBACK_VERSIONS:]:
+            shutil.rmtree(stale, ignore_errors=True)
+
+
 def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool]:
     changed = False
     public_changed = False
@@ -411,6 +454,7 @@ def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool]:
         public_changed = True
     if _ensure_private_extensions(data):
         changed = True
+    _prune_extension_versions(data)
     return changed, public_changed
 
 
