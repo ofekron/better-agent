@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from event_shape import (
@@ -51,7 +52,12 @@ class SubprocessAgent:
         self.initialized: bool = False
         self.extra_env: Optional[dict[str, str]] = extra_env
 
-    async def _ingest_agent_event(self, event: StreamEvent) -> None:
+    async def _ingest_agent_event(
+        self,
+        event: StreamEvent,
+        *,
+        message_id: Optional[str] = None,
+    ) -> None:
         """Persist a streamed agent event into the Better Agent session's events.jsonl.
         Control events (session_discovered/complete/error) are skipped —
         those are run-control signals, not session content. UUID dedup
@@ -82,6 +88,7 @@ class SubprocessAgent:
                 event_type="agent_message",
                 data=event.data,
                 source="subprocess_agent",
+                message_id=message_id,
             )
         except Exception:
             logger.exception(
@@ -98,6 +105,7 @@ class SubprocessAgent:
         ws_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
         mode: str = "native",
         ws_event_prefix: str = "agent",
+        create_provisioning_messages: bool = False,
     ) -> Optional[str]:
         """Run a one-time preparation turn to load context and discover agent_sid.
 
@@ -123,6 +131,12 @@ class SubprocessAgent:
                 coordinator.turn_manager.current_assistant_msgs.get(self.agent_session_id)
                 or {}
             ).get("id")
+            if create_provisioning_messages:
+                assistant_msg = self._create_provisioning_messages(
+                    mode=mode,
+                    prep_prompt=prep_prompt,
+                )
+                target_message_id = assistant_msg["id"]
             with perf.timed("subprocess_agent.init.start_run"):
                 import startup_recovery_gate
                 await startup_recovery_gate.wait_for_recovery_ready()
@@ -166,6 +180,12 @@ class SubprocessAgent:
                         # Soft turn-stop: runner interrupts, drains, sweeps own
                         # bg, exits. No backend killpg.
                         provider.cancel_turn(run_id)
+                        if create_provisioning_messages and target_message_id:
+                            session_manager.set_streaming(
+                                self.agent_session_id,
+                                target_message_id,
+                                False,
+                            )
                         await coordinator.persist_and_dispatch_raw(
                             self.agent_session_id,
                             {"type": f"{ws_event_prefix}_prep_cancelled", "data": {
@@ -181,7 +201,14 @@ class SubprocessAgent:
                     event_dict = {"type": event.type, "data": event.data}
                     is_synth = _is_synthetic_event(event_dict)
                     if not is_synth:
-                        await self._ingest_agent_event(event)
+                        await self._ingest_agent_event(
+                            event,
+                            message_id=(
+                                target_message_id
+                                if create_provisioning_messages
+                                else None
+                            ),
+                        )
                     if event.type not in ("session_discovered", "complete", "error"):
                         if not is_synth:
                             try:
@@ -216,6 +243,12 @@ class SubprocessAgent:
                 session_manager.set_agent_sid(self.agent_session_id, mode, discovered)
                 self.agent_sid = discovered
             self.initialized = discovered is not None
+            if create_provisioning_messages and target_message_id:
+                session_manager.set_streaming(
+                    self.agent_session_id,
+                    target_message_id,
+                    False,
+                )
             await coordinator.persist_and_dispatch_raw(
                 self.agent_session_id,
                 {"type": f"{ws_event_prefix}_prep_complete", "data": {
@@ -224,6 +257,33 @@ class SubprocessAgent:
                 }},
             )
             return discovered
+
+    def _create_provisioning_messages(
+        self,
+        *,
+        mode: str,
+        prep_prompt: str,
+    ) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        user_msg = {
+            "id": str(uuid.uuid4()),
+            "role": "user",
+            "content": prep_prompt,
+            "timestamp": now,
+            "source": "provisioning",
+        }
+        from orchs import get_strategy
+        assistant_msg = get_strategy(mode).build_assistant_scaffold()
+        assistant_msg["timestamp"] = now
+        assistant_msg["source"] = "provisioning"
+        session_manager.append_user_msg(self.agent_session_id, user_msg)
+        session_manager.append_assistant_msg(self.agent_session_id, assistant_msg)
+        session_manager.set_streaming(
+            self.agent_session_id,
+            assistant_msg["id"],
+            True,
+        )
+        return assistant_msg
 
     async def run_turn(
         self,

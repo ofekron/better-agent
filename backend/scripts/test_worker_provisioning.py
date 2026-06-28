@@ -284,6 +284,82 @@ def test_target_init_accepts_custom_provision_prompt():
     assert seen["prep_prompt"] == "caller supplied provision"
 
 
+def test_target_init_anchors_prep_events_to_provisioning_message():
+    import orchs.manager._approval as approval
+    from event_ingester import event_ingester
+    from paths import ba_home
+    from provider import StreamEvent
+    from session_manager import manager as session_manager
+
+    captured = {}
+    original_provider_for_session = main.coordinator.provider_for_session
+
+    class FakeProvider:
+        def start_run(self, *, queue, loop, target_message_id=None, **_kwargs):
+            captured["target_message_id"] = target_message_id
+
+            async def emit():
+                await queue.put(StreamEvent("agent_message", {
+                    "type": "assistant",
+                    "uuid": "prep-render-1",
+                    "message": {"content": [{"type": "text", "text": "ready"}]},
+                }))
+                await queue.put(StreamEvent("complete", {"session_id": "agent-prepped"}))
+
+            loop.create_task(emit())
+
+        def cancel_turn(self, _run_id):
+            captured["cancelled"] = True
+
+    worker = session_manager.create(
+        name="worker:provisioning-anchor",
+        orchestration_mode="native",
+        cwd="/tmp/project",
+        model="glm-5.2",
+        source="internal",
+    )
+
+    async def run_check():
+        return await approval.init_target_agent_session(
+            main.coordinator,
+            bc_session=worker,
+            model="glm-5.2",
+            cwd="/tmp/project",
+            description="worker",
+            cancel_event=main.asyncio.Event(),
+            provision_prompt="prep prompt",
+        )
+
+    main.coordinator.provider_for_session = lambda _sid: FakeProvider()
+    try:
+        result = main.asyncio.run(run_check())
+    finally:
+        main.coordinator.provider_for_session = original_provider_for_session
+
+    assert result == "agent-prepped"
+    refreshed = session_manager.get(worker["id"])
+    messages = refreshed["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert [m.get("source") for m in messages] == ["provisioning", "provisioning"]
+    provisioning_assistant_id = messages[1]["id"]
+    assert captured["target_message_id"] == provisioning_assistant_id
+
+    events_path = ba_home() / "sessions" / worker["id"] / "events.jsonl"
+    rows = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    prep_rows = [
+        row for row in rows
+        if row.get("type") == "agent_message"
+        and (row.get("data") or {}).get("uuid") == "prep-render-1"
+    ]
+    assert prep_rows
+    assert {row.get("msg_id") for row in prep_rows} == {provisioning_assistant_id}
+    assert not event_ingester.root_events_by_sid(worker["id"]).get(worker["id"])
+
+
 if __name__ == "__main__":
     test_provision_workers_is_idempotent_by_role_key()
     test_provision_workers_allows_per_worker_cwd()
@@ -291,4 +367,5 @@ if __name__ == "__main__":
     test_bare_provision_workers_returns_pending_without_init_turn()
     test_coordinator_target_init_proxy_accepts_ws_callback()
     test_target_init_accepts_custom_provision_prompt()
+    test_target_init_anchors_prep_events_to_provisioning_message()
     print("PASS: provision workers is idempotent by role key")

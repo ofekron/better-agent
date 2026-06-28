@@ -354,4 +354,5 @@ async def init_target_agent_session(
         ws_callback=ws_callback,
         mode="native",
         ws_event_prefix="worker",
+        create_provisioning_messages=True,
     )
