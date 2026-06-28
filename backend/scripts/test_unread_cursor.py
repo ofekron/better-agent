@@ -192,6 +192,37 @@ def test_mark_seen_does_not_copy_session_tree() -> None:
     print(f"{PASS} mark_seen_does_not_copy_session_tree")
 
 
+def test_mark_seen_uses_journal_latest_uid() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("scan-fallback"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+
+    original = session_manager_module._event_uuid_safe
+    import event_ingester as event_ingester_module
+    original_latest = event_ingester_module.event_ingester.latest_render_event_uid
+
+    def guarded_event_uuid(_event):
+        raise AssertionError("mark_seen scanned live message events")
+
+    event_ingester_module.event_ingester.latest_render_event_uid = (
+        lambda root_id, *, sid_filter=None: "journal-head"
+    )
+    session_manager_module._event_uuid_safe = guarded_event_uuid
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_manager_module._event_uuid_safe = original
+        event_ingester_module.event_ingester.latest_render_event_uid = original_latest
+    assert result == {"last_seen_event_uid": "journal-head"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_uses_journal_latest_uid")
+
+
 def test_persistence_across_reload() -> None:
     """Persist `last_seen_event_uid`, then drop the in-memory
     SessionManager state and re-hydrate. Counter must rebuild
@@ -268,6 +299,7 @@ def main() -> int:
         test_replace_does_not_bump()
         test_mark_seen_zeros()
         test_mark_seen_does_not_copy_session_tree()
+        test_mark_seen_uses_journal_latest_uid()
         test_persistence_across_reload()
         test_worker_fork_does_not_bump_root()
         print("ALL PASSED")

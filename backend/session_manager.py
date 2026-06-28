@@ -4085,16 +4085,26 @@ class SessionManager:
                 return None
             resolved = uid
             if resolved is None:
-                # Find the latest event uid by walking msg history.
-                # Mirrors `_count_unread_from_disk`'s ordering.
+                try:
+                    from event_ingester import event_ingester
+                    with perf.timed("session.mark_seen.latest_uid_journal"):
+                        resolved = event_ingester.latest_render_event_uid(
+                            rid,
+                            sid_filter=sid,
+                        )
+                except Exception:
+                    logger.exception("mark_seen latest uid lookup failed for %s", sid)
+                    resolved = None
+            if resolved is None:
                 latest: Optional[str] = None
-                for msg in sess.get("messages") or []:
-                    if msg.get("role") != "assistant":
-                        continue
-                    for ev in msg.get("events") or []:
-                        u = _event_uuid_safe(ev)
-                        if u:
-                            latest = u
+                with perf.timed("session.mark_seen.latest_uid_scan"):
+                    for msg in sess.get("messages") or []:
+                        if msg.get("role") != "assistant":
+                            continue
+                        for ev in msg.get("events") or []:
+                            u = _event_uuid_safe(ev)
+                            if u:
+                                latest = u
                 resolved = latest
             sess["last_seen_event_uid"] = resolved
             self._unread_counts[sid] = set()
