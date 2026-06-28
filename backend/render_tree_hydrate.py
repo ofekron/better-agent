@@ -332,7 +332,7 @@ def hydrate_msg_events_from_jsonl(
                 strategy._events_list(live_m),
             )
             extracted = extract_output_text(events_for_extract)
-            if extracted and extracted != (live_m.get("content") or ""):
+            if extracted != (live_m.get("content") or ""):
                 session_manager.update_running_content(sid, msg_id, extracted)
 
         for f in node.get("forks", []):
