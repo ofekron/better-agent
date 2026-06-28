@@ -5301,12 +5301,21 @@ class SessionManager:
         """Stamp when the user last opened/selected this session on a
         client. Does NOT bump `updated_at` — opening is not a content
         change; it only feeds the "last opened" sort."""
-        def _do(s: dict) -> None:
-            s["last_opened_at"] = at
-        return self._run(
-            sid, _do, {"kind": "last_opened_set", "at": at},
-            bump_updated_at=False,
-        )
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            sess = self._cached(sid)
+            if sess is None:
+                return None
+            if sess.get("last_opened_at") == at:
+                return copy.deepcopy(sess)
+            sess["last_opened_at"] = at
+            session_store.write_last_opened(rid, sid, at)
+            if sid == rid:
+                session_store.update_last_opened_projection(sid, at)
+            self._fire(sid, {"kind": "last_opened_set", "at": at})
+            return copy.deepcopy(sess)
 
     def set_archived(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:

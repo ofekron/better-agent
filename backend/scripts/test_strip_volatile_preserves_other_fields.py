@@ -1,5 +1,7 @@
 """Locks `_strip_volatile_from_tree` SRP: it strips EXACTLY the
-volatile fields (`isStreaming`, `events`, `workers[*].events`) and
+volatile fields (`isStreaming`, `events`, `workers[*].events`) plus
+node-level sidecar fields (`draft_input`, `draft_input_seq`,
+`draft_images`, `last_opened_at`) and
 leaves every other field byte-identical across the strip → write →
 restore cycle.
 
@@ -60,6 +62,7 @@ def _build_rich_tree() -> dict:
         "next_seq": 2,
         "created_at": "2026-01-01T00:00:00",
         "updated_at": "2026-01-01T00:00:00",
+        "last_opened_at": "2026-01-01T00:00:01",
         "source": "cli",
         "messages": [
             {
@@ -117,6 +120,7 @@ def _build_rich_tree() -> dict:
                     },
                 ],
                 "next_seq": 1,
+                "last_opened_at": "2026-01-01T00:00:02",
                 "draft_input": "",
                 "forks": [],
             },
@@ -130,6 +134,8 @@ def _frozen_view(node: dict, skip_fields: set) -> str:
     EVERYTHING ELSE is byte-identical."""
     clone = copy.deepcopy(node)
     def visit(n: dict):
+        for f in skip_fields:
+            n.pop(f, None)
         for m in n.get("messages") or []:
             for f in skip_fields:
                 m.pop(f, None)
@@ -162,7 +168,14 @@ def _run() -> bool:
                     ok, f"keys={sorted(msg_a['workers'][0].keys())}"))
 
     # 2) After strip: every NON-volatile field is byte-identical.
-    skip = {"isStreaming", "events"}
+    skip = {
+        "isStreaming",
+        "events",
+        "draft_input",
+        "draft_input_seq",
+        "draft_images",
+        "last_opened_at",
+    }
     ok = _frozen_view(tree, skip) == _frozen_view(original, skip)
     results.append(
         ("non-volatile fields byte-identical after strip", ok,
@@ -197,6 +210,8 @@ def _run() -> bool:
     # And isStreaming was stripped.
     ok = "isStreaming" not in on_disk["messages"][1]
     results.append(("on-disk msg has no isStreaming", ok, ""))
+    ok = "last_opened_at" not in on_disk and "last_opened_at" not in on_disk["forks"][0]
+    results.append(("on-disk nodes have no last_opened_at", ok, ""))
 
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:

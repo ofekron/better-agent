@@ -222,6 +222,29 @@ def _run() -> bool:
         )
     )
 
+    opened_at = "2030-01-02T03:04:05"
+    session_manager.flush_pending_persists()
+    with patch("session_store.write_session_full", side_effect=AssertionError("opened wrote full tree")):
+        opened = session_manager.set_last_opened_at(sid, opened_at)
+    projected_opened = next(s for s in session_store.list_sessions() if s["id"] == sid)
+    disk_after_opened = json.loads(session_store._session_path(sid).read_text(encoding="utf-8"))
+    reloaded_after_opened = session_store.get_root_tree(sid)
+    results.append(
+        (
+            "session open uses opened sidecar instead of full tree write",
+            opened is not None
+            and opened.get("last_opened_at") == opened_at
+            and projected_opened.get("last_opened_at") == opened_at
+            and disk_after_opened.get("last_opened_at") != opened_at
+            and reloaded_after_opened.get("last_opened_at") == opened_at,
+            (
+                f"projected={projected_opened.get('last_opened_at')!r} "
+                f"disk={disk_after_opened.get('last_opened_at')!r} "
+                f"reloaded={reloaded_after_opened.get('last_opened_at')!r}"
+            ),
+        )
+    )
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL
