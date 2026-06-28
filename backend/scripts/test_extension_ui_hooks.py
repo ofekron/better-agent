@@ -130,19 +130,7 @@ def _enable_builtin_ui_extensions() -> None:
         {
             "name": "Ask",
             "surfaces": ["backend_feature", "frontend_feature"],
-            "entrypoints": {
-                "quick_button": {
-                    "label": "Ask",
-                    "icon": "sparkles",
-                    "action": {
-                        "type": "ensure",
-                        "endpoint": "/api/extensions/ofek-dev.ask/backend/ask/ensure",
-                        "path_template": "/s/{id}",
-                        "id_field": "id",
-                        "include_cwd": False,
-                    },
-                },
-            },
+            "entrypoints": {},
             "permissions": {"session_state": True},
         },
     )
@@ -292,17 +280,10 @@ def test_ui_hooks_surfaces_project_structure_page() -> None:
         "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
     }
     quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID]
-    assert len(quick_buttons) == 1
-    assert quick_buttons[0]["action"] == {
-        "type": "ensure",
-        "endpoint": "/api/extensions/ofek-dev.ask/backend/ask/ensure",
-        "path_template": "/s/{id}",
-        "id_field": "id",
-        "include_cwd": False,
-    }
+    assert quick_buttons == []
 
 
-def test_builtin_ask_has_single_toolbar_entrypoint() -> None:
+def test_builtin_ask_has_no_toolbar_entrypoint() -> None:
     manifest_path = (
         Path(__file__).resolve().parents[2]
         / "extensions"
@@ -312,12 +293,7 @@ def test_builtin_ask_has_single_toolbar_entrypoint() -> None:
     entrypoints = extension_store.validate_manifest(
         json.loads(manifest_path.read_text(encoding="utf-8"))
     )["entrypoints"]
-    assert entrypoints["quick_button"]["label"] == "Ask"
-    assert entrypoints["quick_button"]["icon"] == "sparkles"
-    assert entrypoints["quick_button"]["action"] == {
-        "type": "navigate",
-        "path": "/s/virtual:ofek-dev.ask:ask",
-    }
+    assert entrypoints["quick_button"] == {}
     assert [
         module
         for module in entrypoints["frontend_modules"]
@@ -353,13 +329,12 @@ def test_builtin_ask_backend_entrypoint_is_mounted() -> None:
 
 def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
     # First-party builtins surface their UI hooks once seeded + runtime-ready,
-    # regardless of whether they ship as public bundled (ask) or private local
-    # (project-structure) packages. The builtin→private migration dissolved the
-    # old public/private visibility distinction — both are first-party and trusted.
+    # except Ask's toolbar entry, which is intentionally hidden in favor of the
+    # Assistant quick action.
     _seed_store_with_marketplace()
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     hooks = extension_store.ui_hooks()
-    assert [
+    assert not [
         q for q in hooks["quick_buttons"]
         if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
     ]
