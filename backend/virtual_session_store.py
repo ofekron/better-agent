@@ -297,6 +297,21 @@ def _materialize(stored: dict[str, Any], *, include_messages: bool) -> dict[str,
     return session
 
 
+def _copy_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(summary)
+    backing_session_ids = copied.get("backing_session_ids")
+    if isinstance(backing_session_ids, list):
+        copied["backing_session_ids"] = list(backing_session_ids)
+    metadata = copied.get("metadata")
+    if isinstance(metadata, dict):
+        copied["metadata"] = deepcopy(metadata)
+    return copied
+
+
+def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_copy_summary(summary) for summary in summaries]
+
+
 def list_all() -> list[dict[str, Any]]:
     global _summary_cache, _summary_cache_signature
     with _lock:
@@ -307,7 +322,7 @@ def list_all() -> list[dict[str, Any]]:
             and _summary_cache_signature == signature
             and _summary_cache is not None
         ):
-            return deepcopy(_summary_cache)
+            return _copy_summaries(_summary_cache)
         sessions = data.get("sessions") or {}
         out: list[dict[str, Any]] = []
         for session in sessions.values():
@@ -323,8 +338,8 @@ def list_all() -> list[dict[str, Any]]:
         out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
         if signature is not None:
             _summary_cache_signature = signature
-            _summary_cache = deepcopy(out)
-        return deepcopy(out)
+            _summary_cache = _copy_summaries(out)
+        return _copy_summaries(out)
 
 
 def get(session_id: str) -> dict[str, Any] | None:
