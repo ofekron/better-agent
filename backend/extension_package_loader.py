@@ -17,11 +17,10 @@ def package_root(extension_id: str) -> Path:
     record = extension_store.get_extension(clean_extension_id)
     if not record or not extension_store.is_extension_runtime_ready(clean_extension_id):
         raise ExtensionPackageUnavailable("extension is not active")
-    source = record.get("source") or {}
-    install_path = Path(str(source.get("install_path") or "")).expanduser()
-    if not install_path.is_dir():
+    package_path = extension_store.runtime_package_root(clean_extension_id)
+    if not package_path or not package_path.is_dir():
         raise ExtensionPackageUnavailable("extension package is unavailable")
-    return install_path.resolve()
+    return package_path.resolve()
 
 
 def ensure_package_importable(extension_id: str, package_name: str) -> Path:
