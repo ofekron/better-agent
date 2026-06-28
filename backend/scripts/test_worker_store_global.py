@@ -13,6 +13,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from paths import ba_home  # noqa: E402
+import session_store  # noqa: E402
 from stores import session_fork_store, worker_store  # noqa: E402
 
 
@@ -107,12 +108,41 @@ def test_remove_worker_is_global() -> None:
     )
 
 
+def test_worker_count_neutral_writes_do_not_refresh_session_summaries() -> None:
+    calls = 0
+    original = session_store._refresh_all_worker_summaries
+
+    def record_refresh() -> None:
+        nonlocal calls
+        calls += 1
+
+    session_store._refresh_all_worker_summaries = record_refresh
+    try:
+        worker_store.upsert_worker("/repo/a", "worker-refresh", "native", "agent-1")
+        check(calls == 1, "adding a worker refreshes summary worker_count")
+
+        worker_store.upsert_worker("/repo/a", "worker-refresh", "native", "agent-2")
+        worker_store.touch_worker("/repo/a", "worker-refresh")
+        worker_store.enqueue_pool_task("review", {"id": "task-1"})
+        worker_store.pop_pool_task("review", "task-1")
+        worker_store.set_fork("/repo/a", "caller-refresh", "worker-refresh", "fork-refresh")
+        worker_store.touch_fork("/repo/a", "caller-refresh", "worker-refresh")
+        worker_store.clear_fork("/repo/a", "caller-refresh", "worker-refresh")
+        check(calls == 1, "count-neutral worker writes do not refresh summaries")
+
+        worker_store.remove_worker("/repo/a", "worker-refresh")
+        check(calls == 2, "removing a worker refreshes summary worker_count")
+    finally:
+        session_store._refresh_all_worker_summaries = original
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
         test_global_forks_ignore_cwd()
         test_session_fork_store_uses_neutral_session_keyword()
         test_remove_worker_is_global()
+        test_worker_count_neutral_writes_do_not_refresh_session_summaries()
         print("ALL PASS")
         return 0
     finally:
