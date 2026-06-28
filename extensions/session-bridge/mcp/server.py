@@ -9,10 +9,9 @@ from better_agent_sdk import Client
 
 # Match core's per-endpoint budgets: session_search runs up to 15 min (+30s
 # headroom so this client never preempts the search budget); delegate can drive
-# a whole session turn (24h); recall/provision are short.
+# a whole session turn (24h); provision is short.
 _SEARCH_TIMEOUT = 15 * 60 + 30
 _DELEGATE_TIMEOUT = 24 * 60 * 60
-_RECALL_TIMEOUT = 100.0
 _PROPOSE_TIMEOUT = 10.0
 
 
@@ -91,18 +90,6 @@ def propose_sessions_response(
         return {"success": False, "error": str(exc)}
 
 
-def recall_history_response(query: str, k: int = 5) -> dict[str, Any]:
-    query = (query or "").strip()
-    if not query:
-        return {"results": []}
-    try:
-        return Client().call_internal(
-            "/api/internal/session-bridge/recall",
-            {"query": query, "k": k},
-            timeout=_RECALL_TIMEOUT,
-        )
-    except Exception as exc:  # tool boundary: surface transport failures, never crash
-        return {"results": [], "error": str(exc)}
 
 
 def build_server() -> FastMCP:
@@ -112,8 +99,7 @@ def build_server() -> FastMCP:
     def search_sessions(query: str, limit: int = 5) -> dict[str, Any]:
         """Find which of the user's OTHER sessions are relevant to a query, ranked
         by relevance. Discovery only — returns session ids/metadata to act on with
-        delegate_to_session or propose_sessions. For your OWN transcript, use
-        recall_history instead."""
+        delegate_to_session or propose_sessions."""
         return search_sessions_response(query, limit)
 
     @server.tool()
@@ -145,12 +131,6 @@ def build_server() -> FastMCP:
         user's, not yours."""
         return propose_sessions_response(session_ids, reasoning, proposed_project_path)
 
-    @server.tool()
-    def recall_history(query: str, k: int = 5) -> dict[str, Any]:
-        """Semantically search YOUR OWN prior transcript in THIS session to recover
-        earlier context. Scoped to this session only — to search the user's other
-        sessions, use search_sessions."""
-        return recall_history_response(query, k)
 
     return server
 

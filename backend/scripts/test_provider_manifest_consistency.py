@@ -62,11 +62,6 @@ def test_recovery_families():
     assert pm.spec_for("fugu").recovery_family == "claude"
 
 
-def test_recall_kinds_match():
-    import continuation_flow
-    assert pm.recall_kinds() == frozenset(continuation_flow._RECALL_TOOL_PROVIDER_KINDS)
-
-
 def test_installable_matches_installers():
     import provider_setup
     assert pm.installable_kinds() == sorted(provider_setup.INSTALLERS)
@@ -95,7 +90,6 @@ if __name__ == "__main__":
     test_resolve_class_matches_manifest()
     test_runner_modules_importable()
     test_recovery_families()
-    test_recall_kinds_match()
     test_installable_matches_installers()
     test_uses_claude_env_matches()
     test_codex_only_gates()

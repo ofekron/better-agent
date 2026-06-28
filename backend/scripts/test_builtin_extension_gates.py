@@ -203,7 +203,6 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
 
     for path, payload in [
         ("/api/internal/session-bridge/search", {"query": "anything"}),
-        ("/api/internal/session-bridge/recall", {"app_session_id": "a", "query": "anything"}),
         (
             "/api/internal/session-bridge/delegate",
             {

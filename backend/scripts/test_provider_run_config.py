@@ -432,58 +432,6 @@ def _install_credential_broker_extension_record() -> None:
     _save_runtime_extension_record(data, extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID)
 
 
-def _install_continuation_recall_extension_record() -> None:
-    package = Path(_TMP_HOME) / "continuation-recall-extension"
-    (package / "mcp").mkdir(parents=True, exist_ok=True)
-    (package / "mcp" / "server.py").write_text("print('continuation recall')\n", encoding="utf-8")
-    data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"]["ofek-dev.continuation-recall"] = {
-        "manifest": _write_installed_manifest(package, {
-            "kind": extension_store.MANIFEST_KIND,
-            "id": "ofek-dev.continuation-recall",
-            "name": "Continuation Recall",
-            "version": "1.0.0",
-            "description": "Continuation Recall",
-            "surfaces": ["runtime_mcp"],
-            "entrypoints": {
-                "mcp": [
-                    {
-                        "name": "better-agent-continuation-recall",
-                        "python": "mcp/server.py",
-                        "args": [],
-                        "env": {},
-                        "user_facing": True,
-                        "bare_allowed": False,
-                        "requires_backend_auth": True,
-                        "predicate": {"nonempty": ["continuation_chain"]},
-                    }
-                ]
-            },
-            "permissions": {"internal_loopback": True},
-            "marketplace": {},
-        }),
-        "enabled": True,
-        "installed_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "source": {
-            "type": "git",
-            "repo_url": "https://example.test/private.git",
-            "extension_path": "extensions/continuation-recall",
-            "ref": "",
-            "commit_sha": "continuation-recall-private",
-            "install_path": str(package),
-        },
-        "entitlement": {
-            "status": "not_required",
-            "product_id": "",
-            "token_present": False,
-            "last_checked_at": "",
-            "expires_at": "",
-        },
-    }
-    _save_runtime_extension_record(data, "ofek-dev.continuation-recall")
-
-
 def _install_session_bridge_extension_record() -> None:
     package = Path(_TMP_HOME) / "session-bridge-extension"
     (package / "mcp").mkdir(parents=True, exist_ok=True)
@@ -850,28 +798,6 @@ def t_gemini_materializes_isolated_home() -> None:
     check((overlay / ".gemini" / "google_accounts.json").is_symlink(), "Gemini auth file is linked, not copied")
     skill = overlay / ".gemini" / "skills" / "reviewer" / "SKILL.md"
     check(skill.read_text(encoding="utf-8") == "Review.\n", "Gemini skill is written")
-
-
-def t_gemini_continuation_recall_mcp_injected() -> None:
-    _configure_internal_llm_defaults("default_session")
-    _install_continuation_recall_extension_record()
-    config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
-        "continuation_chain": ["provider-sid"],
-        "app_session_id": "bc-sid",
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "secret",
-    }, {
-        "mcp_servers": {"demo": {"command": "echo"}},
-    })
-    servers = config["mcp_servers"]
-    check("demo" in servers, "Gemini continuation keeps existing MCP servers")
-    recall = servers["better-agent-continuation-recall"]
-    check(recall["command"] == sys.executable, "Gemini recall MCP uses current executable")
-    check(recall["args"][-1].endswith("server.py"), "Gemini recall MCP points at private package script")
-    env = recall["env"]
-    check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "Gemini recall MCP carries Better Agent session id")
-    check(env["BETTER_CLAUDE_INTERNAL_TOKEN"] == "secret", "Gemini recall MCP carries internal token")
 
 
 def t_gemini_max_tokens_result_is_context_overflow() -> None:
@@ -1422,7 +1348,6 @@ def main() -> int:
         ("codex built-in tool schemas do not invite null defaults", t_codex_builtin_tool_schemas_do_not_invite_null_defaults),
         ("codex dynamic tools respect existing tool owners", t_codex_dynamic_tools_respect_existing_tool_owners),
         ("gemini materializes isolated home", t_gemini_materializes_isolated_home),
-        ("gemini continuation recall mcp injected", t_gemini_continuation_recall_mcp_injected),
         ("gemini max_tokens result is context overflow", t_gemini_max_tokens_result_is_context_overflow),
         ("built-in user-facing mcp servers injected", t_builtin_user_facing_mcp_servers_injected),
         ("built-in manager mcp servers exclude session bridge", t_builtin_manager_mcp_servers_exclude_session_bridge),

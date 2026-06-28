@@ -289,7 +289,6 @@ import session_search
 import session_bridge
 import assistant_ui
 import coordination
-import session_recall
 import project_update_store
 import project_structure_edit_session
 import virtual_session_prompt_handlers
@@ -8877,28 +8876,6 @@ async def internal_session_bridge_search(
     return response
 
 
-@app.post("/api/internal/session-bridge/recall")
-async def internal_session_bridge_recall(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
-    """`recall_history` tool — semantic search over the CALLER's OWN session
-    transcript (the per-session index built at delegation time). Scoped to
-    `app_session_id`; never reaches another session's index."""
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    sid = str(body.get("app_session_id") or "")
-    query = str(body.get("query") or "").strip()
-    if not sid or not query:
-        return {"results": []}
-    try:
-        k = int(body.get("k") or 5)
-    except (TypeError, ValueError):
-        k = 5
-    results = await asyncio.to_thread(session_recall.recall, sid, query, k=k)
-    return {"results": results}
-
 
 @app.post("/api/internal/coordination/lock-ops")
 async def internal_coordination_lock_ops(
@@ -8987,29 +8964,6 @@ async def internal_marketplace(
     if changed:
         await coordinator.broadcast_global("extensions_changed", {})
     return result
-
-
-@app.post("/api/internal/continuation-recall")
-async def internal_continuation_recall(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Semantic recall for a continuation session. Since continuations reuse
-    the same Better Agent session, all old messages are still there — just search the
-    session's own transcript."""
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    sid = str(body.get("app_session_id") or "")
-    query = str(body.get("query") or "").strip()
-    if not sid or not query:
-        return {"results": []}
-    try:
-        k = int(body.get("k") or 5)
-    except (TypeError, ValueError):
-        k = 5
-    await asyncio.to_thread(session_recall.build_index, sid)
-    results = await asyncio.to_thread(session_recall.recall, sid, query, k=k)
-    return {"results": results}
 
 
 @app.post("/api/internal/session-bridge/delegate")

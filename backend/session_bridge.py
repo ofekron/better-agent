@@ -35,7 +35,6 @@ from typing import Any, Optional
 
 import config_store
 from event_bus import bus
-import session_recall
 import session_search
 import user_prefs
 from session_manager import manager as session_manager
@@ -200,17 +199,6 @@ async def _run(
         if _target_busy(target_sid):
             return {"error": "target_busy"}
         run_sid = target_sid
-
-    # Per-session semantic recall: index the chain's prior transcript so the
-    # delegated turn can `recall_history` over its own past. Built BEFORE the
-    # turn so the backend cache is warm when the runner's tool calls in.
-    # Best-effort — a recall-index failure must never block the delegation.
-    if run_mode == "continue":
-        try:
-            session_recall.build_index(run_sid)
-        except Exception:
-            logger.warning("session_recall.build_index failed for %s",
-                           run_sid[:8], exc_info=True)
 
     final = await _run_turn(
         run_sid,
