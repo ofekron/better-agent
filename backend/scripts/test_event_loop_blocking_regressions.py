@@ -351,6 +351,17 @@ def test_search_summary_lookup_uses_bounded_projection_copy() -> None:
     assert "_markers_snapshot()" not in lookup_source
 
 
+def test_sessions_response_cache_stores_serialized_bytes() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    cache_start = source.index("def _sessions_list_cache_get(")
+    cache_end = source.index("_GIT_STATUS_TTL_SECONDS", cache_start)
+    cache_source = source[cache_start:cache_end]
+    assert "tuple[float, bytes]" in source
+    assert "return _sessions_list_response(cached[1])" in cache_source
+    assert "json.dumps(" in cache_source
+    assert "copy.deepcopy" not in cache_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source
