@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
+from provider import Provider, StreamEvent, build_better_agent_run_env, schedule_loop_task, runner_argv
 from provider_run_config import normalize_provider_run_config
 from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
@@ -260,7 +260,6 @@ class RunState:
     processed_line: int = 0
     tailer: Optional["object"] = None  # GeminiJsonlTailer; typed loosely to avoid import cycle
     tailer_task: Optional[asyncio.Task] = None
-    bootstrap_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -518,7 +517,7 @@ class GeminiProvider(Provider):
         self._runs[run_id] = rs
         self._write_backend_state(rs)
 
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"gemini-bootstrap-{run_id[:8]}",

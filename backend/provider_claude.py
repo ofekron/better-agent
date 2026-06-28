@@ -45,7 +45,7 @@ from typing import Any, Callable, ClassVar, Optional
 
 from event_bus import BusEvent, bus
 from env_compat import get_env
-from provider import Provider, StreamEvent, build_better_agent_run_env, create_loop_task, runner_argv
+from provider import Provider, StreamEvent, build_better_agent_run_env, schedule_loop_task, runner_argv
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -120,7 +120,6 @@ class RunState:
     processed_byte: int = 0
     tailer: Optional["ClaudeJsonlTailer"] = None
     tailer_task: Optional[asyncio.Task] = None
-    bootstrap_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     worker_tailers: dict[str, "ClaudeJsonlTailer"] = field(default_factory=dict)
     started_at: str = ""
@@ -449,7 +448,7 @@ class ClaudeProvider(Provider):
         # Seed backend_state.json so recovery scanners can see this run.
         self._write_backend_state(run_state)
 
-        run_state.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(run_state),
             name=f"bridge-bootstrap-{run_id[:8]}",

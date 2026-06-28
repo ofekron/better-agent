@@ -49,29 +49,34 @@ from proc_control import process_control as _process_control
 logger = logging.getLogger(__name__)
 
 
-def create_loop_task(
+def schedule_loop_task(
     loop: asyncio.AbstractEventLoop,
     coro,
     *,
     name: str,
-) -> asyncio.Task:
+) -> None:
+    """Schedule `coro` to run on `loop`, callable from any thread.
+
+    Returns immediately — the coroutine runs when the loop next services
+    its ready queue. The task handle is intentionally not surfaced.
+
+    This replaces a synchronous cross-thread wait that fatally raised
+    TimeoutError whenever the loop couldn't service a `call_soon` within
+    5s, killing the whole turn under transient loop lag during spawn.
+    Scheduling non-blockingly decouples turn success from loop
+    responsiveness; the bootstrap coroutine's own try/except surfaces
+    its failures.
+    """
     try:
-        running_loop = asyncio.get_running_loop()
+        if asyncio.get_running_loop() is loop:
+            loop.create_task(coro, name=name)
+            return
     except RuntimeError:
-        running_loop = None
-    if running_loop is loop:
-        return loop.create_task(coro, name=name)
-
-    future: concurrent.futures.Future[asyncio.Task] = concurrent.futures.Future()
-
-    def _create() -> None:
-        try:
-            future.set_result(loop.create_task(coro, name=name))
-        except Exception as e:
-            future.set_exception(e)
-
-    loop.call_soon_threadsafe(_create)
-    return future.result(timeout=5)
+        pass
+    # run_coroutine_threadsafe enqueues the task creation on the loop
+    # and returns at once; the loop retains the created task, so it is
+    # not garbage-collected before completion.
+    asyncio.run_coroutine_threadsafe(coro, loop)
 
 
 class RecoveredPopen:

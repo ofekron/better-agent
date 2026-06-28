@@ -32,7 +32,7 @@ from provider import (
     Provider,
     StreamEvent,
     build_better_agent_run_env,
-    create_loop_task,
+    schedule_loop_task,
     runner_argv,
 )
 import provider_runtime
@@ -118,7 +118,6 @@ class RunState:
     processed_line: int = 0
     tailer: Optional["object"] = None  # GeminiJsonlTailer; typed loosely to avoid import cycle
     tailer_task: Optional[asyncio.Task] = None
-    bootstrap_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -387,7 +386,7 @@ class OpenAIProvider(Provider):
         self._runs[run_id] = rs
         self._write_backend_state(rs)
 
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"openai-bootstrap-{run_id[:8]}",
