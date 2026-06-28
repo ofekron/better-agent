@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 import extension_store
 import extension_backend_loader
+import perf
 
 router = APIRouter(prefix="/api/extensions", tags=["extensions"])
 
@@ -128,28 +129,32 @@ async def dispatch_backend_extension_base(extension_id: str, request: Request):
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def dispatch_backend_extension(extension_id: str, path: str, request: Request):
-    core_response = await _dispatch_core_builtin_backend(
-        extension_id,
-        path,
-        request,
-    )
+    with perf.timed("extension.backend.core_fast"):
+        core_response = await _dispatch_core_builtin_backend(
+            extension_id,
+            path,
+            request,
+        )
     if core_response is not None:
         return core_response
-    backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
-    core_response = await _dispatch_core_builtin_backend(
-        extension_id,
-        path,
-        request,
-        backend_spec=backend_spec,
-    )
+    with perf.timed("extension.backend.spec"):
+        backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
+    with perf.timed("extension.backend.core_after_spec"):
+        core_response = await _dispatch_core_builtin_backend(
+            extension_id,
+            path,
+            request,
+            backend_spec=backend_spec,
+        )
     if core_response is not None:
         return core_response
-    return await extension_backend_loader.dispatch_extension_backend_request(
-        extension_id,
-        path,
-        request,
-        backend_spec=backend_spec,
-    )
+    with perf.timed("extension.backend.dispatch"):
+        return await extension_backend_loader.dispatch_extension_backend_request(
+            extension_id,
+            path,
+            request,
+            backend_spec=backend_spec,
+        )
 
 
 async def _dispatch_core_builtin_backend(
