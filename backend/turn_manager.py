@@ -1608,7 +1608,6 @@ class TurnManager:
                 session_manager=session_manager,
                 app_session_id=primary_session_id or app_session_id,
                 prompt=prompt,
-                provider_kind=provider_kind,
                 old_provider_sid=old_provider_sid,
             )
             _session_rec_chain = continuation.continuation_chain
@@ -1652,7 +1651,6 @@ class TurnManager:
                 session_manager=session_manager,
                 app_session_id=primary_session_id or app_session_id,
                 prompt=prompt,
-                provider_kind=provider_kind,
                 old_provider_sid=old_provider_sid,
                 reason="selector_changed",
             )

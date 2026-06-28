@@ -7,8 +7,8 @@ import { trackPromise } from "../progress/store";
 /** Toggle for `context_strategy` (user_prefs). Controls what happens when a
  * session's context window is exceeded:
  * - "native_compact" (default): let the CLI auto-compact the context
- * - "continuation": start a fresh session chained to the previous one,
- *   with recall_history to search the old transcript */
+ * - "continuation": start a fresh provider subprocess chained to the previous
+ *   one; the agent gathers any needed prior context itself via its tools */
 export function ContextStrategySetting() {
   const { t } = useTranslation();
   const [strategy, setStrategy] = useState("native_compact");

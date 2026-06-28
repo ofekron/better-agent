@@ -3,7 +3,7 @@
   "id": "ofek-dev.session-bridge",
   "name": "Session Bridge",
   "version": "0.1.0",
-  "description": "User-facing cross-session operations: search sessions, delegate a prompt to its own session, propose sessions, and recall prior transcript.",
+  "description": "User-facing cross-session operations: search sessions, delegate a prompt to its own session, and propose sessions.",
   "surfaces": [
     "backend_feature",
     "runtime_mcp",

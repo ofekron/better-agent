@@ -1,7 +1,7 @@
 """Canonical provider registry — the single source of truth for every
 per-kind fact that used to be scattered across if/elif chains and parallel
 dicts (`_resolve_class`, app_entry runner choices, INSTALLERS,
-`_GEMINI_FAMILY_KINDS`, the recall/preempt/ui-mcp gates, credential
+`_GEMINI_FAMILY_KINDS`, the preempt/ui-mcp gates, credential
 routing).
 
 STRING-ONLY BY DESIGN: this module imports nothing heavy — not `provider`,
@@ -44,8 +44,6 @@ class ProviderSpec:
     # in-process (no CLI); gemini/fugu have no verified install command yet —
     # both are explicitly False here rather than silently absent.
     installable: bool
-    # Supports the conversation-recall tool (continuation_flow).
-    recall_tool: bool
     # Hosts the built-in `ui` MCP server (open-file-panel). codex cannot.
     hosts_ui_mcp: bool
     # Supports codex-style context-continuation preemption (turn_manager).
@@ -62,49 +60,49 @@ SPECS: dict[str, ProviderSpec] = {
     "claude": ProviderSpec(
         kind="claude", module="provider_claude", cls="ClaudeProvider",
         runner_module="runner", recovery_family="claude",
-        installable=True, recall_tool=True, hosts_ui_mcp=True,
+        installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=True,
     ),
     "gemini": ProviderSpec(
         kind="gemini", module="provider_gemini", cls="GeminiProvider",
         runner_module="runner_gemini", recovery_family="gemini",
-        installable=False, recall_tool=False, hosts_ui_mcp=True,
+        installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "codex": ProviderSpec(
         kind="codex", module="provider_codex", cls="CodexProvider",
         runner_module="runner_codex", recovery_family="codex",
-        installable=True, recall_tool=True, hosts_ui_mcp=False,
+        installable=True, hosts_ui_mcp=False,
         context_continuation=True, uses_claude_env=False,
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",
         runner_module="runner_codex", recovery_family="claude",
-        installable=False, recall_tool=False, hosts_ui_mcp=True,
+        installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "openai": ProviderSpec(
         kind="openai", module="provider_openai", cls="OpenAIProvider",
         runner_module="runner_openai", recovery_family="gemini",
-        installable=False, recall_tool=False, hosts_ui_mcp=True,
+        installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "agy": ProviderSpec(
         kind="agy", module="provider_agy", cls="AgyProvider",
         runner_module="runner_agy", recovery_family="gemini",
-        installable=True, recall_tool=False, hosts_ui_mcp=True,
+        installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "copilot": ProviderSpec(
         kind="copilot", module="provider_copilot", cls="CopilotProvider",
         runner_module="runner_copilot", recovery_family="gemini",
-        installable=True, recall_tool=False, hosts_ui_mcp=True,
+        installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "claude-remote": ProviderSpec(
         kind="claude-remote", module="provider_remote", cls="RemoteProviderProxy",
         runner_module=None, recovery_family="claude",
-        installable=False, recall_tool=True, hosts_ui_mcp=True,
+        installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
         virtual=True,
     ),
@@ -133,10 +131,6 @@ def runner_module_for(kind: str) -> str:
 
 def installable_kinds() -> list[str]:
     return sorted(k for k, s in SPECS.items() if s.installable)
-
-
-def recall_kinds() -> frozenset[str]:
-    return frozenset(k for k, s in SPECS.items() if s.recall_tool)
 
 
 def gemini_family_kinds() -> frozenset[str]:
