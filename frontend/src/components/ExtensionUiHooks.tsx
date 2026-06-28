@@ -53,10 +53,56 @@ export interface HookActionContext {
   cwd: string;
   openAsk?: () => void;
   askSessionPath?: string;
+  /** Marks a freshly-created/ensured session id as routeable before the
+   * sessions list catches up, preventing the route guard from bouncing the
+   * navigation back to the default view. */
+  markSessionKnown?: (id: string) => void;
 }
 
 function isKnownIcon(name: unknown): name is IconName {
   return typeof name === "string" && (ICON_NAMES as readonly string[]).includes(name);
+}
+
+function sessionPathForId(sessionId: string): string {
+  return `/s/${encodeURIComponent(sessionId)}`;
+}
+
+function parseVirtualSingletonPath(path: string): { extensionId: string; slug: string } | null {
+  const match = path.match(/^\/s\/([^/]+)\/?$/);
+  if (!match) return null;
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  const virtual = sessionId.match(/^virtual:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)$/);
+  if (!virtual) return null;
+  return { extensionId: virtual[1], slug: virtual[2] };
+}
+
+async function tryEnsureAssistantSingleton(path: string, ctx: HookActionContext): Promise<boolean> {
+  const parsed = parseVirtualSingletonPath(path);
+  if (!parsed || parsed.slug !== "assistant") return false;
+  try {
+    const endpoint = `/api/extensions/${encodeURIComponent(parsed.extensionId)}/backend/${encodeURIComponent(parsed.slug)}/ensure`;
+    const res = await fetch(`${API}${endpoint}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = res.ok ? await res.json().catch(() => ({})) : {};
+    if (!res.ok || data?.error) return false;
+    const idValue = data?.id ?? data?.session_id;
+    if (idValue == null || String(idValue) === "") return false;
+    const sessionId = String(idValue);
+    ctx.markSessionKnown?.(sessionId);
+    ctx.navigate(sessionPathForId(sessionId));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Execute a navigate/ensure action. `module` actions are rendered inline by
@@ -77,6 +123,11 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
       ctx.openAsk();
       return;
     }
+    // Back-compat for stale/dev-installed Assistant manifests that still
+    // declare the old virtual route even though the backing UI is a real
+    // ensured session. Ensure first and navigate to the returned session id;
+    // if the endpoint is unavailable, fall back to the literal route.
+    if (await tryEnsureAssistantSingleton(action.path, ctx)) return;
     ctx.navigate(action.path);
     return;
   }
@@ -84,6 +135,7 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
     try {
       const res = await fetch(`${API}${action.endpoint}`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(action.include_cwd ? { cwd: ctx.cwd } : {}),
       });
@@ -94,6 +146,7 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
       }
       const idField = action.id_field || "session_id";
       const idValue = data[idField] != null ? String(data[idField]) : "";
+      if (idValue) ctx.markSessionKnown?.(idValue);
       const path = action.path_template.replace(
         `{${idField}}`,
         idValue ? encodeURIComponent(idValue) : "",
