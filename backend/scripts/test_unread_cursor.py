@@ -31,6 +31,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+import session_manager as session_manager_module  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -165,6 +166,32 @@ def test_mark_seen_zeros() -> None:
     print(f"{PASS} mark_seen_zeros")
 
 
+def test_mark_seen_does_not_copy_session_tree() -> None:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=msg,
+        event=_native_event("copy-guard"),
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    original_deepcopy = session_manager_module.copy.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and value.get("id") == sid:
+            raise AssertionError("mark_seen copied the full session tree")
+        return original_deepcopy(value)
+
+    session_manager_module.copy.deepcopy = guarded_deepcopy
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        session_manager_module.copy.deepcopy = original_deepcopy
+    assert result == {"last_seen_event_uid": "copy-guard"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_does_not_copy_session_tree")
+
+
 def test_persistence_across_reload() -> None:
     """Persist `last_seen_event_uid`, then drop the in-memory
     SessionManager state and re-hydrate. Counter must rebuild
@@ -240,6 +267,7 @@ def main() -> int:
         test_append_bumps_unread()
         test_replace_does_not_bump()
         test_mark_seen_zeros()
+        test_mark_seen_does_not_copy_session_tree()
         test_persistence_across_reload()
         test_worker_fork_does_not_bump_root()
         print("ALL PASSED")
