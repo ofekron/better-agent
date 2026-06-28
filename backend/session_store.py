@@ -2983,7 +2983,8 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
             "(SessionManager._persist resolves to root before calling)."
         )
     if bump_updated_at:
-        root["updated_at"] = datetime.now().isoformat()
+        with perf.timed("store.session.write_full.updated_at"):
+            root["updated_at"] = datetime.now().isoformat()
     with perf.timed("store.session.write_full.index_tree"):
         fork_topology_changed = _index_tree(root)
     with perf.timed("store.session.write_full.path"):
@@ -3023,13 +3024,15 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
         with perf.timed("store.session.write_full.signature"):
             file_signature = _session_file_signature(path)
     except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        with perf.timed("store.session.write_full.unlink_tmp"):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         raise
     finally:
-        _restore_volatile_to_tree(popped)
+        with perf.timed("store.session.write_full.restore"):
+            _restore_volatile_to_tree(popped)
     with perf.timed("store.session.write_full.index_signature"):
         if file_signature is not None:
             with _index_lock:
