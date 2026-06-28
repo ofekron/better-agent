@@ -11,6 +11,7 @@ Shape:
 """
 
 import logging
+import threading
 from typing import Literal
 
 from json_store import read_json, write_json
@@ -62,6 +63,8 @@ DEFAULT_SHORTCUT_RESPONSES = [
     "/Adv",
     "Confirmed Go ahead",
 ]
+_PREFS_CACHE_LOCK = threading.Lock()
+_PREFS_CACHE: tuple[tuple[int, int], dict] | None = None
 
 
 def _prefs_path():
@@ -69,11 +72,34 @@ def _prefs_path():
 
 
 def _load() -> dict:
-    return read_json(_prefs_path(), {})
+    global _PREFS_CACHE
+    path = _prefs_path()
+    try:
+        st = path.stat()
+        fingerprint = (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        fingerprint = (0, 0)
+    with _PREFS_CACHE_LOCK:
+        cached = _PREFS_CACHE
+        if cached is not None and cached[0] == fingerprint:
+            return dict(cached[1])
+    data = read_json(path, {})
+    with _PREFS_CACHE_LOCK:
+        _PREFS_CACHE = (fingerprint, dict(data))
+    return dict(data)
 
 
 def _save(data: dict) -> None:
-    write_json(_prefs_path(), data)
+    global _PREFS_CACHE
+    path = _prefs_path()
+    write_json(path, data)
+    try:
+        st = path.stat()
+        fingerprint = (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        fingerprint = (0, 0)
+    with _PREFS_CACHE_LOCK:
+        _PREFS_CACHE = (fingerprint, dict(data))
 
 
 def get_send_mode() -> SendMode:
