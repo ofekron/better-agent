@@ -527,15 +527,20 @@ def _upsert_summary(root: dict) -> None:
         existing = _summary_index.get(root["id"])
         if existing and existing.get("pending_eng_session_id"):
             summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
-        _summary_index[root["id"]] = summary
-        _summary_index_version += 1
-        if _summary_metadata_changed(existing, summary):
-            _summary_metadata_version += 1
+        if existing == summary:
+            summary_changed = False
+        else:
+            _summary_index[root["id"]] = summary
+            _summary_index_version += 1
+            summary_changed = True
+            if _summary_metadata_changed(existing, summary):
+                _summary_metadata_version += 1
     # Write lightweight summary file AFTER the in-memory update. Uses
     # atomic write (tmpfile + os.replace) so a crash mid-write leaves the
     # previous file intact. Non-fatal — in-memory index is authoritative.
     try:
-        _write_summary_file(root["id"], summary)
+        if summary_changed or not _touch_summary_file_current(root["id"]):
+            _write_summary_file(root["id"], summary)
     except Exception:
         # Summary file write failure is non-fatal — in-memory index is
         # authoritative. Next write will overwrite.
@@ -827,6 +832,23 @@ def _write_summary_file(root_id: str, summary: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _touch_summary_file_current(root_id: str) -> bool:
+    sp = _sessions_dir() / f"{root_id}.summary.json"
+    if not sp.exists():
+        return False
+    root_path = _sessions_dir() / f"{root_id}.json"
+    target_mtime_ns = time.time_ns()
+    try:
+        target_mtime_ns = max(target_mtime_ns, root_path.stat().st_mtime_ns)
+    except OSError:
+        return False
+    try:
+        os.utime(sp, ns=(target_mtime_ns, target_mtime_ns))
+        return True
+    except OSError:
+        return False
 
 
 def _sanitize_summary(summary: dict) -> tuple[dict, bool]:
