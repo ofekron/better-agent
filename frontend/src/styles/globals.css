@@ -2388,6 +2388,61 @@ body {
   padding: 1px 4px;
   outline: none;
 }
+.session-selector-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.session-selector-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
+}
+.session-selector-control span {
+  color: var(--text-muted);
+}
+.session-selector-control select {
+  max-width: 150px;
+  min-width: 74px;
+  height: 24px;
+  padding: 1px 20px 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: calc(11px * var(--app-font-scale));
+}
+.session-selector-control--model select {
+  max-width: 210px;
+}
+.session-selector-status,
+.session-selector-error {
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+.session-selector-error {
+  color: var(--danger, #d44);
+  font-weight: 700;
+}
+@media (max-width: 720px) {
+  .session-selector-control span {
+    display: none;
+  }
+  .session-selector-control select {
+    max-width: 96px;
+    min-width: 66px;
+  }
+  .session-selector-control--model select {
+    max-width: 120px;
+  }
+}
+
 .chat-toolbar-badge-btn {
   font-size: calc(11px * var(--app-font-scale));
   padding: 2px 8px;
@@ -10311,6 +10366,187 @@ pre .inline-tag-highlight {
   padding: 8px;
 }
 
+/* ── Changes panel ────────────────────────────────────────────────── */
+.changes-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.changes-panel-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.changes-panel-error {
+  margin: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--danger, #d44);
+  background: rgba(220, 68, 68, 0.08);
+  border: 1px solid rgba(220, 68, 68, 0.35);
+  font-family: monospace;
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.changes-panel-summary {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-tertiary, #888);
+  padding: 0 2px 2px;
+}
+
+.changes-file-card {
+  background: var(--bg-tertiary, #1c1c1c);
+  border: 1px solid var(--border-color, #2a2a2a);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.changes-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-secondary, #181818);
+  border-bottom: 1px solid var(--border-color, #2a2a2a);
+}
+
+.changes-file-name {
+  font-size: calc(12px * var(--app-font-scale));
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.changes-file-count {
+  flex-shrink: 0;
+  font-size: calc(10px * var(--app-font-scale));
+  color: var(--text-tertiary, #888);
+  background: var(--bg-tertiary, #1c1c1c);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+
+.changes-file-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.change-item {
+  border-inline-start: 3px solid var(--accent, #4a8);
+  padding-inline-start: 9px;
+}
+
+.change-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.change-kind-badge {
+  font-size: calc(10px * var(--app-font-scale));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--bg-primary, #000);
+}
+.change-kind-create {
+  background: var(--success, #3a3);
+}
+.change-kind-edit {
+  background: var(--accent, #4a8);
+}
+.change-kind-patch {
+  background: var(--info, #39c);
+}
+
+.change-ts {
+  font-size: calc(10px * var(--app-font-scale));
+  color: var(--text-tertiary, #888);
+  font-family: var(--font-mono, monospace);
+}
+
+.change-toggle {
+  margin-inline-start: auto;
+  background: transparent;
+  border: 1px solid var(--border-color, #2a2a2a);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: calc(10px * var(--app-font-scale));
+  cursor: pointer;
+}
+.change-toggle:hover {
+  border-color: var(--accent, #4a8);
+  color: var(--accent, #4a8);
+}
+
+.change-why {
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-secondary);
+  margin: 4px 0;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.change-multi {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.change-diff-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.change-diff {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: calc(11px * var(--app-font-scale));
+  line-height: 1.45;
+  overflow-x: auto;
+  max-height: 260px;
+  overflow-y: auto;
+  white-space: pre;
+}
+.change-diff code {
+  font-family: var(--font-mono, monospace);
+}
+.change-diff-old {
+  background: rgba(220, 68, 68, 0.1);
+  border-inline-start: 3px solid var(--danger, #d44);
+}
+.change-diff-new {
+  background: rgba(58, 170, 58, 0.1);
+  border-inline-start: 3px solid var(--success, #3a3);
+}
+
+@media (max-width: 640px) {
+  .change-toggle {
+    margin-inline-start: 0;
+  }
+}
+
 .comments-panel-empty {
   padding: 16px;
   text-align: center;
@@ -10911,6 +11147,44 @@ pre .inline-tag-highlight {
 .user-input-card__actions button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* ─── Tool-approval card: per-argument detail rows ───────────── */
+.tool-approval-card__provider {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted, #888);
+}
+.tool-approval-card__args {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.tool-approval-card__arg {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+.tool-approval-card__arg-key {
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+  color: var(--text-muted, #888);
+  overflow-wrap: anywhere;
+}
+.tool-approval-card__arg-value {
+  margin: 0;
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.tool-approval-card__no-args {
+  color: var(--text-muted, #888);
+  font-style: italic;
 }
 
 /* ─── Working-mode overlay (prompt-eng + file-editor) ────────── */
