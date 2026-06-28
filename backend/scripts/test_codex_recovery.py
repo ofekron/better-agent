@@ -24,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import uuid
 from types import SimpleNamespace
@@ -39,7 +41,7 @@ if _BACKEND not in sys.path:
 
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
-from provider import create_loop_task  # noqa: E402
+from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState  # noqa: E402
 from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
 from run_recovery import (  # noqa: E402
@@ -688,26 +690,96 @@ def test_loopback_post_retries_transient_reset() -> bool:
     return True
 
 
-def test_create_loop_task_from_worker_thread() -> bool:
+def test_schedule_loop_task_from_worker_thread() -> bool:
     async def main() -> bool:
         loop = asyncio.get_running_loop()
+        done = threading.Event()
 
-        async def marker() -> str:
-            return "ok"
+        async def marker() -> None:
+            done.set()
 
-        task = await asyncio.to_thread(
-            create_loop_task,
+        await asyncio.to_thread(
+            schedule_loop_task,
             loop,
             marker(),
-            name="test-create-loop-task-worker",
+            name="test-schedule-loop-task-worker",
         )
-        result = await task
-        if result != "ok":
-            print(f"  expected ok task result, got {result!r}")
+        if not done.wait(timeout=2.0):
+            print("  scheduled coro never ran on the loop")
             return False
         return True
 
     return asyncio.run(main())
+
+
+def test_schedule_loop_task_no_block_under_loop_lag() -> bool:
+    """Regression: scheduling the bootstrap coro from a worker thread must
+    NOT synchronously wait for the event loop. The old create_loop_task did
+    future.result(timeout=5) and raised TimeoutError — killing the whole
+    turn — whenever the loop could not service a call_soon within 5s. With
+    the loop deliberately held, scheduling must still return immediately.
+    """
+    loop = asyncio.new_event_loop()
+    hold = threading.Event()      # freed by the test to release the loop
+    holding = threading.Event()   # set once the loop has entered the hold
+    scheduled = threading.Event()  # set by the scheduled coro when it runs
+
+    def occupy_loop() -> None:
+        holding.set()
+        hold.wait(10.0)
+
+    def run_loop() -> None:
+        loop.call_soon(occupy_loop)
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+
+    async def marker() -> None:
+        scheduled.set()
+
+    result: dict = {}
+
+    def schedule_from_worker() -> None:
+        # Hard happens-before: confirm the loop is actually held before
+        # scheduling, closing the call_soon vs call_soon_threadsafe race.
+        if not holding.wait(timeout=2.0):
+            result["error"] = "loop never entered hold"
+            return
+        start = time.monotonic()
+        try:
+            schedule_loop_task(
+                loop, marker(), name="test-schedule-under-lag",
+            )
+        except BaseException as exc:  # noqa: BLE001 — surface pre-fix TimeoutError
+            result["error"] = repr(exc)
+            return
+        result["elapsed"] = time.monotonic() - start
+
+    worker = threading.Thread(target=schedule_from_worker)
+    worker.start()
+    worker.join(timeout=3.0)
+    try:
+        if worker.is_alive():
+            print("  scheduling worker blocked on the held loop (pre-fix hang)")
+            return False
+        if "error" in result:
+            print(f"  scheduling raised (pre-fix behavior): {result['error']}")
+            return False
+        elapsed = result.get("elapsed", 99.0)
+        if elapsed >= 1.0:
+            print(f"  scheduling blocked worker {elapsed:.3f}s; expected immediate return")
+            return False
+        hold.set()
+        if not scheduled.wait(timeout=2.0):
+            print("  scheduled coro never ran after loop released")
+            return False
+        return True
+    finally:
+        hold.set()  # release occupy_loop so the loop can service stop
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2.0)
+        loop.close()
 
 
 def test_codex_mcp_string_error_normalizes() -> bool:
@@ -1244,7 +1316,8 @@ TESTS = [
     ("dead codex wrapper without terminal fails closed", test_dead_wrapper_without_terminal_still_fails_closed),
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
-    ("provider bootstrap task schedules from worker thread", test_create_loop_task_from_worker_thread),
+    ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
+    ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),
     ("codex MCP string error normalizes", test_codex_mcp_string_error_normalizes),
     ("codex replay includes child subagent panel events", test_codex_replay_includes_child_subagent_panel_events),
     ("codex replay derives missing child sources from actual wait shape", test_codex_replay_derives_missing_child_sources_from_actual_wait_shape),

@@ -29,7 +29,7 @@ from provider import (
     RecoveredPopen,
     StreamEvent,
     build_better_agent_run_env,
-    create_loop_task,
+    schedule_loop_task,
     runner_argv,
 )
 from provider_run_config import normalize_provider_run_config
@@ -239,7 +239,6 @@ class RunState:
     child_tailer_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     child_setup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     child_sources: dict[str, dict] = field(default_factory=dict)
-    bootstrap_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -478,7 +477,7 @@ class CodexProvider(Provider):
         self._runs[run_id] = rs
         self._write_backend_state(rs)
 
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"codex-bootstrap-{run_id[:8]}",
@@ -925,7 +924,7 @@ class CodexProvider(Provider):
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"codex-recover-bootstrap-{run_id[:8]}",

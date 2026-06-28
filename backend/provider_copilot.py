@@ -27,7 +27,7 @@ import config_store
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from provider import build_better_agent_run_env, create_loop_task, runner_argv
+from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
 import provider_runtime
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
@@ -410,7 +410,7 @@ class CopilotProvider(GeminiProvider):
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
-        rs.bootstrap_task = create_loop_task(
+        schedule_loop_task(
             loop,
             self._bootstrap_run(rs),
             name=f"copilot-bootstrap-{run_id[:8]}",

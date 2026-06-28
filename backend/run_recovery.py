@@ -1002,7 +1002,6 @@ async def _integrate_one(
                     persist_to=persist_sid,
                     tailer=None,
                     tailer_task=None,
-                    bootstrap_task=None,
                     complete_task=None,
                     lingering=False,
                 )
@@ -1104,7 +1103,6 @@ async def _integrate_one(
                     persist_to=persist_sid,
                     tailer=None,
                     tailer_task=None,
-                    bootstrap_task=None,
                     complete_task=None,
                     lingering=True,
                 )
