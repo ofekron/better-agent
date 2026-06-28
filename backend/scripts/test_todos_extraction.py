@@ -1071,6 +1071,53 @@ def test_cli_prompt_open_todos_only() -> bool:
     return True
 
 
+def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool:
+    sid, msg = _mk_session("native")
+    session_manager.set_current_todos(sid, [
+        {"content": "Check project orientation", "status": "in_progress", "activeForm": None},
+        {"content": "Draft concise implementation plan", "status": "pending", "activeForm": None},
+    ])
+
+    import file_ref_resolver
+    file_ref_resolver.set_tag_rules([
+        {
+            "tag": "ALL_TASKS__DONE",
+            "strip_wrapper": True,
+            "_extension_id": "ofek-dev.user-attention",
+            "marker": {"color": "#2563eb", "tooltip": "All tasks done"},
+        }
+    ])
+
+    strategy = get_strategy("native")
+    _apply(strategy, sid, msg, {
+        "type": "agent_message",
+        "data": {
+            "uuid": "all_done_msg",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<ALL_TASKS__DONE>All requested work is done.</ALL_TASKS__DONE>",
+                    }
+                ],
+            },
+        },
+    }, source_is_provider_stream=True)
+
+    got = session_manager.get(sid).get("current_todos") or []
+    if [item.get("status") for item in got] != ["completed", "completed"]:
+        print(f"  expected marker to complete todos, got {got}")
+        return False
+
+    from turn_helpers import _append_todo_reminder
+    if _append_todo_reminder("next prompt", session_manager.get(sid)) != "next prompt":
+        print("  completed marker did not suppress next todo reminder")
+        return False
+    return True
+
+
 def test_run_turn_gate_covers_every_user_prompt() -> bool:
     """Runtime gate test: exercise the EXACT boolean expression at the
     `run_turn` inject site by extracting it from the source via AST.
@@ -2184,6 +2231,7 @@ TESTS = [
     ("Gemini re-emission preserves completed", test_gemini_reemission_preserves_completed_status),
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
     ("cli_prompt reminder: open todos only", test_cli_prompt_open_todos_only),
+    ("ALL_TASKS__DONE marker completes todos and suppresses reminder", test_all_tasks_done_marker_completes_todos_and_suppresses_reminder),
     ("dispatch supervisor branch passes user_initiated=True", test_dispatch_supervisor_branch_passes_user_initiated),
     ("run_turn actually calls _append_todo_reminder (AST)", test_run_turn_actually_calls_append_todo_reminder),
     ("run_turn gate covers every non-empty user prompt",
