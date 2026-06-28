@@ -135,7 +135,10 @@ def test_session_content_search_uses_readonly_connection_without_writer_lock() -
     config_start = source.index("def _configure_connection(")
     config_end = source.index("def _event_text(", config_start)
     config_source = source[config_start:config_end]
-    assert "conn = _connect_readonly()" in search_source
+    assert "_readonly_conn_local = threading.local()" in source
+    assert "def _readonly_connection()" in source
+    assert "conn = _readonly_connection()" in search_source
+    assert "conn.close()" not in search_source
     assert "with _lock:" not in search_source
     assert "_connect()" not in search_source
     assert "_configure_connection(conn)" in connect_source

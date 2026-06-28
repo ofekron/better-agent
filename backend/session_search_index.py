@@ -20,6 +20,7 @@ _worker_started = False
 _worker_lock = threading.Lock()
 _writer_conn: sqlite3.Connection | None = None
 _writer_conn_path: Path | None = None
+_readonly_conn_local = threading.local()
 _search_cache_lock = threading.Lock()
 _search_cache: dict[tuple[str, int], tuple[int, float, list[tuple[str, int]]]] = {}
 _search_inflight: dict[tuple[str, int], threading.Event] = {}
@@ -81,6 +82,34 @@ def _connect_readonly() -> sqlite3.Connection | None:
     _configure_connection(conn)
     conn.execute("PRAGMA query_only=ON")
     return conn
+
+
+def _readonly_connection() -> sqlite3.Connection | None:
+    path = _db_path()
+    conn = getattr(_readonly_conn_local, "conn", None)
+    conn_path = getattr(_readonly_conn_local, "path", None)
+    if conn is not None and conn_path == path:
+        return conn
+    if conn is not None:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    conn = _connect_readonly()
+    _readonly_conn_local.conn = conn
+    _readonly_conn_local.path = path
+    return conn
+
+
+def _close_readonly_connection() -> None:
+    conn = getattr(_readonly_conn_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    _readonly_conn_local.conn = None
+    _readonly_conn_local.path = None
 
 
 def _configure_connection(conn: sqlite3.Connection) -> None:
@@ -222,14 +251,11 @@ def search(
             return [{"session_id": sid, "score": score} for sid, score in rows]
         event.wait()
     try:
-        conn = _connect_readonly()
+        conn = _readonly_connection()
         if conn is None:
             scores: list[tuple[str, int]] = []
         else:
-            try:
-                scores = _candidate_scores(conn, q, limit)
-            finally:
-                conn.close()
+            scores = _candidate_scores(conn, q, limit)
         with _search_cache_lock:
             _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
             if len(_search_cache) > _SEARCH_CACHE_MAX:
@@ -249,14 +275,11 @@ def _run_search_cache_fill(
     event: threading.Event,
 ) -> None:
     try:
-        conn = _connect_readonly()
+        conn = _readonly_connection()
         if conn is None:
             scores: list[tuple[str, int]] = []
         else:
-            try:
-                scores = _candidate_scores(conn, query, limit)
-            finally:
-                conn.close()
+            scores = _candidate_scores(conn, query, limit)
         with _search_cache_lock:
             _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
             if len(_search_cache) > _SEARCH_CACHE_MAX:
@@ -266,17 +289,15 @@ def _run_search_cache_fill(
             _search_inflight.pop(cache_key, None)
         event.set()
 
+
 def has_indexed_rows() -> bool:
-    conn = _connect_readonly()
+    conn = _readonly_connection()
     if conn is None:
         return False
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM session_event_fts LIMIT 1",
-        ).fetchone()
-        return row is not None
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT 1 FROM session_event_fts LIMIT 1",
+    ).fetchone()
+    return row is not None
 
 
 def rebuild_from_disk() -> None:
@@ -291,6 +312,7 @@ def rebuild_from_disk() -> None:
                 rows.extend(_index_file_rows(fpath.parent.name, fpath))
         with _lock:
             _close_writer_connection_locked()
+            _close_readonly_connection()
             conn = _connect()
             try:
                 conn.execute("DELETE FROM session_event_fts")
