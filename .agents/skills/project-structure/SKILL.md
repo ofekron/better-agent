@@ -9,7 +9,7 @@ Better Agent is a multi-provider desktop/web agent runtime. The backend owns dur
 
 ## Routing
 
-- `backend/`: FastAPI backend, provider runners/adapters, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.
+- `backend/`: FastAPI backend, provider runners/adapters, provider runtime policy, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.
 - `frontend/`: React UI, session/workspace views, settings, i18n, hooks, and UI tests.
 - `extensions/`: bundled Better Agent extensions and their backend/MCP surfaces.
 - `provider-config-sync/`: separate checkout for provider capability/config synchronization across Codex, Claude, and Gemini.
