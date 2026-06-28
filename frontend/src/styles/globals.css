@@ -1196,6 +1196,40 @@ body {
   gap: 8px;
 }
 
+.session-filter-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-filter-section {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.session-filter-section-title {
+  color: var(--text-secondary);
+  font-size: calc(10px * var(--app-font-scale));
+  line-height: 1.2;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-filter-section-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
 .session-filter-group {
   display: flex;
   flex-direction: column;
@@ -1292,6 +1326,17 @@ body {
   border-color: var(--accent, #7b68ee);
   background: var(--accent-dim);
   color: var(--text-primary);
+}
+
+@media (max-width: 640px) {
+  .session-org-bar {
+    padding-inline: 8px;
+  }
+
+  .session-filter-sections,
+  .session-filter-section-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Assigned-tags summary on a session row (read-only). Up to 5 chips,
