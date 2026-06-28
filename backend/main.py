@@ -9491,8 +9491,10 @@ async def internal_coordination_lock_ops(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     return await coordination.lock_ops(
         key=str(body.get("key") or ""),
+        keys=body.get("keys") if isinstance(body.get("keys"), list) else None,
         release=bool(body.get("release") or False),
         holder_token=str(body.get("holder_token") or ""),
+        timeout_seconds=body.get("timeout_seconds"),
     )
 
 
