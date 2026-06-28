@@ -97,6 +97,66 @@ _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 
 
+def _latest_assistant_message_id(session: dict) -> Optional[str]:
+    messages = session.get("messages") if isinstance(session, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("isStreaming"):
+            msg_id = msg.get("id")
+            return msg_id if isinstance(msg_id, str) and msg_id else None
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            msg_id = msg.get("id")
+            return msg_id if isinstance(msg_id, str) and msg_id else None
+    return None
+
+
+def _record_model_switched_event(
+    session_id: str,
+    before: dict,
+    after: dict,
+    updates: dict,
+) -> None:
+    keys = ("model", "provider_id", "reasoning_effort")
+    changed = [
+        key for key in keys
+        if key in updates and before.get(key) != after.get(key)
+    ]
+    if not changed:
+        return
+    msg_id = _latest_assistant_message_id(after)
+    if not msg_id:
+        return
+    root_id = session_manager._root_id_for(session_id)
+    if not root_id:
+        return
+    data = {
+        "uuid": f"model-switch-{uuid.uuid4()}",
+        "model": after.get("model"),
+        "provider_id": after.get("provider_id"),
+        "reasoning_effort": after.get("reasoning_effort"),
+        "previous_model": before.get("model"),
+        "previous_provider_id": before.get("provider_id"),
+        "previous_reasoning_effort": before.get("reasoning_effort"),
+        "changed": changed,
+        "app_session_id": session_id,
+        "msg_id": msg_id,
+    }
+    event = {"type": "model_switched", "data": data}
+    session_manager.append_native_event(session_id, msg_id, event)
+    from event_journal import publish_event_sync
+    publish_event_sync(
+        session_id=root_id,
+        context_id=session_id,
+        event_type="model_switched",
+        data=data,
+        source="selector_change",
+        message_id=msg_id,
+        timeout=30,
+    )
+
+
 def _session_event_file_fingerprint(root_id: str) -> tuple[int, int]:
     path = event_ingester._events_path(root_id)
     try:
@@ -2131,11 +2191,13 @@ async def internal_session_control_selectors(
     if not sid:
         raise HTTPException(status_code=400, detail="app_session_id is required")
     updates = await _resolve_selector_updates(sid, body or {})
+    before = await asyncio.to_thread(session_manager.get, sid)
     session = await asyncio.to_thread(
         session_manager.set_selectors, sid, **updates,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    _record_model_switched_event(sid, before or {}, session, updates)
     if "model" in updates:
         await _record_last_model(session.get("provider_id"), updates["model"])
     if updates.get("reasoning_effort"):
@@ -5313,12 +5375,14 @@ async def update_session_selectors(session_id: str, body: dict):
     body = body or {}
     updates = await _resolve_selector_updates(session_id, body)
     client_id = body.get("client_id") if isinstance(body.get("client_id"), str) else None
+    before = await asyncio.to_thread(session_manager.get, session_id)
     session = await asyncio.to_thread(
         session_manager.set_selectors,
         session_id, client_id=client_id, **updates,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    _record_model_switched_event(session_id, before or {}, session, updates)
     if "model" in updates:
         await _record_last_model(session.get("provider_id"), updates["model"])
     if "reasoning_effort" in updates and updates["reasoning_effort"]:
@@ -5971,6 +6035,7 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
         )
 
     updates = await _resolve_selector_updates(session_id, body)
+    before = await asyncio.to_thread(session_manager.get, session_id)
     session = await asyncio.to_thread(
         session_manager.set_selectors,
         session_id,
@@ -5979,6 +6044,7 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    _record_model_switched_event(session_id, before or {}, session, updates)
     if "model" in updates:
         await _record_last_model(session.get("provider_id"), updates["model"])
     if updates.get("reasoning_effort"):

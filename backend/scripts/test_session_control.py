@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import continuation  # noqa: E402
+import config_store  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
 import extension_store  # noqa: E402
 import session_manager  # noqa: E402
 
@@ -105,7 +107,27 @@ def test_endpoints() -> None:
         extension_store._ensure_public_extensions(data)  # type: ignore[attr-defined]
         extension_store._save(data)  # type: ignore[attr-defined]
 
-        sid = session_manager.manager.create(name="sc-ep", cwd=str(TMP_HOME))["id"]
+        provider = config_store.add_provider({
+            "name": "Session Control Provider",
+            "kind": "claude",
+            "mode": "subscription",
+            "default_model": "model-one",
+            "custom_models": ["model-one", "model-two"],
+        })
+        sid = session_manager.manager.create(
+            name="sc-ep",
+            cwd=str(TMP_HOME),
+            provider_id=provider["id"],
+            model="model-one",
+            orchestration_mode="native",
+        )["id"]
+        session_manager.manager.append_assistant_msg(sid, {
+            "id": "assistant-switch-model",
+            "role": "assistant",
+            "content": "",
+            "events": [],
+            "isStreaming": True,
+        })
         try:
             # continue-fresh next_turn (default): sets the flag, no live turn.
             resp = client.post(
@@ -169,6 +191,32 @@ def test_endpoints() -> None:
                 json={"model": "anything"},
             )
             check(resp.status_code == 400, "selectors rejects missing app_session_id")
+
+            resp = client.post(
+                "/api/internal/session-control/selectors",
+                headers={"X-Internal-Token": internal_token},
+                json={"app_session_id": sid, "model": "model-two"},
+            )
+            check(resp.status_code == 200, f"selectors switches model ok ({resp.status_code})")
+            session = session_manager.manager.get(sid) or {}
+            assistant = next(
+                (m for m in session.get("messages", []) if m.get("id") == "assistant-switch-model"),
+                {},
+            )
+            switch_events = [
+                e for e in assistant.get("events", [])
+                if e.get("type") == "model_switched"
+            ]
+            check(len(switch_events) == 1, "selectors appends model_switched to assistant events")
+            rows = event_ingester.read_ws_events(
+                sid,
+                sid_filter=sid,
+                msg_id_filter="assistant-switch-model",
+            )
+            check(
+                len([e for e in rows if e.get("type") == "model_switched"]) == 1,
+                "selectors writes model_switched to events.jsonl",
+            )
 
             # Bad internal token is forbidden.
             resp = client.post(

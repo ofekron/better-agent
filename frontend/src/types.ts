@@ -37,6 +37,7 @@ export type WSEventType =
   // Turn lifecycle + worker events
   | "turn_start"
   | "manager_event" // legacy backward compat
+  | "model_switched"
   | "turn_complete"
   // Server-side ack that the user's prompt has been persisted to disk
   // (and an empty streaming-assistant placeholder created beside it).

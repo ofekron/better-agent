@@ -33,6 +33,7 @@ EVENT_JOURNAL_WRITE_FAILED = "event_journal.write_failed"
 RENDER_EVENT_TYPES = frozenset({
     "agent_message",
     "manager_event",
+    "model_switched",
     "steer_prompt",
     "worker_event",
 })

@@ -211,7 +211,7 @@ class OrchestrationStrategy(ABC):
     # Event types that land on msg.events (the narrow render tree).
     # DO NOT extend without auditing `_reconcile_msg_events_from_jsonl`.
     # `manager_event` kept for backward compat with pre-migration events.jsonl rows.
-    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "steer_prompt")
+    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "model_switched", "steer_prompt")
 
     # Hard caps on lifecycle accumulators so a `done` event that never
     # fires (orphan run, crashed handler, race between cancel and
