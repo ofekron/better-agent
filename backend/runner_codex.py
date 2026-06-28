@@ -38,6 +38,7 @@ import re
 
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
+from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 import extension_store
 from runs_dir import atomic_write_json
@@ -55,7 +56,6 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
 )
-from prompt_templates import render_prompt
 from provider_run_config import toml_literal, write_skill_tree
 from proc_control import process_control as _process_control
 
@@ -2303,23 +2303,7 @@ def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 # ============================================================================

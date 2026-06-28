@@ -31,11 +31,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
-from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
 from proc_control import process_control as _process_control
 
@@ -553,23 +553,7 @@ def _apply_image_attachments(
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 # ============================================================================

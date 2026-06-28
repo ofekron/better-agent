@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 from runner_codex import _prepend_capability_context as codex_prompt  # noqa: E402
 from runner_gemini import _prepend_capability_context as gemini_prompt  # noqa: E402
+from runner_openai import render_capability_context as openai_capability_context  # noqa: E402
 from orchs.native import handle_turn as native_handle_turn  # noqa: E402
 from capability_contexts import normalize_capability_contexts  # noqa: E402
 from turn_manager import _provider_capability_contexts  # noqa: E402
@@ -95,10 +96,15 @@ def test_cli_prompt_wrapping() -> None:
     }
     codex = codex_prompt("Ship it.", inputs)
     gemini = gemini_prompt("Ship it.", inputs)
-    check(codex.startswith("Use these selected capabilities"), "Codex prompt receives capability prefix")
+    check(codex.startswith("The following injected context is from Better Agent"), "Codex prompt receives capability prefix")
     check("Use the deploy flow." in codex, "Codex prefix includes capability content")
-    check(gemini.startswith("Use these selected capabilities"), "Gemini prompt receives capability prefix")
+    check("## User prompt\n\nShip it." in codex, "Codex marks the real user prompt")
+    check(gemini.startswith("The following injected context is from Better Agent"), "Gemini prompt receives capability prefix")
+    check("## User prompt\n\nShip it." in gemini, "Gemini marks the real user prompt")
     check("Ship it." in gemini, "Gemini prompt preserves user prompt")
+    openai = openai_capability_context(inputs["capability_contexts"])
+    check(openai.startswith("The following injected context is from Better Agent"), "OpenAI context is renderable as instructions")
+    check("Ship it." not in openai, "OpenAI capability instructions exclude the user prompt")
 
 
 def test_native_handler_accepts_capability_contexts() -> None:

@@ -60,7 +60,7 @@ from orchestration_tool_descriptions import (
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
 )
-from prompt_templates import render_prompt
+from capability_contexts import prepend_capability_context, render_capability_context
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_openai")
@@ -197,23 +197,7 @@ def _save_history(agent_session_id: str, messages: list[dict]) -> None:
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 def _prepend_file_attachments(prompt: str, files: list) -> str:
@@ -1533,11 +1517,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     loopback_handlers = _build_loopback_tool_handlers(inputs, cwd=str(cwd), model=model)
     resume_sid = inputs.get("session_id")
 
-    prompt = _prepend_capability_context(prompt, inputs)
+    capability_context = render_capability_context(inputs.get("capability_contexts") or [])
     prompt = _prepend_file_attachments(prompt, inputs.get("files") or [])
     session_id, messages = _load_history_for_run(resume_sid, fork=bool(inputs.get("fork")))
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
+    transient_capability_message = None
+    if capability_context:
+        transient_capability_message = {"role": "system", "content": capability_context}
+        messages.append(transient_capability_message)
     if prompt or inputs.get("images"):
         messages.append({"role": "user", "content": _build_user_content(prompt, inputs.get("images") or [])})
 
@@ -1639,6 +1627,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 "ending the turn; raise max_tool_loops or let the model finish"
             )
 
+        if transient_capability_message is not None:
+            messages = [msg for msg in messages if msg is not transient_capability_message]
         _save_history(session_id, messages)
     except Exception as e:
         logger.exception("openai runner loop failed")

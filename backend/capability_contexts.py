@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from prompt_templates import render_prompt
+
 MAX_CAPABILITY_CONTEXTS = 20
 MAX_CAPABILITY_OUTPUTS = 20
 MAX_CAPABILITY_CONTENT_CHARS = 200_000
@@ -99,3 +101,31 @@ def provider_capability_contexts(
             "content": output["content"],
         })
     return selected
+
+
+def render_capability_context(contexts: Optional[list[dict]]) -> str:
+    blocks: list[str] = []
+    for item in contexts or []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        name = str(item.get("name") or "Capability")
+        category = str(item.get("category") or "capability")
+        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
+    if not blocks:
+        return ""
+    return render_prompt(
+        "runner/capability_context.md",
+        {"blocks": "\n\n".join(blocks)},
+    )
+
+
+def prepend_capability_context(prompt: str, inputs: dict) -> str:
+    context = render_capability_context(inputs.get("capability_contexts") or [])
+    if not context:
+        return prompt
+    if not prompt:
+        return context
+    return f"{context}\n\n## User prompt\n\n{prompt}"
