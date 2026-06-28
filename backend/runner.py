@@ -920,6 +920,94 @@ def _build_delegate_task_tool(
     return delegate_task
 
 
+_CAPABILITY_ID_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "capability_id": {
+            "type": "string",
+            "description": "Full capability id, e.g. 'ofek.testape:testape'.",
+        }
+    },
+    "required": ["capability_id"],
+}
+_CAPABILITY_HTTP_TIMEOUT = 30.0
+
+
+def _build_capability_tools(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    """Better Agent runtime-capability management. Lets the model scope its own
+    session — load a capability (its MCP + skill become available next turn),
+    release it, or list what's loadable. Core owns the write; these tools POST
+    over the internal loopback."""
+    url_path = f"/api/internal/sessions/{app_session_id}/capabilities"
+
+    def _post(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path=url_path,
+            timeout=_CAPABILITY_HTTP_TIMEOUT,
+            non_json_t_key="runner.mssg_non_json",
+            log_prefix="capabilities POST",
+            backoff_cap=5.0,
+        )
+
+    async def _run_action(name: str, payload: dict) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(_post, payload)
+        except Exception as e:
+            return _tool_error_response(name, e)
+        return _tool_success_result(result)
+
+    @tool(
+        "list_capabilities",
+        "List the scoped capabilities loadable in this session and which are active.",
+        {"type": "object", "properties": {}},
+    )
+    async def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
+        return await _run_action("list_capabilities", {"action": "list"})
+
+    @tool(
+        "load_capability",
+        "Load a scoped capability into this session. Its MCP + skill become "
+        "available on the next turn.",
+        _CAPABILITY_ID_INPUT_SCHEMA,
+    )
+    async def load_capability(args: dict[str, Any]) -> dict[str, Any]:
+        capability_id = str(args.get("capability_id") or "").strip()
+        if not capability_id:
+            return {
+                "content": [{"type": "text", "text": "capability_id is required"}],
+                "is_error": True,
+            }
+        return await _run_action(
+            "load_capability", {"action": "load", "capability_id": capability_id}
+        )
+
+    @tool(
+        "release_capability",
+        "Release a previously loaded capability from this session.",
+        _CAPABILITY_ID_INPUT_SCHEMA,
+    )
+    async def release_capability(args: dict[str, Any]) -> dict[str, Any]:
+        capability_id = str(args.get("capability_id") or "").strip()
+        if not capability_id:
+            return {
+                "content": [{"type": "text", "text": "capability_id is required"}],
+                "is_error": True,
+            }
+        return await _run_action(
+            "release_capability", {"action": "release", "capability_id": capability_id}
+        )
+
+    return [list_capabilities, load_capability, release_capability]
+
+
 def _build_create_session_tool(
     *,
     sender_session_id: str,
@@ -1993,6 +2081,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 tools=handoff_tools,
             )
             mcp_servers["handoff"] = handoff_server
+
+    # Capability management — let the model scope its own session (load/release/
+    # list scoped capabilities). Internal, non-bare sessions only; bare sessions
+    # are deliberately capability-stripped.
+    if app_session_id and backend_url and internal_token and not _bare:
+        mcp_servers["capabilities"] = create_sdk_mcp_server(
+            name="capabilities",
+            version="1.0.0",
+            tools=_build_capability_tools(
+                app_session_id=str(app_session_id),
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ),
+        )
 
     if mode == "manager" and team_orchestration_enabled:
         if not app_session_id or not backend_url or not internal_token:
