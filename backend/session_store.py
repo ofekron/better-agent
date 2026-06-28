@@ -519,6 +519,10 @@ def _seen_cursor_path(root_id: str) -> Path:
     return _sessions_dir() / f"{root_id}.seen.json"
 
 
+def _opened_path(root_id: str) -> Path:
+    return _sessions_dir() / f"{root_id}.opened.json"
+
+
 def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
     """Atomically persist the per-node draft sidecar. `drafts` maps a
     node sid -> {draft_input, draft_input_seq, draft_images}; nodes with
@@ -633,6 +637,47 @@ def read_seen_cursors(root_id: str) -> dict[str, Optional[str]]:
     }
 
 
+def read_last_opened(root_id: str) -> dict[str, str]:
+    path = _opened_path(root_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    raw = data.get("opened") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        sid: at
+        for sid, at in raw.items()
+        if isinstance(sid, str) and sid and isinstance(at, str) and at
+    }
+
+
+def write_last_opened(root_id: str, sid: str, at: str) -> None:
+    if not (root_id and sid and isinstance(at, str) and at):
+        return
+    opened = read_last_opened(root_id)
+    if opened.get(sid) == at:
+        return
+    opened[sid] = at
+    path = _opened_path(root_id)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{root_id}.opened.", suffix=".tmp", dir=_sessions_dir(),
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "opened": opened}, f)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def write_seen_cursor(root_id: str, sid: str, uid: Optional[str]) -> None:
     if not (root_id and sid):
         return
@@ -675,6 +720,24 @@ def update_seen_cursor_projection(sid: str, uid: Optional[str]) -> None:
         pass
 
 
+def update_last_opened_projection(sid: str, at: str) -> None:
+    global _summary_index_version
+    updated: Optional[dict] = None
+    with _summary_index_lock:
+        if not _summary_index_loaded:
+            return
+        summary = _summary_index.get(sid)
+        if summary is None or summary.get("last_opened_at") == at:
+            return
+        updated = {**summary, "last_opened_at": at}
+        _summary_index[sid] = updated
+        _summary_index_version += 1
+    try:
+        _write_summary_file(sid, updated)
+    except Exception:
+        pass
+
+
 def _overlay_seen_cursors(root: dict, root_id: str) -> None:
     cursors = read_seen_cursors(root_id)
     if not cursors:
@@ -683,6 +746,16 @@ def _overlay_seen_cursors(root: dict, root_id: str) -> None:
         sid = node.get("id")
         if sid in cursors:
             node["last_seen_event_uid"] = cursors[sid]
+
+
+def _overlay_last_opened(root: dict, root_id: str) -> None:
+    opened = read_last_opened(root_id)
+    if not opened:
+        return
+    for node in [root, *_walk_forks(root)]:
+        sid = node.get("id")
+        if sid in opened:
+            node["last_opened_at"] = opened[sid]
 
 
 def _remove_summary(root_id: str) -> None:
@@ -890,6 +963,7 @@ def _do_build_summary_index_unsafe() -> None:
             ctx = _provider_backfill_context()
             data = _migrate_session(json.loads(fpath.read_text(encoding="utf-8")), ctx)
             _overlay_seen_cursors(data, data["id"])
+            _overlay_last_opened(data, data["id"])
             summary = _build_summary_for_root(data)
             with _summary_index_lock:
                 existing = _summary_index.get(data["id"])
@@ -1092,6 +1166,7 @@ _SIDECAR_JSON_SUFFIXES = (
     ".summary.json",
     ".drafts.json",
     ".seen.json",
+    ".opened.json",
     ".fork-index.json",
 )
 
@@ -2801,6 +2876,7 @@ def get_session(session_id: str) -> Optional[dict]:
     _index_tree(root, force=True)
     _overlay_drafts(root, root_id)
     _overlay_seen_cursors(root, root_id)
+    _overlay_last_opened(root, root_id)
     return _find_in_tree(root, session_id)
 
 
@@ -2847,6 +2923,8 @@ def get_root_tree(session_id: str) -> Optional[dict]:
         _overlay_drafts(root, root_id)
     with perf.timed("store.session.get_root_tree.overlay_seen"):
         _overlay_seen_cursors(root, root_id)
+    with perf.timed("store.session.get_root_tree.overlay_opened"):
+        _overlay_last_opened(root, root_id)
     return root
 
 
@@ -2878,6 +2956,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     events_lists: list[tuple[dict, list]] = []
     uid_idxs: list[tuple[dict, dict]] = []
     drafts: list[tuple[dict, dict]] = []
+    opened: list[tuple[dict, str]] = []
     content_dirty: list[tuple[dict, bool]] = []
     _DRAFT_KEYS = ("draft_input", "draft_input_seq", "draft_images")
 
@@ -2892,6 +2971,10 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         idx = owner.pop("_uid_idx", None)
         if isinstance(idx, dict):
             uid_idxs.append((owner, idx))
+    def _pop_opened(node: dict) -> None:
+        at = node.pop("last_opened_at", None)
+        if isinstance(at, str):
+            opened.append((node, at))
 
     def _pop_events(owner: dict) -> None:
         ev = owner.get("events")
@@ -2903,6 +2986,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     while stack:
         node = stack.pop()
         _pop_drafts(node)
+        _pop_opened(node)
         for m in node.get("messages", []):
             if m.get("role") == "assistant":
                 dirty = bool(m.get("_content_dirty")) or not m.get("content")
@@ -2936,6 +3020,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         "events_lists": events_lists,
         "uid_idxs": uid_idxs,
         "drafts": drafts,
+        "opened": opened,
         "content_dirty": content_dirty,
     }
 
@@ -2952,6 +3037,8 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner["_uid_idx"] = idx
     for node, fields in popped.get("drafts", []):
         node.update(fields)
+    for node, at in popped.get("opened", []):
+        node["last_opened_at"] = at
     for m, value in popped.get("content_dirty", []):
         m["_content_dirty"] = value
 
@@ -3551,6 +3638,10 @@ def delete_session(root_id: str) -> bool:
         pass
     try:
         _seen_cursor_path(root_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        _opened_path(root_id).unlink(missing_ok=True)
     except OSError:
         pass
     return True
