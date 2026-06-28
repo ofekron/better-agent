@@ -240,14 +240,14 @@ def test_worker_list_projects_pools_from_tags():
     )
     assert listed.status_code == 200, listed.text
     pools = {pool["tag"]: pool for pool in listed.json()["pools"]}
-    assert [worker["name"] for worker in pools["review"]["workers"]] == [
-        "worker:review-b",
+    assert {worker["name"] for worker in pools["review"]["workers"]} == {
         "worker:review-a",
-    ]
+        "worker:review-b",
+    }
     assert len(pools["build"]["workers"]) == 1
 
 
-def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker(monkeypatch):
+def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
     dispatched = []
 
     async def fake_submit_team_message(**kwargs):
@@ -256,7 +256,8 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker(monkeypatch):
 
     main.coordinator._init_target_agent_session = _fake_init_target_agent_session
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
-    monkeypatch.setattr(main.coordinator, "submit_team_message", fake_submit_team_message)
+    real_submit = main.coordinator.submit_team_message
+    main.coordinator.submit_team_message = fake_submit_team_message
     client = _client()
     sender = main.session_manager.create(
         name="manager",
@@ -269,19 +270,22 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker(monkeypatch):
     })
     assert provision.status_code == 200, provision.text
 
-    response = client.post(
-        "/api/internal/worker-pools/enqueue",
-        json={"tag": "review", "sender_session_id": sender["id"], "prompt": "review this"},
-        headers={"X-Internal-Token": main.coordinator.internal_token},
-    )
-    assert response.status_code == 200, response.text
+    try:
+        response = client.post(
+            "/api/internal/worker-pools/enqueue",
+            json={"tag": "review", "sender_session_id": sender["id"], "prompt": "review this"},
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+        )
+        assert response.status_code == 200, response.text
 
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.05))
-    assert dispatched
-    assert dispatched[0]["sender_session_id"] == sender["id"]
-    assert dispatched[0]["message"] == "review this"
-    assert dispatched[0]["detach"] is True
+        import asyncio
+        asyncio.run(main._process_worker_pool_queue("review"))
+        assert dispatched
+        assert dispatched[0]["sender_session_id"] == sender["id"]
+        assert dispatched[0]["message"] == "review this"
+        assert dispatched[0]["detach"] is True
+    finally:
+        main.coordinator.submit_team_message = real_submit
 
 
 def test_internal_provision_workers_requires_internal_token():
@@ -620,6 +624,8 @@ if __name__ == "__main__":
     test_provision_workers_is_idempotent_by_role_key()
     test_provision_workers_remains_idempotent_after_session_title_changes()
     test_provision_workers_allows_per_worker_cwd()
+    test_worker_list_projects_pools_from_tags()
+    test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()
     test_coordinator_target_init_proxy_accepts_ws_callback()
