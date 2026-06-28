@@ -636,7 +636,9 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     route_start = source.index('@app.get("/api/sessions")')
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
-    assert "_builtin_extension_enabled(\n                extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in route_source
+    assert "connected_worker_node_ids_snapshot()" in route_source
+    assert "_ns.snapshot()" not in route_source
+    assert "sessions.list.node_snapshot" not in route_source
     assert "_builtin_extension_runtime_ready_fast" not in route_source
     assert "_builtin_extension_runtime_ready(" not in route_source
 
