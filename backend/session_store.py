@@ -174,8 +174,6 @@ _summary_index_loaded = False
 _summary_index_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_cache: list[dict] = []
-_summary_projected_cache_version = -1
-_summary_projected_cache: list[dict] = []
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -191,6 +189,22 @@ _markers_lock = threading.Lock()
 # without forming the `_summary_index_lock <-> _lock_for(cwd)` ABBA or the
 # `_summary_index_lock` self-re-entry that `_upsert_summary` would cause.
 _summary_build_lock = threading.Lock()
+
+
+def _replace_summary_projection_field(
+    session_id: str,
+    field: str,
+    value: object,
+) -> None:
+    global _summary_index_version
+    with _summary_index_lock:
+        if not _summary_index_loaded:
+            return
+        summary = _summary_index.get(session_id)
+        if summary is None or summary.get(field) == value:
+            return
+        _summary_index[session_id] = {**summary, field: value}
+        _summary_index_version += 1
 
 
 def timestamp_sort_value(value: object) -> float:
@@ -297,34 +311,27 @@ def set_requirement_tags_projection(tags_by_session: dict[str, list[dict]]) -> N
         if isinstance(sid, str) and isinstance(tags, list):
             clean[sid] = [tag for tag in tags if isinstance(tag, dict)]
     with _requirement_tags_lock:
+        previous = set(_requirement_tags_by_session)
         _requirement_tags_by_session.clear()
         _requirement_tags_by_session.update(clean)
+    changed = previous | set(clean)
     with _summary_index_lock:
-        _summary_index_version += 1
+        if _summary_index_loaded:
+            for sid in changed:
+                summary = _summary_index.get(sid)
+                if summary is None:
+                    continue
+                tags = clean.get(sid, [])
+                if summary.get("requirement_tags") != tags:
+                    _summary_index[sid] = {**summary, "requirement_tags": tags}
+                    _summary_index_version += 1
+        else:
+            _summary_index_version += 1
 
 
 def _requirement_tags_for_session(session_id: str) -> list[dict]:
     with _requirement_tags_lock:
         return list(_requirement_tags_by_session.get(session_id, []))
-
-
-def _requirement_tags_snapshot() -> dict[str, list[dict]]:
-    with _requirement_tags_lock:
-        return {
-            sid: list(tags)
-            for sid, tags in _requirement_tags_by_session.items()
-        }
-
-
-def _requirement_tags_for_sessions(session_ids: Iterable[str]) -> dict[str, list[dict]]:
-    wanted = set(session_ids)
-    if not wanted:
-        return {}
-    with _requirement_tags_lock:
-        return {
-            sid: list(_requirement_tags_by_session.get(sid, []))
-            for sid in wanted
-        }
 
 
 def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -> None:
@@ -341,32 +348,16 @@ def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -
                 _markers_by_session.pop(sid, None)
         else:
             per[extension_id] = dict(marker)
+        current = {k: dict(v) for k, v in _markers_by_session.get(sid, {}).items()}
+    _replace_summary_projection_field(sid, "markers", current)
     with _summary_index_lock:
-        _summary_index_version += 1
+        if not _summary_index_loaded:
+            _summary_index_version += 1
 
 
 def _markers_for_session(session_id: str) -> dict[str, dict]:
     with _markers_lock:
         return {k: dict(v) for k, v in _markers_by_session.get(session_id, {}).items()}
-
-
-def _markers_snapshot() -> dict[str, dict[str, dict]]:
-    with _markers_lock:
-        return {
-            sid: {k: dict(v) for k, v in per.items()}
-            for sid, per in _markers_by_session.items()
-        }
-
-
-def _markers_for_sessions(session_ids: Iterable[str]) -> dict[str, dict[str, dict]]:
-    wanted = set(session_ids)
-    if not wanted:
-        return {}
-    with _markers_lock:
-        return {
-            sid: {k: dict(v) for k, v in _markers_by_session.get(sid, {}).items()}
-            for sid in wanted
-        }
 
 
 def summary_version() -> int:
@@ -718,6 +709,17 @@ def _do_build_summary_index_unsafe() -> None:
             if pid:
                 eng_by_parent[pid] = data["id"]
 
+    with _requirement_tags_lock:
+        requirement_tags = {
+            sid: list(tags)
+            for sid, tags in _requirement_tags_by_session.items()
+        }
+    with _markers_lock:
+        markers = {
+            sid: {k: dict(v) for k, v in per.items()}
+            for sid, per in _markers_by_session.items()
+        }
+
     # Final unified pass for eng pointers across the WHOLE index
     # (Pass 1 + Pass 2). Acquired under the index lock so all updates
     # land atomically with the `_summary_index_loaded = True` flip.
@@ -737,6 +739,20 @@ def _do_build_summary_index_unsafe() -> None:
                     "pending_eng_session_id": eng_sid,
                 }
                 _summary_index_version += 1
+        for sid, summary in list(_summary_index.items()):
+            tags = requirement_tags.get(sid, [])
+            marker = markers.get(sid, {})
+            if (
+                summary.get("requirement_tags") == tags
+                and summary.get("markers") == marker
+            ):
+                continue
+            _summary_index[sid] = {
+                **summary,
+                "requirement_tags": tags,
+                "markers": marker,
+            }
+            _summary_index_version += 1
         _summary_index_loaded = True
 
     # Phase 3: persist migrated trees outside both locks (write_session_full
@@ -2852,7 +2868,6 @@ def list_sessions() -> list[dict]:
     must not mutate them, but no current caller does.
     """
     global _summary_sorted_cache_version, _summary_sorted_cache
-    global _summary_projected_cache_version, _summary_projected_cache
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
         if _summary_sorted_cache_version != _summary_index_version:
@@ -2865,24 +2880,7 @@ def list_sessions() -> list[dict]:
                 reverse=True,
             )
             _summary_sorted_cache_version = _summary_index_version
-        if _summary_projected_cache_version == _summary_index_version:
-            return list(_summary_projected_cache)
-        items = list(_summary_sorted_cache)
-    requirement_tags = _requirement_tags_snapshot()
-    markers = _markers_snapshot()
-    projected = [
-        {
-            **summary,
-            "requirement_tags": requirement_tags.get(summary.get("id", ""), []),
-            "markers": markers.get(summary.get("id", ""), {}),
-        }
-        for summary in items
-    ]
-    with _summary_index_lock:
-        if _summary_index_version == _summary_sorted_cache_version:
-            _summary_projected_cache = projected
-            _summary_projected_cache_version = _summary_index_version
-    return list(projected)
+        return list(_summary_sorted_cache)
 
 
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
@@ -2890,22 +2888,12 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    requirement_tags = _requirement_tags_for_sessions(ids)
-    markers = _markers_for_sessions(ids)
     with _summary_index_lock:
-        summaries = [
+        return [
             _summary_index[sid]
             for sid in ids
             if sid in _summary_index
         ]
-    return [
-        {
-            **summary,
-            "requirement_tags": requirement_tags.get(summary.get("id", ""), []),
-            "markers": markers.get(summary.get("id", ""), {}),
-        }
-        for summary in summaries
-    ]
 
 
 def iter_all_sessions() -> Iterator[dict]:

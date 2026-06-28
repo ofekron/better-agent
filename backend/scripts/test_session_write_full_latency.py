@@ -149,6 +149,25 @@ def _run() -> bool:
          f"got p95={p95:.2f}ms n={len(rest_latencies)} "
          f"samples-trim={[f'{s:.1f}' for s in rest_latencies[:5]]}..."))
 
+    session_store._ensure_summary_index(blocking=True)
+    session_store.set_marker_projection(sid, "ext-a", {"color": "#ff0000"})
+    session_store.set_requirement_tags_projection({
+        sid: [{"id": "req-a", "label": "Req A"}],
+    })
+    projected = next(s for s in session_store.list_sessions() if s["id"] == sid)
+    version_after_projection = session_store.summary_version()
+    _ = session_store.list_sessions()
+    _ = session_store.list_sessions()
+    results.append(
+        (
+            "session list uses maintained tag/marker projection",
+            projected.get("markers") == {"ext-a": {"color": "#ff0000"}}
+            and projected.get("requirement_tags") == [{"id": "req-a", "label": "Req A"}]
+            and session_store.summary_version() == version_after_projection,
+            f"markers={projected.get('markers')!r} tags={projected.get('requirement_tags')!r}",
+        )
+    )
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL
