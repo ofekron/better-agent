@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 import gzip
 import io
@@ -52,6 +53,7 @@ _HARNESS_DELIVERY_MODES = {_HARNESS_DELIVERY_NATIVE, _HARNESS_DELIVERY_RUNTIME}
 _PRIVATE_LOCAL_RUNTIME_MODE_ENV = "BETTER_AGENT_PRIVATE_EXTENSION_RUNTIME"
 _PRIVATE_LOCAL_RUNTIME_SOURCE = "source"
 _PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
+_PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
     "canvas",
@@ -262,6 +264,28 @@ def store_fingerprint() -> tuple[int, int]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+def _file_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _projection_cache_get(name: str, key: tuple[Any, ...]) -> Any:
+    cached = _PROJECTION_CACHE.get((name, key))
+    return copy.deepcopy(cached) if cached is not None else None
+
+
+def _projection_cache_put(name: str, key: tuple[Any, ...], value: Any) -> Any:
+    _PROJECTION_CACHE[(name, key)] = copy.deepcopy(value)
+    return copy.deepcopy(value)
+
+
+def _clear_projection_cache() -> None:
+    _PROJECTION_CACHE.clear()
+
+
 def _install_root() -> Path:
     return ba_home() / "extensions" / "installed"
 
@@ -355,6 +379,7 @@ def _write_store_unlocked(data: dict[str, Any]) -> None:
         json.dump(data, fh, indent=2)
         tmp_name = fh.name
     os.replace(tmp_name, path)
+    _clear_projection_cache()
 
 
 def _merge_store_for_save(
@@ -4196,6 +4221,10 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
 
 
 def frontend_entrypoints() -> list[dict[str, Any]]:
+    key = (store_fingerprint(),)
+    cached = _projection_cache_get("frontend_entrypoints", key)
+    if cached is not None:
+        return cached
     entries: list[dict[str, Any]] = []
     for record in _active_records():
         if not _record_active(record) or not _record_runtime_ready(record):
@@ -4232,7 +4261,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                 ],
             }
         )
-    return entries
+    return _projection_cache_put("frontend_entrypoints", key, entries)
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -4287,6 +4316,7 @@ def _load_ui_settings() -> dict[str, dict[str, Any]]:
 
 def _save_ui_settings(settings: dict[str, dict[str, Any]]) -> None:
     write_json(_ui_settings_path(), {"schema_version": _UI_SETTINGS_SCHEMA_VERSION, "settings": settings})
+    _clear_projection_cache()
 
 
 def get_ui_settings(extension_id: str) -> dict[str, bool]:
@@ -4329,6 +4359,10 @@ def _ui_hook_enabled(settings: dict[str, dict[str, Any]], extension_id: str, key
 def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     """Quick buttons and pages for every active extension (built-ins
     included), filtered by per-extension UI-surface toggles."""
+    key = (store_fingerprint(), _file_fingerprint(_ui_settings_path()))
+    cached = _projection_cache_get("ui_hooks", key)
+    if cached is not None:
+        return cached
     settings = _load_ui_settings()
     quick_buttons: list[dict[str, Any]] = []
     pages: list[dict[str, Any]] = []
@@ -4366,7 +4400,7 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
             if page.get("badge"):
                 page_item["badge"] = page["badge"]
             pages.append(page_item)
-    return {"quick_buttons": quick_buttons, "pages": pages}
+    return _projection_cache_put("ui_hooks", key, {"quick_buttons": quick_buttons, "pages": pages})
 
 
 # ── extension settings + per-MCP-server enable/disable ───────────────

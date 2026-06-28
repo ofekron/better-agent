@@ -385,6 +385,40 @@ def test_ui_settings_toggle_filters_page() -> None:
     assert len(pages) == 1
 
 
+def test_frontend_entrypoints_reuse_projection_cache() -> None:
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store._PROJECTION_CACHE.clear()  # type: ignore[attr-defined]
+    first = extension_store.frontend_entrypoints()
+    original_load = extension_store._load  # type: ignore[attr-defined]
+
+    def fail_load():
+        raise AssertionError("unchanged frontend_entrypoints should not reread extension store")
+
+    extension_store._load = fail_load  # type: ignore[attr-defined]
+    try:
+        second = extension_store.frontend_entrypoints()
+    finally:
+        extension_store._load = original_load  # type: ignore[attr-defined]
+    assert second == first
+
+
+def test_ui_hooks_cache_invalidates_on_ui_settings_write() -> None:
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store._PROJECTION_CACHE.clear()  # type: ignore[attr-defined]
+    ext_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    assert any(
+        p["extension_id"] == ext_id
+        for p in extension_store.ui_hooks()["pages"]
+    )
+    extension_store.set_ui_settings(ext_id, page_enabled=False)
+    assert not any(
+        p["extension_id"] == ext_id
+        for p in extension_store.ui_hooks()["pages"]
+    )
+
+
 def test_ui_settings_unknown_extension_rejected() -> None:
     _seed_store_with_marketplace()
     try:

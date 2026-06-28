@@ -56,6 +56,7 @@ _RUN_STATE_LOOKUP_CACHE_TTL_S = 5.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_LOOKUP_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
+_RUN_STATE_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 
 
 @dataclass
@@ -95,6 +96,26 @@ def _run_state_cache_get(root_key: str, agent_sid: str) -> Optional[Path] | bool
 def _run_state_cache_put(root_key: str, agent_sid: str, path: Optional[Path]) -> None:
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         _RUN_STATE_LOOKUP_CACHE[(root_key, agent_sid)] = (time.monotonic(), path)
+
+
+def _claim_run_state_lookup(root_key: str, agent_sid: str) -> tuple[threading.Event, bool]:
+    key = (root_key, agent_sid)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        event = _RUN_STATE_INFLIGHT.get(key)
+        if event is not None:
+            return event, False
+        event = threading.Event()
+        _RUN_STATE_INFLIGHT[key] = event
+        return event, True
+
+
+def _finish_run_state_lookup(root_key: str, agent_sid: str, path: Optional[Path]) -> None:
+    key = (root_key, agent_sid)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        _RUN_STATE_LOOKUP_CACHE[key] = (time.monotonic(), path)
+        event = _RUN_STATE_INFLIGHT.pop(key, None)
+    if event is not None:
+        event.set()
 
 
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
@@ -176,6 +197,11 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
     cached = _run_state_cache_get(key, agent_sid)
     if cached is not False:
         return cached
+    event, owner = _claim_run_state_lookup(key, agent_sid)
+    if not owner:
+        event.wait(_RUN_STATE_LOOKUP_TIMEOUT_S)
+        cached = _run_state_cache_get(key, agent_sid)
+        return cached if cached is not False else None
     newest: tuple[float, Path] | None = None
     try:
         with perf.timed("native_files.lookup_run_state"):
@@ -197,7 +223,7 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
     except Exception:
         logger.exception("native_files: run-state lookup failed sid=%s", agent_sid[:8])
     path = newest[1] if newest is not None else None
-    _run_state_cache_put(key, agent_sid, path)
+    _finish_run_state_lookup(key, agent_sid, path)
     return path
 
 
