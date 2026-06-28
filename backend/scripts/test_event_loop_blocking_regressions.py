@@ -298,6 +298,14 @@ def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
     build_source = store_source[build_start:build_end]
     assert "enrich_session_summary(summary)" in build_source
 
+    org_source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
+    enrich_start = org_source.index("def enrich_session_summary(")
+    enrich_end = org_source.index("def enrich_session_summaries(", enrich_start)
+    enrich_source = org_source[enrich_start:enrich_end]
+    assert "_load_shared()" in enrich_source
+    assert "organization_for_session(" not in enrich_source
+    assert "_load()" not in enrich_source
+
 
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -329,26 +337,26 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_summary_sorted_cache_version" in source
     assert "_summary_sorted_cache" in source
-    assert "_summary_projected_cache_version" in source
-    assert "_summary_projected_cache" in source
+    assert "_summary_projected_cache_version" not in source
+    assert "_summary_projected_cache" not in source
+    assert "_replace_summary_projection_field" in source
     start = source.index("def list_sessions()")
     end = source.index("def iter_all_sessions()", start)
     list_source = source[start:end]
     assert "_summary_sorted_cache_version != _summary_index_version" in list_source
-    assert "_summary_projected_cache_version == _summary_index_version" in list_source
     assert "sorted(\n                _summary_index.values()" in list_source
-    assert "requirement_tags.get(summary.get(\"id\", \"\"), [])" in list_source
+    assert "_requirement_tags_snapshot()" not in list_source
+    assert "_markers_snapshot()" not in list_source
 
 
-def test_search_summary_lookup_uses_bounded_projection_copy() -> None:
+def test_search_summary_lookup_uses_maintained_projection() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def get_session_summaries_by_ids(")
     end = source.index("def iter_all_sessions()", start)
     lookup_source = source[start:end]
-    assert "_requirement_tags_for_sessions(ids)" in lookup_source
-    assert "_markers_for_sessions(ids)" in lookup_source
-    assert "_requirement_tags_snapshot()" not in lookup_source
-    assert "_markers_snapshot()" not in lookup_source
+    assert "_requirement_tags_for_sessions" not in source
+    assert "_markers_for_sessions" not in source
+    assert "return [\n            _summary_index[sid]" in lookup_source
 
 
 def test_sessions_response_cache_stores_serialized_bytes() -> None:

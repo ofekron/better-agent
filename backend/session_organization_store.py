@@ -181,12 +181,21 @@ def organization_for_session(session_id: str) -> dict[str, Any]:
 
 
 def enrich_session_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    org = organization_for_session(str(summary.get("id") or ""))
-    return {
-        **summary,
-        "folder_id": org["folder_id"],
-        "session_tags": org["tags"],
-    }
+    sid = str(summary.get("id") or "")
+    with _lock:
+        data = _load_shared()
+        assignment = _assignment(data, sid)
+        tag_by_id = {t.get("id"): t for t in data["tags"]}
+        tags = [
+            copy.deepcopy(tag_by_id[tid])
+            for tid in assignment["tag_ids"]
+            if tid in tag_by_id
+        ]
+        return {
+            **summary,
+            "folder_id": assignment["folder_id"],
+            "session_tags": tags,
+        }
 
 
 def enrich_session_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
