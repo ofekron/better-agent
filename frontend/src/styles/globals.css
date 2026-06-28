@@ -11434,6 +11434,19 @@ pre .inline-tag-highlight {
   vertical-align: middle;
 }
 
+.session-status-error {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-inline-start: 0;
+  border-radius: 50%;
+  background: var(--error, #f85149);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--error, #f85149) 25%, transparent),
+    0 0 6px color-mix(in srgb, var(--error, #f85149) 70%, transparent);
+  vertical-align: middle;
+}
+
 .session-status-unread {
   display: inline-block;
   width: 8px;

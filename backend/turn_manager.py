@@ -1284,6 +1284,13 @@ class TurnManager:
             # emitting turn_complete (no-op when the sender fired none).
             await self._c.await_outstanding_mssg(app_session_id)
 
+            if primary_result.get("success"):
+                # A successful turn retires any prior unseen-error dot.
+                try:
+                    session_manager.clear_unseen_error(app_session_id)
+                except Exception:
+                    logger.debug("clear_unseen_error failed", exc_info=True)
+
             await ws_callback({"type": "turn_complete", "data": {
                 "app_session_id": persist_to,
                 "success": primary_result.get("success", False),
@@ -1431,6 +1438,13 @@ class TurnManager:
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
+            # Surface the failure as a red error dot on the session item
+            # so the user notices even if they're not on the session.
+            # Retired by a view-ack or the next successful turn.
+            try:
+                session_manager.set_unseen_error(app_session_id, error_text)
+            except Exception:
+                logger.debug("set_unseen_error failed", exc_info=True)
 
             # (ii) NEW: error terminal now publishes lifecycle.turn_stopped.
             # Pre-cutover the error path emitted only the direct

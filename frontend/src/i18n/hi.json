@@ -466,6 +466,7 @@
   "session.noMatch": "कोई मेल खाता सत्र नहीं",
   "session.running": "चल रहा है",
   "session.awaitingApproval": "अनुमोदन की प्रतीक्षा",
+  "session.error": "अंतिम टर्न विफल",
   "session.unread_1": "1 नया ईवेंट",
   "session.unread_other": "{{count}} नए ईवेंट",
   "projects.header": "प्रोजेक्ट",

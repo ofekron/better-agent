@@ -31,6 +31,13 @@ export interface BusEventMap {
     unread_count: number;
     last_seen_event_uid?: string | null;
   };
+  // A turn ended in an unrecoverable error (has_error true) or the dot was
+  // retired by a view-ack / successful turn (has_error false). Consumed by
+  // the registry + status badge to render the red error dot.
+  session_error_changed: {
+    session_id: string;
+    has_error: boolean;
+  };
   // An extension attention marker on a session changed. `marker` null
   // clears that extension's marker.
   session_marker_changed: {

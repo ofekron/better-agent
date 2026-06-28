@@ -1744,6 +1744,7 @@ def _decorate_local_sidebar_sessions(sessions: list[dict]) -> list[dict]:
                 "is_running": sid in running_sids,
                 "monitoring_state": monitoring_by_sid.get(sid, "stopped"),
                 "unread_count": unread_by_sid.get(sid, 0),
+                "has_error": session_manager.has_unseen_error(sid),
                 "file_path": f"{sessions_dir}/{sid}.json",
             })
     return local

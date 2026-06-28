@@ -188,6 +188,21 @@ class SessionWSBroadcaster:
                 },
             })
             return
+        if kind == "error_changed":
+            # A turn ended in an unrecoverable error (set) or the dot was
+            # retired by a view-ack / subsequent successful turn (clear).
+            # Carries `cwd` + `node_id` like the other session-state frames.
+            cwd, node_id = self._project_key_for(sid)
+            self._dispatch({
+                "type": "session_error_changed",
+                "data": {
+                    "session_id": sid,
+                    "has_error": bool(change.get("has_error")),
+                    "cwd": cwd,
+                    "node_id": node_id,
+                },
+            })
+            return
         if kind in ("marker_set", "marker_cleared"):
             # Extension attention marker on a session. Mirror unread/pinned:
             # carry `cwd` + `node_id` so the frontend can key the delta to

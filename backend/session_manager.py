@@ -3909,7 +3909,59 @@ class SessionManager:
             )
             snapshot = copy.deepcopy(sess)
         self._clear_view_markers(sid)
+        # A view-ack also retires the unseen-error attention dot, mirroring
+        # how it zeros unread. Separate fire so each concern has its event.
+        self.clear_unseen_error(sid)
         return snapshot
+
+    def set_unseen_error(self, sid: str, text: str) -> None:
+        """Mark this session's last turn as having ended in an unrecoverable
+        error. Persisted on the session record as `unseen_error` so it
+        survives a backend restart, and fired as `error_changed` so the
+        sidebar renders the red error dot. Change-gated so repeat fires
+        with the same text don't spam the WS bus."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return
+        with self._lock_for_root(rid):
+            sess = self._cached(sid)
+            if sess is None or not self._is_user_kind(sess):
+                return
+            if sess.get("unseen_error") == text:
+                return
+            sess["unseen_error"] = text
+            if rid not in self._batches:
+                self._persist_root(rid, bump=False)
+            self._fire(
+                sid,
+                {"kind": "error_changed", "has_error": True, "error": text},
+            )
+
+    def clear_unseen_error(self, sid: str) -> None:
+        """Retire the unseen-error dot (on view-ack or a subsequent
+        successful turn). No-op + no fire when nothing was set."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return
+        with self._lock_for_root(rid):
+            sess = self._cached(sid)
+            if sess is None or not self._is_user_kind(sess):
+                return
+            if not sess.get("unseen_error"):
+                return
+            sess["unseen_error"] = None
+            if rid not in self._batches:
+                self._persist_root(rid, bump=False)
+            self._fire(sid, {"kind": "error_changed", "has_error": False})
+
+    def has_unseen_error(self, sid: str) -> bool:
+        """Cheap (stale-tolerant) read of whether this session currently
+        has an unseen turn-error dot. For sidebar snapshot enrichment."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return False
+        sess = self._cached(sid)
+        return bool(sess and sess.get("unseen_error"))
 
     def _clear_view_markers(self, sid: str) -> None:
         """On a view-ack, clear any marker on `sid` owned by an extension

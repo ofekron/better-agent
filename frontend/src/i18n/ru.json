@@ -466,6 +466,7 @@
   "session.noMatch": "Нет подходящих сессий",
   "session.running": "Выполняется",
   "session.awaitingApproval": "Ожидает подтверждения",
+  "session.error": "Последний ход завершился ошибкой",
   "session.unread_1": "1 новое событие",
   "session.unread_other": "{{count}} новых событий",
   "projects.header": "Проекты",

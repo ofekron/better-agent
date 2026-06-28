@@ -468,6 +468,7 @@
   "session.noMatch": "No matching sessions",
   "session.running": "Running",
   "session.awaitingApproval": "Awaiting approval",
+  "session.error": "Last turn failed",
   "session.unread_1": "1 new event",
   "session.unread_other": "{{count}} new events",
   "projects.header": "Projects",
