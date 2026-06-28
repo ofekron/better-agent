@@ -134,6 +134,19 @@ describe("InputArea queued prompt promote action", () => {
     expect(onSteer).toHaveBeenCalledTimes(0);
   });
 
+  it("uses Queue for desktop Enter while streaming", async () => {
+    setViewportWidth(1280);
+    const { onSend, onSteer } = renderInputArea(true, "active work");
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
+  });
+
   it("uses the explicit Steer button for active Codex steering", async () => {
     const { onSend, onSteer } = renderInputArea(true, "active work");
 
