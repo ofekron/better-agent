@@ -6784,6 +6784,7 @@ async def on_startup():
     # ROLLUP_SECS seconds. Held at module scope inside perf.py so
     # the asyncio task isn't garbage-collected after this returns.
     perf.start_rollup_task()
+    await asyncio.to_thread(shortcut_picker.prewarm_http_stack)
 
     # Background running-state tick: prunes dead `_run_state` entries
     # via os.kill(pid, 0) in a daemon thread (never blocks the event

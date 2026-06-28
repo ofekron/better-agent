@@ -2020,20 +2020,13 @@ def set_remote_recovery_coordinator(coordinator) -> None:
     _remote_coordinator = coordinator
 
 
-async def integrate_remote_runs_for_node(
+def _pending_remote_runs_for_node(
     node_id: str,
     run_id_filter: Optional[set[str]] = None,
-) -> None:
-    coordinator = _remote_coordinator
-    if coordinator is None:
-        logger.warning(
-            "integrate_remote_runs_for_node: coordinator not set; "
-            "skipping recovery for node %s", node_id,
-        )
-        return
+) -> list[tuple[Path, dict]]:
     root = _runs_root()
     if not root.exists():
-        return
+        return []
     pending: list[tuple[Path, dict]] = []
     for child in sorted(root.iterdir()):
         if not child.is_dir():
@@ -2053,6 +2046,25 @@ async def integrate_remote_runs_for_node(
         if bs.get("node_id") != node_id:
             continue
         pending.append((child, bs))
+    return pending
+
+
+async def integrate_remote_runs_for_node(
+    node_id: str,
+    run_id_filter: Optional[set[str]] = None,
+) -> None:
+    coordinator = _remote_coordinator
+    if coordinator is None:
+        logger.warning(
+            "integrate_remote_runs_for_node: coordinator not set; "
+            "skipping recovery for node %s", node_id,
+        )
+        return
+    pending = await asyncio.to_thread(
+        _pending_remote_runs_for_node,
+        node_id,
+        run_id_filter,
+    )
     if not pending:
         return
 

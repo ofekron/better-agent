@@ -36,6 +36,14 @@ _CHEAP_MODELS = [
 ]
 
 
+def prewarm_http_stack() -> None:
+    async def _open_close() -> None:
+        client = httpx.AsyncClient(timeout=0.001)
+        await client.aclose()
+
+    asyncio.run(_open_close())
+
+
 def _pick_model(provider: dict) -> str:
     """Return the cheapest available model for the active provider."""
     available = list(provider.get("custom_models") or [])
