@@ -698,6 +698,73 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         raise AssertionError("native mode did not reinstall the extension skill")
 
 
+def test_private_source_native_skill_context_does_not_require_native_copy() -> None:
+    import runtime_skills
+
+    extension_id = "ofek.private-source-skill"
+    extension_path = "extensions/private-source-skill"
+    package = _write_private_extension_package(
+        extension_id,
+        extension_path,
+        {
+            "name": "Private source skill",
+            "surfaces": ["skills"],
+            "entrypoints": {
+                "skills": [{"name": "private-source-skill", "path": "skills/private-source-skill"}],
+            },
+        },
+        {
+            "skills/private-source-skill/SKILL.md": (
+                "---\n"
+                "name: private-source-skill\n"
+                "description: From direct source.\n"
+                "---\n"
+                "Use direct source.\n"
+            ),
+        },
+    )
+    old_mode = os.environ.get(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV)
+    try:
+        os.environ.pop(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV, None)
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "better_agent_local",
+                "repo_url": str(_TRUSTED_TEST_ROOT),
+                "extension_path": extension_path,
+                "ref": "",
+                "commit_sha": "private-source-skill-test",
+            },
+            persist=True,
+        )
+        extension_store.set_harness_delivery_mode(extension_id, "native")
+        native_skill = Path.home() / ".agents" / "skills" / "private-source-skill"
+        shutil.rmtree(native_skill, ignore_errors=True)
+
+        contexts = runtime_skills.runtime_skill_contexts(str(package))
+        content = "\n".join(str(ctx.get("content") or "") for ctx in contexts)
+        source_skill = package / "skills" / "private-source-skill" / "SKILL.md"
+        if "private-source-skill" not in content:
+            raise AssertionError("direct-source private native skill was not injected")
+        if str(source_skill) not in content:
+            raise AssertionError(f"runtime skill context did not point at source skill: {content}")
+
+        shutil.rmtree(package)
+        contexts = runtime_skills.runtime_skill_contexts(str(_TRUSTED_TEST_ROOT))
+        content = "\n".join(str(ctx.get("content") or "") for ctx in contexts)
+        if "private-source-skill" in content:
+            raise AssertionError("missing private source root should not advertise a stale direct skill")
+    finally:
+        if old_mode is None:
+            os.environ.pop(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV, None)
+        else:
+            os.environ[extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV] = old_mode
+        try:
+            extension_store.uninstall(extension_id)
+        except Exception:
+            pass
+
+
 def _make_team_definition_repo(root: Path) -> tuple[Path, str]:
     repo = root / "private-team-extensions"
     package = repo / "extensions" / "testape"
@@ -4217,6 +4284,7 @@ if __name__ == "__main__":
         test_manifest_accepts_skill_entrypoints_and_requires_skill_md()
         test_extension_enable_disable_installs_runtime_skills()
         test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy()
+        test_private_source_native_skill_context_does_not_require_native_copy()
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()

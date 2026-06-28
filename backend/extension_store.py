@@ -3569,7 +3569,15 @@ def runtime_skill_entries() -> list[dict[str, str]]:
     settings = _load_ext_settings()
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
-        if harness_delivery_mode(manifest["id"], settings=settings) != _HARNESS_DELIVERY_RUNTIME:
+        delivery = harness_delivery_mode(manifest["id"], settings=settings)
+        source = record.get("source") or {}
+        include_native_direct = (
+            delivery == _HARNESS_DELIVERY_NATIVE
+            and source.get("type") == "better_agent_local"
+            and private_local_runtime_mode() == _PRIVATE_LOCAL_RUNTIME_SOURCE
+            and _private_local_source_root(source) is not None
+        )
+        if delivery != _HARNESS_DELIVERY_RUNTIME and not include_native_direct:
             continue
         install_root = runtime_package_root_for_record(record)
         if install_root is None or not install_root.exists():
