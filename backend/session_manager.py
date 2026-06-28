@@ -1328,10 +1328,34 @@ class SessionManager:
             return
         perf.record("session.hydrate_todos.rows", float(len(all_rows)))
 
+        def _payload_may_project(value: object) -> bool:
+            if isinstance(value, str):
+                return (
+                    "TodoWrite" in value
+                    or "TaskCreate" in value
+                    or "TaskUpdate" in value
+                    or "tool_result" in value
+                    or "ALL_TASKS__DONE" in value
+                )
+            if isinstance(value, dict):
+                block_type = value.get("type")
+                if block_type == "tool_result":
+                    return True
+                if block_type == "tool_use" and value.get("name") in (
+                    "TodoWrite",
+                    "TaskCreate",
+                    "TaskUpdate",
+                ):
+                    return True
+                return any(_payload_may_project(child) for child in value.values())
+            if isinstance(value, list):
+                return any(_payload_may_project(child) for child in value)
+            return False
+
         buckets: dict[str, list] = {sid: [] for sid in node_sids}
         for row in all_rows:
             sid = row.get("sid")
-            if sid in buckets:
+            if sid in buckets and _payload_may_project(row.get("data")):
                 buckets[sid].append(row)
 
         def _apply(node: dict) -> None:
