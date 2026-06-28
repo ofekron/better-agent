@@ -1559,6 +1559,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "token_usage": {**usage_acc, "duration_ms": None},
         "finished_at": _now_iso(),
     }
+    _atomic_write_json(run_dir / "terminal.json", complete)
     _atomic_write_json(run_dir / "complete.json", complete)
     state["complete"] = True
     _atomic_write_json(run_dir / "state.json", state)

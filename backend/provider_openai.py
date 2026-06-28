@@ -701,16 +701,19 @@ class OpenAIProvider(Provider):
                 )
 
             if not live_orphan and not has_complete_json:
-                # Dead orphan — synthesize complete.json so future scans
-                # skip and the replay path is unambiguous.
                 try:
-                    complete_path.write_text(json.dumps({
-                        "success": False,
-                        "session_id": bs.get("session_id") or rs_disk.get("session_id"),
-                        "error": "runner died before completion (recovered at startup)",
-                        "token_usage": None,
-                        "finished_at": datetime.now().isoformat(),
-                    }, indent=2), encoding="utf-8")
+                    terminal_path = child / "terminal.json"
+                    if terminal_path.exists():
+                        complete = json.loads(terminal_path.read_text(encoding="utf-8"))
+                    else:
+                        complete = {
+                            "success": False,
+                            "session_id": bs.get("session_id") or rs_disk.get("session_id"),
+                            "error": "runner died before completion (recovered at startup)",
+                            "token_usage": None,
+                            "finished_at": datetime.now().isoformat(),
+                        }
+                    complete_path.write_text(json.dumps(complete, indent=2), encoding="utf-8")
                     has_complete_json = True
                 except Exception:
                     logger.exception(
