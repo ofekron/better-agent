@@ -506,4 +506,140 @@ describe("SessionList advanced filters", () => {
 
     expect(screen.getByText("session.searching")).toBeTruthy();
   });
+
+  it("bulk deletes selected sessions", () => {
+    const onDelete = vi.fn();
+    renderList(
+      [
+        makeSession({ id: "alpha", name: "Alpha" }),
+        makeSession({ id: "beta", name: "Beta" }),
+        makeSession({ id: "gamma", name: "Gamma" }),
+      ],
+      { onDelete },
+    );
+
+    const checkboxes = screen.getAllByLabelText("session.selectSession");
+    fireEvent.click(checkboxes[0]);
+    fireEvent.click(checkboxes[2]);
+
+    const bulkBar = screen.getByTestId("session-bulk-bar");
+    expect(bulkBar.textContent).toContain("session.selectedCount");
+    fireEvent.click(within(bulkBar).getByRole("button", { name: /session.deleteSelected/ }));
+
+    expect(onDelete).toHaveBeenCalledTimes(2);
+    expect(onDelete).toHaveBeenNthCalledWith(1, "alpha");
+    expect(onDelete).toHaveBeenNthCalledWith(2, "gamma");
+    expect(screen.queryByTestId("session-bulk-bar")).toBeNull();
+  });
+
+  it("bulk moves and tags selected sessions", async () => {
+    const organizationRequests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/session-organization")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                schema_version: 1,
+                folders: [
+                  {
+                    id: "folder-client",
+                    project_id: "/tmp/project",
+                    parent_folder_id: null,
+                    name: "Client",
+                    order: 0,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                tags: [
+                  {
+                    id: "tag-important",
+                    project_id: "/tmp/project",
+                    name: "Important",
+                    color: null,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                ],
+                assignments: {},
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url.includes("/api/sessions/") && url.includes("/organization")) {
+          const body = JSON.parse(String(init?.body ?? "{}"));
+          organizationRequests.push({ url, body });
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session_id: url.includes("alpha") ? "alpha" : "beta",
+                organization: {
+                  folder_id: body.folder_id,
+                  tags: body.tag_ids?.map((id: string) => ({
+                    id,
+                    project_id: "/tmp/project",
+                    name: "Important",
+                    color: null,
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  })),
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    render(
+      <SessionList
+        sessions={[
+          makeSession({ id: "alpha", name: "Alpha", cwd: "/tmp/project" }),
+          makeSession({ id: "beta", name: "Beta", cwd: "/tmp/project" }),
+        ]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onDetails={() => {}}
+      />,
+    );
+
+    const checkboxes = screen.getAllByLabelText("session.selectSession");
+    fireEvent.click(checkboxes[0]);
+    fireEvent.click(checkboxes[1]);
+
+    await waitFor(() => expect(screen.getByTestId("session-bulk-bar")).toBeTruthy());
+    const bulkBar = screen.getByTestId("session-bulk-bar");
+    fireEvent.click(within(bulkBar).getByRole("button", { name: /session.folder/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Client" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Client" }));
+
+    await waitFor(() =>
+      expect(organizationRequests.filter((req) => req.body && (req.body as { folder_id?: string }).folder_id === "folder-client")).toHaveLength(2),
+    );
+
+    fireEvent.click(within(bulkBar).getByRole("button", { name: /session.tags/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Important" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Important" }));
+
+    await waitFor(() =>
+      expect(organizationRequests.filter((req) => JSON.stringify(req.body).includes("tag-important"))).toHaveLength(2),
+    );
+  });
 });
