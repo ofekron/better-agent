@@ -3385,6 +3385,25 @@ def _can_preserve_summary_order(
     )
 
 
+def _session_filters_may_include_virtual(
+    *,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    tag_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+) -> bool:
+    if file_edit_mode is True:
+        return False
+    if folder_ids or tag_ids:
+        return False
+    if modes and "virtual" not in modes:
+        return False
+    if sources and not ({"extension", "system"} & sources):
+        return False
+    return True
+
+
 def _build_local_sessions_page_for_list(
     *,
     offset: int,
@@ -3419,13 +3438,22 @@ def _build_local_sessions_page_for_list(
     else:
         with perf.timed("sessions.list.local"):
             out = _local_session_summaries_for_sidebar()
-        with perf.timed("sessions.list.virtual"):
-            virtual_sessions = virtual_session_store.list_all()
-        out.extend(
-            session
-            for session in virtual_sessions
-            if session.get("id") != session_search.ASK_SINGLETON_ID
-        )
+        if _session_filters_may_include_virtual(
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            tag_ids=tag_ids,
+            modes=modes,
+            sources=sources,
+        ):
+            with perf.timed("sessions.list.virtual"):
+                virtual_sessions = virtual_session_store.list_all()
+            out.extend(
+                session
+                for session in virtual_sessions
+                if session.get("id") != session_search.ASK_SINGLETON_ID
+            )
+        else:
+            perf.record("sessions.list.virtual.skipped", 1.0)
     with perf.timed("sessions.list.filter_sort"):
         if _can_preserve_summary_order(
             search_query=search_query,
@@ -3594,13 +3622,22 @@ async def get_sessions(
     else:
         with perf.timed("sessions.list.local"):
             out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
-        with perf.timed("sessions.list.virtual"):
-            virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
-        out.extend(
-            session
-            for session in virtual_sessions
-            if session.get("id") != session_search.ASK_SINGLETON_ID
-        )
+        if _session_filters_may_include_virtual(
+            file_edit_mode=file_edit_mode,
+            folder_ids=filters["folder_ids"],
+            tag_ids=filters["tag_ids"],
+            modes=filters["modes"],
+            sources=filters["sources"],
+        ):
+            with perf.timed("sessions.list.virtual"):
+                virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
+            out.extend(
+                session
+                for session in virtual_sessions
+                if session.get("id") != session_search.ASK_SINGLETON_ID
+            )
+        else:
+            perf.record("sessions.list.virtual.skipped", 1.0)
 
     try:
         import node_link as _nl

@@ -403,6 +403,31 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     assert "_markers_snapshot()" not in list_source
 
 
+def test_session_list_skips_impossible_virtual_filters() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _session_filters_may_include_virtual(")
+    helper_end = source.index("def _build_local_sessions_page_for_list(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "if file_edit_mode is True:" in helper_source
+    assert "if folder_ids or tag_ids:" in helper_source
+    assert 'if modes and "virtual" not in modes:' in helper_source
+    assert 'if sources and not ({"extension", "system"} & sources):' in helper_source
+
+    local_start = source.index("def _build_local_sessions_page_for_list(")
+    local_end = source.index("@app.get(\"/api/sessions\")", local_start)
+    local_source = source[local_start:local_end]
+    assert "_session_filters_may_include_virtual(" in local_source
+    assert "virtual_session_store.list_all()" in local_source
+    assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in local_source
+
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "_session_filters_may_include_virtual(" in route_source
+    assert "virtual_session_store.list_all" in route_source
+    assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in route_source
+
+
 def test_session_tag_filter_uses_summary_projection() -> None:
     store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert '"tag_filter_ids": _tag_filter_ids(' in store_source
