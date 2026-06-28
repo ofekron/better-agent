@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -166,7 +167,14 @@ async def _dispatch_core_builtin_backend(
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
     if extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
-        return None
+        if extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
+            return None
+        if backend_spec is not None:
+            return None
+        record = extension_store.get_extension(extension_id)
+        if not record or record.get("enabled") is not True:
+            return None
+        return await _dispatch_project_structure_core_backend(clean_path, request)
     if backend_spec is not None:
         return None
     record = extension_store.get_extension(extension_id)
@@ -222,6 +230,20 @@ async def _dispatch_machine_nodes_core_backend(
             "idempotent": reason == "already_resolved",
         })
     return None
+
+
+async def _dispatch_project_structure_core_backend(
+    path: str,
+    request: Request,
+) -> JSONResponse | None:
+    if request.method != "GET" or path != "project-updates/total":
+        return None
+    import project_update_store
+
+    count = project_update_store.peek_total_unseen()
+    if count is None:
+        count = await asyncio.to_thread(project_update_store.total_unseen)
+    return JSONResponse({"count": count})
 
 
 @router.post("/install")

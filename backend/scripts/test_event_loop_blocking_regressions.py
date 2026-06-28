@@ -725,7 +725,14 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
     core_source = source[core_start:core_end]
     assert "extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in core_source
+    assert "extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID" in core_source
     assert "extension_store.get_extension(extension_id)" in core_source
+    project_start = source.index("async def _dispatch_project_structure_core_backend(")
+    project_end = source.index("@router.post(\"/install\")", project_start)
+    project_source = source[project_start:project_end]
+    assert 'path != "project-updates/total"' in project_source
+    assert "project_update_store.peek_total_unseen()" in project_source
+    assert "await asyncio.to_thread(project_update_store.total_unseen)" in project_source
 
 
 def test_internal_communication_worker_lookup_is_off_loop() -> None:
