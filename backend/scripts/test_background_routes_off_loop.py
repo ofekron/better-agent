@@ -194,6 +194,7 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
     project_end = source.index("@app.post(\"/api/internal/provisioned-sessions\")", project_start)
     project_source = source[project_start:project_end]
     assert "await asyncio.to_thread(project_update_store.unseen_count" in project_source
+    assert "project_update_store.peek_total_unseen()" in project_source
     assert "await asyncio.to_thread(project_update_store.total_unseen" in project_source
     assert "await asyncio.to_thread(project_update_store.list_unseen" in project_source
     assert "project_update_store.append(project_id, text)" in project_source

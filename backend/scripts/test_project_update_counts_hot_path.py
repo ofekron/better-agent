@@ -32,6 +32,7 @@ def test_counts_are_cached_after_warmup() -> bool:
             project_update_store.unseen_count("proj-a") == 1
             and project_update_store.unseen_count("proj-b") == 1
             and project_update_store.total_unseen() == 2
+            and project_update_store.peek_total_unseen() == 2
         )
     finally:
         project_update_store._read_entries_locked = original

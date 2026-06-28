@@ -2267,7 +2267,9 @@ async def internal_project_update_total(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_project_structure_internal(x_internal_token)
-    count = await asyncio.to_thread(project_update_store.total_unseen)
+    count = project_update_store.peek_total_unseen()
+    if count is None:
+        count = await asyncio.to_thread(project_update_store.total_unseen)
     return {"count": count}
 
 
