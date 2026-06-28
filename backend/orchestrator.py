@@ -3959,6 +3959,7 @@ class Coordinator:
         client_id: Optional[str] = None,
         source: Optional[str] = None,
         lifecycle_msg_id: Optional[str] = None,
+        cli_prompt: Optional[str] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
@@ -3994,6 +3995,8 @@ class Coordinator:
             # lifecycle WS events back to this message for status display.
             "lifecycle_msg_id": lifecycle_msg_id,
         }
+        if cli_prompt is not None and cli_prompt != prompt:
+            user_msg["cli_prompt"] = cli_prompt
         if file_discussion_id:
             user_msg["file_discussion_id"] = file_discussion_id
         if source:

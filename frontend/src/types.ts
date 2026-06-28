@@ -582,6 +582,7 @@ export interface ChatMessage {
   file_discussion_id?: string | null;
   role: "user" | "assistant";
   content: string;
+  cli_prompt?: string | null;
   events: WSEvent[];
   tokenUsage?: TokenUsage;
   timestamp: string;
