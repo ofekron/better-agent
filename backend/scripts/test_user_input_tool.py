@@ -43,7 +43,13 @@ def test_store_persists_pending_request() -> bool:
         timeout_seconds=60,
     )
     pending = user_input_store.pending_for_session(sid)
-    return len(pending) == 1 and pending[0]["request_id"] == req["request_id"]
+    counts = user_input_store.pending_counts_by_session()
+    return (
+        len(pending) == 1
+        and pending[0]["request_id"] == req["request_id"]
+        and user_input_store.pending_count_for_session(sid) == 1
+        and counts.get(sid) == 1
+    )
 
 
 def test_internal_request_waits_until_browser_resolves(client: TestClient) -> bool:
@@ -90,7 +96,11 @@ def test_internal_request_waits_until_browser_resolves(client: TestClient) -> bo
     if response is None or response.status_code != 200:
         return False
     data = response.json()
-    return data.get("success") is True and data.get("answers") == {"decision": "Yes"}
+    return (
+        data.get("success") is True
+        and data.get("answers") == {"decision": "Yes"}
+        and user_input_store.pending_count_for_session(sid) == 0
+    )
 
 
 def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
@@ -104,6 +114,46 @@ def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
     return res.status_code == 200 and data.get("success") is False
 
 
+def test_sidebar_decoration_exposes_pending_count() -> bool:
+    sid = _new_session()
+    user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Q", "options": []}],
+        timeout_seconds=60,
+    )
+    rows = main._decorate_local_sidebar_sessions([{
+        "id": sid,
+        "name": "user-input",
+        "cwd": "/tmp",
+        "node_id": "primary",
+    }])
+    return len(rows) == 1 and rows[0].get("pending_user_input_count") == 1
+
+
+def test_pending_counts_are_cached_after_warmup() -> bool:
+    sid = _new_session()
+    user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Q", "options": []}],
+        timeout_seconds=60,
+    )
+    if user_input_store.pending_count_for_session(sid) != 1:
+        return False
+    original = user_input_store._read_locked
+
+    def fail_read():
+        raise AssertionError("pending count hot path read store")
+
+    user_input_store._read_locked = fail_read
+    try:
+        return (
+            user_input_store.pending_count_for_session(sid) == 1
+            and user_input_store.pending_counts_by_session().get(sid) == 1
+        )
+    finally:
+        user_input_store._read_locked = original
+
+
 def run() -> int:
     client = TestClient(main.app)
     authenticate_client(client)
@@ -111,6 +161,8 @@ def run() -> int:
         ("store persists pending request", lambda: test_store_persists_pending_request()),
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
+        ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
+        ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
     ]
     failures: list[str] = []
     for name, fn in tests:
