@@ -196,15 +196,29 @@ def _run() -> bool:
     })
     projected = next(s for s in session_store.list_sessions() if s["id"] == sid)
     version_after_projection = session_store.summary_version()
+    search_before = session_store.grep_session_scores("heavy", {"title"})
+    metadata_cache_keys_before = tuple(session_store._metadata_search_cache)
     _ = session_store.list_sessions()
     _ = session_store.list_sessions()
+    summary_version_stable = session_store.summary_version() == version_after_projection
     results.append(
         (
             "session list uses maintained tag/marker projection",
             projected.get("markers") == {"ext-a": {"color": "#ff0000"}}
             and projected.get("requirement_tags") == [{"id": "req-a", "label": "Req A"}]
-            and session_store.summary_version() == version_after_projection,
+            and summary_version_stable,
             f"markers={projected.get('markers')!r} tags={projected.get('requirement_tags')!r}",
+        )
+    )
+    session_store.set_marker_projection(sid, "ext-a", {"color": "#00ff00"})
+    search_after = session_store.grep_session_scores("heavy", {"title"})
+    metadata_cache_keys_after = tuple(session_store._metadata_search_cache)
+    results.append(
+        (
+            "metadata session search ignores marker projection churn",
+            search_before == search_after
+            and metadata_cache_keys_before == metadata_cache_keys_after,
+            f"before={search_before!r} after={search_after!r}",
         )
     )
 

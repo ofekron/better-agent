@@ -471,13 +471,14 @@ def test_tree_stub_cache_key_reads_render_seq_once() -> None:
     assert "render_seq_for_sid(" not in key_source
 
 
-def test_metadata_session_search_is_summary_version_cached() -> None:
+def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
+    assert "_summary_metadata_version" in source
     start = source.index("def _metadata_search_scores(")
     end = source.index("def grep_session_scores(", start)
     search_source = source[start:end]
-    assert "cache_key = (query_lower, metadata_fields, _summary_index_version)" in search_source
+    assert "cache_key = (query_lower, metadata_fields, _summary_metadata_version)" in search_source
     assert "cached = _metadata_search_cache.get(cache_key)" in search_source
     assert "return dict(cached)" in search_source
     assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source

@@ -173,6 +173,7 @@ _summary_index: dict[str, dict] = {}
 _summary_index_lock = threading.Lock()
 _summary_index_loaded = False
 _summary_index_version = 0
+_summary_metadata_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_cache: list[dict] = []
 _requirement_tags_by_session: dict[str, list[dict]] = {}
@@ -206,6 +207,15 @@ def _replace_summary_projection_field(
             return
         _summary_index[session_id] = {**summary, field: value}
         _summary_index_version += 1
+
+
+def _summary_metadata_changed(before: Optional[dict], after: dict) -> bool:
+    if before is None:
+        return True
+    return (
+        before.get("name") != after.get("name")
+        or before.get("first_prompt") != after.get("first_prompt")
+    )
 
 
 @lru_cache(maxsize=4096)
@@ -463,7 +473,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
 def _upsert_summary(root: dict) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
-    global _summary_index_version
+    global _summary_index_version, _summary_metadata_version
     summary = _build_summary_for_root(root)
     # Preserve pending_eng_session_id from the existing index entry —
     # _build_summary_for_root can't compute it (it requires cross-session
@@ -474,6 +484,8 @@ def _upsert_summary(root: dict) -> None:
             summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
         _summary_index[root["id"]] = summary
         _summary_index_version += 1
+        if _summary_metadata_changed(existing, summary):
+            _summary_metadata_version += 1
     # Write lightweight summary file AFTER the in-memory update. Uses
     # atomic write (tmpfile + os.replace) so a crash mid-write leaves the
     # previous file intact. Non-fatal — in-memory index is authoritative.
@@ -658,10 +670,11 @@ def _overlay_seen_cursors(root: dict, root_id: str) -> None:
 
 def _remove_summary(root_id: str) -> None:
     """Remove a root's summary entry and file (on delete)."""
-    global _summary_index_version
+    global _summary_index_version, _summary_metadata_version
     with _summary_index_lock:
         if _summary_index.pop(root_id, None) is not None:
             _summary_index_version += 1
+            _summary_metadata_version += 1
     try:
         sp = _sessions_dir() / f"{root_id}.summary.json"
         sp.unlink(missing_ok=True)
@@ -783,7 +796,7 @@ def _do_build_summary_index_unsafe() -> None:
         is already cached. Cold build → not cached → no
         `_summary_build_lock → session_manager-RLock` edge forms.
     """
-    global _summary_index_loaded, _summary_index_version
+    global _summary_index_loaded, _summary_index_version, _summary_metadata_version
     _ensure_dir()
     # {session_id}.json → path
     full_files: dict[str, Path] = {}
@@ -829,8 +842,11 @@ def _do_build_summary_index_unsafe() -> None:
                         )
                         if not needs_fork_backfill:
                             with _summary_index_lock:
+                                existing = _summary_index.get(sid)
                                 _summary_index[sid] = summary
                                 _summary_index_version += 1
+                                if _summary_metadata_changed(existing, summary):
+                                    _summary_metadata_version += 1
                             if cleaned:
                                 stale_summaries.append((sid, summary))
                             published = True
@@ -851,8 +867,11 @@ def _do_build_summary_index_unsafe() -> None:
             _overlay_seen_cursors(data, data["id"])
             summary = _build_summary_for_root(data)
             with _summary_index_lock:
+                existing = _summary_index.get(data["id"])
                 _summary_index[data["id"]] = summary
                 _summary_index_version += 1
+                if _summary_metadata_changed(existing, summary):
+                    _summary_metadata_version += 1
             stale_summaries.append((data["id"], summary))
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             continue
@@ -3605,7 +3624,7 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
         return {}
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
-        cache_key = (query_lower, metadata_fields, _summary_index_version)
+        cache_key = (query_lower, metadata_fields, _summary_metadata_version)
         cached = _metadata_search_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
