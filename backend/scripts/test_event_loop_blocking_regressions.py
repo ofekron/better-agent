@@ -278,6 +278,15 @@ def test_queue_projection_scans_user_messages_once() -> None:
     assert "**user_projection" in project_source
 
 
+def test_queue_projection_skips_unchanged_disk_write() -> None:
+    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
+    start = source.index("def upsert_from_session(")
+    end = source.index("def get(", start)
+    upsert_source = source[start:end]
+    assert 'if _records.get(record["id"]) == record:' in upsert_source
+    assert upsert_source.index('if _records.get(record["id"]) == record:') < upsert_source.index("_write_record_locked(record)")
+
+
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "startup-unread-warm" not in source

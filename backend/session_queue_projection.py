@@ -116,6 +116,8 @@ def upsert_from_session(session: dict[str, Any]) -> None:
         return
     with _lock:
         _load_locked()
+        if _records.get(record["id"]) == record:
+            return
         _records[record["id"]] = record
         _write_record_locked(record)
 
