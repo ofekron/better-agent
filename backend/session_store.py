@@ -151,6 +151,7 @@ _index_lock = threading.Lock()
 # file rescan when the dir is byte-for-byte unchanged.
 _index_fingerprint: Optional[tuple[int, int, int]] = None
 _index_build_lock = threading.Lock()
+_negative_root_resolve_cache: dict[str, tuple[int, int, int]] = {}
 
 # ── Summary index ─────────────────────────────────────────────────────
 #
@@ -809,6 +810,7 @@ def _index_tree(
         _root_forks[rid] = current
         if file_signature is not None:
             _root_index_signatures[rid] = file_signature
+        _negative_root_resolve_cache.clear()
 
 
 def _index_set(fork_id: str, root_id: str) -> None:
@@ -819,6 +821,7 @@ def _index_set(fork_id: str, root_id: str) -> None:
         _root_forks.setdefault(root_id, set()).add(fork_id)
         _index_loaded = True
         _index_fingerprint = fp
+        _negative_root_resolve_cache.clear()
 
 
 def _index_pop(sid: str) -> None:
@@ -831,6 +834,7 @@ def _index_pop(sid: str) -> None:
                 if not forks:
                     _root_forks.pop(root_id, None)
                     _root_index_signatures.pop(root_id, None)
+        _negative_root_resolve_cache.clear()
 
 
 # Sidecar files share the sessions dir and the `.json` extension but are
@@ -1180,6 +1184,7 @@ def _install_index_snapshot(
     _root_index_signatures.clear()
     _root_index_signatures.update(root_signatures)
     _index_fingerprint = fp
+    _negative_root_resolve_cache.clear()
     try:
         _write_index_sidecar(fp, fork_index, root_forks, root_signatures)
     except OSError:
@@ -1253,6 +1258,10 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     _ensure_index()
     if sid in _fork_index:
         return _fork_index[sid]
+    live_fp = _dir_fingerprint()
+    with _index_lock:
+        if _negative_root_resolve_cache.get(sid) == live_fp:
+            return None
     # Miss: another process may have minted this sid. Refresh and
     # retry once. Idempotent — no-op if our cache was already current.
     _refresh_index()
@@ -1260,6 +1269,8 @@ def _resolve_root_id(sid: str) -> Optional[str]:
         return _fork_index[sid]
     if (_sessions_dir() / f"{sid}.json").exists():
         return sid
+    with _index_lock:
+        _negative_root_resolve_cache[sid] = _dir_fingerprint()
     return None
 
 
