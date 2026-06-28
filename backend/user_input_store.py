@@ -12,6 +12,8 @@ from paths import ba_home
 
 _LOCK = threading.RLock()
 _SCHEMA_VERSION = 1
+_COUNTS_LOADED_PATH: Path | None = None
+_PENDING_COUNTS_BY_SESSION: dict[str, int] = {}
 
 
 def _path() -> Path:
@@ -35,6 +37,36 @@ def _read_locked() -> dict[str, Any]:
     if not isinstance(requests, dict):
         raise RuntimeError("invalid user input store")
     return data
+
+
+def _rebuild_counts_locked(data: dict[str, Any], path: Path | None = None) -> None:
+    global _COUNTS_LOADED_PATH
+    _PENDING_COUNTS_BY_SESSION.clear()
+    for req in data.get("requests", {}).values():
+        if not isinstance(req, dict) or req.get("status") != "pending":
+            continue
+        sid = str(req.get("app_session_id") or "")
+        if sid:
+            _PENDING_COUNTS_BY_SESSION[sid] = _PENDING_COUNTS_BY_SESSION.get(sid, 0) + 1
+    _COUNTS_LOADED_PATH = path or _path()
+
+
+def _ensure_counts_locked() -> None:
+    path = _path()
+    if _COUNTS_LOADED_PATH == path:
+        return
+    _rebuild_counts_locked(_read_locked(), path)
+
+
+def _adjust_pending_count_locked(app_session_id: Any, delta: int) -> None:
+    sid = str(app_session_id or "")
+    if not sid:
+        return
+    next_count = _PENDING_COUNTS_BY_SESSION.get(sid, 0) + delta
+    if next_count > 0:
+        _PENDING_COUNTS_BY_SESSION[sid] = next_count
+        return
+    _PENDING_COUNTS_BY_SESSION.pop(sid, None)
 
 
 def _write_locked(data: dict[str, Any]) -> None:
@@ -76,8 +108,10 @@ def create_request(
     }
     with _LOCK:
         data = _read_locked()
+        _ensure_counts_locked()
         data["requests"][request_id] = req
         _write_locked(data)
+        _adjust_pending_count_locked(app_session_id, 1)
     return _public(req)
 
 
@@ -89,6 +123,18 @@ def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:
             for req in data["requests"].values()
             if req.get("app_session_id") == app_session_id and req.get("status") == "pending"
         ]
+
+
+def pending_count_for_session(app_session_id: str) -> int:
+    with _LOCK:
+        _ensure_counts_locked()
+        return _PENDING_COUNTS_BY_SESSION.get(app_session_id, 0)
+
+
+def pending_counts_by_session() -> dict[str, int]:
+    with _LOCK:
+        _ensure_counts_locked()
+        return dict(_PENDING_COUNTS_BY_SESSION)
 
 
 def get_request(request_id: str) -> dict[str, Any] | None:
@@ -125,6 +171,8 @@ def _complete_request(
         req["answers"] = dict(answers)
         req["resolved_at"] = _now()
         _write_locked(data)
+        _ensure_counts_locked()
+        _adjust_pending_count_locked(req.get("app_session_id"), -1)
     return dict(req)
 
 
