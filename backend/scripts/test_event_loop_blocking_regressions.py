@@ -942,6 +942,12 @@ def test_session_detail_has_split_perf_timers() -> None:
     assert "await asyncio.to_thread(\n        _session_detail_snapshot_sync," in route_source
     assert "session_manager.get_root_tree_stubbed" not in route_source
     assert 'perf.record("sessions.detail.worker"' in route_source
+    assert "return _json_bytes_response(tree)" in route_source
+    json_response_start = source.index("def _json_bytes_response(")
+    json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
+    json_response_source = source[json_response_start:json_response_end]
+    assert "separators=(\",\", \":\")" in json_response_source
+    assert "Response(content=content, media_type=\"application/json\")" in json_response_source
     for timer in (
         "sessions.detail.event_meta",
         "sessions.detail.tree",

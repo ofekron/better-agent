@@ -262,6 +262,16 @@ def _sessions_list_response(content: bytes) -> Response:
     return Response(content=content, media_type="application/json")
 
 
+def _json_bytes_response(value: dict) -> Response:
+    content = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return Response(content=content, media_type="application/json")
+
+
 def _sessions_list_cache_get(key: tuple) -> Response | None:
     cached = _sessions_list_response_cache.get(key)
     if cached is None:
@@ -4878,7 +4888,7 @@ async def get_session(
     perf.record("sessions.detail.worker", (time.perf_counter() - worker_start) * 1000)
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    return tree
+    return _json_bytes_response(tree)
 
 
 @app.get("/api/sessions/{session_id}/messages")
