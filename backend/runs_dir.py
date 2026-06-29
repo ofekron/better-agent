@@ -30,6 +30,21 @@ def runs_root() -> Path:
     return ba_home() / "runs"
 
 
+def iter_run_dirs(run_id_filter: Optional[set[str]] = None):
+    root = runs_root()
+    if not root.exists():
+        return
+    if run_id_filter is not None:
+        for run_id in run_id_filter:
+            child = root / run_id
+            if child.is_dir():
+                yield child
+        return
+    for child in root.iterdir():
+        if child.is_dir():
+            yield child
+
+
 # In-process CLI timer tools stripped on EVERY claude spawn (replaced by
 # the backend-owned scheduler). Single source of truth for both sides of
 # the contract: provider_claude appends them to input.json's

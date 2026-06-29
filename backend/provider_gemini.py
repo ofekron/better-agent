@@ -33,6 +33,7 @@ from proc_control import process_control as _process_control
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
+    iter_run_dirs,
     pid_alive as _pid_alive,
     reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
@@ -759,11 +760,7 @@ class GeminiProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
-        for child in _runs_root().iterdir():
-            if not child.is_dir():
-                continue
-            if run_id_filter is not None and child.name not in run_id_filter:
-                continue
+        for child in iter_run_dirs(run_id_filter):
             if (child / "reconciled.marker").exists():
                 continue
             complete_path = child / "complete.json"
