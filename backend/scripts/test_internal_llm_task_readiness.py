@@ -85,6 +85,11 @@ def run() -> None:
         es.extension_internal_llm_tasks(harness_record) == ["extension_context_audit"],
         "harness extension owns extension_context_audit task",
     )
+    ask_record = {"manifest": {"id": es.BUILTIN_ASK_EXTENSION_ID}}
+    check(
+        es.extension_internal_llm_tasks(ask_record) == [],
+        "non-harness extension LLM tasks stay in global settings",
+    )
     assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
         bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),
