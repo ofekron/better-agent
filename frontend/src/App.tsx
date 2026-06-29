@@ -3386,6 +3386,9 @@ function AppMain({
 
   const [openSessionRecords, setOpenSessionRecords] = useState<Record<string, Session>>({});
   const openSessionRecordFetchesRef = useRef<Set<string>>(new Set());
+  const openSessionRecordMissesRef = useRef<Map<string, number>>(new Map());
+  const openSessionRecordRetryTimerRef = useRef<number | null>(null);
+  const [openSessionRecordRetryNonce, setOpenSessionRecordRetryNonce] = useState(0);
   const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
   const markSessionKnown = useCallback((id: string) => {
     if (!id) return;
@@ -3415,6 +3418,12 @@ function AppMain({
         : { ...prev, [currentTree.id]: merged };
     });
   }, [currentTree]);
+
+  useEffect(() => () => {
+    if (openSessionRecordRetryTimerRef.current !== null) {
+      window.clearTimeout(openSessionRecordRetryTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     const confirmed = new Set(sessions.map((s) => s.id));
@@ -3643,17 +3652,44 @@ function AppMain({
     fetch(`${API}/api/sessions/summaries?${params}`, {
       credentials: "include",
     })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { sessions?: Session[] } | null) => {
-        if (cancelled) return;
+      .then((res) => (res.ok ? res.json() : undefined))
+      .then((data: { sessions?: Session[] } | undefined) => {
+        if (cancelled || !data) return;
+        const foundIds = new Set<string>();
         for (const session of data?.sessions ?? []) {
           if (!session?.id) continue;
+          foundIds.add(session.id);
+          openSessionRecordMissesRef.current.delete(session.id);
           setOpenSessionRecords((prev) => {
             const merged = mergeOpenSessionRecord(prev[session.id], session);
             return merged === prev[session.id]
               ? prev
               : { ...prev, [session.id]: merged };
           });
+        }
+        const retryIds: string[] = [];
+        const staleIds = idsToFetch.filter((id) => {
+          if (foundIds.has(id)) return false;
+          const misses = (openSessionRecordMissesRef.current.get(id) ?? 0) + 1;
+          openSessionRecordMissesRef.current.set(id, misses);
+          if (misses < 2) retryIds.push(id);
+          return misses >= 2;
+        });
+        if (
+          retryIds.length > 0 &&
+          openSessionRecordRetryTimerRef.current === null
+        ) {
+          openSessionRecordRetryTimerRef.current = window.setTimeout(() => {
+            openSessionRecordRetryTimerRef.current = null;
+            setOpenSessionRecordRetryNonce((value) => value + 1);
+          }, 0);
+        }
+        if (staleIds.length > 0) {
+          const stale = new Set(staleIds);
+          for (const id of staleIds) {
+            openSessionRecordMissesRef.current.delete(id);
+          }
+          setOpenSessionIds((prev) => prev.filter((id) => !stale.has(id)));
         }
       })
       .catch(() => {})
@@ -3669,6 +3705,7 @@ function AppMain({
   }, [
     openSessionIds,
     openSessionRecords,
+    openSessionRecordRetryNonce,
     sessions,
     sessionsLoaded,
   ]);

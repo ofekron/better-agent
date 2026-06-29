@@ -109,6 +109,72 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
+  it("drops restored tab ids that keep missing from summaries", async () => {
+    const session = makeSession({
+      id: "existing-session",
+      name: "Existing",
+      cwd: "/tmp/project-a",
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(["missing-session"]),
+    );
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    expect(
+      await waitFor(
+        h,
+        () => h.restCalls.some(
+          (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
+        ),
+      ),
+    ).toBe(true);
+    await h.flush();
+
+    h.emit({
+      type: "session_created",
+      data: {
+        session: makeSession({
+          id: "trigger-session",
+          name: "Trigger",
+          cwd: "/tmp/project-a",
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(
+      await waitFor(
+        h,
+        () => !JSON.parse(
+          localStorage.getItem("better-agent-open-session-ids") || "[]",
+        ).includes("missing-session"),
+      ),
+    ).toBe(true);
+    const summaryCalls = h.restCalls.filter(
+      (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
+    ).length;
+
+    h.emit({
+      type: "session_created",
+      data: {
+        session: makeSession({
+          id: "second-trigger-session",
+          name: "Second Trigger",
+          cwd: "/tmp/project-a",
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(
+      h.restCalls.filter(
+        (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
+      ),
+    ).toHaveLength(summaryCalls);
+    h.unmount();
+  }, 15000);
+
   it("keeps session tabs visible for active and Assistant sessions", async () => {
     const assistant = makeSession({
       id: "assistant-session",
