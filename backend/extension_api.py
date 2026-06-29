@@ -171,14 +171,12 @@ async def _dispatch_core_builtin_backend(
             return None
         if backend_spec is not None:
             return None
-        record = extension_store.get_extension(extension_id)
-        if not record or record.get("enabled") is not True:
+        if not extension_store.is_extension_enabled_cached(extension_id):
             return None
         return await _dispatch_project_structure_core_backend(clean_path, request)
     if backend_spec is not None:
         return None
-    record = extension_store.get_extension(extension_id)
-    if not record or record.get("enabled") is not True:
+    if not extension_store.is_extension_enabled_cached(extension_id):
         return None
     return await _dispatch_machine_nodes_core_backend(clean_path, request)
 
