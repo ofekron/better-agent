@@ -830,7 +830,14 @@ def test_team_ask_status_writes_run_off_loop() -> None:
     start = source.index("async def ask_team_message(")
     end = source.index("    def _team_message_turn_response(", start)
     ask_source = source[start:end]
+    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in ask_source
+    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in ask_source
+    assert "queue_item = await asyncio.to_thread(\n                    team_messaging.queue_payload" in ask_source
+    assert "await asyncio.to_thread(\n                    session_manager.add_queued_prompt" in ask_source
+    assert "cli_prompt = await asyncio.to_thread(\n                    team_messaging.format_team_message_prompt" in ask_source
     assert "await ask_status_store.write_status_async(" in ask_source
+    assert "session_manager.add_queued_prompt(" not in ask_source
+    assert "cli_prompt = team_messaging.format_team_message_prompt(" not in ask_source
     assert "ask_status_store.write_status(" not in ask_source
 
 
@@ -2655,9 +2662,12 @@ def test_submit_team_message_sync_store_work_off_loop() -> None:
     submit_source = source[start:end]
     assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in submit_source
     assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in submit_source
+    assert "queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload" in submit_source
     assert "await asyncio.to_thread(\n                session_manager.add_queued_prompt" in submit_source
     assert "cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt" in submit_source
     assert "await asyncio.to_thread(\n                session_manager.remove_queued_prompt" in submit_source
+    assert "session_manager.add_queued_prompt(" not in submit_source
+    assert "cli_prompt = team_messaging.format_team_message_prompt(" not in submit_source
     assert "await self.submit_prompt_async(target_session_id, {" in submit_source
     assert "self.submit_prompt(target_session_id, {" not in submit_source
 
