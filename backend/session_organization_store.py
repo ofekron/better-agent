@@ -190,18 +190,41 @@ def enrich_session_summary(summary: dict[str, Any]) -> dict[str, Any]:
     sid = str(summary.get("id") or "")
     with _lock:
         data = _load_shared()
-        assignment = _assignment(data, sid)
         tag_by_id = {t.get("id"): t for t in data["tags"]}
-        tags = [
-            copy.deepcopy(tag_by_id[tid])
-            for tid in assignment["tag_ids"]
-            if tid in tag_by_id
-        ]
-        return {
-            **summary,
-            "folder_id": assignment["folder_id"],
-            "session_tags": tags,
-        }
+        return enrich_session_summary_from_projection(
+            summary,
+            data["assignments"],
+            tag_by_id,
+        )
+
+
+def enrichment_projection() -> tuple[dict[str, Any], dict[Any, dict[str, Any]]]:
+    with _lock:
+        data = _load_shared()
+        return (
+            copy.deepcopy(data["assignments"]),
+            {t.get("id"): copy.deepcopy(t) for t in data["tags"]},
+        )
+
+
+def enrich_session_summary_from_projection(
+    summary: dict[str, Any],
+    assignments: dict[str, Any],
+    tag_by_id: dict[Any, dict[str, Any]],
+) -> dict[str, Any]:
+    sid = str(summary.get("id") or "")
+    data = {"assignments": assignments}
+    assignment = _assignment(data, sid)
+    tags = [
+        copy.deepcopy(tag_by_id[tid])
+        for tid in assignment["tag_ids"]
+        if tid in tag_by_id
+    ]
+    return {
+        **summary,
+        "folder_id": assignment["folder_id"],
+        "session_tags": tags,
+    }
 
 
 def enrich_session_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:

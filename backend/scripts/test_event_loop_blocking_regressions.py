@@ -446,6 +446,7 @@ def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
     build_end = store_source.index("def set_requirement_tags_projection(", build_start)
     build_source = store_source[build_start:build_end]
     assert "enrich_session_summary(summary)" in build_source
+    assert "enrich_session_summary_from_projection(" in build_source
 
     org_source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
     enrich_start = org_source.index("def enrich_session_summary(")
@@ -987,7 +988,9 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
     assert "projection_snapshot = _projection_snapshot()" in build_source
-    assert "_build_summary_for_root(data, projection_snapshot)" in build_source
+    assert "organization_projection = session_organization_store.enrichment_projection()" in build_source
+    assert "_build_summary_for_root(" in build_source
+    assert "organization_projection," in build_source
     assert "_start_summary_projection_repair()" in build_source
     assert "_summary_has_projection(" not in build_source
     assert "summary_projection_present" not in build_source

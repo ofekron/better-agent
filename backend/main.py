@@ -1921,6 +1921,7 @@ async def _broadcast_projects_changed() -> None:
 
 
 async def _broadcast_session_organization_changed() -> None:
+    await asyncio.to_thread(session_store.refresh_organization_projection)
     await coordinator.broadcast_global("session_organization_changed", {})
 
 
