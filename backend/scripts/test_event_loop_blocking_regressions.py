@@ -637,6 +637,13 @@ def test_session_list_preserves_summary_order_when_no_virtual_rows() -> None:
     assert "if virtual_sidebar_sessions:" in local_source
     assert "appended_virtual_sessions = True" in local_source
     assert "appended_virtual_sessions=appended_virtual_sessions" in local_source
+    assert "_filter_page_for_list_preserving_order(" in local_source
+    assert "_decorate_local_sidebar_sessions(page_source, state_snapshot)" in local_source
+    page_start = source.index("def _filter_page_for_list_preserving_order(")
+    page_end = source.index("def _can_preserve_summary_order(", page_start)
+    page_source = source[page_start:page_end]
+    assert "page.append(session)" in page_source
+    assert "return page, total" in page_source
 
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
