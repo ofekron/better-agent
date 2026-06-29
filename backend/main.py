@@ -107,6 +107,7 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes, tuple[int, int, int]],
 ] = {}
+_sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
 _remote_sessions_refresh_tasks: set[str] = set()
@@ -123,6 +124,7 @@ _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08
 _SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50
+_SIDEBAR_PAYLOAD_CACHE_MAX = 4096
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 
@@ -2396,6 +2398,12 @@ _SIDEBAR_WORKING_MODE_META_KEYS = {
 
 
 def _sidebar_session_payload(session: dict) -> dict:
+    sid = session.get("id")
+    cache_key = id(session)
+    if isinstance(sid, str):
+        cached = _sidebar_payload_cache.get(cache_key)
+        if cached is not None and cached[0] == sid:
+            return dict(cached[1])
     payload = dict(session)
     payload.pop("first_prompt", None)
     meta = payload.get("working_mode_meta")
@@ -2405,6 +2413,10 @@ def _sidebar_session_payload(session: dict) -> dict:
             for key in _SIDEBAR_WORKING_MODE_META_KEYS
             if key in meta
         }
+    if isinstance(sid, str):
+        if len(_sidebar_payload_cache) >= _SIDEBAR_PAYLOAD_CACHE_MAX:
+            _sidebar_payload_cache.pop(next(iter(_sidebar_payload_cache)), None)
+        _sidebar_payload_cache[cache_key] = (sid, payload)
     return payload
 
 

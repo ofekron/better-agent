@@ -925,6 +925,19 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "cached[2] != _sessions_list_transient_state_version()" in cache_source
 
 
+def test_sidebar_payload_reuses_summary_projection_cache() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_sidebar_payload_cache" in source
+    assert "_SIDEBAR_PAYLOAD_CACHE_MAX" in source
+    start = source.index("def _sidebar_session_payload(")
+    end = source.index("def _sidebar_state_snapshot(", start)
+    helper_source = source[start:end]
+    assert "cache_key = id(session)" in helper_source
+    assert "_sidebar_payload_cache.get(cache_key)" in helper_source
+    assert "return dict(cached[1])" in helper_source
+    assert "_sidebar_payload_cache[cache_key] = (sid, payload)" in helper_source
+
+
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = main_source.index("def _sessions_list_cache_version(")
@@ -1812,6 +1825,7 @@ if __name__ == "__main__":
     test_session_discovery_reads_mode_without_deepcopy()
     test_project_aggregates_use_bulk_cached_state()
     test_sidebar_file_paths_use_cached_sessions_dir()
+    test_sidebar_payload_reuses_summary_projection_cache()
     test_session_list_uses_sorted_summary_cache()
     test_session_list_pages_last_user_prompt_order_before_full_sort()
     test_session_list_waits_briefly_for_partial_summary_warm()
