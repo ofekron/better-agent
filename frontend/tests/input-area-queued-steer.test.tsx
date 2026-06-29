@@ -305,6 +305,24 @@ describe("InputArea queued prompt promote action", () => {
     expect(minimized.getAttribute("data-minimized")).toBe("true");
   });
 
+  it("renders mixed selected-text and plain inline comment cards readably", () => {
+    setViewportWidth(1280);
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: '<inline-tags>\n<c file="src/app.tsx" range="10:1-10:24"><sel>export const Foo</sel>Verify this card renders readably</c>\n<c>Second comment — should appear as its own card</c>\n</inline-tags>\nMain user prompt text after the comment envelope.',
+      },
+    });
+
+    const banner = screen.getByTestId("queued-prompt-banner");
+    expect(within(banner).getByText("src/app.tsx:10:1-10:24")).toBeTruthy();
+    expect(within(banner).getByText("export const Foo")).toBeTruthy();
+    expect(within(banner).getByText("Verify this card renders readably")).toBeTruthy();
+    expect(within(banner).getByText("Second comment — should appear as its own card")).toBeTruthy();
+    expect(within(banner).getByText("Main user prompt text after the comment envelope.")).toBeTruthy();
+    expect(banner.textContent).not.toContain("<inline-tags>");
+  });
+
   it("opens queued prompt editing from the explicit edit button", () => {
     const onQueuedTextEdit = vi.fn();
     renderInputArea(true, "", { onQueuedTextEdit });
