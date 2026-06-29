@@ -129,6 +129,7 @@ class EventIngester:
         self._full_scan_cache: dict[str, tuple[int, list[dict]]] = {}
         self._root_events_cache: dict[str, tuple[int, dict[str, list[dict]]]] = {}
         self._root_events_version: dict[str, int] = {}
+        self._root_events_candidate_version: dict[str, int] = {}
 
     def _root_dir(self, root_id: str) -> Path:
         return ba_home() / "sessions" / root_id
@@ -204,6 +205,8 @@ class EventIngester:
         sid_max: dict[str, int] = {}
         render_sid_max: dict[str, int] = {}
         render_projection_version = 0
+        root_event_candidate_seqs: set[int] = set()
+        resolved_root_event_seqs: set[int] = set()
         # Same scan also seeds the seq → byte-offset index so read_events
         # can fast-path-skip the after_seq prefix. INVARIANT: append
         # ONLY at the same site as `existing_lines += 1` (parsed,
@@ -263,6 +266,13 @@ class EventIngester:
                                 render_sid_max[sid_val] = seq_val
                         if self._affects_root_events_projection(entry):
                             render_projection_version += 1
+                            if self._affects_root_events_candidate(entry):
+                                root_event_candidate_seqs.add(seq_val)
+                            elif entry.get("type") == "event_ownership_resolved":
+                                data = entry.get("data") or {}
+                                event_seq = data.get("event_seq")
+                                if isinstance(event_seq, int):
+                                    resolved_root_event_seqs.add(event_seq)
             if torn_offset is not None:
                 logger.warning(
                     "event_ingester: truncating torn trailing line at "
@@ -274,6 +284,9 @@ class EventIngester:
         self._max_seq_by_sid[root_id] = sid_max
         self._render_seq_by_sid[root_id] = render_sid_max
         self._root_events_version[root_id] = render_projection_version
+        self._root_events_candidate_version[root_id] = len(
+            root_event_candidate_seqs - resolved_root_event_seqs
+        )
         self._seq_offsets[root_id] = seq_offsets
         # File size AFTER any torn-tail truncation = next write offset.
         self._next_offset[root_id] = path.stat().st_size if path.exists() else 0
@@ -397,6 +410,10 @@ class EventIngester:
                 self._root_events_version.get(root_id, 0) + 1
             )
             self._root_events_cache.pop(root_id, None)
+            if self._affects_root_events_candidate(entry):
+                self._root_events_candidate_version[root_id] = (
+                    self._root_events_candidate_version.get(root_id, 0) + 1
+                )
         try:
             import session_search_projection
             session_search_projection.note_event_written(root_id, entry)
@@ -720,10 +737,13 @@ class EventIngester:
             self._max_seq_by_sid[root_id] = {}
             self._render_seq_by_sid[root_id] = {}
             self._root_events_version[root_id] = 0
+            self._root_events_candidate_version[root_id] = 0
             return {}
         out: dict[str, int] = {}
         render_out: dict[str, int] = {}
         render_projection_version = 0
+        root_event_candidate_seqs: set[int] = set()
+        resolved_root_event_seqs: set[int] = set()
         parsed_lines = 0
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -746,9 +766,19 @@ class EventIngester:
                         render_out[sid] = seq
                 if self._affects_root_events_projection(entry):
                     render_projection_version += 1
+                    if self._affects_root_events_candidate(entry):
+                        root_event_candidate_seqs.add(seq)
+                    elif entry.get("type") == "event_ownership_resolved":
+                        data = entry.get("data") or {}
+                        event_seq = data.get("event_seq")
+                        if isinstance(event_seq, int):
+                            resolved_root_event_seqs.add(event_seq)
         self._max_seq_by_sid[root_id] = out
         self._render_seq_by_sid[root_id] = render_out
         self._root_events_version[root_id] = render_projection_version
+        self._root_events_candidate_version[root_id] = len(
+            root_event_candidate_seqs - resolved_root_event_seqs
+        )
         self._seq[root_id] = parsed_lines
         return dict(out)
 
@@ -772,6 +802,16 @@ class EventIngester:
         if event_type == "event_ownership_resolved":
             return True
         if event_type not in {"agent_message", "manager_event"}:
+            return False
+        from event_shape import is_metadata_event
+        return not is_metadata_event(entry)
+
+    @staticmethod
+    def _affects_root_events_candidate(entry: dict) -> bool:
+        event_type = entry.get("type")
+        if event_type not in {"agent_message", "manager_event"}:
+            return False
+        if entry.get("msg_id") is not None:
             return False
         from event_shape import is_metadata_event
         return not is_metadata_event(entry)
@@ -934,10 +974,11 @@ class EventIngester:
             if version is None:
                 self._scan_max_seq(root_id)
                 version = self._root_events_version.get(root_id, 0)
+            candidate_version = self._root_events_candidate_version.get(root_id, 0)
             cached = self._root_events_cache.get(root_id)
             if cached is not None and cached[0] == version:
                 return copy.deepcopy(cached[1])
-            if version == 0:
+            if version == 0 or candidate_version == 0:
                 self._root_events_cache[root_id] = (version, {})
                 return {}
             file_size = path.stat().st_size
@@ -1485,6 +1526,7 @@ class EventIngester:
                 self._full_scan_cache.pop(root_id, None)
                 self._root_events_cache.pop(root_id, None)
                 self._root_events_version.pop(root_id, None)
+                self._root_events_candidate_version.pop(root_id, None)
 
     def close_all(self) -> None:
         root_ids = set(self._handles) | set(self._seq)
