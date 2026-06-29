@@ -421,6 +421,37 @@ def test_search_candidates_avoid_full_session_scan_for_content_matches() -> bool
     return True
 
 
+def test_search_candidates_bound_content_index_wait() -> bool:
+    _reset_home()
+    for idx in range(3):
+        _write_session(
+            sid=f"slow-{idx}",
+            name=f"unrelated {idx}",
+            messages=[{"role": "user", "content": "plain prompt"}],
+        )
+    seen_waits: list[float | None] = []
+    original_search = session_search_index.search
+
+    def fake_search(*_args, **kwargs):
+        seen_waits.append(kwargs.get("max_wait_seconds"))
+        return []
+
+    session_search_index.search = fake_search  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle", limit=5)
+    finally:
+        session_search_index.search = original_search  # type: ignore[assignment]
+    ok = (
+        candidates == []
+        and seen_waits == [session_search._SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS]
+    )
+    print(
+        f"{PASS if ok else FAIL} content-index candidate search uses bounded wait "
+        f"-- waits={seen_waits}",
+    )
+    return ok
+
+
 def test_run_search_sessions_worker_parse_failed() -> bool:
     """A worker reply with no usable JSON maps to error=parse_failed."""
     _reset_home()
@@ -786,6 +817,7 @@ def main_run() -> int:
         test_search_worker_instructions_wrap_bounded_candidates,
         test_search_candidates_include_later_message_snippets,
         test_search_candidates_avoid_full_session_scan_for_content_matches,
+        test_search_candidates_bound_content_index_wait,
         test_run_search_sessions_worker_parse_failed,
         test_run_search_sessions_worker_timeout,
         test_run_search_sessions_short_circuits_empty_candidates,

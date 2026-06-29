@@ -83,6 +83,7 @@ _DEFAULT_MAX_RESULTS = 20
 _DEFAULT_TIMEOUT_SECONDS = 15 * 60
 _SEARCH_CANDIDATE_LIMIT = 40
 _SEARCH_SNIPPET_LIMIT = 360
+_SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS = 0.05
 
 
 # ── Index building ─────────────────────────────────────────────────────
@@ -293,7 +294,11 @@ def _search_candidates(
             import session_search_index
             content_scores = {
                 str(item.get("session_id")): int(item.get("score") or 0)
-                for item in session_search_index.search(query, limit=max(len(rows), limit))
+                for item in session_search_index.search(
+                    query,
+                    limit=max(len(rows), limit),
+                    max_wait_seconds=_SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS,
+                )
                 if item.get("session_id")
             }
         except Exception:
