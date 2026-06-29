@@ -2179,11 +2179,12 @@ function AppMain({
   const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
     return (currentSession?.queued_prompts ?? []).map(queuedPromptToBanner);
   }, [currentSession?.queued_prompts]);
-  const queuedPrompt = currentSession
+  const queuedPrompts = currentSession
     ? (currentSession.id in queuedBySession
-        ? queuedBySession[currentSession.id]?.[0] ?? null
-        : persistedQueuedPrompts[0] ?? null)
-    : null;
+        ? queuedBySession[currentSession.id] ?? []
+        : persistedQueuedPrompts)
+    : [];
+  const queuedPrompt = queuedPrompts[0] ?? null;
   // Smoking-gun detector: backend says a prompt is queued (REST
   // queued_prompts), but a local null in queuedBySession masks the banner so
   // the user sees an empty queue. Fires only on transition (effect deps), not
@@ -4658,15 +4659,20 @@ function AppMain({
   }, [currentSession, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
 
   const handleQueuedTextEdit = useCallback(
-    (text: string) => {
+    (text: string, queuedId?: string) => {
       if (!currentSession) return;
-      const existing = queuedBySession[currentSession.id]?.[0] ?? persistedQueuedPrompts[0] ?? null;
+      const base = queuedBySession[currentSession.id]?.length
+        ? queuedBySession[currentSession.id]!
+        : persistedQueuedPrompts;
+      const existing = queuedId
+        ? base.find((item) => item.id === queuedId) ?? null
+        : base[0] ?? null;
       if (!existing) return;
       const sent = sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
       setQueuedForSession(currentSession.id, (prev) => {
-        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
-        return base.map((item, index) => index === 0 ? { ...item, preview: text } : item);
+        const current = prev.length > 0 ? prev : base;
+        return current.map((item) => item.id === existing.id ? { ...item, preview: text } : item);
       }, "text_edit");
     },
     [currentSession, persistedQueuedPrompts, queuedBySession, setQueuedForSession, sendUpdateQueued]
@@ -6564,6 +6570,7 @@ function AppMain({
               runStateBySession={runStateBySession}
               onForkAndSend={handleForkAndSend}
               queuedPrompt={queuedPrompt}
+              queuedPrompts={queuedPrompts}
               onPromoteQueued={() => handlePromoteQueued("interrupt")}
               onSteerQueued={() => handlePromoteQueued("steer")}
               onCancelQueued={handleCancelQueued}

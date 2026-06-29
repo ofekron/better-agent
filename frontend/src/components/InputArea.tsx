@@ -85,10 +85,11 @@ interface Props {
   canFork?: boolean;
   forkTargetLabel?: string;
   queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
+  queuedPrompts?: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: () => void;
   onSteerQueued?: () => void;
   onCancelQueued?: () => void;
-  onQueuedTextEdit?: (text: string) => void;
+  onQueuedTextEdit?: (text: string, queuedId?: string) => void;
   onReviewLastWork?: () => void;
   sendTarget?: "worker" | "supervisor";
   onSendTargetChange?: (target: "worker" | "supervisor") => void;
@@ -154,6 +155,7 @@ export function InputArea({
   canFork = false,
   forkTargetLabel,
   queuedPrompt,
+  queuedPrompts,
   onPromoteQueued,
   onSteerQueued,
   onCancelQueued,
@@ -193,6 +195,7 @@ export function InputArea({
   // user can compose multi-line prompts without surprise submits.
   const enterIsNewline = viewport.mode !== "desktop";
   const compactActionMenus = viewport.mode === "mobile";
+  const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -658,18 +661,19 @@ export function InputArea({
           ))}
         </div>
       )}
-      {queuedPrompt && (
+      {visibleQueuedPrompts.map((item, index) => (
         <QueuedPromptBanner
-          preview={queuedPrompt.preview}
-          images={queuedPrompt.images}
-          imagesCount={queuedPrompt.imagesCount}
-          files={queuedPrompt.files}
-          filesCount={queuedPrompt.filesCount}
-          onPromote={onPromoteQueued}
-          onSteer={canSteer && _isStreaming ? onSteerQueued : undefined}
-          onCancel={onCancelQueued!}
-          onEdit={onQueuedTextEdit}
-          onSaveToNote={onQueuedToNote ?? undefined}
+          key={item.id}
+          preview={item.preview}
+          images={item.images}
+          imagesCount={item.imagesCount}
+          files={item.files}
+          filesCount={item.filesCount}
+          onPromote={index === 0 ? onPromoteQueued : undefined}
+          onSteer={index === 0 && canSteer && _isStreaming ? onSteerQueued : undefined}
+          onCancel={index === 0 ? onCancelQueued : undefined}
+          onEdit={onQueuedTextEdit ? (text) => onQueuedTextEdit(text, item.id) : undefined}
+          onSaveToNote={index === 0 ? onQueuedToNote ?? undefined : undefined}
           steerLabel={t("input.steerButton")}
           steerTitle={t("input.steerTitle")}
           interruptLabel={t("input.interruptButton")}
@@ -680,7 +684,7 @@ export function InputArea({
           expandLabel={t("input.queuedExpand")}
           compactActions={compactActionMenus}
         />
-      )}
+      ))}
       {forkTargetLabel && (
         <div
           className="input-fork-target"
@@ -1078,9 +1082,9 @@ function QueuedPromptBanner({
   imagesCount?: number;
   files?: FileAttachment[];
   filesCount?: number;
-  onPromote: () => void;
+  onPromote?: () => void;
   onSteer?: () => void;
-  onCancel: () => void;
+  onCancel?: () => void;
   onEdit?: (text: string) => void;
   onSaveToNote?: (text: string) => void;
   steerLabel: string;
@@ -1213,14 +1217,16 @@ function QueuedPromptBanner({
               {steerLabel}
             </button>
           )}
-          <button
-            className="promote-btn interrupt"
-            data-testid="queued-interrupt-btn"
-            onClick={onPromote}
-            title={interruptTitle}
-          >
-            {interruptLabel}
-          </button>
+          {onPromote && (
+            <button
+              className="promote-btn interrupt"
+              data-testid="queued-interrupt-btn"
+              onClick={onPromote}
+              title={interruptTitle}
+            >
+              {interruptLabel}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -1263,15 +1269,17 @@ function QueuedPromptBanner({
         <div className="queued-prompt-actions">
           {compactActions ? null : (
             <>
-              <button
-                className="queued-cancel-btn"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onCancel();
-                }}
-              >
-                {cancelLabel}
-              </button>
+              {onCancel && (
+                <button
+                  className="queued-cancel-btn"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onCancel();
+                  }}
+                >
+                  {cancelLabel}
+                </button>
+              )}
               {onSaveToNote && (
                 <button
                   className="queued-note-btn"
@@ -1298,18 +1306,20 @@ function QueuedPromptBanner({
               {steerLabel}
             </button>
           )}
-          <button
-            className="promote-btn interrupt"
-            data-testid="queued-interrupt-btn"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onPromote();
-            }}
-            title={interruptTitle}
-          >
-            {interruptLabel}
-          </button>
-          {compactActions && (
+          {onPromote && (
+            <button
+              className="promote-btn interrupt"
+              data-testid="queued-interrupt-btn"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onPromote();
+              }}
+              title={interruptTitle}
+            >
+              {interruptLabel}
+            </button>
+          )}
+          {compactActions && (onCancel || onSaveToNote) && (
             <QueuedPromptOverflowMenu
               open={actionsOpen}
               setOpen={setActionsOpen}
@@ -1390,12 +1400,14 @@ function QueuedPromptBanner({
       <div className="queued-prompt-actions">
         {compactActions ? null : (
           <>
-            <button
-              className="queued-cancel-btn"
-              onClick={onCancel}
-            >
-              {cancelLabel}
-            </button>
+            {onCancel && (
+              <button
+                className="queued-cancel-btn"
+                onClick={onCancel}
+              >
+                {cancelLabel}
+              </button>
+            )}
             {onSaveToNote && (
               <button
                 className="queued-note-btn"
@@ -1417,15 +1429,17 @@ function QueuedPromptBanner({
             {steerLabel}
           </button>
         )}
-        <button
-          className="promote-btn interrupt"
-          data-testid="queued-interrupt-btn"
-          onClick={onPromote}
-          title={interruptTitle}
-        >
-          {interruptLabel}
-        </button>
-        {compactActions && (
+        {onPromote && (
+          <button
+            className="promote-btn interrupt"
+            data-testid="queued-interrupt-btn"
+            onClick={onPromote}
+            title={interruptTitle}
+          >
+            {interruptLabel}
+          </button>
+        )}
+        {compactActions && (onCancel || onSaveToNote) && (
           <QueuedPromptOverflowMenu
             open={actionsOpen}
             setOpen={setActionsOpen}
@@ -1448,7 +1462,7 @@ function QueuedPromptOverflowMenu({
 }: {
   open: boolean;
   setOpen: (open: boolean | ((open: boolean) => boolean)) => void;
-  onCancel: () => void;
+  onCancel?: () => void;
   cancelLabel: string;
   onSaveToNote?: () => void;
 }) {
@@ -1465,15 +1479,17 @@ function QueuedPromptOverflowMenu({
       </button>
       {open && (
         <div className="queued-overflow-menu">
-          <button
-            className="overflow-menu-item"
-            onClick={() => {
-              setOpen(false);
-              onCancel();
-            }}
-          >
-            {cancelLabel}
-          </button>
+          {onCancel && (
+            <button
+              className="overflow-menu-item"
+              onClick={() => {
+                setOpen(false);
+                onCancel();
+              }}
+            >
+              {cancelLabel}
+            </button>
+          )}
           {onSaveToNote && (
             <button
               className="overflow-menu-item"
