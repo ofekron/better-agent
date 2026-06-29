@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "クロスセッション委任を自動承認（フォークのみ）",
   "settings.crossSessionDelegateAutoHint": "オンの場合、delegate_to_session が確認ピッカーなしで別セッションをフォークして実行できます。Continue モードは常に確認します。デフォルトはオフです。",
   "settings.contextStrategy": "コンテキストウィンドウ戦略",
+  "settings.sessionTabsVisible": "セッションタブバーを表示",
   "settings.sessionTabsSort": "セッションタブの並び順",
   "settings.contextStrategyNative": "自動コンパクト（デフォルト）",
   "settings.contextStrategyContinuation": "recall 付きで新しいセッションを開始",

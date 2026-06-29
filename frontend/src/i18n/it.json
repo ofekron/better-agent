@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "Approvazione automatica delega tra sessioni (solo fork)",
   "settings.crossSessionDelegateAutoHint": "Quando attivo, delegate_to_session può creare il fork di un'altra sessione ed eseguire senza il selettore di conferma. La modalità continua chiede sempre conferma. Disattivato per impostazione predefinita.",
   "settings.contextStrategy": "Strategia finestra di contesto",
+  "settings.sessionTabsVisible": "Mostra barra schede sessioni",
   "settings.sessionTabsSort": "Ordine schede sessioni",
   "settings.contextStrategyNative": "Auto compact (predefinito)",
   "settings.contextStrategyContinuation": "Avvia nuova sessione con recall",

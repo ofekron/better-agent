@@ -269,6 +269,7 @@
   "settings.crossSessionDelegateAuto": "אישור אוטומטי להאצלה בין-סשנים (fork בלבד)",
   "settings.crossSessionDelegateAutoHint": "כשמופעל, delegate_to_session יכול לפצל סשן אחר ולהריץ ללא בורר אישור. מצב continue תמיד שואל. כבוי כברירת מחדל.",
   "settings.contextStrategy": "אסטרטגיית חלון הקשר",
+  "settings.sessionTabsVisible": "הצג סרגל לשוניות סשנים",
   "settings.sessionTabsSort": "סדר לשוניות הסשנים",
   "settings.contextStrategyNative": "דחיסה אוטומטית (ברירת מחדל)",
   "settings.contextStrategyContinuation": "סשן חדש עם שליפה",

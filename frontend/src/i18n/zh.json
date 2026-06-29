@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "自动批准跨会话委派（仅 fork）",
   "settings.crossSessionDelegateAutoHint": "开启后，delegate_to_session 可 fork 另一个会话并在无需确认选择器的情况下运行。continue 模式始终会询问。默认关闭。",
   "settings.contextStrategy": "上下文窗口策略",
+  "settings.sessionTabsVisible": "显示会话标签栏",
   "settings.sessionTabsSort": "会话标签排序",
   "settings.contextStrategyNative": "自动压缩（默认）",
   "settings.contextStrategyContinuation": "启动新会话并保留 recall",

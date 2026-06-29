@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "Aprobar automáticamente la delegación entre sesiones (solo fork)",
   "settings.crossSessionDelegateAutoHint": "Cuando está activado, delegate_to_session puede hacer fork de otra sesión y ejecutarse sin el selector de confirmación. El modo continuar siempre pregunta. Desactivado por defecto.",
   "settings.contextStrategy": "Estrategia de ventana de contexto",
+  "settings.sessionTabsVisible": "Mostrar barra de pestañas de sesión",
   "settings.sessionTabsSort": "Orden de pestañas de sesión",
   "settings.contextStrategyNative": "Compactado automático (predeterminado)",
   "settings.contextStrategyContinuation": "Iniciar sesión nueva con recall",

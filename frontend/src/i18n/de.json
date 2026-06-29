@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "Sitzungsübergreifende Delegation automatisch genehmigen (nur Fork)",
   "settings.crossSessionDelegateAutoHint": "Wenn aktiv, kann delegate_to_session eine andere Sitzung forken und ohne die Bestätigungsauswahl ausführen. Continue-Modus fragt immer. Standardmäßig aus.",
   "settings.contextStrategy": "Kontextfenster-Strategie",
+  "settings.sessionTabsVisible": "Sitzungs-Registerkartenleiste anzeigen",
   "settings.sessionTabsSort": "Reihenfolge der Sitzungs-Registerkarten",
   "settings.contextStrategyNative": "Auto-Compact (Standard)",
   "settings.contextStrategyContinuation": "Neue Sitzung mit Recall starten",
