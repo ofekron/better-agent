@@ -14,6 +14,7 @@ Each provider record:
       "custom_models": list[str],
       "default_model": str,    # default model id for new sessions / fallback
       "default_reasoning_effort": str,
+      "runner":        "native" | "openai",
     }
 
 The api_key for an api_key-mode provider is stored in the OS keychain under
@@ -335,6 +336,20 @@ def _reject_unsupported_provider_config(kind: str, mode: str) -> None:
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
 
 
+def _runner_choices_for_kind(kind: str) -> list[str]:
+    import provider_manifest
+    return list(provider_manifest.runner_choices_for(kind))
+
+
+def _clean_runner(kind: str, value: object) -> str:
+    import provider_manifest
+    runner = str(value or "").strip()
+    choices = _runner_choices_for_kind(kind)
+    if runner in choices:
+        return runner
+    return provider_manifest.default_runner_for(kind)
+
+
 def _seed_default_state() -> dict:
     """Fresh-install default providers, with Claude active."""
     claude_pid = str(uuid.uuid4())
@@ -352,6 +367,7 @@ def _seed_default_state() -> dict:
                 "custom_models": [],
                 "default_model": "claude-opus-4-7[1m]",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+                "runner": _clean_runner("claude", ""),
                 "default_permission": default_permission_for_kind("claude"),
             },
             {
@@ -364,6 +380,7 @@ def _seed_default_state() -> dict:
                 "custom_models": [],
                 "default_model": "gpt-5.5",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+                "runner": _clean_runner("codex", ""),
                 "default_permission": default_permission_for_kind("codex"),
             },
         ],
@@ -392,6 +409,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "custom_models": list(custom_models),
         "default_model": _default_model_for(mode, base_url),
         "default_reasoning_effort": _clean_default_reasoning_effort("claude", None),
+        "runner": _clean_runner("claude", ""),
     }
     legacy_key = _read_legacy_api_key()
     if legacy_key and provider["mode"] == "api_key":
@@ -712,6 +730,8 @@ def _strip(provider: dict) -> dict:
         "config_dir": provider.get("config_dir", ""),
         "custom_models": provider.get("custom_models", []),
         "default_model": provider.get("default_model", ""),
+        "runner": _clean_runner(kind, provider.get("runner")),
+        "runner_options": _runner_choices_for_kind(kind),
         "reasoning_effort_options": effort_options,
         "default_reasoning_effort": default_effort if effort_options else "",
         "permission_options": permission_options,
@@ -972,6 +992,7 @@ def add_provider(payload: dict) -> dict:
         "config_dir": (payload.get("config_dir") or "").strip(),
         "custom_models": list(payload.get("custom_models") or []),
         "default_model": (payload.get("default_model") or "").strip(),
+        "runner": _clean_runner(kind, payload.get("runner")),
         "default_permission": _clean_default_permission(kind, payload.get("default_permission")),
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
@@ -1015,6 +1036,11 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         target["config_dir"] = (payload.get("config_dir") or "").strip()
     if "default_model" in payload:
         target["default_model"] = (payload.get("default_model") or "").strip()
+    if "runner" in payload or "kind" in payload:
+        target["runner"] = _clean_runner(
+            target.get("kind", "claude"),
+            payload.get("runner", target.get("runner")),
+        )
     if "default_reasoning_effort" in payload:
         target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
             target, payload.get("default_reasoning_effort")

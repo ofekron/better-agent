@@ -1181,6 +1181,7 @@ export interface BrowseResult {
 }
 
 export type ProviderMode = "subscription" | "api_key";
+export type ProviderRunner = "native" | "openai";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,
@@ -1208,6 +1209,8 @@ export interface Provider {
   config_dir: string;
   custom_models: string[];
   default_model: string;
+  runner: ProviderRunner;
+  runner_options: ProviderRunner[];
   reasoning_effort_options: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | "";
   permission_options: PermissionOptions;

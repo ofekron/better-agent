@@ -134,6 +134,7 @@ interface Template {
     base_url: string;
     config_dir: string;
     default_model: string;
+    runner?: Provider["runner"];
     default_reasoning_effort: ReasoningEffort | "";
     api_key?: string;
   };
@@ -2246,6 +2247,7 @@ interface FormPayload {
   base_url: string;
   config_dir: string;
   default_model: string;
+  runner: Provider["runner"];
   default_reasoning_effort: ReasoningEffort | "";
   default_permission: Permission;
   api_key: string;
@@ -2271,6 +2273,11 @@ const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
 };
 function permissionOptionsForKind(kind: string): Record<string, string[]> {
   return PERMISSION_OPTIONS[kind] ?? {};
+}
+
+function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
+  if (saved?.length) return saved;
+  return kind === "openai" ? ["openai"] : ["native"];
 }
 
 // Capability keys overridable per provider (kind gives the default; these
@@ -2299,10 +2306,12 @@ function ProviderForm({
    * the default_model dropdown. Undefined during the create wizard
    * (provider doesn't exist yet → free-text input). */
   providerId?: string;
-  initial: Omit<FormPayload, "api_key" | "default_permission"> & {
+  initial: Omit<FormPayload, "api_key" | "default_permission" | "runner"> & {
     api_key?: string;
     capability_overrides?: Partial<Record<string, boolean>>;
     default_permission?: Permission;
+    runner?: Provider["runner"];
+    runner_options?: Provider["runner_options"];
   };
   initialHasKey: boolean;
   onClose: () => void;
@@ -2314,6 +2323,11 @@ function ProviderForm({
   const [kind] = useState(initial.kind || "claude");
   const modes = availableModesForForm(kind, mode, initial.mode);
   const [mode_, setMode] = useState<Provider["mode"]>(initial.mode);
+  const runnerOptions = runnerOptionsForKind(kind, initial.runner_options);
+  const initialRunner = initial.runner ?? runnerOptions[0];
+  const [runner, setRunner] = useState<Provider["runner"]>(
+    runnerOptions.includes(initialRunner) ? initialRunner : runnerOptions[0],
+  );
   const [baseUrl, setBaseUrl] = useState(initial.base_url);
   const [configDir, setConfigDir] = useState(initial.config_dir);
   const configDirCopy = configDirCopyForKind(kind);
@@ -2391,6 +2405,7 @@ function ProviderForm({
         base_url: baseUrl,
         config_dir: configDir,
         default_model: defaultModel,
+        runner,
         default_reasoning_effort: defaultReasoningEffort,
         default_permission: defaultPermission,
         api_key:
@@ -2457,6 +2472,23 @@ function ProviderForm({
                 {t('setup.apiKeyButton')}
               </button>
             )}
+          </div>
+        )}
+
+        {runnerOptions.length > 1 && (
+          <div className="setup-field">
+            <label>{t("setup.runnerLabel")}</label>
+            <select
+              value={runner}
+              onChange={(e) => setRunner(e.target.value as Provider["runner"])}
+            >
+              {runnerOptions.map((option) => (
+                <option key={option} value={option}>
+                  {t(`setup.runner.${option}`)}
+                </option>
+              ))}
+            </select>
+            <span className="setup-field-hint">{t("setup.runnerHint")}</span>
           </div>
         )}
 

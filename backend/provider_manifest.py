@@ -54,6 +54,7 @@ class ProviderSpec:
     # Virtual kinds (claude-remote) are coordinator-side proxies: never a
     # persisted disk provider, never resolved via get_provider, no runner.
     virtual: bool = False
+    runner_choices: tuple[str, ...] = ("native",)
 
 
 SPECS: dict[str, ProviderSpec] = {
@@ -86,6 +87,7 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner_openai", recovery_family="gemini",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
+        runner_choices=("openai",),
     ),
     "agy": ProviderSpec(
         kind="agy", module="provider_agy", cls="AgyProvider",
@@ -127,6 +129,16 @@ def runner_module_for(kind: str) -> str:
     the spec leaves it unset."""
     s = SPECS.get(kind)
     return (s.runner_module if s and s.runner_module else "runner")
+
+
+def runner_choices_for(kind: str | None) -> tuple[str, ...]:
+    spec = spec_for(kind)
+    return spec.runner_choices if spec else ("native",)
+
+
+def default_runner_for(kind: str | None) -> str:
+    choices = runner_choices_for(kind)
+    return choices[0] if choices else "native"
 
 
 def installable_kinds() -> list[str]:
