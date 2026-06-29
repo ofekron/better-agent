@@ -956,7 +956,10 @@ class SessionManager:
         rid = self._node_root_id.get(sid)
         if rid is not None:
             return rid
-        return session_store._resolve_root_id(sid)
+        rid = session_store._resolve_root_id(sid)
+        if rid is not None:
+            self._node_root_id[sid] = rid
+        return rid
 
     def _lock_for_root(self, root_id: str) -> threading.RLock:
         with self._cache_guard:
