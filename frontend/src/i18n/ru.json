@@ -586,6 +586,7 @@
   "fileEditor.discard": "Отменить",
   "fileEditor.closing": "Закрытие…",
   "fileEditor.done": "Готово",
+  "fileEditor.pickFiles": "Выбрать файлы",
   "fork.original": "оригинал",
   "fork.fork": "форк",
   "fork.focusedAria": "Активная панель",

@@ -586,6 +586,7 @@
   "fileEditor.discard": "تجاهل",
   "fileEditor.closing": "جارٍ الإغلاق…",
   "fileEditor.done": "تم",
+  "fileEditor.pickFiles": "اختر ملفات",
   "fork.original": "الأصل",
   "fork.fork": "تفرّع",
   "fork.focusedAria": "اللوحة المركّز عليها",

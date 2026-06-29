@@ -602,6 +602,7 @@
   "fileEditor.discard": "Discard",
   "fileEditor.closing": "Closing…",
   "fileEditor.done": "Done",
+  "fileEditor.pickFiles": "Pick files",
   "fork.original": "original",
   "fork.fork": "fork",
   "fork.focusedAria": "Focused pane",

@@ -586,6 +586,7 @@
   "fileEditor.discard": "Verwerfen",
   "fileEditor.closing": "Schließen…",
   "fileEditor.done": "Fertig",
+  "fileEditor.pickFiles": "Dateien auswählen",
   "fork.original": "Original",
   "fork.fork": "Fork",
   "fork.focusedAria": "Fokussiertes Panel",

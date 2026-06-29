@@ -17,6 +17,37 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
+  it("shows a file picker action for empty file-edit sessions", async () => {
+    const session = makeSession({
+      id: "file-edit-empty",
+      name: "Edit project files",
+      working_mode: "file_editing",
+      working_mode_meta: {
+        persistent: true,
+        project_cwd: "/tmp/proj",
+        file_paths: [],
+        original_contents: {},
+      },
+      messages: [
+        makeAssistantMsg({
+          id: "file-edit-ask",
+          content: "Which file or files do you want to edit?",
+          seq: 0,
+        }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    expect(h.$('[data-testid="empty-file-editor-pick-files"]')).not.toBeNull();
+
+    await h.click('[data-testid="empty-file-editor-pick-files"]');
+
+    expect(h.raw.getByRole("heading", { name: "fileChooser.title" })).toBeTruthy();
+
+    h.unmount();
+  });
+
   it("send → messages_replay populates the chat (new architecture)", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });

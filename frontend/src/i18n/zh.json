@@ -586,6 +586,7 @@
   "fileEditor.discard": "放弃",
   "fileEditor.closing": "关闭中…",
   "fileEditor.done": "完成",
+  "fileEditor.pickFiles": "选择文件",
   "fork.original": "原始",
   "fork.fork": "fork",
   "fork.focusedAria": "聚焦的窗格",
