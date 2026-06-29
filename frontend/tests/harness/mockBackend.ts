@@ -73,6 +73,18 @@ function sessionMatchesListQuery(s: Session, query: Record<string, string>): boo
   return true;
 }
 
+function sessionSummary(s: Session): Partial<Session> {
+  const {
+    messages: _messages,
+    forks: _forks,
+    token_usage_total: _tokenUsageTotal,
+    token_usage_last: _tokenUsageLast,
+    rearranger_stats: _rearrangerStats,
+    ...summary
+  } = s;
+  return summary;
+}
+
 function emptyState(): BackendState {
   return {
     sessions: [],
@@ -309,7 +321,7 @@ export class MockBackend {
           )
           .filter((s) => sessionMatchesListQuery(s, query))
           .map((s) => ({
-            ...s,
+            ...sessionSummary(s),
             pending_eng_session_id: engByParent.get(s.id) ?? null,
           }))
           .sort((a, b) => {
@@ -325,6 +337,23 @@ export class MockBackend {
         total: sessions.length,
         has_more: offset + limit < sessions.length,
       };
+    }
+    if (method === "GET" && path === "/api/sessions/topbar-pinned") {
+      const sessions = this.state.sessions
+        .filter((s) => s.topbar_pinned)
+        .map((s) => sessionSummary(s))
+        .sort((a, b) =>
+          Date.parse((b.topbar_pinned_at as string | undefined) || "") -
+          Date.parse((a.topbar_pinned_at as string | undefined) || ""),
+        );
+      return { sessions };
+    }
+    if (method === "GET" && path === "/api/sessions/summaries") {
+      const ids = splitFilter(query.ids);
+      const sessions = this.state.sessions
+        .filter((s) => ids.has(s.id))
+        .map((s) => sessionSummary(s));
+      return { sessions };
     }
     // ---- File (used by FileEditor's poll) ----
     if (method === "GET" && path === "/api/file") {
@@ -377,6 +406,15 @@ export class MockBackend {
           if (findNodeInTree(r, id)) return r;
         }
         return session ?? notFound();
+      }
+      if (sub === "/stats" && method === "GET") {
+        if (!session) return notFound();
+        return {
+          token_usage_total: session.token_usage_total ?? null,
+          token_usage_last: session.token_usage_last ?? null,
+          rearranger_stats: session.rearranger_stats ?? null,
+          context_window: session.context_window ?? null,
+        };
       }
       if (sub === "" && method === "DELETE") {
         // Cascade-delete: drop any prompt-engineering session whose

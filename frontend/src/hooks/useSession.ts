@@ -603,6 +603,10 @@ export function useSession(authStatus?: string) {
     if (!t || t.sid !== sessionId) return;
     armOpenQuietTimer();
   };
+  useEffect(() => () => {
+    clearOpenQuietTimer();
+    openTimingRef.current = null;
+  }, []);
   // Per-session list of currently-running CLI runs as reported by
   // the backend's `run_state` event. Backend is the source of truth
   // for "is something running" — frontend just mirrors. Stored as
@@ -636,6 +640,7 @@ export function useSession(authStatus?: string) {
   const sessionsNextOffsetRef = useRef(0);
   const sessionsLoadingPageRef = useRef(false);
   const sessionListRequestSeqRef = useRef(0);
+  const sessionListFiltersReadyRef = useRef(false);
   const currentSessionRef = useRef<Session | null>(null);
   currentSessionRef.current = currentSession;
 
@@ -730,11 +735,15 @@ export function useSession(authStatus?: string) {
         const rawPage = data.sessions || [];
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
-        // Seed the registry from this page (async callback — NOT during
-        // render) so deeper-page rows have a live entry for both the
-        // status rank and the running/unread badge. Only fills missing
-        // sids; never clobbers a fresher live entry.
-        sessionRegistry.seedFromRows(page);
+        if (replace && offset === 0) {
+          sessionRegistry.replaceFromRows(page);
+        } else {
+          // Seed the registry from this page (async callback — NOT during
+          // render) so deeper-page rows have a live entry for both the
+          // status rank and the running/unread badge. Only fills missing
+          // sids; never clobbers a fresher live entry.
+          sessionRegistry.seedFromRows(page);
+        }
         setSessions((prev) => mergeSessionPage(prev, page, replace));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
@@ -817,6 +826,10 @@ export function useSession(authStatus?: string) {
 
   useEffect(() => {
     if (!sessionsLoaded) return;
+    if (!sessionListFiltersReadyRef.current) {
+      sessionListFiltersReadyRef.current = true;
+      return;
+    }
     sessionsNextOffsetRef.current = 0;
     void fetchSessionPage(0, true, sessionListFilters);
   }, [fetchSessionPage, sessionListFilters, sessionsLoaded]);

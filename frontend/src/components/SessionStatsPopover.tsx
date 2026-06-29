@@ -5,6 +5,7 @@ import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import type { Session } from "../types";
 import { TokenUsageDisplay } from "./TokenUsage";
 import type { PopoverAnchor } from "./SessionTagPopover";
+import { API } from "../api";
 
 interface Props {
   anchor: PopoverAnchor;
@@ -22,6 +23,12 @@ const MARGIN = 8;
 export function SessionStatsPopover({ anchor, session, onClose }: Props) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
+  const [stats, setStats] = useState({
+    usage: session.token_usage_total ?? null,
+    usageLast: session.token_usage_last ?? null,
+    rearrangerStats: session.rearranger_stats ?? null,
+    contextWindow: session.context_window ?? null,
+  });
   const [pos, setPos] = useState<React.CSSProperties>({
     position: "fixed",
     zIndex: 1000,
@@ -30,6 +37,27 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
   });
 
   useBackButtonDismiss(true, onClose);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API}/api/sessions/${encodeURIComponent(session.id)}/stats`, {
+      credentials: "include",
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        setStats({
+          usage: data.token_usage_total ?? null,
+          usageLast: data.token_usage_last ?? null,
+          rearrangerStats: data.rearranger_stats ?? null,
+          contextWindow: data.context_window ?? null,
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [session.id]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -80,10 +108,10 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
     >
       <div className="session-stats-popover-header">{t("tokens.stats")}</div>
       <TokenUsageDisplay
-        usage={session.token_usage_total ?? null}
-        usageLast={session.token_usage_last ?? null}
-        rearrangerStats={session.rearranger_stats ?? null}
-        contextWindow={session.context_window ?? null}
+        usage={stats.usage}
+        usageLast={stats.usageLast}
+        rearrangerStats={stats.rearrangerStats}
+        contextWindow={stats.contextWindow}
       />
     </div>,
     document.body,

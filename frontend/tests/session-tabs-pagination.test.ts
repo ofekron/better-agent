@@ -40,10 +40,28 @@ describe("session tabs with paged sessions", () => {
         () => h.$(".session-tabs")?.textContent?.includes("Session 60") === true,
       ),
     ).toBe(true);
+    expect(
+      h.restCalls.filter((c) => c.method === "GET" && c.path === "/api/sessions"),
+    ).toHaveLength(1);
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === "/api/sessions/sess-60",
+      ),
+    ).toBe(false);
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
+      ),
+    ).toBe(true);
 
     await h.clickByText(/Session 60/);
 
     expect(window.location.pathname).toBe("/s/sess-60");
+    expect(
+      h.restCalls.filter(
+        (c) => c.method === "GET" && c.path === "/api/sessions/sess-60",
+      ),
+    ).toHaveLength(1);
     h.unmount();
   }, 15000);
 
@@ -61,11 +79,50 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions: [assistant, work] } });
 
     await h.selectSession(work.id);
-    expect(h.$(".session-tabs")?.textContent).not.toContain("Work");
+    expect(h.$(".session-tabs")?.textContent ?? "").not.toContain("Work");
 
     await h.selectSession(assistant.id);
     expect(h.$(".session-tabs")).toBeNull();
 
+    h.unmount();
+  }, 10000);
+
+  it("fetches session stats only when the stats popover opens", async () => {
+    const session = makeSession({
+      id: "stats-session",
+      name: "Stats",
+      cwd: "/tmp/project-a",
+      token_usage_total: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === "/api/sessions/stats-session/stats",
+      ),
+    ).toBe(false);
+
+    await h.click('[data-testid="session-item"][data-session-id="stats-session"] .session-item-tag-control');
+    await h.flush();
+
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === "/api/sessions/stats-session/stats",
+      ),
+    ).toBe(true);
+    expect(
+      await waitFor(
+        h,
+        () => h.restCalls.some(
+          (c) => c.method === "GET" && c.path === "/api/sessions/stats-session",
+        ),
+      ),
+    ).toBe(true);
     h.unmount();
   }, 10000);
 

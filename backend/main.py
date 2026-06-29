@@ -2656,6 +2656,15 @@ def _decorate_local_sidebar_sessions(
     return local
 
 
+def _sidebar_stats_payload(session: dict) -> dict:
+    return {
+        "rearranger_stats": session.get("rearranger_stats"),
+        "token_usage_total": session.get("token_usage_total"),
+        "token_usage_last": session.get("token_usage_last"),
+        "context_window": session.get("context_window"),
+    }
+
+
 def _local_sessions_for_sidebar() -> list[dict]:
     return _decorate_local_sidebar_sessions(_local_session_summaries_for_sidebar())
 
@@ -6057,6 +6066,43 @@ async def get_topbar_pinned_sessions():
         reverse=True,
     )
     return {"sessions": pinned}
+
+
+@app.get("/api/sessions/summaries")
+async def get_session_summaries(ids: str = Query("")):
+    requested_ids = [
+        sid.strip()
+        for sid in ids.split(",")
+        if sid.strip()
+    ]
+    if not requested_ids:
+        return {"sessions": []}
+    summaries = await asyncio.to_thread(
+        _local_session_summaries_by_ids_for_sidebar,
+        requested_ids,
+    )
+    by_id = {str(session.get("id")): session for session in summaries if session.get("id")}
+    ordered = [by_id[sid] for sid in requested_ids if sid in by_id]
+    page = await _run_hot_path(
+        "sessions.summaries.decorate.worker",
+        _decorate_local_sidebar_sessions,
+        ordered,
+        None,
+    )
+    return {"sessions": page}
+
+
+@app.get("/api/sessions/{session_id}/stats")
+async def get_session_stats(session_id: str):
+    if session_id == session_search.ASK_SINGLETON_ID:
+        session = await session_search.ensure_ask_session()
+    else:
+        session = await asyncio.to_thread(virtual_session_store.get, session_id)
+    if not session:
+        session = await asyncio.to_thread(session_manager.get, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    return _sidebar_stats_payload(session)
 
 
 @app.get("/api/sessions/{session_id}")
@@ -13307,10 +13353,25 @@ async def websocket_chat(websocket: WebSocket):
     logger.info("WebSocket connected")
 
     async def ws_callback(event_dict):
+        send_t = time.perf_counter()
         try:
             await websocket.send_json(event_dict)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "WebSocket send failed type=%s error=%s",
+                event_dict.get("type") if isinstance(event_dict, dict) else None,
+                exc,
+            )
+            return
+        elapsed_ms = (time.perf_counter() - send_t) * 1000.0
+        perf.record("ws.send_json", elapsed_ms)
+        if elapsed_ms > 250.0:
+            logger.warning(
+                "slow WebSocket send type=%s elapsed_ms=%.1f bytes=%d",
+                event_dict.get("type") if isinstance(event_dict, dict) else None,
+                elapsed_ms,
+                len(json.dumps(event_dict, separators=(",", ":"), default=str)),
+            )
 
     # Per-connection token so subscription bookkeeping in the coordinator
     # keys on a value that is unique per WS connection and NEVER reused
@@ -14387,4 +14448,5 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
         proxy_headers=False,
+        ws_per_message_deflate=False,
     )
