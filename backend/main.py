@@ -1287,12 +1287,14 @@ bind_session_ws_broadcaster(ws_broadcaster)
 rearranger = Rearranger(session_manager)
 from event_bus_subscribers import (
     bind_post_turn_hooks,
+    bind_pre_turn_hooks,
     bind_rearranger,
     bind_worker_fanout_cleanup,
 )
 bind_rearranger(rearranger)
 bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
 bind_post_turn_hooks()
+bind_pre_turn_hooks()
 
 # Rebuild the declarative tag-rule registry from every enabled extension
 # so styling/markers apply from boot, not only after the periodic
@@ -5581,6 +5583,24 @@ def _floor_events_from_seq(
     return max(0, floor)
 
 
+@app.get("/api/sessions/topbar-pinned")
+async def get_topbar_pinned_sessions():
+    sessions = await asyncio.to_thread(session_manager.list)
+    pinned = [
+        session
+        for session in sessions
+        if session.get("topbar_pinned")
+    ]
+    pinned.sort(
+        key=lambda session: (
+            session.get("topbar_pinned_at") or "",
+            session.get("id") or "",
+        ),
+        reverse=True,
+    )
+    return {"sessions": pinned}
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session(
     session_id: str,
@@ -6333,6 +6353,19 @@ async def pin_session(session_id: str, body: dict):
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     return {"id": session_id, "pinned": pinned}
+
+
+@app.put("/api/sessions/{session_id}/topbar-pin")
+async def pin_session_to_topbar(session_id: str, body: dict):
+    pinned = bool((body or {}).get("pinned", True))
+    session = await asyncio.to_thread(session_manager.set_topbar_pinned, session_id, pinned)
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    return {
+        "id": session_id,
+        "topbar_pinned": pinned,
+        "topbar_pinned_at": session.get("topbar_pinned_at"),
+    }
 
 
 @app.post("/api/sessions/{session_id}/opened")

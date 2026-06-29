@@ -1466,14 +1466,23 @@ def _validate_dependencies(value: Any, *, extension_id: str) -> list[str]:
 
 def _validate_hooks(value: Any, *, has_backend: bool) -> dict[str, Any]:
     """Declarative lifecycle hooks an extension subscribes to. Today:
-    ``post_turn`` — a path (under the extension's backend host) core invokes
-    fire-and-forget after ``lifecycle.turn_complete`` with the turn context.
-    Requires ``entrypoints.backend`` (the hook is a backend invocation)."""
+    ``pre_turn`` — core invokes fire-and-forget before a turn runs (on
+    ``lifecycle.turn_start``); ``post_turn`` — core invokes fire-and-forget
+    after ``lifecycle.turn_complete``. Both receive the turn context and
+    require ``entrypoints.backend`` (the hook is a backend invocation)."""
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise ExtensionError("entrypoints.hooks must be an object")
     hooks: dict[str, Any] = {}
+    pre_turn = value.get("pre_turn")
+    if pre_turn is not None:
+        if not has_backend:
+            raise ExtensionError("entrypoints.hooks.pre_turn requires entrypoints.backend")
+        pre_turn = str(pre_turn).strip()
+        if not pre_turn.startswith("/"):
+            raise ExtensionError("entrypoints.hooks.pre_turn must be a path starting with /")
+        hooks["pre_turn"] = pre_turn
     post_turn = value.get("post_turn")
     if post_turn is not None:
         if not has_backend:
@@ -1490,7 +1499,7 @@ def _validate_hooks(value: Any, *, has_backend: bool) -> dict[str, Any]:
         if not session_event.startswith("/"):
             raise ExtensionError("entrypoints.hooks.session_event must be a path starting with /")
         hooks["session_event"] = session_event
-    unknown = sorted(set(value) - {"post_turn", "session_event"})
+    unknown = sorted(set(value) - {"pre_turn", "post_turn", "session_event"})
     if unknown:
         raise ExtensionError(f"entrypoints.hooks has unknown keys: {', '.join(unknown)}")
     return hooks
@@ -4205,6 +4214,19 @@ def post_turn_hooks() -> list[tuple[str, str]]:
         if not _record_active(record) or not _record_runtime_ready(record):
             continue
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get("post_turn")
+        if path:
+            out.append((record["manifest"]["id"], str(path)))
+    return out
+
+
+def pre_turn_hooks() -> list[tuple[str, str]]:
+    """(extension_id, path) for active, runtime-ready INSTALLED extensions
+    declaring a ``entrypoints.hooks.pre_turn`` backend path."""
+    out: list[tuple[str, str]] = []
+    for record in list_extensions():
+        if not _record_active(record) or not _record_runtime_ready(record):
+            continue
+        path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get("pre_turn")
         if path:
             out.append((record["manifest"]["id"], str(path)))
     return out
