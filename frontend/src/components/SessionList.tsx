@@ -26,6 +26,7 @@ import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
+import { todoProgress } from "./TodosPanel";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 
@@ -521,10 +522,10 @@ function SessionNode({
   const providerName = provider?.name ?? session.provider_id?.split('/')[0] ?? 'unknown';
 
   const todos = session.current_todos ?? [];
+  const tasks = session.current_tasks ?? [];
   const requirementTags = session.requirement_tags ?? [];
   const manualTags = session.session_tags ?? [];
-  const todoTotal = todos.length;
-  const todoDone = todos.filter((td) => td.status === "completed").length;
+  const { total: todoTotal, done: todoDone } = todoProgress(todos, tasks);
   const todoBadge: { text: string; className: string; label: string; state: string } =
     todoTotal === 0
       ? {

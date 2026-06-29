@@ -1,8 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
+  mergeTodoWorkItems,
   splitTodoPresentation,
   TodoItemRow,
+  todoProgress,
   TodosPanel,
   visibleTodoCount,
 } from "../src/components/TodosPanel";
@@ -24,6 +26,24 @@ describe("TodoItemRow", () => {
 });
 
 describe("TodosPanel presentation", () => {
+  it("merges todo and task state with completed duplicates winning", () => {
+    const todos = [
+      { content: "Shared item", status: "pending" as const },
+      { content: "Todo only", status: "in_progress" as const },
+    ];
+    const tasks = [
+      { content: "Shared item", status: "completed" as const },
+      { content: "Task only", status: "pending" as const },
+    ];
+
+    expect(mergeTodoWorkItems(todos, tasks)).toEqual([
+      { content: "Shared item", status: "completed" },
+      { content: "Todo only", status: "in_progress" },
+      { content: "Task only", status: "pending" },
+    ]);
+    expect(todoProgress(todos, tasks)).toEqual({ total: 3, done: 1, visible: 2 });
+  });
+
   it("shows the current trailing plan and collapses older todo history", () => {
     const todos = [
       { content: "Old active", status: "in_progress" as const },

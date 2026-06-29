@@ -334,6 +334,7 @@ class GeminiProvider(Provider):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,
@@ -423,6 +424,7 @@ class GeminiProvider(Provider):
             "permission": _permission,
             "session_id": session_id,
             "mode": runner_mode,
+            "source": source or "",
             "app_session_id": app_session_id,
             "active_capability_ids": [
                 str(cid)

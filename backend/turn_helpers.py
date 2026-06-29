@@ -160,7 +160,7 @@ def _session_work_items(session: dict) -> list[dict]:
             normalized = {**item, "content": content}
             if key in seen:
                 existing = items[seen[key]]
-                if existing.get("status") == "completed" and normalized.get("status") != "completed":
+                if existing.get("status") != "completed" and normalized.get("status") == "completed":
                     items[seen[key]] = normalized
                 continue
             seen[key] = len(items)

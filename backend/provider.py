@@ -283,6 +283,7 @@ class Provider(ABC):
         session_id: Optional[str],
         mode: str,
         app_session_id: str,
+        source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         setting_sources: Optional[list[str]] = None,
         backend_url: Optional[str] = None,

@@ -1903,6 +1903,7 @@ class TurnManager:
                     session_id=current_session_id,
                     mode=mode,
                     app_session_id=app_session_id,
+                    source=source,
                     setting_sources=run_setting_sources,
                     backend_url=backend_url,
                     internal_token=internal_token,

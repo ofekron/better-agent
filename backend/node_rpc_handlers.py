@@ -84,6 +84,7 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             session_id=msg.get("session_id"),
             mode=msg.get("mode") or "native",
             app_session_id=worker_agent_session_id,
+            source=msg.get("source"),
             disallowed_tools=msg.get("disallowed_tools"),
             setting_sources=msg.get("setting_sources"),
             backend_url=msg.get("backend_url"),
