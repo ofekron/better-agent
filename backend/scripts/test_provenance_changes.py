@@ -111,3 +111,62 @@ def test_non_edit_tools_dropped():
     ])
     provenance_store.record_from_event(SID, ev)
     assert provenance_store.read_file_changes(SID) == []
+
+
+def _assistant_msg(mid, content):
+    return {"id": mid, "role": "assistant", "content": content}
+
+
+def _user_msg(text):
+    return {"id": f"u-{text[:4]}", "role": "user", "content": text}
+
+
+def test_group_changes_by_turn_buckets_by_user_prompt():
+    # Two turns: each has a user prompt + an assistant msg whose edits land in
+    # that turn. msg_id on the change matches the assistant msg id.
+    provenance_store.record_from_event(SID, _event("a1", [
+        _tool("Edit", {"file_path": "/a.ts", "old_string": "x", "new_string": "y"}, "tu-a1"),
+    ]))
+    provenance_store.record_from_event(SID, _event("a2", [
+        _tool("Edit", {"file_path": "/b.ts", "old_string": "1", "new_string": "2"}, "tu-a2"),
+    ]))
+    changes = provenance_store.read_file_changes(SID)
+    messages = [
+        _user_msg("fix the bug"),
+        _assistant_msg("a1", []),
+        _user_msg("refactor it"),
+        _assistant_msg("a2", []),
+    ]
+    turns = provenance_store.group_changes_by_turn(messages, changes)
+    assert [t["turn_index"] for t in turns] == [0, 1]
+    assert turns[0]["user_prompt"] == "fix the bug"
+    assert turns[1]["user_prompt"] == "refactor it"
+    assert turns[0]["changes"][0]["file_path"] == "/a.ts"
+    assert turns[1]["changes"][0]["file_path"] == "/b.ts"
+
+
+def test_group_changes_by_turn_ungrouped_bucket():
+    provenance_store.record_from_event(SID, _event("a1", [
+        _tool("Edit", {"file_path": "/a.ts", "old_string": "x", "new_string": "y"}, "tu-a1"),
+    ]))
+    changes = provenance_store.read_file_changes(SID)
+    # No matching assistant msg in the render tree → ungrouped (turn -1).
+    turns = provenance_store.group_changes_by_turn([], changes)
+    assert len(turns) == 1 and turns[0]["turn_index"] == -1
+    assert turns[0]["changes"][0]["file_path"] == "/a.ts"
+
+
+def test_group_changes_by_turn_user_content_as_blocks():
+    provenance_store.record_from_event(SID, _event("a1", [
+        _tool("Edit", {"file_path": "/a.ts", "old_string": "x", "new_string": "y"}, "tu-a1"),
+    ]))
+    changes = provenance_store.read_file_changes(SID)
+    messages = [
+        {"id": "u1", "role": "user", "content": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "world"},
+        ]},
+        _assistant_msg("a1", []),
+    ]
+    turns = provenance_store.group_changes_by_turn(messages, changes)
+    assert turns[0]["user_prompt"] == "hello world"

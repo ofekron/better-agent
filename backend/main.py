@@ -7628,13 +7628,21 @@ async def get_session_details(session_id: str):
 @app.get("/api/sessions/{session_id}/changes")
 async def get_session_changes(session_id: str):
     """Every file edit made in this session + the reasoning that preceded
-    each, projected from the provenance log. Backend owns the filter (file-
-    edit detection across providers); the Changes right-panel just renders.
-    Refetched on the ``session_provenance_changed`` WS ping."""
+    each, projected from the provenance log and grouped by the user→assistant
+    turn that produced them. Backend owns the filter (file-edit detection
+    across providers) and the turn grouping (it owns the render tree); the
+    Changes right-panel just renders. Refetched on the
+    ``session_provenance_changed`` WS ping."""
     from stores import provenance_store
 
-    changes = await asyncio.to_thread(provenance_store.read_file_changes, session_id)
-    return {"session_id": session_id, "changes": changes}
+    def _build():
+        changes = provenance_store.read_file_changes(session_id)
+        sess = session_manager.get(session_id) or {}
+        messages = sess.get("messages") or []
+        return provenance_store.group_changes_by_turn(messages, changes)
+
+    turns = await asyncio.to_thread(_build)
+    return {"session_id": session_id, "turns": turns}
 
 
 @app.post("/api/sessions/{session_id}/seen")
