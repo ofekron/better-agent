@@ -20,7 +20,10 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
     out: list[dict[str, Any]] = []
     for worker in workers:
         bc_sid = worker.get("agent_session_id")
-        bc = session_manager.get_lite(bc_sid) if bc_sid else None
+        bc = session_manager.get_fields(
+            bc_sid,
+            ("agent_session_id", "cwd", "name", "orchestration_mode"),
+        ) if bc_sid else None
         if not bc:
             continue
         mode = worker.get("orchestration_mode") or bc.get("orchestration_mode") or "native"

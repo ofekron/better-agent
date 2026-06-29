@@ -262,7 +262,7 @@ def list_worker_projection(cwd: str, limit: int = 20) -> list[dict]:
         agent_session_id = w.get("agent_session_id")
         if not agent_session_id:
             continue
-        bc = _sm.get(agent_session_id)
+        bc = _sm.get_fields(agent_session_id, ("cwd", "name"))
         if not bc:
             continue
         out.append({
