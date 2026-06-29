@@ -759,6 +759,7 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         "target_session_id": {"type": "string"},
         "target_worker_id": {"type": "string"},
         "target_worker_pool": {"type": "string"},
+        "pool_affinity_key": {"type": "string"},
         "message": {"type": "string"},
     },
     "required": ["message"],
@@ -798,6 +799,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "target_session_id": {"type": "string"},
         "target_worker_id": {"type": "string"},
         "target_worker_pool": {"type": "string"},
+        "pool_affinity_key": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
         "mode": {
@@ -1152,6 +1154,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         target_session_id = str(args.get("target_session_id") or "").strip()
         target_worker_id = str(args.get("target_worker_id") or "").strip()
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
         if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result("one target and message are required", success=False)
@@ -1163,6 +1166,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
                     "target_session_id": target_session_id,
                     "target_worker_id": target_worker_id,
                     "target_worker_pool": target_worker_pool,
+                    "pool_affinity_key": pool_affinity_key,
                     "message": message,
                 },
                 backend_url=backend_url,
@@ -1181,6 +1185,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         target_session_id = str(args.get("target_session_id") or "").strip()
         target_worker_id = str(args.get("target_worker_id") or "").strip()
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
         try:
@@ -1221,6 +1226,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
                 "target_session_id": target_session_id,
                 "target_worker_id": target_worker_id,
                 "target_worker_pool": target_worker_pool,
+                "pool_affinity_key": pool_affinity_key,
                 "message": message,
                 "ask_id": f"ask_{uuid.uuid4().hex[:10]}",
                 "mode": mode,

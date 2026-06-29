@@ -223,6 +223,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
             "arguments": json.dumps(
                 {
                     "target_worker_pool": "testape",
+                    "pool_affinity_key": "thread-1",
                     "message": "run async",
                     "mode": "continue_and_expect_mssg_back_async",
                 }
@@ -251,6 +252,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
     assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["sender_session_id"] == "sender-1"
     assert captured[0][1]["target_worker_pool"] == "testape"
+    assert captured[0][1]["pool_affinity_key"] == "thread-1"
     assert captured[0][1]["message"] == "run async"
     assert captured[0][1]["mode"] == "continue_and_expect_mssg_back_async"
 

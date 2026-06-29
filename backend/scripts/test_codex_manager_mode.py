@@ -34,6 +34,7 @@ def test_ask_dynamic_tool_contract(failures: list[str]) -> None:
     check("target_session_id" in properties, "ask accepts session target", failures)
     check("target_worker_id" in properties, "ask accepts worker target", failures)
     check("target_worker_pool" in properties, "ask accepts pool target", failures)
+    check("pool_affinity_key" in properties, "ask accepts pool affinity hint", failures)
     check("run_mode" in properties, "ask accepts run mode", failures)
     check("mode" in properties, "ask accepts wait/async behavior mode", failures)
     check("worker_description" in properties, "ask accepts optional session label for fork mode", failures)

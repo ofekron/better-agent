@@ -28,7 +28,9 @@ MSSG_DESCRIPTION = (
     "it. Target with exactly one of target_session_id, "
     "target_worker_id, or target_worker_pool. Use for direct coordination or a "
     "worker's final report to its manager. For a reply you read inline, use ask "
-    f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN}' instead."
+    f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN}' instead. With "
+    "target_worker_pool, pass pool_affinity_key to continue the same thread on "
+    "the same pool worker."
 )
 
 ASK_DESCRIPTION = (
@@ -41,7 +43,8 @@ ASK_DESCRIPTION = (
     "run_mode='fork' runs an ISOLATED branch that does NOT mutate the session's "
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
     "discard the fork after). Do NOT fork to create a brand-new session. Unlike "
-    "delegate_task, ask keeps the target explicit."
+    "delegate_task, ask keeps the target explicit. With target_worker_pool, pass "
+    "pool_affinity_key to continue the same thread on the same pool worker."
 )
 
 DELEGATE_TASK_DESCRIPTION = (

@@ -241,6 +241,7 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         "target_session_id": {"type": "string"},
         "target_worker_id": {"type": "string"},
         "target_worker_pool": {"type": "string"},
+        "pool_affinity_key": {"type": "string"},
         "message": {"type": "string"},
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
@@ -291,6 +292,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "target_session_id": {"type": "string"},
         "target_worker_id": {"type": "string"},
         "target_worker_pool": {"type": "string"},
+        "pool_affinity_key": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
         "mode": {
@@ -607,6 +609,7 @@ def _build_mssg_tool_handler(
         target_session_id = str(args.get("target_session_id") or "").strip()
         target_worker_id = str(args.get("target_worker_id") or "").strip()
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
         if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result(
@@ -621,6 +624,7 @@ def _build_mssg_tool_handler(
                     "target_session_id": target_session_id,
                     "target_worker_id": target_worker_id,
                     "target_worker_pool": target_worker_pool,
+                    "pool_affinity_key": pool_affinity_key,
                     "message": message,
                     "provider_id": str(args.get("provider_id") or "").strip() or None,
                     "model": str(args.get("model") or "").strip(),
@@ -790,6 +794,7 @@ def _build_ask_tool_handler(
         target_session_id = str(args.get("target_session_id") or "").strip()
         target_worker_id = str(args.get("target_worker_id") or "").strip()
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
+        pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
         try:
@@ -845,6 +850,7 @@ def _build_ask_tool_handler(
                 "target_session_id": target_session_id,
                 "target_worker_id": target_worker_id,
                 "target_worker_pool": target_worker_pool,
+                "pool_affinity_key": pool_affinity_key,
                 "message": message,
                 "ask_id": ask_id,
                 "mode": mode,
