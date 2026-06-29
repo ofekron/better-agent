@@ -456,25 +456,38 @@ def _load_state() -> dict:
     with _state_cache_lock:
         if _state_cache is not None and _state_cache[0] == fingerprint:
             return copy.deepcopy(_state_cache[1])
-    raw = read_json(_config_path(), {})
-    if not raw:
-        state = _seed_default_state()
-        _save_state(state)
-        return _load_state()
-    # New schema?
-    if "providers" in raw and isinstance(raw.get("providers"), list):
-        state = _normalize_loaded_state(raw)
-        with _state_cache_lock:
+        # Cold path runs INSIDE the lock so a restart-time thundering herd
+        # performs ONE disk read + parse instead of N. The faulthandler
+        # watchdog ranked config_store._load_state -> read_json the #2
+        # event-loop blocker (137 dumps; 120 in a single restart hour)
+        # precisely because the read sat OUTSIDE the lock and every
+        # concurrent first-access caller hit disk on the loop. The
+        # fast-path check above doubles as the post-lock re-check: a herd
+        # member that blocked acquiring the lock finds the leader's
+        # populated cache (identical mtime/size fingerprint during a
+        # restart) and returns it without touching disk. `_state_cache_lock`
+        # is an RLock, so the `_save_state()` re-entry below is safe; lock
+        # order is always _state_cache_lock -> _api_key_cache_lock (the
+        # legacy-migration branch), never the reverse, so no deadlock.
+        raw = read_json(_config_path(), {})
+        if not raw:
+            state = _seed_default_state()
+            _save_state(state)
+            return copy.deepcopy(_state_cache[1])
+        # New schema?
+        if "providers" in raw and isinstance(raw.get("providers"), list):
+            state = _normalize_loaded_state(raw)
             _state_cache = (fingerprint, copy.deepcopy(state))
-        return state
-    # Old flat schema → migrate, persist, then drop the legacy keychain
-    # slot. Order matters: save first so a crash during _delete_legacy_api_key
-    # leaves the new schema in place; the new keychain slot was populated
-    # before save inside _migrate_flat_to_providers.
-    state = _migrate_flat_to_providers(raw)
-    _save_state(state)
-    _delete_legacy_api_key()
-    return _load_state()
+            return state
+        # Old flat schema → migrate, persist, then drop the legacy keychain
+        # slot. Order matters: save first so a crash during
+        # _delete_legacy_api_key leaves the new schema in place; the new
+        # keychain slot was populated before save inside
+        # _migrate_flat_to_providers.
+        state = _migrate_flat_to_providers(raw)
+        _save_state(state)
+        _delete_legacy_api_key()
+        return copy.deepcopy(_state_cache[1])
 
 
 def _log_removed_providers(new_providers: list) -> None:
