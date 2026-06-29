@@ -564,6 +564,30 @@ def test_async_provider_resolution_runs_off_loop() -> None:
     assert "provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)" in route_source
 
 
+def test_delegation_state_store_calls_run_off_loop() -> None:
+    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    run_start = source.index("async def run_delegation(")
+    locked_start = source.index("async def run_delegation_locked(")
+    run_source = source[run_start:locked_start]
+    locked_source = source[locked_start:]
+
+    assert "caller_session = await asyncio.to_thread(session_manager.get" in run_source
+    assert "worker_session = await asyncio.to_thread(session_manager.get" in run_source
+    assert "worker_record_result = await asyncio.to_thread(\n        _find_worker_record" in run_source
+    assert "session_manager.get(worker_session_id)" not in run_source
+    assert "worker_store.get_worker(candidate_cwd, worker_session_id)" not in run_source
+    assert "worker_store.remove_worker(candidate_cwd, worker_session_id)" not in run_source
+
+    assert "await asyncio.to_thread(\n                session_fork_store.get_fork_record" in locked_source
+    assert "await asyncio.to_thread(session_manager.get, fork_agent_session_id)" in locked_source
+    assert "await asyncio.to_thread(session_manager.delete, fork_agent_session_id)" in locked_source
+    assert "fork_bc = await asyncio.to_thread(\n                session_manager.create_delegate_fork" in locked_source
+    assert "manager_session = await asyncio.to_thread(session_manager.get, app_session_id)" in locked_source
+    assert "session_fork_store.get_fork_record(cwd, app_session_id" not in locked_source
+    assert "session_manager.get(fork_agent_session_id)" not in locked_source
+    assert "session_manager.create_delegate_fork(" not in locked_source
+
+
 def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
     start = source.index("def prepare_provider_event_for_journal(")
