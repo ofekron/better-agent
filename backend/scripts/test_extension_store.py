@@ -3192,6 +3192,50 @@ def test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record(
         raise AssertionError("uninstalled private Project Structure extension was re-enabled without install")
 
 
+def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
+    import assistant_ui
+    import session_manager
+
+    assistant_id = extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+    if not assistant_id:
+        raise AssertionError("assistant builtin id missing")
+    package = _write_private_extension_package(
+        assistant_id,
+        "extensions/assistant",
+        {
+            "name": "Assistant",
+            "surfaces": ["backend_feature"],
+            "permissions": {"session_state": True},
+        },
+        files={"prompts/system.md": "Assistant role prompt."},
+    )
+    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(_TRUSTED_TEST_ROOT),
+            "extension_path": "extensions/assistant",
+            "ref": "",
+            "commit_sha": "assistant-private",
+        },
+        persist=True,
+    )
+
+    sess = assistant_ui.ensure_singleton("board")
+    sid = sess["id"]
+    state_path = assistant_ui._state_path()  # type: ignore[attr-defined]
+    if not state_path.exists():
+        raise AssertionError("assistant singleton state was not created")
+    if session_manager.manager.get(sid) is None:
+        raise AssertionError("assistant singleton session was not created")
+
+    extension_store.uninstall(assistant_id)
+    if state_path.exists():
+        raise AssertionError("assistant singleton state still exists after uninstall")
+    if session_manager.manager.get(sid) is not None:
+        raise AssertionError("assistant singleton session still exists after uninstall")
+
+
 def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_state() -> None:
     original_repo_root = extension_store._repo_root  # type: ignore[attr-defined]
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
