@@ -23,20 +23,14 @@ from typing import Any, Optional
 
 from paths import ba_home
 from file_ref_resolver import rewrite_event_data
+from event_shape import frontend_event_from_journal_row
 from session_manager import manager as session_manager
 import perf
 
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_STUB_NON_RENDER_TYPES = frozenset({
-    "complete",
-    "session_discovered",
-    "worker_prep_start",
-    "worker_prep_event",
-    "worker_prep_complete",
-    "worker_prep_cancelled",
-})
+_EVENT_SUMMARIES_VERSION = 2
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
@@ -268,6 +262,7 @@ class EventIngester:
             sidecar.get("mtime_ns") != signature[0]
             or sidecar.get("size") != signature[1]
             or sidecar.get("tail") != tail
+            or sidecar.get("summary_version") != _EVENT_SUMMARIES_VERSION
         ):
             return None
         summaries = sidecar.get("summaries")
@@ -300,6 +295,7 @@ class EventIngester:
         sidecar_path = self._event_summaries_path(root_id)
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         payload = {
+            "summary_version": _EVENT_SUMMARIES_VERSION,
             "mtime_ns": signature[0],
             "size": signature[1],
             "tail": tail,
@@ -1593,11 +1589,26 @@ class EventIngester:
             return {}
         with self._summaries_state(root_id, path, tail) as (all_summaries, _):
             if not sid_filter:
-                return all_summaries
+                return self._public_message_summaries(all_summaries)
             return {
-                k: v for k, v in all_summaries.items()
+                k: self._public_message_summary(v)
+                for k, v in all_summaries.items()
                 if v.get("sid") == sid_filter
             }
+
+    @staticmethod
+    def _public_message_summary(summary: dict) -> dict:
+        return {
+            key: value for key, value in summary.items()
+            if not str(key).startswith("_")
+        }
+
+    @classmethod
+    def _public_message_summaries(cls, summaries: dict[str, dict]) -> dict[str, dict]:
+        return {
+            msg_id: cls._public_message_summary(summary)
+            for msg_id, summary in summaries.items()
+        }
 
     def latest_render_event_uid(
         self,
@@ -1778,32 +1789,39 @@ class EventIngester:
             "byte_end": line_end,
             "event_count": 0,
             "last_events": [],
+            "_render_uuid_idx": {},
         })
         if isinstance(seq, int):
             if not isinstance(rec.get("seq_start"), int):
                 rec["seq_start"] = seq
             rec["seq_end"] = seq
         rec["byte_end"] = line_end
-        if etype not in _STUB_NON_RENDER_TYPES:
-            summary_event = self._summary_render_event(entry)
-            if summary_event is None:
+        summary_event = self._summary_render_event(entry)
+        if summary_event is None:
+            return
+        uuid_idx = rec.setdefault("_render_uuid_idx", {})
+        if not isinstance(uuid_idx, dict):
+            uuid_idx = {}
+            rec["_render_uuid_idx"] = uuid_idx
+        data = summary_event.get("data") if isinstance(summary_event, dict) else None
+        uid = data.get("uuid") if isinstance(data, dict) else None
+        if isinstance(uid, str) and uid:
+            existing_idx = uuid_idx.get(uid)
+            if isinstance(existing_idx, int):
+                tail_start = rec["event_count"] - len(rec["last_events"])
+                tail_idx = existing_idx - tail_start
+                if 0 <= tail_idx < len(rec["last_events"]):
+                    rec["last_events"][tail_idx] = summary_event
                 return
-            rec["event_count"] += 1
-            rec["last_events"].append(summary_event)
-            if len(rec["last_events"]) > tail:
-                del rec["last_events"][0]
+            uuid_idx[uid] = rec["event_count"]
+        rec["event_count"] += 1
+        rec["last_events"].append(summary_event)
+        if len(rec["last_events"]) > tail:
+            del rec["last_events"][0]
 
     @staticmethod
     def _summary_render_event(entry: dict) -> Optional[dict]:
-        etype = entry.get("type")
-        data = entry.get("data", {})
-        seq = entry.get("seq")
-        if etype == "manager_event" and isinstance(data, dict):
-            inner = data.get("event")
-            if isinstance(inner, dict):
-                return {**inner, "seq": seq}
-            return None
-        return {"type": etype, "data": data, "seq": seq}
+        return frontend_event_from_journal_row(entry, include_seq=True)
 
     def _append_summaries(
         self, path: Path, root_id: str, tail: int,

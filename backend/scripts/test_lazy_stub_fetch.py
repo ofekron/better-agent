@@ -62,6 +62,20 @@ def _manager_event(uuid: str, text: str = "x") -> dict:
     }
 
 
+def _agent_event(uuid: str, text: str = "x") -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "uuid": uuid,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        },
+    }
+
+
 def _worker_event(delegation_id: str, uuid: str, text: str = "x") -> dict:
     return {
         "type": "worker_event",
@@ -408,6 +422,66 @@ def test_get_message_full_count_matches_stub() -> bool:
     return True
 
 
+def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
+    sess = session_manager.create(
+        name="streaming-summary", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("manager")
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-streaming-1", "role": "user",
+        "content": "q1", "events": [], "isStreaming": False,
+    })
+    asst = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst)
+    msg = session_manager.get_ref(sid)["messages"][-1]
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
+                        user_msg=None, root_id=sid)
+    strategy.apply_event(app_session_id=sid, msg=msg,
+                         event=_agent_event("same", "partial"), ctx=ctx,
+                         source_is_provider_stream=True)
+    strategy.apply_event(app_session_id=sid, msg=msg,
+                         event=_agent_event("same", "final"), ctx=ctx,
+                         source_is_provider_stream=True)
+    msg["isStreaming"] = False
+    asst1_id = msg["id"]
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-streaming-2", "role": "user",
+        "content": "q2", "events": [], "isStreaming": False,
+    })
+    asst2 = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst2)
+    latest = session_manager.get_ref(sid)["messages"][-1]
+    strategy.apply_event(app_session_id=sid, msg=latest,
+                         event=_agent_event("latest", "latest"), ctx=ctx,
+                         source_is_provider_stream=True)
+    latest["isStreaming"] = False
+
+    _wait_for_summaries(sid, [asst1_id, latest["id"]])
+    tree = session_manager.get_root_tree_stubbed(sid)
+    stub = {m["id"]: m for m in tree["messages"]}[asst1_id]["stub"]
+    full = session_manager.get_message_full(sid, asst1_id)
+    if full is None:
+        print("  get_message_full returned None")
+        return False
+    if render_stub.renderable_count(full) != 1:
+        print(f"  full renderable count wrong: {full.get('events')}")
+        return False
+    if stub["event_count"] != 1:
+        print(f"  stub should dedupe same uuid to 1, got {stub}")
+        return False
+    tail = stub["last_events"]
+    text = (((tail[-1].get("data") or {}).get("message") or {})
+            .get("content") or [{}])[0].get("text")
+    if text != "final":
+        print(f"  stub tail should carry latest mutation, got {tail}")
+        return False
+    return True
+
+
 def test_stubbed_load_does_not_corrupt_cache() -> bool:
     sid, asst1_id, _ = _mk_two_turn_session()
     session_manager.get_root_tree_stubbed(sid)  # strips + restores
@@ -503,6 +577,8 @@ TESTS = [
         test_manager_stubbed_cold_load_skips_hydrate_with_workers),
     ("get_message_full count matches stub.event_count",
         test_get_message_full_count_matches_stub),
+    ("stub summary dedupes streaming uuid updates",
+        test_stub_summary_dedupes_streaming_uuid_updates),
     ("strip-before-deepcopy does not corrupt live cache",
         test_stubbed_load_does_not_corrupt_cache),
     ("native stubbed load keeps cache thin, expand reads jsonl",
