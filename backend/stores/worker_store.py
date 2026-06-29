@@ -76,6 +76,7 @@ logger = logging.getLogger(__name__)
 from paths import ba_home
 
 _lock = threading.RLock()
+_worker_count_cache: dict[tuple[str, tuple[int, int]], int] = {}
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -95,6 +96,14 @@ def _now() -> str:
 
 def _path() -> Path:
     return _workers_dir() / "global.json"
+
+
+def _file_fingerprint() -> tuple[int, int]:
+    try:
+        stat = _path().stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _empty() -> dict:
@@ -161,6 +170,8 @@ def _write(
     refresh_worker_summaries: bool = True,
 ) -> None:
     write_json(_path(), registry)
+    with _lock_for():
+        _worker_count_cache.clear()
     if refresh_worker_summaries:
         from session_store import _refresh_all_worker_summaries
         _refresh_all_worker_summaries()
@@ -182,6 +193,23 @@ def list_workers(cwd: str) -> list[dict]:
         workers = [w for w in workers if w.get("cwd") == cwd]
     workers.sort(key=lambda w: w.get("last_active", ""), reverse=True)
     return workers
+
+
+def worker_count(cwd: str = "") -> int:
+    fingerprint = _file_fingerprint()
+    key = (cwd, fingerprint)
+    with _lock_for():
+        cached = _worker_count_cache.get(key)
+        if cached is not None:
+            return cached
+        workers = _read().get("workers", [])
+        if cwd:
+            count = sum(1 for w in workers if w.get("cwd") == cwd)
+        else:
+            count = len(workers)
+        _worker_count_cache.clear()
+        _worker_count_cache[key] = count
+        return count
 
 
 def list_pools(cwd: str = "") -> list[dict]:
