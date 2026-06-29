@@ -172,6 +172,28 @@ def test_extract_text() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# B2. internal prompt filtering
+# --------------------------------------------------------------------------- #
+
+def test_internal_import_prompt_filter() -> None:
+    F = native_import._is_internal_import_prompt
+    internal = [
+        "<self>\n<role>worker</role>",
+        "<self>\n<role>manager</role>",
+        "<worker-prep>\nYou are about to be added to a project",
+        "<machine-completion-prep>\nYou are a reusable machine-completion worker.",
+        "<search-worker-provision>\nYou are a reusable session-search ranking worker.",
+        "<get-requirements-processor-prep>\nYou are a reusable requirements lookup worker.",
+        "<verdict-prompt>\nYou are an adversarial supervisor.",
+        "Better Agent requires a parent-session reply after subagent work.",
+        "Better Agent run.sh startup checker for Z.AI",
+    ]
+    for prompt in internal:
+        check(F(prompt), f"internal prompt not filtered: {prompt[:60]}")
+    check(not F("Fix imported session filtering"), "real user prompt filtered")
+
+
+# --------------------------------------------------------------------------- #
 # C. segmentation differential over the combinatorial space
 # --------------------------------------------------------------------------- #
 
@@ -1012,6 +1034,7 @@ def test_unknown_kind_not_enumerated() -> None:
 def main() -> None:
     test_is_user_prompt()
     test_extract_text()
+    test_internal_import_prompt_filter()
     test_segmentation_differential()
     test_derive_title()
     test_codex_iso()

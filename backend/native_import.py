@@ -681,6 +681,17 @@ _INTERNAL_IMPORT_PROMPT_SIGNATURES = (
     "direct Claude Code CLI process configured for the Z.AI Claude-compatible provider",
     "machine completion worker for the requirement-analysis pipeline",
     "You are an adversarial reviewer for Better Agent",
+    "Better Agent requires a parent-session reply after subagent work.",
+)
+
+
+_INTERNAL_IMPORT_PROMPT_PREFIXES = (
+    "<self>",
+    "<worker-prep>",
+    "<machine-completion-prep>",
+    "<search-worker-provision>",
+    "<get-requirements-processor-prep>",
+    "<verdict-prompt>",
 )
 
 
@@ -692,7 +703,10 @@ class SkippedNativeSession(Exception):
 
 def _is_internal_import_prompt(prompt: str) -> bool:
     text = prompt.strip()
-    return any(sig in text for sig in _INTERNAL_IMPORT_PROMPT_SIGNATURES)
+    return (
+        text.startswith(_INTERNAL_IMPORT_PROMPT_PREFIXES)
+        or any(sig in text for sig in _INTERNAL_IMPORT_PROMPT_SIGNATURES)
+    )
 
 
 def _segment_turns(events: list[dict]) -> list[_Turn]:
