@@ -824,6 +824,18 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "_session_event_meta(" not in route_source
 
 
+def test_session_list_reads_user_prefs_once() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _session_list_user_prefs(" in source
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "await asyncio.to_thread(_session_list_user_prefs)" in route_source
+    assert "user_prefs.get_folder_view_enabled()" not in route_source
+    assert "user_prefs.get_session_sort()" not in route_source
+    assert "user_prefs.get_session_status_sort()" not in route_source
+
+
 def test_session_detail_has_split_perf_timers() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = source.index("async def get_session(")
@@ -1156,6 +1168,7 @@ if __name__ == "__main__":
     test_session_list_uses_sorted_summary_cache()
     test_session_list_does_not_prewarm_snapshots()
     test_session_list_warms_event_meta_off_path()
+    test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
