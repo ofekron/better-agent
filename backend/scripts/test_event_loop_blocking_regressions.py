@@ -166,11 +166,18 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
 
 def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
     source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    assert "_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"stream-event-apply\"" in source
+    helper_start = source.index("    def _apply_provider_stream_event_sync(")
+    helper_end = source.index("    async def _publish_provider_stream_event(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "session_manager.message_batch(" in helper_source
+    assert "hydrate_events=False" in helper_source
     start = source.index("async def save_ws_callback(")
     end = source.index("            if event_dict.get(\"type\") in _BRIDGE_EVENT_TYPES:", start)
     callback_source = source[start:end]
-    assert "session_manager.message_batch(" in callback_source
-    assert "hydrate_events=False" in callback_source
+    assert "run_in_executor(\n                        _STREAM_EVENT_APPLY_EXECUTOR" in callback_source
+    assert "session_manager.message_batch(" not in callback_source
     assert "with session_manager.batch(persist_to):" not in callback_source
 
 
