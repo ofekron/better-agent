@@ -117,6 +117,15 @@ def _run() -> bool:
     # 1) Compute first snapshot — populates _since_cache.
     tree1 = session_manager.get_root_tree_stubbed(sid, msg_limit=50)
     assert tree1 is not None
+    from event_ingester import event_ingester
+    render_seq = event_ingester.render_seq_for_sid(sid, sid)
+    cache_key = session_manager._since_cache[sid][0]
+    ok = cache_key[1] == render_seq
+    results.append((
+        "snapshot cache key uses render seq",
+        ok,
+        f"cache={cache_key[1]}, render_seq={render_seq}",
+    ))
     msg1 = tree1["messages"][-1]
     events1 = msg1.get("events") or []
     ok = len(events1) == N_INITIAL
