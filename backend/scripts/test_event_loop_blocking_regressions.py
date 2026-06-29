@@ -682,6 +682,16 @@ def test_session_exists_uses_index_without_cold_root_load() -> None:
     assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
 
 
+def test_root_id_resolution_caches_successful_store_lookup() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("    def _root_id_for(")
+    end = source.index("    def _lock_for_root(", start)
+    helper_source = source[start:end]
+    assert "rid = self._node_root_id.get(sid)" in helper_source
+    assert "rid = session_store._resolve_root_id(sid)" in helper_source
+    assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
