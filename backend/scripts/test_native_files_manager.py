@@ -68,6 +68,15 @@ def _live_keys(nfm):
     return {k for k, t in nfm._tailers.items() if t.alive}
 
 
+async def _wait_for(predicate, *, timeout=1.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
 async def main():
     _patch()
     nfm = nfm_mod.NativeFilesManager()
@@ -109,6 +118,9 @@ async def main():
     #    from the store on first demand).
     await _demand(nfm, sid, token="tokA", present=True)
     rid = session_manager._root_id_for(sid)
+    assert await _wait_for(lambda: (rid, "PRIMARY-SID") in _live_keys(nfm)), (
+        "primary not tailed after background resolution"
+    )
     live = _live_keys(nfm)
     assert (rid, "PRIMARY-SID") in live, f"primary not tailed: {live}"
     assert (rid, "FORK-SID") in live, f"fork not tailed: {live}"
@@ -194,6 +206,9 @@ async def main():
     session_manager.set_agent_sid(sid2, "manager", "LAGGING-SID")
     await _demand(nfm, sid2, token="tokC", present=True)
     rid2 = session_manager._root_id_for(sid2)
+    assert await _wait_for(lambda: (rid2, "LAGGING-SID") in _live_keys(nfm)), (
+        "primary dropped when jsonl file lags agent_sid_set (BLOCKER regression)"
+    )
     assert (rid2, "LAGGING-SID") in _live_keys(nfm), (
         "primary dropped when jsonl file lags agent_sid_set (BLOCKER regression)"
     )
@@ -651,6 +666,39 @@ async def test_agent_sid_session_read_does_not_block_event_loop() -> None:
     print("PASS test_agent_sid_session_read_does_not_block_event_loop")
 
 
+async def test_demand_seed_schedules_slow_primary_resolution() -> None:
+    _patch()
+    nfm = nfm_mod.NativeFilesManager()
+    nfm.bind()
+    sess = session_manager.create(
+        name="background-primary",
+        cwd="/tmp/background-primary",
+        orchestration_mode="manager",
+    )
+    sid = sess["id"]
+    root_id = session_manager._root_id_for(sid) or sid
+    session_manager.set_agent_sid(sid, "manager", "BACKGROUND-SID")
+    original_resolve = nfm._resolve_primary_jsonl_cached
+
+    def slow_resolve(*args, **kwargs):
+        time.sleep(0.2)
+        return nfm_mod.Path("/tmp/background-primary/BACKGROUND-SID.jsonl")
+
+    nfm._resolve_primary_jsonl_cached = slow_resolve  # type: ignore
+    try:
+        start = time.monotonic()
+        await _demand(nfm, sid, token="background-token", present=True)
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1, f"demand waited for slow primary resolution: {elapsed:.3f}s"
+        assert await _wait_for(
+            lambda: (root_id, "BACKGROUND-SID") in _live_keys(nfm),
+            timeout=1.0,
+        ), "background primary resolution did not open tailer"
+    finally:
+        nfm._resolve_primary_jsonl_cached = original_resolve  # type: ignore
+    print("PASS test_demand_seed_schedules_slow_primary_resolution")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
@@ -666,3 +714,4 @@ if __name__ == "__main__":
     asyncio.run(test_codex_primary_not_tailed_by_claude_tailer())
     asyncio.run(test_demand_seed_does_not_block_event_loop())
     asyncio.run(test_agent_sid_session_read_does_not_block_event_loop())
+    asyncio.run(test_demand_seed_schedules_slow_primary_resolution())

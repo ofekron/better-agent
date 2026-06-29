@@ -320,6 +320,7 @@ class NativeFilesManager:
         self._native_path_locks_guard = threading.Lock()
         self._primary_jsonl_cache: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
         self._primary_jsonl_cache_lock = threading.Lock()
+        self._primary_resolution_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     # ── wiring ────────────────────────────────────────────────────────
     def bind(self) -> None:
@@ -365,12 +366,21 @@ class NativeFilesManager:
             sid,
             sess,
             agent_sid,
+            allow_slow=False,
             trigger_event_id=event.seq,
             trigger_event_type=event.type,
         )
         if target is not None:
             self._targets.setdefault(sid, {})[agent_sid] = target
             await self._append_native_path_target_async(sid, target)
+        else:
+            self._schedule_primary_resolution(
+                sid,
+                sess,
+                agent_sid,
+                trigger_event_id=event.seq,
+                trigger_event_type=event.type,
+            )
         await self._reconcile()
 
     async def _on_fork_target(self, event: BusEvent) -> None:
@@ -482,10 +492,17 @@ class NativeFilesManager:
                 return
             primary = sess.get("agent_session_id")
             if primary:
-                target = await self._resolve_primary_target(owning, sess, primary)
+                target = await self._resolve_primary_target(
+                    owning,
+                    sess,
+                    primary,
+                    allow_slow=False,
+                )
                 if target is not None:
                     self._targets.setdefault(owning, {})[primary] = target
                     await self._append_native_path_target_async(owning, target)
+                else:
+                    self._schedule_primary_resolution(owning, sess, primary)
             for m in sess.get("messages") or []:
                 for panel in (m.get("workers") or []):
                     fsid = panel.get("fork_agent_sid")
@@ -510,6 +527,7 @@ class NativeFilesManager:
         sess: dict,
         agent_sid: str,
         *,
+        allow_slow: bool = True,
         trigger_event_id: Optional[int] = None,
         trigger_event_type: Optional[str] = None,
     ) -> Optional[_Target]:
@@ -520,7 +538,10 @@ class NativeFilesManager:
         )
         if persisted is not None:
             return persisted
-        jp = await asyncio.to_thread(self._resolve_primary_jsonl_cached, dict(sess), agent_sid)
+        if allow_slow:
+            jp = await asyncio.to_thread(self._resolve_primary_jsonl_cached, dict(sess), agent_sid)
+        else:
+            jp = self._primary_jsonl_cache_get(dict(sess), agent_sid)
         if jp is None:
             return None
         offset = int((sess.get("processed_line_by_sid") or {}).get(agent_sid) or 0)
@@ -534,12 +555,95 @@ class NativeFilesManager:
             trigger_event_type=trigger_event_type,
         )
 
-    def _resolve_primary_jsonl_cached(self, sess: dict, agent_sid: str) -> Optional[Path]:
-        key = (
+    def _schedule_primary_resolution(
+        self,
+        owning: str,
+        sess: dict,
+        agent_sid: str,
+        *,
+        trigger_event_id: Optional[int] = None,
+        trigger_event_type: Optional[str] = None,
+    ) -> None:
+        key = (owning, agent_sid)
+        existing = self._primary_resolution_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._resolve_primary_target_background(
+                owning,
+                dict(sess),
+                agent_sid,
+                trigger_event_id=trigger_event_id,
+                trigger_event_type=trigger_event_type,
+            ),
+            name=f"native-primary-resolve-{agent_sid[:8]}",
+        )
+        self._primary_resolution_tasks[key] = task
+        task.add_done_callback(lambda done, task_key=key: self._primary_resolution_done(task_key, done))
+
+    def _primary_resolution_done(
+        self,
+        key: tuple[str, str],
+        task: asyncio.Task,
+    ) -> None:
+        self._primary_resolution_tasks.pop(key, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("native_files: primary resolution failed sid=%s", key[1][:8])
+
+    async def _resolve_primary_target_background(
+        self,
+        owning: str,
+        sess: dict,
+        agent_sid: str,
+        *,
+        trigger_event_id: Optional[int] = None,
+        trigger_event_type: Optional[str] = None,
+    ) -> None:
+        target = await self._resolve_primary_target(
+            owning,
+            sess,
+            agent_sid,
+            allow_slow=True,
+            trigger_event_id=trigger_event_id,
+            trigger_event_type=trigger_event_type,
+        )
+        if target is None:
+            return
+        self._targets.setdefault(owning, {})[agent_sid] = target
+        await self._append_native_path_target_async(owning, target)
+        await self._reconcile()
+
+    def _primary_jsonl_cache_get(self, sess: dict, agent_sid: str) -> Optional[Path]:
+        key = self._primary_jsonl_cache_key(sess, agent_sid)
+        now = time.monotonic()
+        with self._primary_jsonl_cache_lock:
+            cached = self._primary_jsonl_cache.get(key)
+            if cached is None:
+                return None
+            ts, path = cached
+            ttl = (
+                _PRIMARY_JSONL_POSITIVE_CACHE_TTL_S
+                if path is not None
+                else _PRIMARY_JSONL_CACHE_TTL_S
+            )
+            if now - ts < ttl:
+                return path
+            self._primary_jsonl_cache.pop(key, None)
+        return None
+
+    def _primary_jsonl_cache_key(self, sess: dict, agent_sid: str) -> tuple[str, str, str]:
+        return (
             str(sess.get("id") or ""),
             str(sess.get("cwd") or ""),
             str(agent_sid),
         )
+
+    def _resolve_primary_jsonl_cached(self, sess: dict, agent_sid: str) -> Optional[Path]:
+        key = self._primary_jsonl_cache_key(sess, agent_sid)
         now = time.monotonic()
         with self._primary_jsonl_cache_lock:
             cached = self._primary_jsonl_cache.get(key)
