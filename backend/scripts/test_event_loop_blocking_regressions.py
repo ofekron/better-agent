@@ -2623,15 +2623,18 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "_local_visible_order_cache" in source
-    assert "session_store.summary_order_version()" in helper_source
+    assert "session_store.summary_index_version()" in helper_source
     assert "sessions.list.local.visible_order_cache.hit" in helper_source
     assert "sessions.list.local.visible_order_build" in helper_source
+    assert 'key = (sort_by, project_path, version)' in helper_source
+    assert 'summary.get("cwd") != project_path' in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     page_end = source.index("def _root_session_file_path(", page_start)
     page_source = source[page_start:page_end]
     assert "_can_page_default_local_visible_order(" in page_source
     assert "sessions.list.local.visible_order_page" in page_source
+    assert "_local_visible_order_ids(sort_by, project_path)" in page_source
     assert "visible_ids[offset:offset + limit]" in page_source
     assert page_source.index("sessions.list.local.visible_order_page") < page_source.index(
         "sessions.list.local.ordered_ids"
