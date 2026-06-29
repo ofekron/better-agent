@@ -33,6 +33,9 @@ async def _run() -> bool:
 
     original_file_op = main._file_op
     original_ttl = main._GIT_STATUS_TTL_SECONDS
+    if original_ttl < 15.0:
+        print(f"{FAIL} git-status cache TTL is below frontend poll interval: {original_ttl!r}")
+        return False
     main._file_op = fake_file_op
     main._GIT_STATUS_TTL_SECONDS = 60.0
     main._clear_git_status_cache()
