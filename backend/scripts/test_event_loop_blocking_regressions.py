@@ -34,6 +34,21 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     assert "sess = session_manager.get_lite(self.app_session_id)" not in source
 
 
+def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    file_start = source.index("class _FileTailFollower:")
+    byte_start = source.index("class _AppendOnlyByteFollower:")
+    file_source = source[file_start:byte_start]
+    byte_end = source.index("class ClaudeJsonlTailer", byte_start)
+    byte_source = source[byte_start:byte_end]
+    assert "_CURSOR_EXECUTOR" in file_source
+    assert "_CURSOR_EXECUTOR" in byte_source
+    assert "size = self._path.stat().st_size" not in file_source
+    assert "st = self._path.stat()" not in byte_source
+    assert "with open(self._path, \"rb\") as f:" not in file_source.split("def _read_from_sync", 1)[0]
+    assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
+
+
 def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
     start = source.index("def prepare_provider_event_for_journal(")
@@ -860,6 +875,7 @@ if __name__ == "__main__":
     test_ownership_projection_uses_dedicated_executor()
     test_wire_tailer_gap_fill_reads_journal_off_loop()
     test_jsonl_dispatch_reads_session_lite_off_loop()
+    test_jsonl_fallback_followers_poll_files_off_loop()
     test_jsonl_dispatch_ingests_orphans_off_loop()
     test_wire_tailer_subscribe_resolves_root_off_loop()
     test_native_demand_publish_does_not_leak_coroutine_without_loop()
