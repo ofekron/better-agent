@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import os
 import json
 import sys
@@ -63,6 +64,9 @@ _GET_EXTENSION_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] =
 _GET_EXTENSION_CACHE_LOCK = threading.Lock()
 _BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
+_STORE_FINGERPRINT_CACHE: tuple[float, tuple[int, int]] | None = None
+_STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
+_STORE_FINGERPRINT_TTL_SECONDS = 0.5
 _RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
 _RESERVED_MCP_SERVER_NAMES = {
@@ -277,12 +281,39 @@ def _store_path() -> Path:
 
 
 def store_fingerprint() -> tuple[int, int]:
+    global _STORE_FINGERPRINT_CACHE
+    now = time.monotonic()
+    with _STORE_FINGERPRINT_CACHE_LOCK:
+        cached = _STORE_FINGERPRINT_CACHE
+        if (
+            cached is not None
+            and now - cached[0] <= _STORE_FINGERPRINT_TTL_SECONDS
+        ):
+            return cached[1]
     path = _store_path()
     try:
         stat = path.stat()
     except FileNotFoundError:
-        return (0, 0)
-    return (stat.st_mtime_ns, stat.st_size)
+        fingerprint = (0, 0)
+    else:
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _STORE_FINGERPRINT_CACHE_LOCK:
+        _STORE_FINGERPRINT_CACHE = (now, fingerprint)
+    return fingerprint
+
+
+def _refresh_store_fingerprint_cache(path: Path | None = None) -> tuple[int, int]:
+    global _STORE_FINGERPRINT_CACHE
+    path = path or _store_path()
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        fingerprint = (0, 0)
+    else:
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _STORE_FINGERPRINT_CACHE_LOCK:
+        _STORE_FINGERPRINT_CACHE = (time.monotonic(), fingerprint)
+    return fingerprint
 
 
 def _file_fingerprint(path: Path) -> tuple[int, int]:
@@ -417,6 +448,7 @@ def _write_store_unlocked(data: dict[str, Any]) -> None:
         json.dump(data, fh, indent=2)
         tmp_name = fh.name
     os.replace(tmp_name, path)
+    _refresh_store_fingerprint_cache(path)
     _clear_projection_cache()
 
 
