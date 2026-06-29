@@ -981,7 +981,8 @@ def test_machine_node_snapshot_reads_are_off_loop() -> None:
     assert "node_store.snapshot()" not in dispatch_source
     assert "node_link.public_pending_nodes_cached()" in dispatch_source
     assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
-    assert "await asyncio.to_thread(_local_node_id_or_primary)" in dispatch_source
+    assert "_local_node_id_or_primary_cached()" in dispatch_source
+    assert "await asyncio.to_thread(_local_node_id_or_primary" not in dispatch_source
 
 
 def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
