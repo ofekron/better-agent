@@ -1181,7 +1181,7 @@ export interface BrowseResult {
 }
 
 export type ProviderMode = "subscription" | "api_key";
-export type ProviderRunner = "native" | "openai";
+export type ProviderRunner = "native" | "better_agent_runner";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,

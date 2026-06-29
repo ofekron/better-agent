@@ -753,7 +753,7 @@ def _resolve_class(kind: str) -> type[Provider]:
 
 def _provider_runtime_kind(record: dict) -> str:
     runner = str(record.get("runner") or "").strip()
-    if runner == "openai":
+    if runner == "better_agent_runner":
         return "openai"
     return record.get("kind") or "claude"
 

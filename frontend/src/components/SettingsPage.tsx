@@ -2289,7 +2289,7 @@ function permissionOptionsForKind(kind: string): Record<string, string[]> {
 
 function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
   if (saved?.length) return saved;
-  return kind === "openai" ? ["openai"] : ["native"];
+  return kind === "openai" ? ["better_agent_runner"] : ["native"];
 }
 
 // Capability keys overridable per provider (kind gives the default; these

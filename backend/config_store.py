@@ -14,7 +14,7 @@ Each provider record:
       "custom_models": list[str],
       "default_model": str,    # default model id for new sessions / fallback
       "default_reasoning_effort": str,
-      "runner":        "native" | "openai",
+      "runner":        "native" | "better_agent_runner",
     }
 
 The api_key for an api_key-mode provider is stored in the OS keychain under
