@@ -565,6 +565,8 @@ async def run_delegation(
                 ephemeral=ephemeral,
                 machine_completion=machine_completion,
                 include_events=include_events,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
             )
     finally:
         new_depth = coordinator.active_delegations.get(app_session_id, 1) - 1
@@ -604,6 +606,8 @@ async def run_delegation_locked(
     ephemeral: bool = False,
     machine_completion: bool = False,
     include_events: bool = False,
+    provider_id: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
     """Inner worker-run body — runs under the per-(caller, worker) lock.
 

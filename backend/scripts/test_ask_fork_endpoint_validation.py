@@ -120,17 +120,20 @@ def test_ask_fork_existing_target_enters_delegation():
     main.session_manager.get = lambda _sid: (_ for _ in ()).throw(
         AssertionError("ask-fork existence validation must not deepcopy via get()")
     )
+    body = {
+        "app_session_id": "caller-session",
+        "instructions": "check this",
+        "worker_session_id": target["id"],
+        "worker_description": "",
+        "provider_id": "provider-1",
+        "model": "model",
+        "reasoning_effort": "high",
+        "cwd": "/tmp",
+        "run_mode": "fork",
+    }
     try:
         result = asyncio.run(main.internal_ask_fork(
-            {
-                "app_session_id": "caller-session",
-                "instructions": "check this",
-                "worker_session_id": target["id"],
-                "worker_description": "",
-                "model": "model",
-                "cwd": "/tmp",
-                "run_mode": "fork",
-            },
+            body,
             x_internal_token=main.coordinator.internal_token,
         ))
     finally:
@@ -139,6 +142,8 @@ def test_ask_fork_existing_target_enters_delegation():
 
     assert result == {"success": True}
     assert called[0]["worker_session_id"] == target["id"]
+    assert called[0]["provider_id"] == "provider-1"
+    assert called[0]["reasoning_effort"] == "high"
     assert called[0]["include_events"] is False
 
 
@@ -178,6 +183,21 @@ def test_ask_fork_include_events_is_explicit():
     assert result["success"] is True
     assert result["events"] == [{"type": "agent_message"}]
     assert called[0]["include_events"] is True
+
+
+def test_ask_fork_locked_runner_accepts_provider_config():
+    source = (BACKEND / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    signature_start = source.index("async def run_delegation_locked(")
+    signature_end = source.index(") -> dict:", signature_start)
+    signature = source[signature_start:signature_end]
+    assert "provider_id: str = \"\"" in signature
+    assert "reasoning_effort: str = \"\"" in signature
+
+    call_start = source.index("return await run_delegation_locked(")
+    call_end = source.index("\n    finally:", call_start)
+    call = source[call_start:call_end]
+    assert "provider_id=provider_id" in call
+    assert "reasoning_effort=reasoning_effort" in call
 
 
 if __name__ == "__main__":
