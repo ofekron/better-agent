@@ -473,14 +473,6 @@ def _markers_for_session(session_id: str) -> dict[str, dict]:
         return {k: dict(v) for k, v in _markers_by_session.get(session_id, {}).items()}
 
 
-def _has_projection_snapshot() -> bool:
-    with _requirement_tags_lock:
-        if _requirement_tags_by_session:
-            return True
-    with _markers_lock:
-        return bool(_markers_by_session)
-
-
 def _start_summary_projection_repair() -> None:
     global _summary_projection_repair_running
     with _summary_projection_repair_lock:
@@ -1167,17 +1159,16 @@ def _do_build_summary_index_unsafe() -> None:
         summary_files,
         seen_cursor_ids,
     )
-    if not _has_projection_snapshot():
-        cached_summaries = _load_summary_index_cache(summary_cache_fingerprint)
-        if cached_summaries is not None:
-            with _summary_index_lock:
-                _summary_index.clear()
-                _summary_index.update(cached_summaries)
-                _summary_index_version += 1
-                _summary_metadata_version += 1
-                _summary_index_loaded = True
-            _start_summary_projection_repair()
-            return
+    cached_summaries = _load_summary_index_cache(summary_cache_fingerprint)
+    if cached_summaries is not None:
+        with _summary_index_lock:
+            _summary_index.clear()
+            _summary_index.update(cached_summaries)
+            _summary_index_version += 1
+            _summary_metadata_version += 1
+            _summary_index_loaded = True
+        _start_summary_projection_repair()
+        return
 
     # Trees migrated in Pass 2 that need a persist — written AFTER the
     # locks release so the next start hits the Pass-1 fast path.
