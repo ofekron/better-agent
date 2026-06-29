@@ -400,6 +400,16 @@ def list_recent(limit: int, *, exclude_id: str | None = None) -> tuple[list[dict
         return _list_summaries(limit=limit, exclude_id=exclude_id)
 
 
+def list_recent_cached(limit: int, *, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int] | None:
+    if limit < 1:
+        limit = 1
+    cached = _summary_cache
+    if cached is None:
+        return None
+    with perf.timed("virtual_sessions.list.cached_only"):
+        return _summary_cache_slice(cached, limit=limit, exclude_id=exclude_id)
+
+
 def list_all() -> list[dict[str, Any]]:
     summaries, _total = _list_summaries()
     return summaries

@@ -112,6 +112,7 @@ _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
 _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
+_virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
@@ -604,6 +605,36 @@ async def _remote_sessions_for_sidebar(node_id: str) -> list[dict]:
     sessions = await _fetch_remote_sessions_live(node_id)
     _remote_sessions_cache_put(node_id, sessions)
     return sessions
+
+
+def _remote_sessions_for_sidebar_cached(node_id: str) -> list[dict] | None:
+    cached, fresh = _remote_sessions_cache_get(node_id)
+    if cached is None:
+        perf.record("sessions.list.remote_cache.deferred_miss", 1.0)
+        _schedule_remote_sessions_refresh(node_id)
+        return None
+    if fresh:
+        perf.record("sessions.list.remote_cache.deferred_hit", 1.0)
+    else:
+        perf.record("sessions.list.remote_cache.deferred_stale", 1.0)
+        _schedule_remote_sessions_refresh(node_id)
+    return cached
+
+
+def _schedule_virtual_sessions_recent_refresh(limit: int) -> None:
+    global _virtual_sessions_recent_refresh_task
+    existing = _virtual_sessions_recent_refresh_task
+    if existing is not None and not existing.done():
+        return
+
+    async def _refresh() -> None:
+        await asyncio.to_thread(
+            virtual_session_store.list_recent,
+            limit,
+            exclude_id=session_search.ASK_SINGLETON_ID,
+        )
+
+    _virtual_sessions_recent_refresh_task = asyncio.create_task(_refresh())
 
 
 def _session_list_user_prefs() -> tuple[bool, str, bool]:
@@ -4409,6 +4440,9 @@ async def get_sessions(
     content_scores: dict[str, int] = {}
     appended_virtual_sessions = False
     appended_remote_sessions = False
+    handled_virtual_sessions = False
+    handled_remote_sessions = False
+    deferred_sidebar_projection = False
     local_total: int | None = None
     can_page_remote_local_order = _can_page_local_summary_order(
         search_query=search_query,
@@ -4458,61 +4492,132 @@ async def get_sessions(
         else:
             with perf.timed("sessions.list.local"):
                 out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
-        if may_include_virtual:
-            with perf.timed("sessions.list.virtual"):
-                if can_page_remote_local_order:
-                    virtual_sessions, virtual_total = await asyncio.to_thread(
-                        virtual_session_store.list_recent,
+        if (
+            can_page_remote_local_order
+            and local_total is not None
+            and len(out) >= max(offset + limit, 1)
+        ):
+            if may_include_virtual:
+                with perf.timed("sessions.list.virtual.cached_first_page"):
+                    cached_virtual = await asyncio.to_thread(
+                        virtual_session_store.list_recent_cached,
                         max(offset + limit, 1),
                         exclude_id=session_search.ASK_SINGLETON_ID,
                     )
+                handled_virtual_sessions = True
+                if cached_virtual is None:
+                    deferred_sidebar_projection = True
+                    _schedule_virtual_sessions_recent_refresh(max(offset + limit, 1))
                 else:
-                    virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
-                    virtual_total = len([
-                        session for session in virtual_sessions
+                    virtual_sessions, virtual_total = cached_virtual
+                    virtual_sidebar_sessions = [
+                        session
+                        for session in virtual_sessions
                         if session.get("id") != session_search.ASK_SINGLETON_ID
-                    ])
-            virtual_sidebar_sessions = [
-                session
-                for session in virtual_sessions
-                if session.get("id") != session_search.ASK_SINGLETON_ID
-            ]
-            if virtual_sidebar_sessions:
-                out.extend(virtual_sidebar_sessions)
-                appended_virtual_sessions = True
-            if local_total is not None:
-                local_total += virtual_total
+                    ]
+                    if virtual_sidebar_sessions:
+                        out.extend(virtual_sidebar_sessions)
+                        appended_virtual_sessions = True
+                    local_total += virtual_total
+            with perf.timed("sessions.list.remote.cached_first_page"):
+                for nid in connected:
+                    remote = _remote_sessions_for_sidebar_cached(nid)
+                    if remote is None:
+                        deferred_sidebar_projection = True
+                        continue
+                    for rs in remote:
+                        rs["node_id"] = nid
+                        rs.setdefault("is_running", False)
+                        rs.setdefault("unread_count", 0)
+                        rs.setdefault("monitoring_state", "idle")
+                        out.append(rs)
+                        appended_remote_sessions = True
+                    local_total += len(remote)
+            handled_remote_sessions = True
+            if deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions:
+                end = offset + limit
+                with perf.timed("sessions.list.page_decorate"):
+                    page = await asyncio.to_thread(
+                        _decorate_local_sidebar_sessions,
+                        out[offset:end],
+                        None,
+                    )
+                _schedule_session_event_meta_warm(page)
+                return _sessions_list_response(
+                    json.dumps(
+                        {
+                            "sessions": page,
+                            "offset": offset,
+                            "limit": limit,
+                            "total": local_total,
+                            "has_more": end < local_total,
+                            "sort_by": effective_sort_by,
+                            "status_sort": effective_status_sort,
+                        },
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+        if may_include_virtual:
+            if handled_virtual_sessions:
+                pass
+            else:
+                with perf.timed("sessions.list.virtual"):
+                    if can_page_remote_local_order:
+                        virtual_sessions, virtual_total = await asyncio.to_thread(
+                            virtual_session_store.list_recent,
+                            max(offset + limit, 1),
+                            exclude_id=session_search.ASK_SINGLETON_ID,
+                        )
+                    else:
+                        virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
+                        virtual_total = len([
+                            session for session in virtual_sessions
+                            if session.get("id") != session_search.ASK_SINGLETON_ID
+                        ])
+                virtual_sidebar_sessions = [
+                    session
+                    for session in virtual_sessions
+                    if session.get("id") != session_search.ASK_SINGLETON_ID
+                ]
+                if virtual_sidebar_sessions:
+                    out.extend(virtual_sidebar_sessions)
+                    appended_virtual_sessions = True
+                if local_total is not None:
+                    local_total += virtual_total
         else:
             perf.record("sessions.list.virtual.skipped", 1.0)
 
-    try:
-        with perf.timed("sessions.list.remote"):
-            remote_results = await asyncio.gather(
-                *(
-                    asyncio.wait_for(
-                        _remote_sessions_for_sidebar(nid),
-                        timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS + 0.05,
-                    )
-                    for nid in connected
-                ),
-                return_exceptions=True,
-            )
-        for nid, result in zip(connected, remote_results):
-            if isinstance(result, Exception):
-                logger.warning("get_sessions: remote node merge timed out")
-                continue
-            remote = result
-            for rs in remote:
-                rs["node_id"] = nid
-                rs.setdefault("is_running", False)
-                rs.setdefault("unread_count", 0)
-                rs.setdefault("monitoring_state", "idle")
-                out.append(rs)
-                appended_remote_sessions = True
-            if local_total is not None:
-                local_total += len(remote)
-    except Exception:
-        logger.debug("get_sessions: node merge failed", exc_info=True)
+    if not handled_remote_sessions:
+        try:
+            with perf.timed("sessions.list.remote"):
+                remote_results = await asyncio.gather(
+                    *(
+                        asyncio.wait_for(
+                            _remote_sessions_for_sidebar(nid),
+                            timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS + 0.05,
+                        )
+                        for nid in connected
+                    ),
+                    return_exceptions=True,
+                )
+            for nid, result in zip(connected, remote_results):
+                if isinstance(result, Exception):
+                    logger.warning("get_sessions: remote node merge timed out")
+                    continue
+                remote = result
+                for rs in remote:
+                    rs["node_id"] = nid
+                    rs.setdefault("is_running", False)
+                    rs.setdefault("unread_count", 0)
+                    rs.setdefault("monitoring_state", "idle")
+                    out.append(rs)
+                    appended_remote_sessions = True
+                if local_total is not None:
+                    local_total += len(remote)
+        except Exception:
+            logger.debug("get_sessions: node merge failed", exc_info=True)
 
     if (
         can_page_remote_local_order
@@ -4620,7 +4725,7 @@ async def get_sessions(
             for session in page
         ]
     _schedule_session_event_meta_warm(page)
-    return _sessions_list_cache_put(cache_key, {
+    response_payload = {
         "sessions": page,
         "offset": offset,
         "limit": limit,
@@ -4628,7 +4733,17 @@ async def get_sessions(
         "has_more": end < total,
         "sort_by": effective_sort_by,
         "status_sort": effective_status_sort,
-    })
+    }
+    if deferred_sidebar_projection:
+        return _sessions_list_response(
+            json.dumps(
+                response_payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    return _sessions_list_cache_put(cache_key, response_payload)
 
 
 @app.post("/api/sessions/search-content")
