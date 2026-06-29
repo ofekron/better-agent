@@ -292,6 +292,25 @@ def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
         assert "child.name not in run_id_filter" not in recover_source
 
 
+def test_provider_prune_uses_shared_scandir_helper() -> None:
+    runs_source = (ROOT / "runs_dir.py").read_text(encoding="utf-8")
+    assert "def prune_old_completed_runs(max_age_days: int = 7) -> int" in runs_source
+    assert "with os.scandir(root) as entries:" in runs_source
+
+    for filename in (
+        "provider_claude.py",
+        "provider_codex.py",
+        "provider_gemini.py",
+        "provider_openai.py",
+    ):
+        source = (ROOT / filename).read_text(encoding="utf-8")
+        start = source.index("    def prune_old_runs(")
+        end = source.index("    # ------------------------------------------------------------------", start + 1)
+        prune_source = source[start:end]
+        assert "prune_old_completed_runs(max_age_days)" in prune_source
+        assert "_runs_root().iterdir()" not in prune_source
+
+
 def test_session_fork_index_refresh_is_root_scoped() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def _index_tree(")
@@ -1601,6 +1620,7 @@ if __name__ == "__main__":
     test_private_extension_reconcile_skips_current_smoked_install()
     test_pending_node_polling_uses_public_projection_cache()
     test_filtered_provider_recovery_does_not_rescan_all_runs()
+    test_provider_prune_uses_shared_scandir_helper()
     test_machine_node_snapshot_reads_are_off_loop()
     test_pending_approval_listing_uses_cached_projection_off_loop()
     test_project_update_counts_batch_uses_single_store_call()

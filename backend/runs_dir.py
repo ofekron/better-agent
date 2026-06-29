@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +45,27 @@ def iter_run_dirs(run_id_filter: Optional[set[str]] = None):
     for child in root.iterdir():
         if child.is_dir():
             yield child
+
+
+def prune_old_completed_runs(max_age_days: int = 7) -> int:
+    root = runs_root()
+    if not root.exists():
+        return 0
+    cutoff = time.time() - (max_age_days * 24 * 60 * 60)
+    removed = 0
+    with os.scandir(root) as entries:
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+                complete_path = Path(entry.path) / "complete.json"
+                if complete_path.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            if reap_run_dir(Path(entry.path)):
+                removed += 1
+    return removed
 
 
 # In-process CLI timer tools stripped on EVERY claude spawn (replaced by
