@@ -2112,6 +2112,26 @@ def test_startup_warms_virtual_session_summaries_off_loop() -> None:
     assert 'name="startup-virtual-session-summaries-warm"' in startup_source
 
 
+def test_startup_warms_recent_git_statuses_off_hot_path() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("async def _warm_recent_git_statuses()")
+    helper_end = source.index("def _shutdown_kill_runners_flag()", helper_start)
+    helper_source = source[helper_start:helper_end]
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "_GIT_STATUS_STARTUP_WARM_LIMIT = 8" in source
+    assert "await asyncio.to_thread(project_store.list_projects)" in helper_source
+    assert 'node_id != "primary"' in helper_source
+    assert "await _cached_git_status(node_id, cwd)" in helper_source
+    assert "warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT" in helper_source
+    assert '"git_status_warm"' in startup_source
+    assert '"startup_tasks.git_status_warm"' in startup_source
+    assert "_warm_recent_git_statuses" in startup_source
+    assert "in_thread=False" in startup_source
+    assert 'name="startup-git-status-warm"' in startup_source
+
+
 def test_session_organization_refresh_is_coalesced_background_work() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("async def _broadcast_session_organization_changed(")

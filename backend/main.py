@@ -745,6 +745,7 @@ def _invalidate_session_list_user_prefs_cache() -> None:
 
 
 _GIT_STATUS_TTL_SECONDS = 60.0
+_GIT_STATUS_STARTUP_WARM_LIMIT = 8
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _git_status_inflight: dict[tuple[str, str], asyncio.Task] = {}
 _git_status_cache_lock = asyncio.Lock()
@@ -812,6 +813,32 @@ async def _store_git_status_refresh(
             _git_status_inflight.pop(key, None)
         if isinstance(result, dict):
             _git_status_cache[key] = (time.monotonic(), dict(result))
+
+
+async def _warm_recent_git_statuses() -> None:
+    try:
+        projects = await asyncio.to_thread(project_store.list_projects)
+    except Exception:
+        logger.debug("git-status startup warm: project list failed", exc_info=True)
+        return
+    warmed = 0
+    seen: set[tuple[str, str]] = set()
+    for project in projects:
+        node_id = str(project.get("node_id") or "primary")
+        cwd = str(project.get("path") or "")
+        if node_id != "primary" or not cwd:
+            continue
+        key = (node_id, cwd)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            await _cached_git_status(node_id, cwd)
+        except Exception:
+            logger.debug("git-status startup warm failed cwd=%s", cwd, exc_info=True)
+        warmed += 1
+        if warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT:
+            break
 
 
 def _shutdown_kill_runners_flag() -> Path:
@@ -9193,6 +9220,16 @@ async def on_startup():
             virtual_session_store.list_all,
         ),
         name="startup-virtual-session-summaries-warm",
+    )
+
+    asyncio.create_task(
+        run_task(
+            "git_status_warm",
+            "startup_tasks.git_status_warm",
+            _warm_recent_git_statuses,
+            in_thread=False,
+        ),
+        name="startup-git-status-warm",
     )
 
     asyncio.create_task(
