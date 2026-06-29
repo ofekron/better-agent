@@ -1361,6 +1361,7 @@ def test_get_session_strips_synthetic_events_off_loop() -> None:
 def test_session_detail_response_bytes_are_cached() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_session_detail_response_cache" in source
+    assert "_SESSION_DETAIL_RESPONSE_CACHE_MAX = 64" in source
     assert "def _session_detail_cache_get(" in source
     assert "def _session_detail_cache_put(" in source
     assert "def _session_detail_response_cache_key_sync(" in source
