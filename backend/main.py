@@ -114,6 +114,7 @@ _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
+_local_visible_order_cache: dict[tuple[str, int], tuple[list[str], int]] = {}
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
@@ -2350,6 +2351,60 @@ def _local_session_summaries_by_ids_for_sidebar(session_ids: list[str]) -> list[
         return [s for s in summaries if not _wm.should_hide_from_sidebar(s)]
 
 
+def _can_page_default_local_visible_order(
+    *,
+    project_path: str | None,
+    search: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    content_scores: dict[str, int],
+) -> bool:
+    return (
+        project_path is None
+        and not (search or "").strip()
+        and not show_archived
+        and file_edit_mode is None
+        and not folder_ids
+        and not tag_ids
+        and not provider_ids
+        and not model_ids
+        and not modes
+        and not sources
+        and not content_scores
+    )
+
+
+def _local_visible_order_ids(sort_by: str) -> tuple[list[str], int]:
+    import working_mode as _wm
+    version = session_store.summary_version()
+    key = (sort_by, version)
+    cached = _local_visible_order_cache.get(key)
+    if cached is not None:
+        perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
+        return cached
+    perf.record("sessions.list.local.visible_order_cache.miss", 1.0)
+    ordered_ids = session_manager.ordered_summary_ids(sort_by)
+    visible_ids: list[str] = []
+    with perf.timed("sessions.list.local.visible_order_build"):
+        for summary in session_store.get_session_summaries_by_ids(ordered_ids):
+            if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
+                continue
+            sid = summary.get("id")
+            if sid:
+                visible_ids.append(str(sid))
+    if len(_local_visible_order_cache) >= 8:
+        _local_visible_order_cache.pop(next(iter(_local_visible_order_cache)), None)
+    cached = (visible_ids, len(visible_ids))
+    _local_visible_order_cache[key] = cached
+    return cached
+
+
 def _local_session_page_for_sidebar_preserving_order(
     *,
     sort_by: str,
@@ -2368,6 +2423,23 @@ def _local_session_page_for_sidebar_preserving_order(
     content_scores: dict[str, int],
 ) -> tuple[list[dict], int]:
     import working_mode as _wm
+    if _can_page_default_local_visible_order(
+        project_path=project_path,
+        search=search,
+        show_archived=show_archived,
+        file_edit_mode=file_edit_mode,
+        folder_ids=folder_ids,
+        tag_ids=tag_ids,
+        provider_ids=provider_ids,
+        model_ids=model_ids,
+        modes=modes,
+        sources=sources,
+        content_scores=content_scores,
+    ):
+        with perf.timed("sessions.list.local.visible_order_page"):
+            visible_ids, total = _local_visible_order_ids(sort_by)
+            page_ids = visible_ids[offset:offset + limit]
+            return session_store.get_session_summaries_by_ids(page_ids), total
     with perf.timed("sessions.list.local.ordered_ids"):
         ordered_ids = session_manager.ordered_summary_ids(sort_by)
     page_ids: list[str] = []
