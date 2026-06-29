@@ -306,8 +306,17 @@ class ClaudeProvider(Provider):
         # bare; a worker's own init turn uses the worker's (bare) session.
         from session_manager import manager as _sm
         import config_store
-        _sess_rec = _sm.get(app_session_id) or {}
-        _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
+        _run_config_fields = (
+            "bare_config",
+            "orchestration_mode",
+            "permission",
+            "provider_id",
+        )
+        _sess_rec = _sm.get_fields(app_session_id, _run_config_fields)
+        _worker_sess_rec = (
+            _sm.get_fields(worker_agent_session_id, _run_config_fields)
+            if worker_agent_session_id else {}
+        )
         from permission import resolve_for_run as _resolve_perm
         _permission = _resolve_perm(
             sess_rec=_sess_rec,
