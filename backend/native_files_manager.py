@@ -36,8 +36,6 @@ import heapq
 import json
 import logging
 import os
-import shutil
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -130,38 +128,7 @@ def _finish_run_state_lookup(root_key: str, agent_sid: str, path: Optional[Path]
 
 
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
-    recent = _recent_state_index_for_root(root).get(agent_sid, [])
-    if recent:
-        return recent
-    rg = shutil.which("rg")
-    if rg is None:
-        matches: list[Path] = []
-        for state_path in root.glob("*/state.json"):
-            try:
-                if agent_sid in state_path.read_text(encoding="utf-8", errors="ignore"):
-                    matches.append(state_path)
-            except OSError:
-                continue
-        return matches
-    proc = subprocess.run(
-        [
-            rg,
-            "--files-with-matches",
-            "--fixed-strings",
-            "--glob",
-            "state.json",
-            agent_sid,
-            str(root),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=_RUN_STATE_LOOKUP_TIMEOUT_S,
-        check=False,
-    )
-    if proc.returncode not in (0, 1):
-        return []
-    return [Path(line) for line in proc.stdout.splitlines() if line]
+    return _recent_state_index_for_root(root).get(agent_sid, [])
 
 
 def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
@@ -283,8 +250,6 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
                 mt = sp.stat().st_mtime
                 if newest is None or mt > newest[0]:
                     newest = (mt, Path(jp))
-    except subprocess.TimeoutExpired:
-        logger.warning("native_files: run-state lookup timed out sid=%s", agent_sid[:8])
     except Exception:
         logger.exception("native_files: run-state lookup failed sid=%s", agent_sid[:8])
     path = newest[1] if newest is not None else None
