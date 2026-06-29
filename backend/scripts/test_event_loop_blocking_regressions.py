@@ -1759,6 +1759,17 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     assert "session_search_index.needs_rebuild()" in startup_source
 
 
+def test_session_search_rebuild_streams_insert_batches() -> None:
+    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    start = source.index("def rebuild_from_disk()")
+    end = source.index("def _delete_db_files()", start)
+    rebuild_source = source[start:end]
+    assert "_REBUILD_INSERT_BATCH_SIZE = 1000" in source
+    assert "batch: list[tuple[str, str]] = []" in rebuild_source
+    assert "_insert_index_rows(conn, batch)" in rebuild_source
+    assert "rows.extend(" not in rebuild_source
+
+
 def test_event_projections_warm_in_background() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _session_event_projection_warm_roots(" in source
@@ -2360,6 +2371,7 @@ if __name__ == "__main__":
     test_summary_index_cache_is_sidecar()
     test_session_store_sessions_dir_is_cached()
     test_startup_session_search_rebuild_skips_persisted_index()
+    test_session_search_rebuild_streams_insert_batches()
     test_project_match_rebuild_skips_unchanged_session_state()
     test_stubbed_tree_cache_key_does_not_scan_message_events()
     test_stubbed_tree_cache_attaches_root_events_after_cache_copy()
