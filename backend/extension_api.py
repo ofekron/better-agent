@@ -321,14 +321,28 @@ async def _dispatch_project_structure_core_backend(
     path: str,
     request: Request,
 ) -> JSONResponse | None:
-    if request.method != "GET" or path != "project-updates/total":
-        return None
-    import project_update_store
+    if request.method == "GET" and path == "project-updates/total":
+        import project_update_store
 
-    count = project_update_store.peek_total_unseen()
-    if count is None:
-        count = await asyncio.to_thread(project_update_store.total_unseen)
-    return JSONResponse({"count": count})
+        count = project_update_store.peek_total_unseen()
+        if count is None:
+            count = await asyncio.to_thread(project_update_store.total_unseen)
+        return JSONResponse({"count": count})
+    if request.method != "POST" or path != "project-updates/counts-batch":
+        return None
+
+    import project_update_store
+    from paths import encode_cwd
+
+    body = await request.json()
+    cwds = (body or {}).get("cwds") if isinstance(body, dict) else None
+    if not isinstance(cwds, list) or any(not isinstance(cwd, str) for cwd in cwds):
+        return JSONResponse({"detail": "cwds must be a list of strings"}, status_code=400)
+    project_ids = [encode_cwd(cwd) for cwd in cwds]
+    counts = project_update_store.peek_unseen_counts(project_ids)
+    if counts is None:
+        counts = await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
+    return JSONResponse(counts)
 
 
 @router.post("/install")

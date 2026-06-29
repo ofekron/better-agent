@@ -947,11 +947,14 @@ def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
 def test_project_update_counts_batch_uses_single_store_call() -> None:
     store_source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
     assert "def unseen_counts(project_ids: list[str])" in store_source
+    assert "def peek_unseen_counts(project_ids: list[str])" in store_source
 
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = main_source.index("async def internal_project_update_counts_batch(")
     route_end = main_source.index("@app.post(\"/api/internal/project-updates/unseen\")", route_start)
     route_source = main_source[route_start:route_end]
+    assert "counts = project_update_store.peek_unseen_counts(project_ids)" in route_source
+    assert "if counts is None:" in route_source
     assert "await asyncio.to_thread(project_update_store.unseen_counts, project_ids)" in route_source
     assert "project_update_store.unseen_count(project_id)" not in route_source
 
@@ -1459,9 +1462,12 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     project_start = source.index("async def _dispatch_project_structure_core_backend(")
     project_end = source.index("@router.post(\"/install\")", project_start)
     project_source = source[project_start:project_end]
-    assert 'path != "project-updates/total"' in project_source
+    assert 'request.method == "GET" and path == "project-updates/total"' in project_source
+    assert 'request.method != "POST" or path != "project-updates/counts-batch"' in project_source
     assert "project_update_store.peek_total_unseen()" in project_source
+    assert "project_update_store.peek_unseen_counts(project_ids)" in project_source
     assert "await asyncio.to_thread(project_update_store.total_unseen)" in project_source
+    assert "await asyncio.to_thread(project_update_store.unseen_counts, project_ids)" in project_source
 
 
 def test_project_update_total_is_maintained_projection() -> None:
