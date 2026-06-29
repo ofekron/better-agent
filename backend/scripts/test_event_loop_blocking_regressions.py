@@ -86,7 +86,7 @@ def test_delegation_locked_reuses_worker_session_snapshot() -> None:
     assert "session_manager.get(worker_agent_session_id)" not in locked_source
     assert "provider_run_config = worker_session.get(\"provider_run_config\")" in locked_source
     assert "capability_contexts = worker_session.get(\"capability_contexts\")" in locked_source
-    assert "reasoning_effort = worker_session.get(\"reasoning_effort\")" in locked_source
+    assert "worker_session.get(\"reasoning_effort\")" in locked_source
 
 
 def test_async_provider_resolution_runs_off_loop() -> None:
@@ -388,12 +388,15 @@ def test_jsonl_line_count_uses_fingerprint_cache() -> None:
 def test_internal_workers_list_runs_projection_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = source.index("async def internal_list_workers_for_cwd(")
-    route_end = source.index("def _worker_pool_projection(", route_start)
+    route_end = source.index("@app.", route_start)
     route_source = source[route_start:route_end]
     assert "return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)" in route_source
     assert "compute_jsonl_path(" not in route_source
     assert "count_jsonl_lines(" not in route_source
     assert "session_manager.get_lite(" not in route_source
+    projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
+    assert "session_manager.get_fields(" in projection_source
+    assert "session_manager.get_lite(" not in projection_source
 
 
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
@@ -513,6 +516,16 @@ def test_team_message_validation_uses_lite_session_read() -> None:
     assert "session_manager.get(" not in validation_source
 
 
+def test_known_worker_projection_uses_field_reads() -> None:
+    source = (ROOT / "stores" / "worker_store.py").read_text(encoding="utf-8")
+    start = source.index("def list_worker_projection(")
+    end = source.index("@perf.timed_fn(\"store.worker.upsert\")", start)
+    projection_source = source[start:end]
+    assert "_sm.get_fields(agent_session_id" in projection_source
+    assert "_sm.get(agent_session_id)" not in projection_source
+    assert "_sm.get_lite(agent_session_id)" not in projection_source
+
+
 def test_session_exists_uses_index_without_cold_root_load() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     start = source.index("    def exists(self, sid: str) -> bool:")
@@ -531,7 +544,7 @@ def test_session_detail_reuses_migrated_root_cache() -> None:
     helper_end = source.index("def read_node_kind_record(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "cache_key = (root_id, file_signature)" in helper_source
-    assert "return copy.deepcopy(cached)" in helper_source
+    assert "return _copy_jsonish(cached)" in helper_source
     detail_start = source.index("def get_root_tree(")
     detail_end = source.index("def _strip_volatile_from_tree(", detail_start)
     detail_source = source[detail_start:detail_end]
@@ -2259,6 +2272,7 @@ if __name__ == "__main__":
     test_team_ask_status_writes_run_off_loop()
     test_team_message_context_uses_lite_session_read()
     test_team_message_validation_uses_lite_session_read()
+    test_known_worker_projection_uses_field_reads()
     test_session_exists_uses_index_without_cold_root_load()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
