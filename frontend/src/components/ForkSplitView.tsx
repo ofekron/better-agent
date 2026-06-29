@@ -85,7 +85,7 @@ export function ForkSplitView({
   onAdvSyncClick,
 }: Props) {
   const { t } = useTranslation();
-  const [focusedViewSessionId, setFocusedViewSessionId] = useState<string | null>(null);
+  const [focusedViewEnabled, setFocusedViewEnabled] = useState(false);
 
   // Flatten the tree depth-first so root → its forks → their forks ...
   // become an ordered list of panes. We render each as a column.
@@ -191,15 +191,15 @@ export function ForkSplitView({
   }, [panes, focusedSessionId]);
 
   const focusedViewPane = useMemo(() => {
-    if (!focusedViewSessionId) return null;
-    return panes.find(({ pane }) => pane.id === focusedViewSessionId) ?? null;
-  }, [focusedViewSessionId, panes]);
+    if (!focusedViewEnabled) return null;
+    return panes.find(({ pane }) => pane.id === focusedSessionId) ?? null;
+  }, [focusedSessionId, focusedViewEnabled, panes]);
 
   useEffect(() => {
-    if (focusedViewSessionId && !focusedViewPane) {
-      setFocusedViewSessionId(null);
+    if (focusedViewEnabled && !focusedViewPane) {
+      setFocusedViewEnabled(false);
     }
-  }, [focusedViewPane, focusedViewSessionId]);
+  }, [focusedViewEnabled, focusedViewPane]);
 
   // Axis-locked horizontal swipe on the tab strip — switches the
   // focused pane to the previous / next neighbour. The swipe handler
@@ -330,7 +330,7 @@ export function ForkSplitView({
           <button
             type="button"
             className="fork-focus-back"
-            onClick={() => setFocusedViewSessionId(null)}
+            onClick={() => setFocusedViewEnabled(false)}
             title={t("fork.backToSplitTitle")}
             data-testid="fork-back-to-split"
           >
@@ -387,7 +387,7 @@ export function ForkSplitView({
               onSetFocus={() => onSetFocus(pane.id)}
               onOpenFocusedView={() => {
                 if (!isClosed) onSetFocus(pane.id);
-                setFocusedViewSessionId(pane.id);
+                setFocusedViewEnabled(true);
               }}
               onClose={() => onCloseFork(pane.id)}
               onReopen={() => onReopenFork(pane.id)}

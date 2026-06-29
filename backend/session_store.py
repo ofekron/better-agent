@@ -35,6 +35,7 @@ import copy
 import json
 import logging
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -209,6 +210,16 @@ _summary_projection_repair_running = False
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
+_index_sidecar_write_queue: queue.Queue[
+    tuple[
+        tuple[int, int, int],
+        dict[str, str],
+        dict[str, set[str]],
+        dict[str, tuple[int, int]],
+    ] | None
+] = queue.Queue(maxsize=1)
+_index_sidecar_write_started = False
+_index_sidecar_write_lock = threading.Lock()
 
 
 def _clear_negative_root_resolve_cache() -> None:
@@ -1964,6 +1975,69 @@ def _write_index_sidecar_best_effort(
         pass
 
 
+def _ensure_index_sidecar_writer() -> None:
+    global _index_sidecar_write_started
+    if _index_sidecar_write_started:
+        return
+    with _index_sidecar_write_lock:
+        if _index_sidecar_write_started:
+            return
+        thread = threading.Thread(
+            target=_index_sidecar_writer_loop,
+            name="session-fork-index-sidecar",
+            daemon=True,
+        )
+        thread.start()
+        _index_sidecar_write_started = True
+
+
+def _index_sidecar_writer_loop() -> None:
+    while True:
+        item = _index_sidecar_write_queue.get()
+        if item is None:
+            _index_sidecar_write_queue.task_done()
+            return
+        try:
+            fp, fork_index, root_forks, root_signatures = item
+            _write_index_sidecar_best_effort(
+                fp,
+                fork_index,
+                root_forks,
+                root_signatures,
+            )
+        finally:
+            _index_sidecar_write_queue.task_done()
+
+
+def _schedule_index_sidecar_write(
+    fp: tuple[int, int, int],
+    fork_index: dict[str, str],
+    root_forks: dict[str, set[str]],
+    root_signatures: dict[str, tuple[int, int]],
+) -> None:
+    _ensure_index_sidecar_writer()
+    item = (
+        fp,
+        dict(fork_index),
+        {root_id: set(forks) for root_id, forks in root_forks.items()},
+        dict(root_signatures),
+    )
+    try:
+        _index_sidecar_write_queue.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+    try:
+        _index_sidecar_write_queue.get_nowait()
+        _index_sidecar_write_queue.task_done()
+    except queue.Empty:
+        pass
+    try:
+        _index_sidecar_write_queue.put_nowait(item)
+    except queue.Full:
+        pass
+
+
 def _persist_index_sidecar_if_loaded() -> None:
     global _index_fingerprint
     with _index_lock:
@@ -1977,10 +2051,7 @@ def _persist_index_sidecar_if_loaded() -> None:
             for root_id, forks in _root_forks.items()
         }
         root_signatures = dict(_root_index_signatures)
-    try:
-        _write_index_sidecar(fp, fork_index, root_forks, root_signatures)
-    except OSError:
-        pass
+    _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
 
 
 def _install_index_snapshot(
@@ -2043,7 +2114,7 @@ def _refresh_index(
                 _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
                 _index_refresh_attempt_until.pop(fp, None)
                 _index_refresh_global_attempt_until = 0.0
-            _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
+            _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
             return fp
         with _index_lock:
             until = time.monotonic() + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
@@ -2071,7 +2142,7 @@ def _ensure_index() -> None:
                 return
             _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
             _index_loaded = True
-        _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
+        _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
 
 
 def _resolve_root_id(sid: str) -> Optional[str]:
