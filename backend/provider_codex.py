@@ -247,6 +247,8 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    backend_state_flush_task: Optional[asyncio.Task] = None
+    backend_state_flush_dirty: bool = False
 
 
 # ============================================================================
@@ -603,7 +605,7 @@ class CodexProvider(Provider):
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
             _rs.processed_byte_offset = n
-            self._write_backend_state(_rs)
+            self._schedule_backend_state_flush(_rs)
 
         rs.tailer = CodexRolloutTailer(
             path=rs.jsonl_path,
@@ -698,6 +700,7 @@ class CodexProvider(Provider):
                     logger.exception(
                         "codex child tailer task failed for %s", rs.run_id,
                     )
+            await self._flush_backend_state_async(rs)
             await self._emit_complete_from_file(rs, complete_path)
         finally:
             self._cleanup_run(rs.run_id)
@@ -794,7 +797,7 @@ class CodexProvider(Provider):
 
         def _on_child_cursor(n: int, _rs: RunState = rs, _source_key: str = source_key) -> None:
             _rs.child_sources.setdefault(_source_key, {})["processed_byte_offset"] = n
-            self._write_backend_state(_rs)
+            self._schedule_backend_state_flush(_rs)
 
         tailer = CodexRolloutTailer(
             path=path,
@@ -883,6 +886,34 @@ class CodexProvider(Provider):
             _atomic_write_json(self._backend_state_path(rs), data)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+
+    def _schedule_backend_state_flush(self, rs: RunState) -> None:
+        rs.backend_state_flush_dirty = True
+        task = rs.backend_state_flush_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write_backend_state(rs)
+            rs.backend_state_flush_dirty = False
+            return
+        rs.backend_state_flush_task = loop.create_task(
+            self._coalesced_backend_state_flush(rs),
+            name=f"codex-state-flush-{rs.run_id[:8]}",
+        )
+
+    async def _coalesced_backend_state_flush(self, rs: RunState) -> None:
+        try:
+            await self._flush_backend_state_async(rs)
+        finally:
+            if rs.backend_state_flush_task is asyncio.current_task():
+                rs.backend_state_flush_task = None
+
+    async def _flush_backend_state_async(self, rs: RunState) -> None:
+        while rs.backend_state_flush_dirty:
+            rs.backend_state_flush_dirty = False
+            await asyncio.to_thread(self._write_backend_state, rs)
 
     def attach_recovered_run(
         self,

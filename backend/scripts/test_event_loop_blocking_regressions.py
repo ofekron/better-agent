@@ -331,6 +331,26 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         assert "complete_path.exists()" not in watcher_source
 
 
+def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
+    source = (ROOT / "provider_codex.py").read_text(encoding="utf-8")
+    root_cursor_start = source.index("        def _on_cursor(")
+    root_cursor_end = source.index("        rs.tailer = CodexRolloutTailer(", root_cursor_start)
+    root_cursor_source = source[root_cursor_start:root_cursor_end]
+    assert "self._schedule_backend_state_flush(_rs)" in root_cursor_source
+    assert "self._write_backend_state(_rs)" not in root_cursor_source
+
+    child_cursor_start = source.index("        def _on_child_cursor(")
+    child_cursor_end = source.index("        tailer = CodexRolloutTailer(", child_cursor_start)
+    child_cursor_source = source[child_cursor_start:child_cursor_end]
+    assert "self._schedule_backend_state_flush(_rs)" in child_cursor_source
+    assert "self._write_backend_state(_rs)" not in child_cursor_source
+
+    flush_start = source.index("    async def _flush_backend_state_async(")
+    flush_end = source.index("    def attach_recovered_run(", flush_start)
+    flush_source = source[flush_start:flush_end]
+    assert "await asyncio.to_thread(self._write_backend_state, rs)" in flush_source
+
+
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     start = source.index("def get_messages_since(")
