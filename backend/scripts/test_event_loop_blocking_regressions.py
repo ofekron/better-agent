@@ -829,6 +829,12 @@ def test_session_detail_has_split_perf_timers() -> None:
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
+    helper_start = source.index("def _session_detail_snapshot_sync(")
+    helper_end = source.index("def _floor_events_from_seq(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "await asyncio.to_thread(\n        _session_detail_snapshot_sync," in route_source
+    assert "session_manager.get_root_tree_stubbed" not in route_source
+    assert 'perf.record("sessions.detail.worker"' in route_source
     for timer in (
         "sessions.detail.event_meta",
         "sessions.detail.tree",
@@ -837,7 +843,7 @@ def test_session_detail_has_split_perf_timers() -> None:
         "sessions.detail.max_context_copy",
         "sessions.detail.total",
     ):
-        assert f'perf.record("{timer}"' in route_source
+        assert f'perf.record("{timer}"' in helper_source
 
 
 def test_sidebar_summary_omits_worker_refs() -> None:

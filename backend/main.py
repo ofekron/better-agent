@@ -4699,6 +4699,83 @@ def _session_reconcile_snapshot_and_schedule(root_id: str) -> tuple[bool, bool, 
     return dirty, hydrated, gen_after
 
 
+def _session_detail_snapshot_sync(
+    session_id: str,
+    *,
+    msg_limit: int,
+    exchange_count: Optional[int],
+) -> Optional[dict]:
+    root_id = session_manager._root_id_for(session_id)
+    barrier_seq = 0
+    get_start = time.perf_counter()
+    max_seq_ms = 0.0
+    tree_ms = 0.0
+    strip_ms = 0.0
+    max_context_ms = 0.0
+    has_events = False
+    if isinstance(root_id, str):
+        max_seq_start = time.perf_counter()
+        has_events, barrier_seq, max_context = _session_event_meta(root_id)
+        max_seq_ms = (time.perf_counter() - max_seq_start) * 1000
+        perf.record("sessions.detail.event_meta", max_seq_ms)
+    else:
+        max_context = {}
+    gen_before = session_manager._reconcile_gen.get(root_id or "", 0) if root_id else 0
+    tree_start = time.perf_counter()
+    tree = session_manager.get_root_tree_stubbed(
+        session_id, msg_limit=msg_limit, exchange_count=exchange_count,
+    )
+    tree_ms = (time.perf_counter() - tree_start) * 1000
+    perf.record("sessions.detail.tree", tree_ms)
+    if not tree:
+        return None
+
+    strip_start = time.perf_counter()
+    _strip_synthetic_events_from_tree(tree)
+    strip_ms = (time.perf_counter() - strip_start) * 1000
+    perf.record("sessions.detail.strip_synthetic", strip_ms)
+    root_id = tree.get("id")
+    if isinstance(root_id, str):
+        if has_events:
+            reconcile_start = time.perf_counter()
+            dirty, hydrated, gen_after = _session_reconcile_snapshot_and_schedule(root_id)
+            reconcile_ms = (time.perf_counter() - reconcile_start) * 1000
+            perf.record("sessions.detail.reconcile_snapshot", reconcile_ms)
+            msg_count = len(tree.get("messages", []))
+            assistant_msgs = [m for m in tree.get("messages", []) if m.get("role") == "assistant"]
+            last_events = assistant_msgs[-1].get("events") if assistant_msgs else None
+            last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
+            logger.info(
+                "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
+                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
+                "last_asst_stub=%s timings="
+                "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
+                root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
+                msg_count,
+                len(tree.get("queued_prompts") or []),
+                len(tree.get("draft_input") or ""),
+                len(last_events) if last_events else None,
+                last_stub.get("event_count") if last_stub else None,
+                max_seq_ms, 0.0, tree_ms, strip_ms,
+            )
+        if has_events:
+            max_context_start = time.perf_counter()
+            tree["max_seq_by_sid"] = dict(max_context)
+            max_context_ms = (time.perf_counter() - max_context_start) * 1000
+            perf.record("sessions.detail.max_context_copy", max_context_ms)
+        else:
+            tree["max_seq_by_sid"] = {}
+        total_ms = (time.perf_counter() - get_start) * 1000
+        perf.record("sessions.detail.total", total_ms)
+        if total_ms >= 50 or max_context_ms >= 20 or strip_ms >= 20:
+            logger.info(
+                "GET session %s timings total=%.1fms max_context=%.1fms strip=%.1fms has_events=%s",
+                root_id[:8], total_ms, max_context_ms, strip_ms, has_events,
+            )
+        tree["file_path"] = str(_session_path(root_id))
+    return tree
+
+
 def _floor_events_from_seq(
     app_session_id: str,
     requested_from_seq: int,
@@ -4746,87 +4823,16 @@ async def get_session(
     if virtual:
         return virtual
 
-    root_id = await asyncio.to_thread(session_manager._root_id_for, session_id)
-    barrier_seq = 0
-    get_start = time.perf_counter()
-    max_seq_ms = 0.0
-    barrier_ms = 0.0
-    tree_ms = 0.0
-    max_context_ms = 0.0
-    has_events = False
-    if isinstance(root_id, str):
-        max_seq_start = time.perf_counter()
-        has_events, barrier_seq, max_context = await asyncio.to_thread(
-            _session_event_meta, root_id,
-        )
-        max_seq_ms = (time.perf_counter() - max_seq_start) * 1000
-        perf.record("sessions.detail.event_meta", max_seq_ms)
-    else:
-        max_context = {}
-    gen_before = session_manager._reconcile_gen.get(root_id or "", 0) if root_id else 0
-    tree_start = time.perf_counter()
+    worker_start = time.perf_counter()
     tree = await asyncio.to_thread(
-        session_manager.get_root_tree_stubbed,
-        session_id, msg_limit=msg_limit, exchange_count=exchange_count,
+        _session_detail_snapshot_sync,
+        session_id,
+        msg_limit=msg_limit,
+        exchange_count=exchange_count,
     )
-    tree_ms = (time.perf_counter() - tree_start) * 1000
-    perf.record("sessions.detail.tree", tree_ms)
+    perf.record("sessions.detail.worker", (time.perf_counter() - worker_start) * 1000)
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-
-    strip_start = time.perf_counter()
-    await asyncio.to_thread(_strip_synthetic_events_from_tree, tree)
-    strip_ms = (time.perf_counter() - strip_start) * 1000
-    perf.record("sessions.detail.strip_synthetic", strip_ms)
-    root_id = tree.get("id")
-    if isinstance(root_id, str):
-        if has_events:
-            reconcile_start = time.perf_counter()
-            dirty, hydrated, gen_after = await asyncio.to_thread(
-                _session_reconcile_snapshot_and_schedule,
-                root_id,
-            )
-            reconcile_ms = (time.perf_counter() - reconcile_start) * 1000
-            perf.record("sessions.detail.reconcile_snapshot", reconcile_ms)
-            msg_count = len(tree.get("messages", []))
-            assistant_msgs = [m for m in tree.get("messages", []) if m.get("role") == "assistant"]
-            last_events = assistant_msgs[-1].get("events") if assistant_msgs else None
-            last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
-            logger.info(
-                "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
-                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
-                "last_asst_stub=%s timings="
-                "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
-                root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
-                msg_count,
-                len(tree.get("queued_prompts") or []),
-                len(tree.get("draft_input") or ""),
-                len(last_events) if last_events else None,
-                last_stub.get("event_count") if last_stub else None,
-                max_seq_ms, barrier_ms, tree_ms, strip_ms,
-            )
-        if has_events:
-            max_context_start = time.perf_counter()
-            # Render-projection head, NOT the raw journal head: it equals
-            # the highest seq materialized into the rendered snapshot, so
-            # the frontend's WS resume cursor (events_from_seq) never
-            # overshoots the on-screen tail. Handing the raw head dropped
-            # the still-streaming turn on a mid-turn hard refresh — the
-            # trailing non-render/unresolved events pushed the watermark
-            # past the rendered tail, so the WS resume skipped it.
-            tree["max_seq_by_sid"] = dict(max_context)
-            max_context_ms = (time.perf_counter() - max_context_start) * 1000
-            perf.record("sessions.detail.max_context_copy", max_context_ms)
-        else:
-            tree["max_seq_by_sid"] = {}
-        total_ms = (time.perf_counter() - get_start) * 1000
-        perf.record("sessions.detail.total", total_ms)
-        if total_ms >= 50 or max_context_ms >= 20 or strip_ms >= 20:
-            logger.info(
-                "GET session %s timings total=%.1fms max_context=%.1fms strip=%.1fms has_events=%s",
-                root_id[:8], total_ms, max_context_ms, strip_ms, has_events,
-            )
-        tree["file_path"] = str(_session_path(root_id))
     return tree
 
 
