@@ -894,7 +894,22 @@ class SessionManager:
                 return False
             node_sid = str(node.get("id") or event_sid)
             strategy = get_strategy(node.get("orchestration_mode") or "team")
-            before = copy.deepcopy(strategy._events_list(msg))
+            before_events = strategy._events_list(msg)
+            event_uuid = _event_uuid_safe({"type": event_type, "data": data})
+            before_len = len(before_events)
+            before_event = None
+            if event_uuid:
+                uid_idx = msg.get("_uid_idx")
+                before_idx = uid_idx.get(event_uuid) if isinstance(uid_idx, dict) else None
+                if before_idx is None:
+                    for idx, event in enumerate(before_events):
+                        if _event_uuid_safe(event) == event_uuid:
+                            before_idx = idx
+                            break
+                if isinstance(before_idx, int) and 0 <= before_idx < before_len:
+                    before_event = _copy_jsonish(before_events[before_idx])
+            else:
+                before_event = _copy_jsonish(before_events)
             ctx = ApplyEventCtx(root_id=root_id)
             strategy.apply_event(
                 app_session_id=node_sid,
@@ -909,14 +924,29 @@ class SessionManager:
                 content = extract_output_text(strip_synthetic_events(after_events))
                 if content != (msg.get("content") or ""):
                     msg["content"] = content
-            changed = before != after_events
+            if event_uuid:
+                uid_idx = msg.get("_uid_idx")
+                after_idx = uid_idx.get(event_uuid) if isinstance(uid_idx, dict) else None
+                if after_idx is None:
+                    for idx, event in enumerate(after_events):
+                        if _event_uuid_safe(event) == event_uuid:
+                            after_idx = idx
+                            break
+                after_event = (
+                    after_events[after_idx]
+                    if isinstance(after_idx, int) and 0 <= after_idx < len(after_events)
+                    else None
+                )
+                changed = before_len != len(after_events) or before_event != after_event
+            else:
+                changed = before_event != after_events
             if changed:
                 self._persist_root(rid, bump=True)
                 self._fire(node_sid, {
                     "kind": "journal_event_projected",
                     "msg_id": msg_id,
                     "seq": seq,
-                    "msg": copy.deepcopy(msg),
+                    "msg": _copy_jsonish(msg),
                 })
             return changed
 
