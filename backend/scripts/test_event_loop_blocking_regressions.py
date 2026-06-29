@@ -203,7 +203,7 @@ def test_session_first_prompt_search_uses_summary_index() -> None:
     search_source = source[search_start:search_end]
     assert '"first_prompt": _first_user_prompt(root)' in summary_source
     assert "rows = _metadata_search_rows()" in search_source
-    assert "for sid, _title, first_prompt in rows:" in search_source
+    assert "for sid, title, first_prompt in rows:" in search_source
     assert "score = first_prompt.count(query_lower)" in search_source
     assert "json.loads(path.read_text" not in search_source
     assert "_migrate_session(" not in search_source
@@ -1221,6 +1221,7 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "cached = _metadata_search_cache.get(cache_key)" in search_source
     assert "return dict(cached)" in search_source
     assert "rows = _metadata_search_rows()" in search_source
+    assert "for sid, title, first_prompt in rows:" in search_source
     assert "title.count(query_lower)" in search_source
     assert "first_prompt.count(query_lower)" in search_source
     assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source
