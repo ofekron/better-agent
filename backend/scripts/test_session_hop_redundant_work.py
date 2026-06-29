@@ -349,6 +349,114 @@ def test_non_render_orphan_does_not_rebuild_root_events_projection() -> bool:
     return True
 
 
+def test_render_orphan_updates_warm_root_events_projection() -> bool:
+    sid = _fresh_session()
+    first_uid = str(uuid.uuid4())
+    event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": first_uid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "first orphan"}],
+            },
+        },
+        source="test",
+        msg_id=None,
+    )
+    event_ingester.root_events_by_sid(sid)
+    original_read_all = event_ingester._read_all_events_locked
+    try:
+        event_ingester._read_all_events_locked = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("warm root-event projection rebuilt from disk")
+        )
+        uid = str(uuid.uuid4())
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "type": "assistant",
+                "uuid": uid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "warm orphan"}],
+                },
+            },
+            source="test",
+            msg_id=None,
+        )
+        after = event_ingester.root_events_by_sid(sid)
+    finally:
+        event_ingester._read_all_events_locked = original_read_all
+    if uid not in {
+        ((event.get("data") or {}).get("uuid"))
+        for event in after.get(sid, [])
+        if isinstance(event, dict)
+    }:
+        print("  warm root event projection did not include appended orphan")
+        return False
+    return True
+
+
+def test_stamped_event_updates_warm_root_events_projection() -> bool:
+    sid = _fresh_session()
+    uid = str(uuid.uuid4())
+    event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": uid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "orphan"}],
+            },
+        },
+        source="test",
+        msg_id=None,
+    )
+    before = event_ingester.root_events_by_sid(sid)
+    if not before.get(sid):
+        print("  expected orphan before stamped event")
+        return False
+    original_read_all = event_ingester._read_all_events_locked
+    try:
+        event_ingester._read_all_events_locked = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("warm root-event projection rebuilt from disk")
+        )
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "type": "assistant",
+                "uuid": uid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "owned"}],
+                },
+            },
+            source="test",
+            msg_id="asst-owned",
+        )
+        after = event_ingester.root_events_by_sid(sid)
+    finally:
+        event_ingester._read_all_events_locked = original_read_all
+    if any(
+        ((event.get("data") or {}).get("uuid")) == uid
+        for event in after.get(sid, [])
+        if isinstance(event, dict)
+    ):
+        print("  stamped event did not remove matching root orphan")
+        return False
+    return True
+
+
 # ─── 4. Single-flight under concurrent schedules ───────────────────
 
 
@@ -707,6 +815,8 @@ async def _amain() -> int:
         ("non-render orphans do not invalidate snapshot", test_non_render_orphans_do_not_invalidate_snapshot),
         ("worker_event advances render watermark", test_worker_event_advances_render_watermark),
         ("non-render orphan does not rebuild root events", test_non_render_orphan_does_not_rebuild_root_events_projection),
+        ("render orphan updates warm root events", test_render_orphan_updates_warm_root_events_projection),
+        ("stamped event updates warm root events", test_stamped_event_updates_warm_root_events_projection),
         ("ws replay cap at msg_limit", test_ws_replay_cap_at_msg_limit),
         ("ws event cursor uses server floor", test_ws_event_cursor_uses_server_floor),
         ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),

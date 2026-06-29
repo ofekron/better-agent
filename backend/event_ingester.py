@@ -672,7 +672,7 @@ class EventIngester:
             self._root_events_version[root_id] = (
                 self._root_events_version.get(root_id, 0) + 1
             )
-            self._root_events_cache.pop(root_id, None)
+            self._update_root_events_cache_for_entry(root_id, entry)
             if self._affects_root_events_candidate(entry):
                 self._root_events_candidate_version[root_id] = (
                     self._root_events_candidate_version.get(root_id, 0) + 1
@@ -1414,6 +1414,62 @@ class EventIngester:
             if isinstance(inner, dict):
                 return copy.deepcopy(inner)
         return {"type": "agent_message", "data": copy.deepcopy(data)}
+
+    def _update_root_events_cache_for_entry(self, root_id: str, entry: dict) -> None:
+        cached = self._root_events_cache.get(root_id)
+        if cached is None:
+            return
+        version = self._root_events_version.get(root_id, 0)
+        projection = cached[1]
+        sid = entry.get("sid")
+        if not isinstance(sid, str):
+            self._root_events_cache[root_id] = (version, projection)
+            return
+        if entry.get("type") == "event_ownership_resolved":
+            self._root_events_cache.pop(root_id, None)
+            return
+        uid = self._extract_uuid(entry.get("data") or {})
+        if entry.get("msg_id") is not None:
+            if uid:
+                self._remove_root_event_projection(
+                    projection, sid, uid=uid,
+                )
+            self._root_events_cache[root_id] = (version, projection)
+            return
+        existing = projection.setdefault(sid, [])
+        if uid and any(
+            self._extract_uuid(event.get("data") or {}) == uid
+            for event in existing
+            if isinstance(event, dict)
+        ):
+            self._root_events_cache[root_id] = (version, projection)
+            return
+        existing.append(self._root_event_frontend_shape(entry))
+        self._root_events_cache[root_id] = (version, projection)
+
+    def _remove_root_event_projection(
+        self,
+        projection: dict[str, list[dict]],
+        sid: str,
+        *,
+        uid: Optional[str] = None,
+    ) -> None:
+        current = projection.get(sid)
+        if not current:
+            return
+        filtered = []
+        for event in current:
+            if not isinstance(event, dict):
+                filtered.append(event)
+                continue
+            event_data = event.get("data") or {}
+            if uid and self._extract_uuid(event_data) == uid:
+                continue
+            filtered.append(event)
+        if filtered:
+            projection[sid] = filtered
+        else:
+            projection.pop(sid, None)
 
     def has_uid(self, root_id: str, uid: str) -> bool:
         """Check whether a UID is already tracked for this root.
