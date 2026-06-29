@@ -31,6 +31,14 @@ def _path() -> Path:
     return ba_home() / "virtual_sessions.json"
 
 
+def version_token() -> tuple[int, int] | None:
+    try:
+        st = _path().stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _now() -> str:
     return datetime.now().isoformat()
 

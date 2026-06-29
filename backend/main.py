@@ -112,7 +112,7 @@ _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
 _session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
-_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 5.0
+_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0
 _SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
@@ -508,7 +508,7 @@ def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> 
             import session_search_index
             content_generation = session_search_index.generation()
         return (session_store.search_metadata_version(), content_generation)
-    return session_store.summary_version()
+    return (session_store.summary_version(), virtual_session_store.version_token())
 
 
 def _sessions_list_transient_state_version() -> tuple[int, int, int]:
