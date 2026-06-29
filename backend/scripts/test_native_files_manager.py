@@ -276,19 +276,29 @@ async def test_run_state_recent_index_is_reused_across_sids() -> None:
         )
     calls = 0
     original_build = nfm_mod._build_recent_state_index
+    candidate_calls = 0
+    original_candidates = nfm_mod._recent_state_candidates
 
     def counted_build(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original_build(*args, **kwargs)
 
+    def counted_candidates(*args, **kwargs):
+        nonlocal candidate_calls
+        candidate_calls += 1
+        return original_candidates(*args, **kwargs)
+
     nfm_mod._build_recent_state_index = counted_build  # type: ignore
+    nfm_mod._recent_state_candidates = counted_candidates  # type: ignore
     try:
         assert str(nfm_mod._scan_run_state_for_jsonl("REUSE-A-SID")) == "/tmp/REUSE-A-SID.jsonl"
         assert str(nfm_mod._scan_run_state_for_jsonl("REUSE-B-SID")) == "/tmp/REUSE-B-SID.jsonl"
     finally:
         nfm_mod._build_recent_state_index = original_build  # type: ignore
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
     assert calls == 1, f"expected one recent state index build, got {calls}"
+    assert candidate_calls == 1, f"expected one recent state candidate scan, got {candidate_calls}"
     print("PASS test_run_state_recent_index_is_reused_across_sids")
 
 

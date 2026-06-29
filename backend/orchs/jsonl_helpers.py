@@ -25,6 +25,7 @@ _JSONL_PATH_CACHE: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
 _JSONL_PATH_NEGATIVE_TTL_S = 5.0
 _JSONL_INDEX_TTL_S = 5.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
+_RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_LOOKUP_TIMEOUT_S = 1.5
 _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
 _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
@@ -161,6 +162,10 @@ def _recent_state_index(root: Path) -> dict[str, list[Path]]:
     global _RUN_STATE_RECENT_INDEX
     key = str(root)
     now = time.monotonic()
+    if _RUN_STATE_RECENT_INDEX is not None:
+        cached_key, ts, _cached_candidates, index = _RUN_STATE_RECENT_INDEX
+        if cached_key == key and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+            return index
     candidates = _recent_state_candidates(root)
     if not candidates:
         return {}
