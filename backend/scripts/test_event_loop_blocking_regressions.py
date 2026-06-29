@@ -724,21 +724,22 @@ def test_extension_projection_routes_cache_json_bytes() -> None:
     assert "def _projection_response_cache_get(" in source
     assert "def _projection_response_cache_put(" in source
     assert "def _cached_json_projection_response(" in source
+    assert "async def _cached_json_projection_response_threaded(" in source
     assert "json.dumps(" in source
     assert "Response(content=content, media_type=\"application/json\")" in source
 
     frontend_start = source.index("async def get_frontend_entrypoints(")
     frontend_end = source.index("@router.get(\"/ui-hooks\")", frontend_start)
     frontend_source = source[frontend_start:frontend_end]
-    assert "_cached_json_projection_response(" in frontend_source
-    assert "extension_store.frontend_entrypoints_cache_key()" in frontend_source
+    assert "await _cached_json_projection_response_threaded(" in frontend_source
+    assert "extension_store.frontend_entrypoints_cache_key," in frontend_source
     assert "extension_store.frontend_entrypoints()" in frontend_source
 
     hooks_start = source.index("async def get_ui_hooks(")
     hooks_end = source.index("@router.get(\"/{extension_id}/frontend/{asset_path:path}\")", hooks_start)
     hooks_source = source[hooks_start:hooks_end]
-    assert "_cached_json_projection_response(" in hooks_source
-    assert "extension_store.ui_hooks_cache_key()" in hooks_source
+    assert "await _cached_json_projection_response_threaded(" in hooks_source
+    assert "extension_store.ui_hooks_cache_key," in hooks_source
     assert "extension_store.ui_hooks()" in hooks_source
 
 

@@ -299,6 +299,15 @@ def _projection_cache_put(name: str, key: tuple[Any, ...], value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def _projection_cache_items(name: str) -> list[tuple[tuple[Any, ...], Any]]:
+    prefix = (name,)
+    return [
+        (key[1], copy.deepcopy(value))
+        for key, value in _PROJECTION_CACHE.items()
+        if key[:1] == prefix
+    ]
+
+
 def _clear_projection_cache() -> None:
     global _RECONCILED_STORE_FINGERPRINT
     _PROJECTION_CACHE.clear()
@@ -4322,6 +4331,9 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
 
 
 def frontend_entrypoints() -> list[dict[str, Any]]:
+    cached = _frontend_entrypoints_cached_for_current_files()
+    if cached is not None:
+        return cached
     key = frontend_entrypoints_cache_key()
     cached = _projection_cache_get("frontend_entrypoints", key)
     if cached is not None:
@@ -4370,11 +4382,51 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
     return _projection_cache_put("frontend_entrypoints", key, entries)
 
 
+def _frontend_entrypoints_cached_for_current_files() -> list[dict[str, Any]] | None:
+    fingerprint = store_fingerprint()
+    mode = private_local_runtime_mode()
+    for key, value in _projection_cache_items("frontend_entrypoints"):
+        if len(key) != 3 or key[0] != fingerprint or key[1] != mode:
+            continue
+        if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
+            return value
+        source_fingerprints = key[2]
+        if not isinstance(source_fingerprints, tuple):
+            continue
+        current: list[tuple[Any, ...]] = []
+        valid = True
+        for item in source_fingerprints:
+            if not isinstance(item, tuple) or len(item) != 4:
+                valid = False
+                break
+            extension_id, runtime_root, asset_paths, _old_fingerprint = item
+            if not isinstance(asset_paths, tuple):
+                valid = False
+                break
+            current.append(
+                (
+                    extension_id,
+                    runtime_root,
+                    asset_paths,
+                    _frontend_assets_fingerprint(
+                        Path(str(runtime_root)),
+                        [str(path) for path in asset_paths],
+                    ),
+                )
+            )
+        if valid and tuple(current) == source_fingerprints:
+            return value
+    return None
+
+
 def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
+    mode = private_local_runtime_mode()
+    if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
+        return (store_fingerprint(), mode, ())
     source_fingerprints: list[tuple[Any, ...]] = []
     for record in _active_records():
         source = record.get("source") or {}
-        if source.get("type") != "better_agent_local" or private_local_runtime_mode() != _PRIVATE_LOCAL_RUNTIME_SOURCE:
+        if source.get("type") != "better_agent_local":
             continue
         manifest = record.get("manifest") or {}
         frontend_path = str(manifest.get("entrypoints", {}).get("frontend") or "")
@@ -4385,14 +4437,16 @@ def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
             continue
         frontend_modules = manifest.get("entrypoints", {}).get("frontend_modules") or []
         frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
+        asset_paths = tuple(frontend_assets)
         source_fingerprints.append(
             (
                 str(manifest.get("id") or ""),
                 str(runtime_root),
+                asset_paths,
                 _frontend_assets_fingerprint(runtime_root, frontend_assets),
             )
         )
-    return (store_fingerprint(), private_local_runtime_mode(), tuple(source_fingerprints))
+    return (store_fingerprint(), mode, tuple(source_fingerprints))
 
 
 def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> tuple[tuple[str, int, int], ...]:
