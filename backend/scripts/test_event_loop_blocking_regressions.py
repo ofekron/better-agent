@@ -606,6 +606,16 @@ def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
         assert "child.name not in run_id_filter" not in recover_source
 
 
+def test_filtered_remote_recovery_does_not_rescan_all_runs() -> None:
+    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
+    start = source.index("def _pending_remote_runs_for_node(")
+    end = source.index("async def integrate_remote_runs_for_node(", start)
+    helper_source = source[start:end]
+    assert "iter_run_dirs(run_id_filter)" in helper_source
+    assert "children = sorted(children)" in helper_source
+    assert "child.name not in run_id_filter" not in helper_source
+
+
 def test_provider_prune_uses_shared_scandir_helper() -> None:
     runs_source = (ROOT / "runs_dir.py").read_text(encoding="utf-8")
     assert "def prune_old_completed_runs(max_age_days: int = 7) -> int" in runs_source
@@ -2297,6 +2307,7 @@ if __name__ == "__main__":
     test_private_extension_reconcile_skips_current_smoked_install()
     test_pending_node_polling_uses_public_projection_cache()
     test_filtered_provider_recovery_does_not_rescan_all_runs()
+    test_filtered_remote_recovery_does_not_rescan_all_runs()
     test_provider_prune_uses_shared_scandir_helper()
     test_machine_node_snapshot_reads_are_off_loop()
     test_node_snapshot_caches_static_specs()

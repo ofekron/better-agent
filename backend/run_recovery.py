@@ -15,6 +15,7 @@ from typing import Optional
 import perf
 from provider import RecoveredPopen
 from runs_dir import (
+    iter_run_dirs,
     pid_alive as _pid_alive,
     runs_root as _runs_root,
     salvage_complete_payload as _salvage_complete_payload,
@@ -2166,11 +2167,10 @@ def _pending_remote_runs_for_node(
     if not root.exists():
         return []
     pending: list[tuple[Path, dict]] = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        if run_id_filter is not None and child.name not in run_id_filter:
-            continue
+    children = iter_run_dirs(run_id_filter)
+    if run_id_filter is None:
+        children = sorted(children)
+    for child in children:
         bs_path = child / "backend_state.json"
         if not bs_path.exists():
             continue
