@@ -262,8 +262,14 @@ class ExtensionConsentRequired(ExtensionError):
     pass
 
 
+_STORE_PATH: Path | None = None
+
+
 def _store_path() -> Path:
-    return ba_home() / "extensions" / "extensions.json"
+    global _STORE_PATH
+    if _STORE_PATH is None:
+        _STORE_PATH = ba_home() / "extensions" / "extensions.json"
+    return _STORE_PATH
 
 
 def store_fingerprint() -> tuple[int, int]:
