@@ -30,6 +30,30 @@ _index_generation = 0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
 
 
+def _search_cache_valid(cached_at: float, generation: int, now: float) -> bool:
+    return generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS
+
+
+def _cached_rows_for_limit(
+    query: str,
+    limit: int,
+    now: float,
+) -> list[tuple[str, int]] | None:
+    best_limit = -1
+    best_rows: list[tuple[str, int]] | None = None
+    for (cached_query, cached_limit), (generation, cached_at, rows) in _search_cache.items():
+        if cached_query != query or cached_limit < limit:
+            continue
+        if not _search_cache_valid(cached_at, generation, now):
+            continue
+        if best_rows is None or cached_limit < best_limit:
+            best_limit = cached_limit
+            best_rows = rows
+    if best_rows is None:
+        return None
+    return best_rows[:limit]
+
+
 def _db_path() -> Path:
     return ba_home() / "session_search_index.sqlite3"
 
@@ -225,9 +249,12 @@ def search(
             cached = _search_cache.get(cache_key)
             if cached is not None:
                 generation, cached_at, rows = cached
-                if generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS:
+                if _search_cache_valid(cached_at, generation, now):
                     return [{"session_id": sid, "score": score} for sid, score in rows]
                 stale_rows = rows
+            reusable_rows = _cached_rows_for_limit(q, limit, now)
+            if reusable_rows is not None:
+                return [{"session_id": sid, "score": score} for sid, score in reusable_rows]
             event = _search_inflight.get(cache_key)
             if event is None:
                 event = threading.Event()
