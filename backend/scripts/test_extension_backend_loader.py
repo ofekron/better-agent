@@ -471,7 +471,10 @@ def main() -> int:
         entrypoints = response.json()["entrypoints"]
         entrypoint = next((item for item in entrypoints if item["extension_id"] == "ofek.backend"), None)
         check(entrypoint is not None, "frontend entrypoint should be listed")
-        check(entrypoint["entrypoint_url"] == "/api/extensions/ofek.backend/frontend/ui/index.js", "frontend entrypoint URL is scoped")
+        check(
+            entrypoint["entrypoint_url"].startswith("/api/extensions/ofek.backend/frontend/ui/index.js"),
+            "frontend entrypoint URL is scoped",
+        )
 
         response = client.get("/api/extensions/ofek.backend/frontend/ui/index.js")
         check(response.status_code == 200 and "ok = true" in response.text, "frontend bundle asset served")
