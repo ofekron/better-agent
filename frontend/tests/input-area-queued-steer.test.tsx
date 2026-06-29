@@ -334,4 +334,17 @@ describe("InputArea queued prompt promote action", () => {
     fireEvent.blur(editor);
     expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work");
   });
+
+  it("uses the mobile-safe queued editing layout", () => {
+    setViewportWidth(390);
+    renderInputArea(true, "", { onQueuedTextEdit: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit queued prompt" }));
+
+    const banner = screen.getByTestId("queued-prompt-banner");
+    expect(banner.classList.contains("is-editing")).toBe(true);
+    expect(banner.querySelector(".queued-prompt-header")).toBeTruthy();
+    expect(banner.querySelector(".queued-prompt-edit-input")).toBeTruthy();
+    expect(banner.querySelector(".queued-prompt-actions")).toBeTruthy();
+  });
 });

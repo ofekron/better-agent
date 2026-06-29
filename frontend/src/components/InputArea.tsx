@@ -1228,19 +1228,21 @@ function QueuedPromptBanner({
 
   if (editing) {
     return (
-      <div className="queued-prompt-banner" data-testid="queued-prompt-banner">
-        <span className="queued-prompt-label">{queuedLabel}</span>
-        <button
-          className="queued-minimize-btn"
-          type="button"
-          data-testid="queued-minimize-btn"
-          title={minimizeLabel}
-          aria-label={minimizeLabel}
-          aria-expanded={true}
-          onClick={() => setMinimized(true)}
-        >
-          <Icon name="chevron-down" size={14} />
-        </button>
+      <div className="queued-prompt-banner is-editing" data-testid="queued-prompt-banner">
+        <div className="queued-prompt-header">
+          <span className="queued-prompt-label">{queuedLabel}</span>
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            data-testid="queued-minimize-btn"
+            title={minimizeLabel}
+            aria-label={minimizeLabel}
+            aria-expanded={true}
+            onClick={() => setMinimized(true)}
+          >
+            <Icon name="chevron-down" size={14} />
+          </button>
+        </div>
         <textarea
           ref={inputRef}
           className="queued-prompt-edit-input"
@@ -1258,65 +1260,67 @@ function QueuedPromptBanner({
             }
           }}
         />
-        {compactActions ? null : (
-          <>
-            <button
-              className="queued-cancel-btn"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                onCancel();
-              }}
-            >
-              {cancelLabel}
-            </button>
-            {onSaveToNote && (
+        <div className="queued-prompt-actions">
+          {compactActions ? null : (
+            <>
               <button
-                className="queued-note-btn"
+                className="queued-cancel-btn"
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  onSaveToNote(editText.trim() || preview);
+                  onCancel();
                 }}
               >
-                <Icon name="memo" size={15} />
+                {cancelLabel}
               </button>
-            )}
-          </>
-        )}
-        {onSteer && (
+              {onSaveToNote && (
+                <button
+                  className="queued-note-btn"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onSaveToNote(editText.trim() || preview);
+                  }}
+                >
+                  <Icon name="memo" size={15} />
+                </button>
+              )}
+            </>
+          )}
+          {onSteer && (
+            <button
+              className="promote-btn"
+              data-testid="queued-steer-btn"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onSteer();
+              }}
+              title={steerTitle}
+            >
+              {steerLabel}
+            </button>
+          )}
           <button
-            className="promote-btn"
-            data-testid="queued-steer-btn"
+            className="promote-btn interrupt"
+            data-testid="queued-interrupt-btn"
             onMouseDown={(e) => {
               e.preventDefault();
-              onSteer();
+              onPromote();
             }}
-            title={steerTitle}
+            title={interruptTitle}
           >
-            {steerLabel}
+            {interruptLabel}
           </button>
-        )}
-        <button
-          className="promote-btn interrupt"
-          data-testid="queued-interrupt-btn"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onPromote();
-          }}
-          title={interruptTitle}
-        >
-          {interruptLabel}
-        </button>
-        {compactActions && (
-          <QueuedPromptOverflowMenu
-            open={actionsOpen}
-            setOpen={setActionsOpen}
-            onCancel={onCancel}
-            cancelLabel={cancelLabel}
-            onSaveToNote={
-              onSaveToNote ? () => onSaveToNote(editText.trim() || preview) : undefined
-            }
-          />
-        )}
+          {compactActions && (
+            <QueuedPromptOverflowMenu
+              open={actionsOpen}
+              setOpen={setActionsOpen}
+              onCancel={onCancel}
+              cancelLabel={cancelLabel}
+              onSaveToNote={
+                onSaveToNote ? () => onSaveToNote(editText.trim() || preview) : undefined
+              }
+            />
+          )}
+        </div>
       </div>
     );
   }
