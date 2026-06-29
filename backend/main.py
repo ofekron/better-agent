@@ -1049,6 +1049,10 @@ def _warning_off_loop(message: str, *args: Any) -> None:
     _LOG_WRITE_EXECUTOR.submit(logger.warning, message, *args)
 
 
+def _frontend_log_off_loop(level: int, line: str) -> None:
+    _LOG_WRITE_EXECUTOR.submit(frontend_logger.log, level, line)
+
+
 def create_api_app() -> FastAPI:
     """Create the FastAPI API app before frontend static files are mounted.
 
@@ -7524,7 +7528,7 @@ async def frontend_log(request: Request):
         line += f" | url={url}"
     if stack:
         line += f"\n{stack}"
-    frontend_logger.log(log_level, line)
+    _frontend_log_off_loop(log_level, line)
     return {"ok": True}
 
 
