@@ -388,15 +388,7 @@ def enqueue_pool_task(tag: str, item: dict) -> dict:
     with _lock_for():
         registry = _read()
         queue = registry.setdefault("pool_queues", {}).setdefault(clean, [])
-        insert_at = next(
-            (
-                index
-                for index, queued in enumerate(queue)
-                if int(queued.get("attempts") or 0) > 0
-            ),
-            len(queue),
-        )
-        queue.insert(insert_at, item)
+        queue.append(item)
         _write("", registry, refresh_worker_summaries=False)
         return {"tag": clean, "queued_count": len(queue), "item": item}
 
@@ -473,7 +465,7 @@ def record_pool_task_failure(
                 queues.pop(clean, None)
             registry["pool_queues"] = queues
             _write("", registry, refresh_worker_summaries=False)
-            return {"action": action, "item": failed, "queued_count": len(queue)}
+            return {"action": action, "item": failed}
     return {"action": "missing"}
 
 

@@ -16294,6 +16294,87 @@ button.progress-inflight {
   font-size: calc(13px * var(--app-font-scale));
 }
 
+.analytics-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.analytics-log-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.analytics-log-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong, var(--border));
+}
+
+.analytics-log-main,
+.analytics-log-meta {
+  min-width: 0;
+}
+
+.analytics-log-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  font-weight: 600;
+}
+
+.analytics-log-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-log-status {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(74, 194, 192, 0.14);
+  color: #4ac2c0;
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+}
+
+.analytics-log-status.error {
+  background: rgba(224, 85, 106, 0.14);
+  color: #ff9cab;
+}
+
+.analytics-log-prompt,
+.analytics-log-error {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.analytics-log-error {
+  color: #ffb3bf;
+}
+
+.analytics-log-meta {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 @media (max-width: 640px) {
   .analytics-page {
     padding: 16px;
@@ -16310,6 +16391,14 @@ button.progress-inflight {
 
   .analytics-charts {
     grid-template-columns: 1fr;
+  }
+
+  .analytics-log-row {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-log-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

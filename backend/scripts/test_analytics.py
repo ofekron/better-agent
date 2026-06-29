@@ -30,6 +30,7 @@ if _BACKEND not in sys.path:
 
 import analytics  # noqa: E402
 import config_store  # noqa: E402
+import llm_call_log  # noqa: E402
 import session_store  # noqa: E402
 import trace_collector  # noqa: E402
 
@@ -51,7 +52,7 @@ def test_aggregate_excludes_internal_and_empty_sessions():
          "provider_id": "p1", "model": "m1", "orchestration_mode": "team",
          "message_count": 0},
     ]
-    out = analytics.aggregate(sessions, [], {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}, start, END)
+    out = analytics.aggregate(sessions, [], [], {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}, start, END)
     assert out["sessions"]["total"] == 1
     assert out["sessions"]["messages_total"] == 4
 
@@ -68,7 +69,7 @@ def test_aggregate_breaks_sessions_down_by_provider_and_model():
     ]
     pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"},
             "p2": {"id": "p2", "name": "Gemini", "kind": "gemini"}}
-    out = analytics.aggregate(sessions, [], pmap, start, END)
+    out = analytics.aggregate(sessions, [], [], pmap, start, END)
     assert out["sessions"]["total"] == 2
     assert {p["name"]: p["count"] for p in out["sessions"]["by_provider"]} == {"Claude": 1, "Gemini": 1}
     assert {m["model"]: m["count"] for m in out["sessions"]["by_model"]} == {"m1": 1, "m2": 1}
@@ -85,7 +86,7 @@ def test_aggregate_keeps_two_same_kind_providers_distinct():
     ]
     pmap = {"p1": {"id": "p1", "name": "Claude Pro", "kind": "claude"},
             "p2": {"id": "p2", "name": "Claude Personal", "kind": "claude"}}
-    out = analytics.aggregate(sessions, [], pmap, start, END)
+    out = analytics.aggregate(sessions, [], [], pmap, start, END)
     assert len(out["sessions"]["by_provider"]) == 2
     assert {p["name"] for p in out["sessions"]["by_provider"]} == {"Claude Pro", "Claude Personal"}
 
@@ -107,7 +108,7 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
         {"session_id": "real", "timestamp": (END - timedelta(days=10)).isoformat(), "duration_ms": 100.0},  # out of range
     ]
     pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}
-    out = analytics.aggregate(sessions, traces, pmap, start, END)
+    out = analytics.aggregate(sessions, traces, [], pmap, start, END)
     assert out["turns"]["total"] == 2
     # avg of [1000,3000]=2000; median of sorted [1000,3000]=2000
     assert out["turns"]["duration_avg_ms"] == 2000.0
@@ -118,14 +119,14 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
 
 
 def test_aggregate_bucket_granularity_scales_with_span():
-    assert analytics.aggregate([], [], {}, END - timedelta(days=2), END)["range"]["granularity"] == "hour"
-    assert analytics.aggregate([], [], {}, END - timedelta(days=40), END)["range"]["granularity"] == "day"
-    assert analytics.aggregate([], [], {}, END - timedelta(days=100), END)["range"]["granularity"] == "week"
-    assert analytics.aggregate([], [], {}, END - timedelta(days=400), END)["range"]["granularity"] == "month"
+    assert analytics.aggregate([], [], [], {}, END - timedelta(days=2), END)["range"]["granularity"] == "hour"
+    assert analytics.aggregate([], [], [], {}, END - timedelta(days=40), END)["range"]["granularity"] == "day"
+    assert analytics.aggregate([], [], [], {}, END - timedelta(days=100), END)["range"]["granularity"] == "week"
+    assert analytics.aggregate([], [], [], {}, END - timedelta(days=400), END)["range"]["granularity"] == "month"
 
 
 def test_aggregate_empty_range_is_well_formed():
-    out = analytics.aggregate([], [], {}, datetime(2026, 1, 1), datetime(2026, 1, 8))
+    out = analytics.aggregate([], [], [], {}, datetime(2026, 1, 1), datetime(2026, 1, 8))
     assert out["sessions"]["total"] == 0
     assert out["turns"]["total"] == 0
     assert out["sessions"]["series"] == []
@@ -146,7 +147,12 @@ def test_resolve_bounds_defaults_to_last_30_days():
 
 def test_compute_analytics_reads_live_stores():
     p1 = config_store.add_provider({"name": "Claude", "kind": "claude", "mode": "subscription"})
-    p2 = config_store.add_provider({"name": "Gemini", "kind": "gemini", "mode": "subscription"})
+    p2 = config_store.add_provider({
+        "name": "Gemini",
+        "kind": "gemini",
+        "mode": "api_key",
+        "api_key": "test-key",
+    })
     s1 = session_store.create_session(name="a", model="glm-5.1", provider_id=p1["id"], orchestration_mode="team")
     s2 = session_store.create_session(name="b", model="gemini-2.5", provider_id=p2["id"], orchestration_mode="native")
     # give them a message so they pass the real-session filter
@@ -167,6 +173,73 @@ def test_compute_analytics_reads_live_stores():
     assert {"claude", "gemini"} <= {p["kind"] for p in out["providers"]}
     prov = {p["name"]: p["turns"] for p in out["turns"]["by_provider"]}
     assert prov["Claude"] == 1 and prov["Gemini"] == 1
+
+
+def test_aggregate_llm_calls_from_single_log_shape():
+    start = END - timedelta(days=7)
+    calls = [
+        {
+            "id": "llm_a",
+            "timestamp": (END - timedelta(hours=3)).isoformat(),
+            "source": "turn",
+            "reason": "manager",
+            "provider_id": "p1",
+            "provider_kind": "claude",
+            "provider_name": "Claude",
+            "model": "sonnet",
+            "prompt_preview": "fix bug",
+            "token_usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
+            "success": True,
+        },
+        {
+            "id": "llm_b",
+            "timestamp": (END - timedelta(hours=1)).isoformat(),
+            "source": "rearranger",
+            "reason": "session_tree_projection",
+            "provider_id": "p2",
+            "provider_kind": "gemini",
+            "provider_name": "Gemini",
+            "model": "gemini-2.5",
+            "prompt_preview": "tree",
+            "token_usage": {"input_tokens": 2, "output_tokens": 3, "cache_read_input_tokens": 5},
+            "success": False,
+            "error": "quota",
+        },
+        {
+            "id": "old",
+            "timestamp": (END - timedelta(days=30)).isoformat(),
+            "source": "turn",
+            "reason": "manager",
+            "token_usage": {"total_tokens": 999},
+        },
+    ]
+    pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}
+    out = analytics.aggregate([], [], calls, pmap, start, END)
+    llm = out["llm_calls"]
+    assert llm["total"] == 2
+    assert llm["token_usage"]["input_tokens"] == 12
+    assert llm["token_usage"]["output_tokens"] == 7
+    assert llm["token_usage"]["cache_read_input_tokens"] == 5
+    assert llm["token_usage"]["total_tokens"] == 19
+    assert {p["name"]: p["calls"] for p in llm["by_provider"]} == {"Claude": 1, "Gemini": 1}
+    assert llm["recent"][0]["id"] == "llm_b"
+
+
+def test_compute_analytics_includes_llm_log():
+    llm_call_log.append_call(
+        source="turn",
+        reason="manager",
+        provider_id="p1",
+        provider_kind="claude",
+        provider_name="Claude",
+        model="sonnet",
+        prompt="hello world",
+        token_usage={"input_tokens": 1, "output_tokens": 2},
+        success=True,
+    )
+    out = analytics.compute_analytics(*analytics.resolve_bounds(None, None))
+    assert out["llm_calls"]["total"] >= 1
+    assert out["llm_calls"]["recent"][0]["prompt_preview"] == "hello world"
 
 
 _TESTS = [v for k, v in sorted(globals().items())

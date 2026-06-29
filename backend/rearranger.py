@@ -51,6 +51,7 @@ from paths import ba_home
 from typing import Any, Optional
 
 import rearranger_state
+import llm_call_log
 import trace_collector
 from provider import default_provider, get_provider
 from session_manager import manager as session_manager
@@ -460,6 +461,24 @@ class Rearranger:
         updated = session_manager.add_rearranger_usage(
             app_session_id, usage, cost_usd,
         )
+        try:
+            await asyncio.to_thread(
+                llm_call_log.append_call,
+                source="rearranger",
+                reason="session_tree_projection",
+                provider_id=provider.id,
+                provider_kind=provider.KIND,
+                provider_name=provider.record.get("name"),
+                model=provider.record.get("default_model"),
+                app_session_id=app_session_id,
+                provider_session_id=result.get("session_id"),
+                prompt=diff_prompt,
+                token_usage=usage,
+                success=not bool(result.get("is_error")),
+                error=result.get("error"),
+            )
+        except Exception:
+            logger.exception("failed to append rearranger llm call log")
 
         tree_text = result.get("result") or ""
         new_sid = result.get("session_id")

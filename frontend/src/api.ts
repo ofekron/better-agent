@@ -128,6 +128,54 @@ export interface AnalyticsReport {
     duration_avg_ms: number;
     duration_p50_ms: number;
   };
+  llm_calls: {
+    total: number;
+    token_usage: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+      total_tokens: number;
+      duration_ms?: number;
+    };
+    series: {
+      t: string;
+      count: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+      total_tokens: number;
+    }[];
+    by_provider: { provider_id: string; kind: string; name: string; calls: number; total_tokens: number }[];
+    by_model: { kind: string; model: string; calls: number; total_tokens: number }[];
+    by_source: { source: string; calls: number; total_tokens: number }[];
+    by_reason: { reason: string; calls: number; total_tokens: number }[];
+    recent: {
+      id?: string;
+      timestamp?: string;
+      source: string;
+      reason: string;
+      provider_id: string;
+      provider_kind: string;
+      provider_name: string;
+      model: string;
+      reasoning_effort?: string | null;
+      app_session_id?: string | null;
+      provider_session_id?: string | null;
+      trace_id?: string | null;
+      prompt_preview: string;
+      token_usage: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_creation_input_tokens: number;
+        cache_read_input_tokens: number;
+        total_tokens: number;
+      };
+      success?: boolean | null;
+      error?: string | null;
+    }[];
+  };
 }
 
 /** Snapshot of the session's pending schedules. Push side:
