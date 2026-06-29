@@ -238,3 +238,77 @@ def read_file_changes(app_session_id: str) -> list[dict]:
         )
         if c is not None
     ]
+
+
+def _user_prompt_text(msg: dict) -> str:
+    """Extract a user message's prompt text (content may be a string or a
+    list of content blocks, as the SDK delivers it)."""
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        parts = [
+            b.get("text", "")
+            for b in c
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        return " ".join(p for p in parts if p).strip()
+    return ""
+
+
+def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
+    """Group flat change rows by the user→assistant turn that produced them.
+
+    A turn starts at each ``role == "user"`` message and owns every following
+    assistant message until the next user message. Each change's ``msg_id`` is
+    the assistant message id (set in :func:`extract`), so we map assistant
+    msg_id → turn index. Returns chronological::
+
+        [{turn_index, user_prompt, ts, changes: [...]}, ...]
+
+    Changes whose ``msg_id`` isn't found in the render tree land in a trailing
+    ``turn_index = -1`` ("ungrouped") bucket — e.g. edits from a worker fork
+    whose panel isn't in the root message list."""
+    turn_of_msg: dict = {}      # assistant msg id -> turn index
+    prompts: dict = {}          # turn index -> user prompt
+    ti = -1
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "user":
+            ti += 1
+            prompts[ti] = _user_prompt_text(m)
+        elif role == "assistant":
+            mid = m.get("id")
+            if mid is not None:
+                # Assistant msg before any user msg -> turn 0.
+                turn_of_msg[mid] = ti if ti >= 0 else 0
+
+    buckets: dict = {}
+    for c in changes:
+        key = turn_of_msg.get(c.get("msg_id"))
+        if key is None:
+            key = -1  # ungrouped
+        buckets.setdefault(key, []).append(c)
+
+    ordered = sorted(k for k in buckets if k >= 0)
+    result = []
+    for t in ordered:
+        chs = buckets.get(t, [])
+        result.append({
+            "turn_index": t,
+            "user_prompt": prompts.get(t, ""),
+            "ts": chs[0].get("ts") if chs else None,
+            "changes": chs,
+        })
+    if -1 in buckets:
+        chs = buckets[-1]
+        result.append({
+            "turn_index": -1,
+            "user_prompt": "",
+            "ts": chs[0].get("ts") if chs else None,
+            "changes": chs,
+        })
+    return result
+
