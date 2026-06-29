@@ -5236,6 +5236,28 @@ def _session_detail_response_cache_key_sync(
     )
 
 
+def _session_detail_cached_key_still_current(
+    key: tuple,
+    session_id: str,
+    *,
+    msg_limit: int,
+    exchange_count: Optional[int],
+) -> bool:
+    if len(key) != 6 or key[0] != session_id:
+        return False
+    root_id = session_manager._root_id_for(session_id)
+    if not isinstance(root_id, str):
+        return False
+    tree_key = session_manager.root_tree_stub_cache_key(
+        session_id,
+        msg_limit=msg_limit,
+        exchange_count=exchange_count,
+    )
+    if tree_key is None or key[1] != tree_key:
+        return False
+    return key[2] == _session_event_file_fingerprint(root_id)
+
+
 def _floor_events_from_seq(
     app_session_id: str,
     requested_from_seq: int,
@@ -5287,14 +5309,15 @@ async def get_session(
     cached_full_key = _session_detail_response_cache_latest.get(simple_cache_key)
     cache_key = None
     if cached_full_key is not None:
-        current_key = await asyncio.to_thread(
-            _session_detail_response_cache_key_sync,
+        still_current = await asyncio.to_thread(
+            _session_detail_cached_key_still_current,
+            cached_full_key,
             session_id,
             msg_limit=msg_limit,
             exchange_count=exchange_count,
         )
-        if current_key == cached_full_key:
-            cache_key = current_key
+        if still_current:
+            cache_key = cached_full_key
         else:
             _session_detail_response_cache_latest.pop(simple_cache_key, None)
     if cache_key is not None:
