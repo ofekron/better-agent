@@ -343,6 +343,16 @@ def test_frontend_entrypoints_do_not_run_smoke_subprocesses() -> None:
     assert "_run_extension_smoke_test(" not in frontend_source
 
 
+def test_extension_list_uses_projection_cache() -> None:
+    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
+    start = source.index("def list_extensions(")
+    end = source.index("def _active_records(", start)
+    list_source = source[start:end]
+    assert '_projection_cache_get("list_extensions"' in list_source
+    assert '_projection_cache_put(\n        "list_extensions",' in list_source
+    assert "return list_extensions(include_hidden=include_hidden), False" in list_source
+
+
 def test_startup_reenqueue_reads_sessions_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
@@ -1158,6 +1168,7 @@ if __name__ == "__main__":
     test_pending_approval_listing_uses_cached_projection_off_loop()
     test_project_update_counts_batch_uses_single_store_call()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
+    test_extension_list_uses_projection_cache()
     test_startup_reenqueue_reads_sessions_off_loop()
     test_startup_does_not_warm_unread_by_hydrating_sessions()
     test_startup_defers_requirement_and_project_match_warmers()

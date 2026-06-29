@@ -3099,8 +3099,17 @@ def _record_smoke_test_current(record: dict[str, Any]) -> bool:
 
 
 def list_extensions(*, include_hidden: bool = False) -> list[dict[str, Any]]:
+    fingerprint = store_fingerprint()
+    key = (fingerprint, include_hidden)
+    cached = _projection_cache_get("list_extensions", key)
+    if cached is not None:
+        return cached
     data = _load()
-    return _list_extensions_from_data(data, include_hidden=include_hidden)
+    return _projection_cache_put(
+        "list_extensions",
+        key,
+        _list_extensions_from_data(data, include_hidden=include_hidden),
+    )
 
 
 def list_extensions_with_reconciliation(*, include_hidden: bool = False) -> tuple[list[dict[str, Any]], bool]:
@@ -3110,13 +3119,18 @@ def list_extensions_with_reconciliation(*, include_hidden: bool = False) -> tupl
     with _RECONCILED_STORE_LOCK:
         reconciled = _RECONCILED_STORE_FINGERPRINT == (path_key, fingerprint)
     if reconciled:
-        data = _load()
-        return _list_extensions_from_data(data, include_hidden=include_hidden), False
+        return list_extensions(include_hidden=include_hidden), False
 
     data, _changed, public_changed = _load_with_changes()
     with _RECONCILED_STORE_LOCK:
         _RECONCILED_STORE_FINGERPRINT = (path_key, store_fingerprint())
-    return _list_extensions_from_data(data, include_hidden=include_hidden), public_changed
+    fingerprint = store_fingerprint()
+    key = (fingerprint, include_hidden)
+    return _projection_cache_put(
+        "list_extensions",
+        key,
+        _list_extensions_from_data(data, include_hidden=include_hidden),
+    ), public_changed
 
 
 def _list_extensions_from_data(data: dict[str, Any], *, include_hidden: bool = False) -> list[dict[str, Any]]:
