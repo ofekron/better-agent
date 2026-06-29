@@ -4456,10 +4456,10 @@ async def get_sessions(
                 out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
         if may_include_virtual:
             with perf.timed("sessions.list.virtual"):
-                if can_page_remote_local_order and effective_sort_by == "last_user_prompt_at":
+                if can_page_remote_local_order:
                     virtual_sessions, virtual_total = await asyncio.to_thread(
                         virtual_session_store.list_recent,
-                        1,
+                        max(offset + limit, 1),
                         exclude_id=session_search.ASK_SINGLETON_ID,
                     )
                 else:
