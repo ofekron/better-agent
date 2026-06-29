@@ -51,6 +51,8 @@ _METADATA_KINDS = {
     "worker_eligible_set",
     "worker_creation_policy_set",
     "capability_contexts_set",
+    "active_capability_added",
+    "active_capability_removed",
     "working_mode_marked",
     "adv_sync_updated",
     "msg_ask_result_set",
@@ -455,6 +457,13 @@ class SessionWSBroadcaster:
             patch = {
                 "capability_contexts": list(
                     change.get("capability_contexts") or []
+                )
+            }
+        elif kind in ("active_capability_added", "active_capability_removed"):
+            from session_manager import manager as _sm
+            patch = {
+                "active_capability_ids": list(
+                    _sm.get_field(sid, "active_capability_ids") or []
                 )
             }
         elif kind == "open_panels_set":
