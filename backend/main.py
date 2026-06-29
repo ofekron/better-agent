@@ -7040,7 +7040,10 @@ async def mark_session_opened(session_id: str):
     Server-generated timestamp; does not bump `updated_at`."""
     at = datetime.now().isoformat()
     session = await asyncio.to_thread(
-        session_manager.set_last_opened_at, session_id, at,
+        session_manager.set_last_opened_at,
+        session_id,
+        at,
+        return_session=False,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
