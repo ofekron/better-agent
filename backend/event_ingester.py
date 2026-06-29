@@ -27,6 +27,7 @@ from file_ref_resolver import rewrite_event_data
 from event_shape import frontend_event_from_journal_row
 from session_manager import manager as session_manager
 import perf
+import session_store
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +43,10 @@ _FSYNC_INTERVAL = 0.25
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
-    """Look up the session's (cwd, is_remote) for file-ref resolution.
-
-    Uses `get_lite()` to skip the expensive deepcopy of `msg.events` —
-    both are session-level fields, so the events lists aren't needed.
-    On heavy sessions (~13 MB hydrated tree) this drops the call from
-    ~100 ms (deepcopy) to ~1 ms.
-
-    `is_remote=True` (session hosted on a worker-node) makes the
-    rewriter skip the local-disk existence check — the referenced
-    files live on the node, not here.
-    """
+    """Look up the session's (cwd, is_remote) for file-ref resolution."""
     try:
-        sess = session_manager.get_lite(root_id)
+        fields = session_store.summary_fields_many([root_id], ("cwd", "node_id"))
+        sess = fields.get(root_id)
         if isinstance(sess, dict):
             from file_ref_resolver import assume_exists_for_session
             is_remote = assume_exists_for_session(sess)
