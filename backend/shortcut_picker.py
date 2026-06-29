@@ -124,11 +124,15 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
 
     Returns ALL shortcuts on any error so the caller can always show something.
     """
+    fallback_shortcuts: list[str] | None = None
+
     async def _pick_with_inputs() -> list[str]:
+        nonlocal fallback_shortcuts
         all_shortcuts, provider, model, shortcuts_json, assistant_excerpt = await asyncio.to_thread(
             _shortcut_picker_inputs,
             assistant_text,
         )
+        fallback_shortcuts = list(all_shortcuts)
         if not all_shortcuts:
             return []
 
@@ -194,9 +198,11 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
         return await asyncio.wait_for(_pick_with_inputs(), timeout=_PICK_WAIT_TIMEOUT_SECS)
     except asyncio.TimeoutError:
         logger.debug("Shortcut picker call still running, returning all shortcuts")
-        all_shortcuts = await asyncio.to_thread(user_prefs.get_shortcut_responses)
-        return all_shortcuts
+        if fallback_shortcuts is not None:
+            return list(fallback_shortcuts)
+        return await asyncio.to_thread(user_prefs.get_shortcut_responses)
     except Exception:
         logger.debug("Shortcut picker call failed, returning all shortcuts", exc_info=True)
-        all_shortcuts = await asyncio.to_thread(user_prefs.get_shortcut_responses)
-        return all_shortcuts
+        if fallback_shortcuts is not None:
+            return list(fallback_shortcuts)
+        return await asyncio.to_thread(user_prefs.get_shortcut_responses)
