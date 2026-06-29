@@ -13909,6 +13909,7 @@ async def websocket_chat(websocket: WebSocket):
         await websocket.close(code=1008)
         return
     logger.info("WebSocket connected")
+    ws_send_lock = asyncio.Lock()
 
     async def ws_callback(event_dict):
         event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
@@ -13929,9 +13930,15 @@ async def websocket_chat(websocket: WebSocket):
                 "ws.send_json.serialize_off_loop",
                 (time.perf_counter() - serialize_t) * 1000.0,
             )
-            wire_t = time.perf_counter()
-            await websocket.send_text(text)
-            perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
+            lock_wait_t = time.perf_counter()
+            async with ws_send_lock:
+                perf.record(
+                    "ws.send_json.lock_wait",
+                    (time.perf_counter() - lock_wait_t) * 1000.0,
+                )
+                wire_t = time.perf_counter()
+                await websocket.send_text(text)
+                perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
         except Exception as exc:
             logger.debug(
                 "WebSocket send failed type=%s error=%s",
