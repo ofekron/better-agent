@@ -5699,13 +5699,13 @@ class SessionManager:
             if sess is None:
                 return None
             if sess.get("last_opened_at") == at:
-                return copy.deepcopy(sess)
+                return _copy_jsonish(sess)
             sess["last_opened_at"] = at
             session_store.write_last_opened(rid, sid, at)
             if sid == rid:
                 session_store.update_last_opened_projection(sid, at)
             self._fire(sid, {"kind": "last_opened_set", "at": at})
-            return copy.deepcopy(sess)
+            return _copy_jsonish(sess)
 
     def set_archived(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:

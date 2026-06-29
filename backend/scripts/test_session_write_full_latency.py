@@ -288,8 +288,15 @@ def _run() -> bool:
 
     opened_at = "2030-01-02T03:04:05"
     session_manager.flush_pending_persists()
-    with patch("session_store.write_session_full", side_effect=AssertionError("opened wrote full tree")):
+    with (
+        patch("session_store.write_session_full", side_effect=AssertionError("opened wrote full tree")),
+        patch("session_manager.copy.deepcopy", side_effect=AssertionError("opened deep-copied session")),
+    ):
         opened = session_manager.set_last_opened_at(sid, opened_at)
+    returned_messages = opened.get("messages") if opened is not None else None
+    if isinstance(returned_messages, list):
+        returned_messages.append({"id": "mutated-return"})
+    cached_after_opened = session_manager.get_ref(sid)
     projected_opened = next(s for s in session_store.list_sessions() if s["id"] == sid)
     disk_after_opened = json.loads(session_store._session_path(sid).read_text(encoding="utf-8"))
     reloaded_after_opened = session_store.get_root_tree(sid)
@@ -306,6 +313,18 @@ def _run() -> bool:
                 f"disk={disk_after_opened.get('last_opened_at')!r} "
                 f"reloaded={reloaded_after_opened.get('last_opened_at')!r}"
             ),
+        )
+    )
+    results.append(
+        (
+            "session open returns isolated copy without deepcopy",
+            opened is not None
+            and all(
+                msg.get("id") != "mutated-return"
+                for msg in cached_after_opened.get("messages", [])
+                if isinstance(msg, dict)
+            ),
+            f"returned_messages={len(returned_messages or [])} cached_messages={len(cached_after_opened.get('messages', []))}",
         )
     )
 
