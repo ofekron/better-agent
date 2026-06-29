@@ -623,7 +623,7 @@ class GeminiProvider(Provider):
         complete_path = rs.run_dir / "complete.json"
         try:
             while True:
-                if complete_path.exists():
+                if await asyncio.to_thread(complete_path.exists):
                     break
                 # INVARIANT: process death MUST end this loop. If the
                 # runner is SIGKILLed (OOM, manual kill, OS) it never
@@ -638,7 +638,10 @@ class GeminiProvider(Provider):
                 if rs.popen.poll() is not None:
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while not complete_path.exists() and loop.time() < grace_end:
+                    while (
+                        not await asyncio.to_thread(complete_path.exists)
+                        and loop.time() < grace_end
+                    ):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)
                     break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)

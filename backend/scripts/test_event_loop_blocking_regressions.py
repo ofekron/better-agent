@@ -306,13 +306,19 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
     assert "publish_event_sync(" in broadcast_source
 
 
-def test_codex_complete_watcher_filesystem_poll_runs_off_loop() -> None:
-    source = (ROOT / "provider_codex.py").read_text(encoding="utf-8")
-    start = source.index("async def _watch_complete(")
-    end = source.index("async def _ensure_child_tailer(", start)
-    watcher_source = source[start:end]
-    assert "await asyncio.to_thread(complete_path.exists)" in watcher_source
-    assert "complete_path.exists()" not in watcher_source
+def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
+    for filename in ("provider_claude.py", "provider_codex.py", "provider_gemini.py"):
+        source = (ROOT / filename).read_text(encoding="utf-8")
+        start = source.index("async def _watch_complete(")
+        if filename == "provider_claude.py":
+            end = source.index("async def _watch_linger_exit(", start)
+        elif filename == "provider_codex.py":
+            end = source.index("async def _ensure_child_tailer(", start)
+        else:
+            end = source.index("# ------------------------------------------------------------------\n    # _emit_complete_from_file", start)
+        watcher_source = source[start:end]
+        assert "await asyncio.to_thread(complete_path.exists)" in watcher_source
+        assert "complete_path.exists()" not in watcher_source
 
 
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
