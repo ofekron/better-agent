@@ -4526,7 +4526,6 @@ function AppMain({
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action);
     if (!sent) return;
-    if (action === "steer") return;
     setQueuedForSession(currentSession.id, (prev) => prev.slice(1), "promote");
   }, [currentSession, sendPromoteQueued, setQueuedForSession]);
 
