@@ -2860,6 +2860,7 @@ class SessionManager:
         *,
         bump_updated_at: bool = True,
         enrich: Optional[Callable[[dict], dict]] = None,
+        hydrate_events: bool = True,
     ) -> Optional[dict]:
         """Mutate `sid`'s session, persist, fire listener.
 
@@ -2877,7 +2878,7 @@ class SessionManager:
         if rid is None:
             return None
         with self._lock_for_root(rid):
-            sess = self._cached(sid)
+            sess = self._cached(sid, hydrate_events=hydrate_events)
             if sess is None:
                 return None
             mutate(sess)
@@ -4017,6 +4018,7 @@ class SessionManager:
         return self._run(
             sid, _do,
             {"kind": "workers_snapshot", "msg_id": msg_id, "workers": snap},
+            hydrate_events=False,
         )
 
     def upsert_worker_panel(
@@ -4044,6 +4046,7 @@ class SessionManager:
         return self._run(
             sid, _do,
             {"kind": "worker_panel_upserted", "msg_id": msg_id, "panel": panel},
+            hydrate_events=False,
         )
 
     def update_worker_panel(
@@ -4070,6 +4073,7 @@ class SessionManager:
                 "delegation_id": delegation_id,
                 "fields": fields,
             },
+            hydrate_events=False,
         )
 
     def apply_worker_panel_event(
@@ -4152,6 +4156,7 @@ class SessionManager:
                 "delegation_id": delegation_id,
                 "event": inner_event,
             },
+            hydrate_events=False,
         )
 
     def update_running_content(

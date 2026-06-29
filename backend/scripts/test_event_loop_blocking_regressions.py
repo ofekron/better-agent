@@ -160,6 +160,26 @@ def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
     assert "with session_manager.batch(persist_to):" not in callback_source
 
 
+def test_worker_panel_mutations_skip_cold_event_hydration() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    run_start = source.index("    def _run(")
+    run_end = source.index("    @perf.timed_fn(\"session.persist_root\")", run_start)
+    run_source = source[run_start:run_end]
+    assert "hydrate_events: bool = True" in run_source
+    assert "self._cached(sid, hydrate_events=hydrate_events)" in run_source
+
+    for name in (
+        "snapshot_workers",
+        "upsert_worker_panel",
+        "update_worker_panel",
+        "apply_worker_panel_event",
+    ):
+        start = source.index(f"    def {name}(")
+        end = source.index("\n    def ", start + 1)
+        helper_source = source[start:end]
+        assert "hydrate_events=False" in helper_source
+
+
 def test_subagent_watcher_scans_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(" in source

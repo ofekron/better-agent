@@ -471,6 +471,37 @@ def test_i_worker_event_does_not_need_snapshot_workers() -> bool:
     return ok
 
 
+def test_i2_worker_event_skips_cold_event_hydration() -> bool:
+    """Worker-panel routing must not hydrate full root event history."""
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_I2")
+    original = session_manager._hydrate_cached_root_events
+    calls = 0
+
+    def counted_hydrate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    session_manager._event_hydrated_roots.discard(root_id)
+    session_manager._hydrate_cached_root_events = counted_hydrate
+    try:
+        _apply(
+            sid,
+            msg_id,
+            root_id,
+            _worker_event("del_I2", "uuid-I2", "without-hydrate"),
+            source_is_provider_stream=True,
+        )
+    finally:
+        session_manager._hydrate_cached_root_events = original
+
+    panel_evs = _panel_events(sid, msg_id, "del_I2")
+    ok = calls == 0 and len(panel_evs) == 1
+    print(f"{PASS if ok else FAIL} I2: worker_event skips cold hydration — "
+          f"hydrate_calls={calls} panel.events={len(panel_evs)}")
+    return ok
+
+
 def test_j_malformed_inner_no_crash_no_pollute() -> bool:
     """Corner cases on the worker_event payload shape:
        J1: data.event = None → inner becomes {} (falsy) → branch's
@@ -669,6 +700,7 @@ def main() -> int:
             test_g3_worker_event_updates_raw_session_content(),
             test_h_multi_panel_routes_correctly(),
             test_i_worker_event_does_not_need_snapshot_workers(),
+            test_i2_worker_event_skips_cold_event_hydration(),
             test_j_malformed_inner_no_crash_no_pollute(),
             test_k_worker_start_creates_panel_before_worker_event(),
             test_l_post_trigger_insert_at_counts_after_current_event(),
