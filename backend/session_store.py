@@ -566,6 +566,11 @@ def summary_version() -> int:
         return _summary_index_version
 
 
+def summary_order_version() -> int:
+    with _summary_index_lock:
+        return _summary_order_version
+
+
 def _summary_order_key(summary: Optional[dict]) -> tuple[bool, float]:
     return _summary_sort_key(summary, "updated_at")
 

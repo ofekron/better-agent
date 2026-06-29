@@ -2483,7 +2483,7 @@ def _can_page_default_local_visible_order(
 
 def _local_visible_order_ids(sort_by: str) -> tuple[list[str], int]:
     import working_mode as _wm
-    version = session_store.summary_version()
+    version = session_store.summary_order_version()
     key = (sort_by, version)
     cached = _local_visible_order_cache.get(key)
     if cached is not None:
