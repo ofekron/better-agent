@@ -107,7 +107,7 @@ def installer_for(kind: str) -> ProviderInstaller:
     return installer
 
 
-async def provider_setup_status(kind: str) -> dict[str, Any]:
+async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> dict[str, Any]:
     cached = _STATUS_CACHE.get(kind)
     now = time.monotonic()
     if cached and now - cached[0] <= _STATUS_TTL_SECONDS:
@@ -120,7 +120,9 @@ async def provider_setup_status(kind: str) -> dict[str, Any]:
     if task is None:
         task = asyncio.create_task(_refresh_status_cache(kind))
         _STATUS_INFLIGHT[kind] = task
-    return _copy_status(await task)
+    if wait_for_cold:
+        return _copy_status(await task)
+    return _pending_status(installer_for(kind))
 
 
 async def _refresh_status_cache(kind: str) -> dict[str, Any]:
@@ -157,6 +159,13 @@ def _copy_status(status: dict[str, Any]) -> dict[str, Any]:
     if isinstance(command, list):
         copied["install_command"] = list(command)
     return copied
+
+
+def _pending_status(installer: ProviderInstaller) -> dict[str, Any]:
+    pending = {"ok": False, "stdout": "", "stderr": "", "returncode": -1, "checking": True}
+    status = _public_status(installer, dict(pending), dict(pending))
+    status["checking"] = True
+    return status
 
 
 # ---- Streaming install registry ----------------------------------------
