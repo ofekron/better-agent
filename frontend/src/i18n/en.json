@@ -819,6 +819,8 @@
   "app.loading": "Loading...",
   "app.adversarialSyncFailed": "Adversarial sync failed to start: ",
   "app.fileEditOfflineQueue": "File-editing sessions cannot be queued offline.",
+  "app.offlineQueued_1": "Offline — 1 action queued",
+  "app.offlineQueued_other": "Offline — {{count}} actions queued",
   "backendUnavailable.title": "Cannot reach Better Agent",
   "backendUnavailable.subtitle": "The backend is unavailable or rejected this browser origin.",
   "backendUnavailable.retry": "Retry",

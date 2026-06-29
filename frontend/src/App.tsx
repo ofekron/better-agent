@@ -5667,7 +5667,9 @@ function AppMain({
       {!connected && offlineQueue.queue.length > 0 && (
         <div className="offline-banner">
           <span className="offline-banner-dot" />
-          Offline — {offlineQueue.queue.length} action{offlineQueue.queue.length !== 1 ? "s" : ""} queued
+          {t(offlineQueue.queue.length === 1 ? "app.offlineQueued_1" : "app.offlineQueued_other", {
+            count: offlineQueue.queue.length,
+          })}
         </div>
       )}
       {restartError && (
