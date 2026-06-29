@@ -853,7 +853,7 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "def _sessions_list_transient_state_version()" in source
     assert "coordinator.turn_manager.cached_state_version()" in source
     assert "session_manager.unread_counts_version()" in source
-    assert "user_input_store.pending_counts_version()" in source
+    assert "user_input_store.pending_counts_version_loaded()" in source
 
 
 def test_search_sessions_response_cache_uses_metadata_version() -> None:

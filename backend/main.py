@@ -515,7 +515,7 @@ def _sessions_list_transient_state_version() -> tuple[int, int, int]:
     return (
         coordinator.turn_manager.cached_state_version(),
         session_manager.unread_counts_version(),
-        user_input_store.pending_counts_version(),
+        user_input_store.pending_counts_version_loaded(),
     )
 
 
