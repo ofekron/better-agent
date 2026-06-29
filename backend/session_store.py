@@ -168,6 +168,8 @@ _negative_root_resolve_cache: dict[str, tuple[int, int, int]] = {}
 _negative_root_resolve_until: dict[str, float] = {}
 _negative_root_resolve_global_until = 0.0
 _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
+_DIR_FINGERPRINT_CACHE_TTL_SECONDS = 0.10
+_dir_fingerprint_cache: tuple[float, tuple[int, int, int]] | None = None
 
 # ── Summary index ─────────────────────────────────────────────────────
 #
@@ -1684,6 +1686,17 @@ def _dir_fingerprint() -> tuple[int, int, int]:
     return (count, max_mtime, total_size)
 
 
+def _dir_fingerprint_cached() -> tuple[int, int, int]:
+    global _dir_fingerprint_cache
+    now = time.monotonic()
+    cached = _dir_fingerprint_cache
+    if cached is not None and now - cached[0] <= _DIR_FINGERPRINT_CACHE_TTL_SECONDS:
+        return cached[1]
+    fingerprint = _dir_fingerprint()
+    _dir_fingerprint_cache = (now, fingerprint)
+    return fingerprint
+
+
 def _build_index_snapshot(
     fp: Optional[tuple[int, int, int]] = None,
 ) -> tuple[tuple[int, int, int], dict[str, str], dict[str, set[str]], dict[str, tuple[int, int]]]:
@@ -2065,7 +2078,7 @@ def _resolve_root_id(sid: str) -> Optional[str]:
             return None
         if _negative_root_resolve_global_until > now:
             return None
-    live_fp = _dir_fingerprint()
+    live_fp = _dir_fingerprint_cached()
     with _index_lock:
         if _negative_root_resolve_cache.get(sid) == live_fp:
             return None
