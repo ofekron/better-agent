@@ -2642,6 +2642,8 @@ def test_submit_team_message_sync_store_work_off_loop() -> None:
     assert "await asyncio.to_thread(\n                session_manager.add_queued_prompt" in submit_source
     assert "cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt" in submit_source
     assert "await asyncio.to_thread(\n                session_manager.remove_queued_prompt" in submit_source
+    assert "await self.submit_prompt_async(target_session_id, {" in submit_source
+    assert "self.submit_prompt(target_session_id, {" not in submit_source
 
 
 def test_default_session_page_uses_visible_order_cache() -> None:

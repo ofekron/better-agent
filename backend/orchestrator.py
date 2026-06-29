@@ -1259,7 +1259,7 @@ class Coordinator:
                 metadata,
                 target_session_id=target_session_id,
             )
-            self.submit_prompt(target_session_id, {
+            await self.submit_prompt_async(target_session_id, {
                 "_queued_id": queue_item_id,
                 "app_session_id": target_session_id,
                 "prompt": message,
@@ -1946,7 +1946,7 @@ class Coordinator:
                     metadata,
                     target_session_id=target_session_id,
                 )
-                self.submit_prompt(target_session_id, {
+                await self.submit_prompt_async(target_session_id, {
                     "_queued_id": queue_item_id,
                     "app_session_id": target_session_id,
                     "prompt": message,
