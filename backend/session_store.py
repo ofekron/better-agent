@@ -727,7 +727,12 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
     return affected
 
 
-def _upsert_summary(root: dict, *, preserve_projection_fields: bool = False) -> None:
+def _upsert_summary(
+    root: dict,
+    *,
+    preserve_projection_fields: bool = False,
+    root_mtime_ns: int | None = None,
+) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
@@ -770,10 +775,17 @@ def _upsert_summary(root: dict, *, preserve_projection_fields: bool = False) -> 
         sidecar_current = True
         if not summary_changed:
             with perf.timed("store.session.summary.sidecar_stat"):
-                sidecar_current = _touch_summary_file_current(root["id"])
+                sidecar_current = _touch_summary_file_current(
+                    root["id"],
+                    root_mtime_ns=root_mtime_ns,
+                )
         if summary_changed or not sidecar_current:
             with perf.timed("store.session.summary.sidecar_write"):
-                _write_summary_file(root["id"], summary)
+                _write_summary_file(
+                    root["id"],
+                    summary,
+                    root_mtime_ns=root_mtime_ns,
+                )
     except Exception:
         # Summary file write failure is non-fatal — in-memory index is
         # authoritative. Next write will overwrite.
@@ -1042,7 +1054,12 @@ def _remove_summary(root_id: str) -> None:
         pass
 
 
-def _write_summary_file(root_id: str, summary: dict) -> None:
+def _write_summary_file(
+    root_id: str,
+    summary: dict,
+    *,
+    root_mtime_ns: int | None = None,
+) -> None:
     sp = _sessions_dir() / f"{root_id}.summary.json"
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=f".{root_id}.summary.",
@@ -1053,12 +1070,15 @@ def _write_summary_file(root_id: str, summary: dict) -> None:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(summary, f)
         os.replace(tmp_path, sp)
-        root_path = _sessions_dir() / f"{root_id}.json"
         target_mtime_ns = time.time_ns()
-        try:
-            target_mtime_ns = max(target_mtime_ns, root_path.stat().st_mtime_ns)
-        except OSError:
-            pass
+        if root_mtime_ns is None:
+            root_path = _sessions_dir() / f"{root_id}.json"
+            try:
+                root_mtime_ns = root_path.stat().st_mtime_ns
+            except OSError:
+                root_mtime_ns = None
+        if root_mtime_ns is not None:
+            target_mtime_ns = max(target_mtime_ns, root_mtime_ns)
         os.utime(sp, ns=(target_mtime_ns, target_mtime_ns))
     except Exception:
         try:
@@ -1161,16 +1181,22 @@ def _write_summary_index_cache(
         raise
 
 
-def _touch_summary_file_current(root_id: str) -> bool:
+def _touch_summary_file_current(
+    root_id: str,
+    *,
+    root_mtime_ns: int | None = None,
+) -> bool:
     sp = _sessions_dir() / f"{root_id}.summary.json"
     if not sp.exists():
         return False
-    root_path = _sessions_dir() / f"{root_id}.json"
     target_mtime_ns = time.time_ns()
-    try:
-        target_mtime_ns = max(target_mtime_ns, root_path.stat().st_mtime_ns)
-    except OSError:
-        return False
+    if root_mtime_ns is None:
+        root_path = _sessions_dir() / f"{root_id}.json"
+        try:
+            root_mtime_ns = root_path.stat().st_mtime_ns
+        except OSError:
+            return False
+    target_mtime_ns = max(target_mtime_ns, root_mtime_ns)
     try:
         os.utime(sp, ns=(target_mtime_ns, target_mtime_ns))
         return True
@@ -3597,7 +3623,11 @@ def write_session_full(
     # concurrent `list_sessions` observe the new summary while the
     # on-disk file is still the old one.
     with perf.timed("store.session.write_full.summary"):
-        _upsert_summary(root, preserve_projection_fields=preserve_projection_fields)
+        _upsert_summary(
+            root,
+            preserve_projection_fields=preserve_projection_fields,
+            root_mtime_ns=file_signature[0] if file_signature is not None else None,
+        )
 
 
 def list_sessions() -> list[dict]:

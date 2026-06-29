@@ -160,6 +160,22 @@ def _run() -> bool:
             f"version before={version_before} after={version_after}",
         )
     )
+    original_touch = session_store._touch_summary_file_current
+    touch_mtimes: list[int | None] = []
+
+    def track_touch(root_id, *, root_mtime_ns=None):
+        touch_mtimes.append(root_mtime_ns)
+        return original_touch(root_id, root_mtime_ns=root_mtime_ns)
+
+    with patch("session_store._touch_summary_file_current", side_effect=track_touch):
+        session_store.write_session_full(root, bump_updated_at=False)
+    results.append(
+        (
+            "unchanged summary refresh reuses write-path mtime",
+            bool(touch_mtimes) and all(mtime is not None for mtime in touch_mtimes),
+            f"touch_mtimes={touch_mtimes}",
+        )
+    )
 
     msg = root["messages"][-1]
     ctx = ApplyEventCtx(root_id=sid, run_id="run-heavy")

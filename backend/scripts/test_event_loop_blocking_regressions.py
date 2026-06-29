@@ -1771,8 +1771,12 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     upsert_source = source[start:end]
     assert "sidecar_current = True" in upsert_source
     assert "if not summary_changed:" in upsert_source
-    assert "sidecar_current = _touch_summary_file_current(root[\"id\"])" in upsert_source
+    assert "root_mtime_ns=root_mtime_ns" in upsert_source
     assert "if summary_changed or not sidecar_current:" in upsert_source
+    write_start = source.index("def write_session_full(")
+    write_end = source.index("def list_sessions(", write_start)
+    write_source = source[write_start:write_end]
+    assert "root_mtime_ns=file_signature[0] if file_signature is not None else None" in write_source
 
 
 def test_summary_index_skips_empty_projection_scan() -> None:
