@@ -63,6 +63,41 @@ def test_session_index_skips_malformed_roots(failures: list[str]) -> None:
     check(session_store._index_loaded is True, "session index loads despite malformed root/fork records", failures)
 
 
+def test_migrated_root_cache_returns_isolated_trees(failures: list[str]) -> None:
+    import session_store
+    from paths import ba_home
+
+    root = {
+        "_schema_version": session_store.SCHEMA_VERSION,
+        "id": "cache-root",
+        "name": "cache-root",
+        "model": "gpt-5.5",
+        "cwd": "/tmp",
+        "orchestration_mode": "native",
+        "kind": "user",
+        "parent_session_id": None,
+        "forks": [],
+        "messages": [{"id": "m1", "role": "user", "content": "before", "seq": 0}],
+        "next_seq": 1,
+        "created_at": "2026-06-21T00:00:00",
+        "updated_at": "2026-06-21T00:00:00",
+        "source": "cli",
+    }
+    sessions = ba_home() / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "cache-root.json").write_text(json.dumps(root), encoding="utf-8")
+    session_store._migrated_root_cache.clear()
+    first = session_store.get_root_tree("cache-root")
+    if first:
+        first["messages"][0]["content"] = "mutated"
+    second = session_store.get_root_tree("cache-root")
+    check(
+        bool(second) and second["messages"][0]["content"] == "before",
+        "migrated root cache returns isolated trees",
+        failures,
+    )
+
+
 def test_prompt_templates_use_meipass(failures: list[str]) -> None:
     import prompt_templates
 
@@ -498,6 +533,7 @@ def main() -> int:
     failures: list[str] = []
     try:
         test_session_index_skips_malformed_roots(failures)
+        test_migrated_root_cache_returns_isolated_trees(failures)
         test_prompt_templates_use_meipass(failures)
         test_jsonl_path_positive_cache(failures)
         test_jsonl_path_encoded_cwd_fast_path(failures)
