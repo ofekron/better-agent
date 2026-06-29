@@ -449,7 +449,28 @@ class TurnManager:
         msg = self.current_assistant_msgs.get(app_session_id)
         if msg is None:
             return None
-        return copy.deepcopy(msg)
+        # `msg` is the SAME dict `apply_event` mutates — frequently from a
+        # different thread (SDK callback / asyncio.to_thread) under
+        # `session_manager._lock_for_root(root_id)`. An unguarded
+        # `copy.deepcopy` walks the dict tree and races a concurrent key
+        # change, raising 'RuntimeError: dictionary keys changed during
+        # iteration'. Take the snapshot under that same per-root lock so no
+        # thread can reshape the tree mid-copy.
+        #
+        # Lock-order safe: this acquires ONLY a session_manager root lock
+        # for a READ-only deepcopy, and the callers (websocket_chat /
+        # messages_replay / propose_sessions) hold no lock when invoking it.
+        # The documented cross-subsystem order is event_ingester →
+        # session_manager; since no event_ingester lock is taken here, that
+        # order cannot invert.
+        rid = session_manager._root_id_for(app_session_id)
+        if rid is None:
+            # No resolvable root ⇒ no `session_manager.batch(...)` can be
+            # mutating the dict (batch raises KeyError without a root), so
+            # the unguarded copy cannot race a mutation.
+            return copy.deepcopy(msg)
+        with session_manager._lock_for_root(rid):
+            return copy.deepcopy(msg)
 
     def in_flight_event_count(self, app_session_id: str) -> int:
         """Manager-event count on the in-flight assistant message for
