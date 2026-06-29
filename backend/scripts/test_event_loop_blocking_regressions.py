@@ -1634,7 +1634,7 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "session_search_index.has_indexed_rows()" in startup_source
+    assert "session_search_index.needs_rebuild()" in startup_source
 
 
 def test_event_projections_warm_in_background() -> None:

@@ -28,6 +28,10 @@ _SEARCH_CACHE_MAX = 128
 _SEARCH_CACHE_STALE_SECONDS = 5.0
 _index_generation = 0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
+# Bumped whenever the indexed-row shape changes. A persisted index whose
+# stored version differs is stale (e.g. the pre-lean-extraction multi-GB
+# index that stored raw event blobs) and is rebuilt from disk on startup.
+_INDEX_SCHEMA_VERSION = 2
 
 
 def generation() -> int:
@@ -162,13 +166,62 @@ def _configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA mmap_size=268435456")
 
 
+# Only the conversation itself is worth full-text searching. Indexing raw
+# event blobs (tool inputs, tool_result file dumps, worker transcripts,
+# run_state) bloated the FTS table to multi-GB and made content search take
+# seconds. Extract only user/assistant text and tool names.
+_INDEX_TEXT_PER_EVENT_LIMIT = 8_000
+
+
 def _event_text(entry: dict[str, Any]) -> str:
-    data = entry.get("data")
-    if data is None:
+    text = _searchable_event_text(entry)
+    if not text:
         return ""
-    if isinstance(data, str):
-        return data
-    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+    if len(text) > _INDEX_TEXT_PER_EVENT_LIMIT:
+        text = text[:_INDEX_TEXT_PER_EVENT_LIMIT]
+    return text
+
+
+def _searchable_event_text(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    # Only agent_message events carry conversation content; everything else
+    # (worker_*, run_state, turn lifecycle, command_received, ...) is metadata
+    # or bulk transcripts with no search value.
+    if entry.get("type") != "agent_message":
+        return ""
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+        return ""
+    return _content_searchable_text(message.get("content"))
+
+
+def _content_searchable_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(str(block.get("text") or ""))
+        elif btype == "tool_use":
+            # Tool name is useful signal ("which tools did this session use");
+            # the input is often a full file write / command blob — skip it.
+            name = block.get("name")
+            if name:
+                parts.append(str(name))
+        # tool_result / image / thinking → skip (bulk, low search value).
+    return "\n".join(part for part in parts if part)
 
 
 def index_event(session_id: str, entry: dict[str, Any]) -> None:
@@ -366,6 +419,20 @@ def has_indexed_rows() -> bool:
     return row is not None
 
 
+def needs_rebuild() -> bool:
+    """True when there is no usable index, or the persisted index was built
+    under an older row shape and must be rebuilt lean."""
+    conn = _readonly_connection()
+    if conn is None:
+        return True
+    row = conn.execute("PRAGMA user_version").fetchone()
+    stored = row[0] if row else 0
+    if stored != _INDEX_SCHEMA_VERSION:
+        return True
+    row = conn.execute("SELECT 1 FROM session_event_fts LIMIT 1").fetchone()
+    return row is None
+
+
 def rebuild_from_disk() -> None:
     global _index_generation
     if not _rebuild_lock.acquire(blocking=False):
@@ -379,14 +446,19 @@ def rebuild_from_disk() -> None:
         with _lock:
             _close_writer_connection_locked()
             _close_readonly_connection()
+            # Rebuild into a fresh DB file rather than DELETE+reinsert. A
+            # previously bloated index (multi-GB of raw event blobs) leaves
+            # FTS5 tombstoned segments and free pages behind after DELETE, so
+            # queries stay slow; a fresh file is compact and fast.
+            _delete_db_files()
             conn = _connect()
             try:
-                conn.execute("DELETE FROM session_event_fts")
                 if rows:
                     conn.executemany(
                         "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
                         rows,
                     )
+                conn.execute(f"PRAGMA user_version = {_INDEX_SCHEMA_VERSION}")
                 conn.commit()
                 with _search_cache_lock:
                     _index_generation += 1
@@ -394,6 +466,21 @@ def rebuild_from_disk() -> None:
                 conn.close()
     finally:
         _rebuild_lock.release()
+
+
+def _delete_db_files() -> None:
+    base = _db_path()
+    for path in (
+        base,
+        base.with_suffix(base.suffix + "-wal"),
+        base.with_suffix(base.suffix + "-shm"),
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.debug("session search index: could not remove %s", path, exc_info=True)
 
 
 def _candidate_scores(

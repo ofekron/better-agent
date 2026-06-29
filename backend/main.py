@@ -9194,7 +9194,7 @@ async def on_startup():
     import session_search_index
 
     def _rebuild_session_search_index_if_empty() -> None:
-        if session_search_index.has_indexed_rows():
+        if not session_search_index.needs_rebuild():
             logger.info("session_search_index: persisted index present; skipping startup rebuild")
             return
         session_search_index.rebuild_from_disk()
