@@ -358,6 +358,51 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         main.coordinator.submit_team_message = real_submit
 
 
+def test_worker_pool_affinity_reuses_bound_worker_even_when_busy():
+    import asyncio
+
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    sender = main.session_manager.create(
+        name="manager",
+        cwd="/tmp/pool-affinity",
+        orchestration_mode="team",
+    )
+    provision = _post_team_ui_provision(client, {
+        "cwd": "/tmp/pool-affinity",
+        "workers": [
+            {"role_key": "review-a", "orchestration_mode": "native", "tags": ["review"]},
+            {"role_key": "review-b", "orchestration_mode": "native", "tags": ["review"]},
+        ],
+    })
+    assert provision.status_code == 200, provision.text
+    first_target = asyncio.run(main._resolve_communication_target({
+        "sender_session_id": sender["id"],
+        "target_worker_pool": "review",
+        "pool_affinity_key": "thread-1",
+    }))
+
+    real_running = main.coordinator.turn_manager.is_running_cached
+    main.coordinator.turn_manager.is_running_cached = lambda sid: sid == first_target
+    try:
+        repeated_target = asyncio.run(main._resolve_communication_target({
+            "sender_session_id": sender["id"],
+            "target_worker_pool": "review",
+            "pool_affinity_key": "thread-1",
+        }))
+        different_thread_target = asyncio.run(main._resolve_communication_target({
+            "sender_session_id": sender["id"],
+            "target_worker_pool": "review",
+            "pool_affinity_key": "thread-2",
+        }))
+    finally:
+        main.coordinator.turn_manager.is_running_cached = real_running
+
+    assert repeated_target == first_target
+    assert different_thread_target != first_target
+
+
 def test_internal_provision_workers_requires_internal_token():
     broadcasts = []
 
@@ -698,6 +743,7 @@ if __name__ == "__main__":
     test_pool_workers_receive_peer_context_in_provision_prompt()
     test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
+    test_worker_pool_affinity_reuses_bound_worker_even_when_busy()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()
     test_coordinator_target_init_proxy_accepts_ws_callback()

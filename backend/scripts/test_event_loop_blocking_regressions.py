@@ -1982,12 +1982,12 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
     resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
     resolver_source = source[resolver_start:resolver_end]
     assert "await asyncio.to_thread(_find_worker_by_agent_session_id" in resolver_source
-    assert "await asyncio.to_thread(_pick_idle_pool_worker" in resolver_source
+    assert "await asyncio.to_thread(\n        _pick_pool_worker_for_sender" in resolver_source
 
-    async_start = source.index("async def internal_async_communicate(")
-    async_end = source.index("async def _resolve_communication_target(", async_start)
+    async_start = source.index("async def _ask_continue_and_expect_mssg_back_async(")
+    async_end = source.index("async def _ask_wait_and_grab_last_mssg_in_turn(", async_start)
     async_source = source[async_start:async_end]
-    assert "await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)" in async_source
+    assert "await asyncio.to_thread(\n            _pick_pool_worker_for_sender" in async_source
     assert "await _resolve_communication_target(body)" in async_source
     assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
 

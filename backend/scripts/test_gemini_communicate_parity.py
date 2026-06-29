@@ -141,12 +141,14 @@ def test_ask_async_mode_routes_to_ask_endpoint():
     communicate_mcp.ask_response(
         "run in background",
         target_worker_pool="testape",
+        pool_affinity_key="thread-1",
         mode="continue_and_expect_mssg_back_async",
     )
     endpoint, payload, timeout = captured[0]
     assert endpoint == "/api/internal/ask"
     assert payload["sender_session_id"] == "mgr-session"
     assert payload["target_worker_pool"] == "testape"
+    assert payload["pool_affinity_key"] == "thread-1"
     assert payload["message"] == "run in background"
     assert payload["mode"] == "continue_and_expect_mssg_back_async"
     assert payload["provider_id"] is None

@@ -10320,18 +10320,26 @@ async def _ask_continue_and_expect_mssg_back_async(
     requested_model: str,
 ) -> dict[str, Any]:
     target_worker_pool = str(body.get("target_worker_pool") or "").strip()
+    pool_affinity_key = _api_optional_pool_affinity_key(body.get("pool_affinity_key"))
     has_exact_target = (
         str(body.get("target_session_id") or "").strip()
         or str(body.get("target_worker_id") or "").strip()
     )
     if target_worker_pool and not has_exact_target:
-        target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
+        target = await asyncio.to_thread(
+            _pick_pool_worker_for_sender,
+            target_worker_pool,
+            sender_session_id,
+            pool_affinity_key,
+            True,
+        )
         if not target:
             queued = await _enqueue_worker_pool_message(
                 tag=target_worker_pool,
                 sender_session_id=sender_session_id,
                 prompt=message,
                 expect_mssg_response=True,
+                pool_affinity_key=pool_affinity_key,
                 provider_id=requested_provider_id,
                 model=requested_model,
                 reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
@@ -10408,9 +10416,11 @@ async def _handle_internal_ask(body: dict) -> dict[str, Any]:
 
 
 async def _resolve_communication_target(body: dict) -> str:
+    sender_session_id = str((body or {}).get("sender_session_id") or "").strip()
     target_session_id = str((body or {}).get("target_session_id") or "").strip()
     target_worker_id = str((body or {}).get("target_worker_id") or "").strip()
     target_worker_pool = str((body or {}).get("target_worker_pool") or "").strip()
+    pool_affinity_key = _api_optional_pool_affinity_key((body or {}).get("pool_affinity_key"))
     targets = [value for value in (target_session_id, target_worker_id, target_worker_pool) if value]
     if len(targets) != 1:
         raise HTTPException(status_code=400, detail="exactly one target is required")
@@ -10421,7 +10431,13 @@ async def _resolve_communication_target(body: dict) -> str:
         if not worker:
             raise HTTPException(status_code=404, detail="target_worker_id does not exist")
         return str(worker.get("agent_session_id") or "")
-    target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
+    target = await asyncio.to_thread(
+        _pick_pool_worker_for_sender,
+        target_worker_pool,
+        sender_session_id,
+        pool_affinity_key,
+        False,
+    )
     if not target:
         raise HTTPException(status_code=409, detail="no idle worker in target_worker_pool")
     return str(target.get("agent_session_id") or "")
@@ -11937,6 +11953,17 @@ def _worker_provision_prompt_for_body(*, body: dict, bc_session_id: str, descrip
     return f"{base}\n\n{pool_context}"
 
 
+def _api_optional_pool_affinity_key(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    key = str(value).strip()
+    if not key:
+        return ""
+    if len(key) > 200:
+        raise HTTPException(status_code=400, detail="pool_affinity_key must be at most 200 characters")
+    return key
+
+
 @app.post("/api/internal/worker-pools/enqueue")
 async def internal_enqueue_worker_pool_prompt(
     body: dict = Body(default={}),
@@ -11956,6 +11983,7 @@ async def internal_enqueue_worker_pool_prompt(
         sender_session_id=sender_session_id,
         prompt=prompt,
         expect_mssg_response=bool((body or {}).get("expect_mssg_response")),
+        pool_affinity_key=_api_optional_pool_affinity_key((body or {}).get("pool_affinity_key")),
     )
     return {"success": True, **queued}
 
@@ -11966,6 +11994,7 @@ async def _enqueue_worker_pool_message(
     sender_session_id: str,
     prompt: str,
     expect_mssg_response: bool,
+    pool_affinity_key: str = "",
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
@@ -11978,6 +12007,7 @@ async def _enqueue_worker_pool_message(
         "sender_session_id": sender_session_id,
         "prompt": prompt,
         "expect_mssg_response": expect_mssg_response,
+        "pool_affinity_key": pool_affinity_key,
         "provider_id": provider_id,
         "model": model,
         "reasoning_effort": reasoning_effort,
@@ -12008,7 +12038,13 @@ async def _process_worker_pool_queue(tag: str) -> None:
         item = await asyncio.to_thread(_ws.peek_pool_task, tag)
         if not item:
             return
-        target = await asyncio.to_thread(_pick_idle_pool_worker, tag)
+        target = await asyncio.to_thread(
+            _pick_pool_worker_for_sender,
+            tag,
+            str(item.get("sender_session_id") or ""),
+            str(item.get("pool_affinity_key") or ""),
+            True,
+        )
         if not target:
             await asyncio.sleep(1)
             continue
@@ -12045,6 +12081,54 @@ def _pick_idle_pool_worker(tag: str) -> dict | None:
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: item.get("last_active") or "")[0]
+
+
+def _pool_worker_by_session_id(tag: str, worker_session_id: str) -> dict | None:
+    from stores import worker_store as _ws
+
+    wanted = str(worker_session_id or "").strip()
+    if not wanted:
+        return None
+    for worker in _ws.list_workers(""):
+        if str(worker.get("agent_session_id") or "") != wanted:
+            continue
+        if tag not in _ws.normalize_tags(worker.get("tags")):
+            return None
+        session = session_manager.get_lite(wanted)
+        if not session:
+            return None
+        return {**worker, "name": session.get("name") or worker.get("name")}
+    return None
+
+
+def _pick_pool_worker_for_sender(
+    tag: str,
+    sender_session_id: str,
+    pool_affinity_key: str,
+    require_idle: bool,
+) -> dict | None:
+    clean_key = str(pool_affinity_key or "").strip()
+    if clean_key:
+        from stores import pool_affinity_store as _pas
+
+        bound_id = _pas.get_binding(tag, sender_session_id, clean_key)
+        if bound_id:
+            bound = _pool_worker_by_session_id(tag, bound_id)
+            if bound:
+                if not require_idle:
+                    return bound
+                if not coordinator.turn_manager.is_running_cached(bound_id):
+                    session = session_manager.get_lite(bound_id)
+                    if session and not session.get("queued_prompts"):
+                        return bound
+                return None
+            _pas.clear_binding(tag, sender_session_id, clean_key)
+    target = _pick_idle_pool_worker(tag)
+    if target and clean_key:
+        from stores import pool_affinity_store as _pas
+
+        _pas.bind(tag, sender_session_id, clean_key, str(target.get("agent_session_id") or ""))
+    return target
 
 
 def _find_worker_by_agent_session_id(agent_session_id: str) -> dict | None:

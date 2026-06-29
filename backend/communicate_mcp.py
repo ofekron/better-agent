@@ -98,6 +98,7 @@ def _communication_payload(
     target_session_id: str,
     target_worker_id: str,
     target_worker_pool: str,
+    pool_affinity_key: str,
     message: str,
     provider_id: str = "",
     model: str = "",
@@ -106,6 +107,7 @@ def _communication_payload(
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
     target_worker_pool = (target_worker_pool or "").strip()
+    pool_affinity_key = (pool_affinity_key or "").strip()
     message = (message or "").strip()
     targets = [target for target in (target_session_id, target_worker_id, target_worker_pool) if target]
     if len(targets) != 1 or not message:
@@ -116,6 +118,7 @@ def _communication_payload(
         "target_session_id": target_session_id,
         "target_worker_id": target_worker_id,
         "target_worker_pool": target_worker_pool,
+        "pool_affinity_key": pool_affinity_key,
         "message": message,
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
@@ -128,6 +131,7 @@ def mssg_response(
     target_session_id: str = "",
     target_worker_id: str = "",
     target_worker_pool: str = "",
+    pool_affinity_key: str = "",
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
@@ -136,6 +140,7 @@ def mssg_response(
         target_session_id,
         target_worker_id,
         target_worker_pool,
+        pool_affinity_key,
         message,
         provider_id,
         model,
@@ -182,6 +187,7 @@ def ask_response(
     target_session_id: str = "",
     target_worker_id: str = "",
     target_worker_pool: str = "",
+    pool_affinity_key: str = "",
     run_mode: str = "direct",
     worker_description: str = "",
     worker_registry_cwd: str = "",
@@ -194,6 +200,7 @@ def ask_response(
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
     target_worker_pool = (target_worker_pool or "").strip()
+    pool_affinity_key = (pool_affinity_key or "").strip()
     message = (message or "").strip()
     if not any((target_session_id, target_worker_id, target_worker_pool)) or not message:
         return {"success": False, "error": "one target and message are required"}
@@ -241,6 +248,7 @@ def ask_response(
         "target_session_id": target_session_id,
         "target_worker_id": target_worker_id,
         "target_worker_pool": target_worker_pool,
+        "pool_affinity_key": pool_affinity_key,
         "message": message,
         "ask_id": ask_id,
         "mode": mode,
@@ -412,6 +420,7 @@ def build_server() -> FastMCP:
             target_session_id: str = "",
             target_worker_id: str = "",
             target_worker_pool: str = "",
+            pool_affinity_key: str = "",
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
@@ -421,6 +430,7 @@ def build_server() -> FastMCP:
                 target_session_id,
                 target_worker_id,
                 target_worker_pool,
+                pool_affinity_key,
                 provider_id,
                 model,
                 reasoning_effort,
@@ -488,6 +498,7 @@ def build_server() -> FastMCP:
             target_session_id: str = "",
             target_worker_id: str = "",
             target_worker_pool: str = "",
+            pool_affinity_key: str = "",
             run_mode: str = "direct",
             worker_description: str = "",
             worker_registry_cwd: str = "",
@@ -502,6 +513,7 @@ def build_server() -> FastMCP:
                 target_session_id,
                 target_worker_id,
                 target_worker_pool,
+                pool_affinity_key,
                 run_mode,
                 worker_description,
                 worker_registry_cwd,
