@@ -5766,17 +5766,23 @@ async def _project_match_warm_loop():
     global _project_match_ready
     from project_match.worker import rebuild_index
 
+    fingerprint = None
     while True:
         try:
             if _project_match_executor is None:
                 logger.warning("project_match: executor unavailable")
                 return
-            await asyncio.get_running_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 _project_match_executor,
                 rebuild_index,
+                fingerprint,
             )
+            fingerprint = result.get("fingerprint") if isinstance(result, dict) else None
             _project_match_ready = True
-            logger.info("project_match: index rebuilt")
+            if isinstance(result, dict) and result.get("rebuilt") is False:
+                logger.info("project_match: index unchanged; rebuild skipped")
+            else:
+                logger.info("project_match: index rebuilt")
         except Exception:
             _project_match_ready = False
             logger.exception("project_match: index rebuild failed")

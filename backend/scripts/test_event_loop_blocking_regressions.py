@@ -927,6 +927,22 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     assert "_rebuild_session_search_index_if_empty" in startup_source
 
 
+def test_project_match_rebuild_skips_unchanged_session_state() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    warm_start = main_source.index("async def _project_match_warm_loop()")
+    warm_end = main_source.index("def _ensure_project_match_warm_task()", warm_start)
+    warm_source = main_source[warm_start:warm_end]
+    assert "fingerprint = None" in warm_source
+    assert "rebuild_index,\n                fingerprint," in warm_source
+    assert 'result.get("fingerprint")' in warm_source
+    assert 'result.get("rebuilt") is False' in warm_source
+
+    worker_source = (ROOT / "project_match" / "worker.py").read_text(encoding="utf-8")
+    assert "def sessions_fingerprint()" in worker_source
+    assert "previous_fingerprint is not None and fingerprint == previous_fingerprint" in worker_source
+    assert '{"rebuilt": False, "fingerprint": fingerprint}' in worker_source
+
+
 def test_startup_recovery_defers_cold_runs() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     recover_start = source.index("async def _recover_in_flight_task()")
@@ -1199,6 +1215,7 @@ if __name__ == "__main__":
     test_sidebar_summary_omits_worker_refs()
     test_summary_index_skips_empty_projection_scan()
     test_startup_session_search_rebuild_skips_persisted_index()
+    test_project_match_rebuild_skips_unchanged_session_state()
     test_startup_recovery_defers_cold_runs()
     test_startup_recovery_gate_opens_before_live_integration()
     test_recovery_dispatch_skips_reconciled_runs_before_owner_read()
