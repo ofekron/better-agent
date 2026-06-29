@@ -57,6 +57,10 @@ _PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
+# Fingerprint-keyed cache for get_extension() — defined here (beside the
+# other store caches) so _clear_projection_cache can reference it.
+_GET_EXTENSION_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_GET_EXTENSION_CACHE_LOCK = threading.Lock()
 _BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
 _RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
@@ -313,6 +317,11 @@ def _clear_projection_cache() -> None:
     _PROJECTION_CACHE.clear()
     with _RECONCILED_STORE_LOCK:
         _RECONCILED_STORE_FINGERPRINT = None
+    # get_extension's fingerprint cache auto-invalidates on any store write
+    # (file mtime/size changes), but a same-fingerprint forced refresh must
+    # drop it too so a reconcile that rewrites identical bytes is observed.
+    with _GET_EXTENSION_CACHE_LOCK:
+        _GET_EXTENSION_CACHE.clear()
 
 
 def _install_root() -> Path:
@@ -3212,8 +3221,30 @@ def _active_records() -> list[dict[str, Any]]:
 
 
 def get_extension(extension_id: str) -> dict[str, Any] | None:
+    """Fingerprint-cached single-record read.
+
+    HOT PATH: called on the per-request internal-extension auth chain
+    (`internal_extension_settings`, `_require_extension_permission`) AND
+    indirectly via `is_extension_active`, so each guarded request used to
+    take the cross-process `fcntl.flock(LOCK_EX)` + disk read in `_load()`
+    twice on the event loop. The faulthandler watchdog ranked
+    `extension_store._store_lock` the #3 event-loop blocker (acquire-wait
+    via `contextlib.__enter__`). Cache by `store_fingerprint()`
+    (mtime_ns, size) exactly like `is_extension_enabled_cached`: any
+    `_write_store_unlocked` bumps the file fingerprint and auto-
+    invalidates, and `_clear_projection_cache()` drops it explicitly for
+    same-fingerprint refreshes. Returns a deepcopy so callers can't mutate
+    the shared snapshot (parity with the projection cache)."""
+    fingerprint = store_fingerprint()
+    with _GET_EXTENSION_CACHE_LOCK:
+        cached = _GET_EXTENSION_CACHE.get(extension_id)
+        if cached is not None and cached[0] == fingerprint:
+            return copy.deepcopy(cached[1])
     data = _load()
-    return data["extensions"].get(extension_id)
+    record = data["extensions"].get(extension_id)
+    with _GET_EXTENSION_CACHE_LOCK:
+        _GET_EXTENSION_CACHE[extension_id] = (fingerprint, record)
+    return copy.deepcopy(record)
 
 
 def is_extension_enabled_cached(extension_id: str | None) -> bool:
