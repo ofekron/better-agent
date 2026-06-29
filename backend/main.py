@@ -123,6 +123,7 @@ _REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0
 _SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
+_SESSION_LIST_SEARCH_MIN_CANDIDATES = 200
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08
 _SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50
 _SIDEBAR_PAYLOAD_CACHE_MAX = 4096
@@ -4191,7 +4192,7 @@ def _build_local_sessions_page_for_list(
             content_scores = session_store.grep_session_scores(
                 search_query,
                 selected_search_fields,
-                content_limit=max(offset + limit, 1),
+                content_limit=_session_search_candidate_limit(offset, limit),
                 content_max_wait_seconds=content_max_wait_seconds,
             )
         with perf.timed("sessions.list.search_local"):
@@ -4332,6 +4333,10 @@ async def _sidebar_search_scores(
     )
 
 
+def _session_search_candidate_limit(offset: int, limit: int) -> int:
+    return max(offset + limit, _SESSION_LIST_SEARCH_MIN_CANDIDATES)
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     offset: int = Query(0, ge=0),
@@ -4418,7 +4423,8 @@ async def get_sessions(
         _remote_sessions_cache_version_snapshot() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
-    cached_response = _sessions_list_cache_get(cache_key)
+    cache_response = not search_query
+    cached_response = _sessions_list_cache_get(cache_key) if cache_response else None
     if cached_response is not None:
         perf.record("sessions.list.response_cache.hit", 1.0)
         return cached_response
@@ -4427,7 +4433,7 @@ async def get_sessions(
         with perf.timed("sessions.list.local_page_thread"):
             page, total = await asyncio.to_thread(_build_local_sessions_page_for_list, **filters)
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_cache_put(cache_key, {
+        response_payload = {
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -4435,7 +4441,17 @@ async def get_sessions(
             "has_more": offset + limit < total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        })
+        }
+        if cache_response:
+            return _sessions_list_cache_put(cache_key, response_payload)
+        return _sessions_list_response(
+            json.dumps(
+                response_payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
 
     content_scores: dict[str, int] = {}
     appended_virtual_sessions = False
@@ -4479,7 +4495,7 @@ async def get_sessions(
             content_scores = await _sidebar_search_scores(
                 search_query,
                 search_fields,
-                content_limit=max(offset + limit, 1),
+                content_limit=_session_search_candidate_limit(offset, limit),
             )
         with perf.timed("sessions.list.search_local"):
             out = await asyncio.to_thread(
@@ -4799,7 +4815,16 @@ async def get_sessions(
                 separators=(",", ":"),
             ).encode("utf-8")
         )
-    return _sessions_list_cache_put(cache_key, response_payload)
+    if cache_response:
+        return _sessions_list_cache_put(cache_key, response_payload)
+    return _sessions_list_response(
+        json.dumps(
+            response_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
 @app.post("/api/sessions/search-content")
