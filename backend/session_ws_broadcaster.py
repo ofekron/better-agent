@@ -63,6 +63,7 @@ _METADATA_KINDS = {
     "todos_snapshot",
     "tasks_updated",
     "queued_prompts_updated",
+    "last_opened_set",
 }
 
 # Change kinds that are internal-only — they don't need WS frames because
@@ -71,8 +72,10 @@ _METADATA_KINDS = {
 _INTERNAL_KINDS = {
     "agent_sid_set",
     "workers_snapshot",
+    "worker_panel_event",
     "worker_panel_upserted",
     "worker_panel_updated",
+    "delegate_fork_created",
     "native_event_appended",
     "native_event_replaced",
     "native_events_set",
@@ -539,6 +542,8 @@ class SessionWSBroadcaster:
             patch = {
                 "queued_prompts": list(change.get("queued_prompts") or [])
             }
+        elif kind == "last_opened_set":
+            patch = {"last_opened_at": change.get("at")}
         else:
             # Tag changes. Enriched payload carries the full
             # post-mutation inline_tags list.

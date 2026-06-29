@@ -13,25 +13,30 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from session_manager import manager as session_manager  # noqa: E402
+import session_ws_broadcaster  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
+
+
+class StubCoordinator:
+    def __init__(self, captured: list[dict]) -> None:
+        self._captured = captured
+
+    async def noop(self) -> None:
+        return None
+
+    def broadcast_global(self, type_: str, data: dict):
+        self._captured.append({"type": type_, "data": data})
+        return self.noop()
 
 
 def test_active_capability_changes_emit_metadata_patch() -> None:
     captured: list[dict] = []
 
-    class StubCoordinator:
-        async def noop(self) -> None:
-            return None
-
-        def broadcast_global(self, type_: str, data: dict):
-            captured.append({"type": type_, "data": data})
-            return self.noop()
-
     sess = session_manager.create(name="active-capability", cwd="/tmp")
     sid = sess["id"]
     session_manager.add_active_capability(sid, "ofek.testape:testape")
 
-    broadcaster = SessionWSBroadcaster(StubCoordinator())
+    broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
     broadcaster.on_change(sid, {
         "kind": "active_capability_added",
         "capability_id": "ofek.testape:testape",
@@ -47,6 +52,44 @@ def test_active_capability_changes_emit_metadata_patch() -> None:
     }]
 
 
+def test_last_opened_emits_metadata_patch() -> None:
+    captured: list[dict] = []
+    broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
+
+    broadcaster.on_change("sid-1", {
+        "kind": "last_opened_set",
+        "at": "2026-06-29T11:22:33Z",
+    })
+
+    assert captured == [{
+        "type": "session_metadata_updated",
+        "data": {
+            "session_id": "sid-1",
+            "patch": {"last_opened_at": "2026-06-29T11:22:33Z"},
+            "originated_by": None,
+        },
+    }]
+
+
+def test_internal_worker_changes_do_not_warn_or_dispatch() -> None:
+    captured: list[dict] = []
+    seen: list[object] = []
+
+    original_warning = session_ws_broadcaster.logger.warning
+    session_ws_broadcaster.logger.warning = lambda *args, **kwargs: seen.append(args)
+    try:
+        broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
+        broadcaster.on_change("sid-1", {"kind": "worker_panel_event"})
+        broadcaster.on_change("sid-1", {"kind": "delegate_fork_created"})
+    finally:
+        session_ws_broadcaster.logger.warning = original_warning
+
+    assert captured == []
+    assert seen == []
+
+
 if __name__ == "__main__":
     test_active_capability_changes_emit_metadata_patch()
+    test_last_opened_emits_metadata_patch()
+    test_internal_worker_changes_do_not_warn_or_dispatch()
     print("ok")
