@@ -23,6 +23,7 @@ scope.
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 try:  # POSIX only; absent on Windows.
@@ -184,14 +185,40 @@ def _default_home() -> Path:
     return legacy
 
 
-def ba_home() -> Path:
-    """Resolve the Better Agent state root.
+_HOME_CACHE: dict[tuple[str, str], Path] = {}
+_HOME_CACHE_LOCK = threading.Lock()
 
-    Honors `BETTER_AGENT_HOME` if set, then `BETTER_CLAUDE_HOME` as
-    legacy fallback. Env values must be absolute. Without env config,
-    defaults to `~/.better-claude`; when that path is used, creates
-    `~/.better-agent` as a local alias if possible.
+
+def reset_home_cache() -> None:
+    """Drop the memoized ``ba_home()`` result and the secured-roots set.
+
+    The env-keyed cache below already re-resolves automatically whenever the
+    home env vars change (the common test case), so call this only when a test
+    mutates on-disk state under an *unchanged* env value and wants the next
+    ``ba_home()`` to redo the mkdir / chmod / alias work from scratch.
     """
+    with _HOME_CACHE_LOCK:
+        _HOME_CACHE.clear()
+        _SECURED_ROOTS.clear()
+
+
+def _record_resolve_ms(ms: float) -> None:
+    """Surface cold-path resolves in the standard PERF rollup so we can verify
+    in production that the cache is doing its job: after startup this counter
+    should stay near-flat (resolves only on first-touch per env). Lazy import +
+    swallow everything — `paths` is imported far too early and broadly to take
+    a hard dependency on `perf`, and instrumentation must never break path
+    resolution."""
+    try:
+        import perf
+        perf.record("paths.ba_home.resolve", ms)
+    except Exception:
+        pass
+
+
+def _resolve_home_uncached() -> Path:
+    import time as _time
+    t0 = _time.perf_counter()
     configured = _env_home(_PRIMARY_HOME_ENV) or _env_home(_LEGACY_HOME_ENV)
     root = configured or _default_home()
     assert_state_root_safe(root)
@@ -202,7 +229,47 @@ def ba_home() -> Path:
     if secured_key not in _SECURED_ROOTS:
         _make_private(root)
         _SECURED_ROOTS.add(secured_key)
+    _record_resolve_ms((_time.perf_counter() - t0) * 1000.0)
     return root
+
+
+def ba_home() -> Path:
+    """Resolve the Better Agent state root.
+
+    Honors `BETTER_AGENT_HOME` if set, then `BETTER_CLAUDE_HOME` as
+    legacy fallback. Env values must be absolute. Without env config,
+    defaults to `~/.better-claude`; when that path is used, creates
+    `~/.better-agent` as a local alias if possible.
+
+    HOT PATH: this is called hundreds of times across the backend —
+    including inside per-request auth resolution
+    (`orchestrator.resolve_principal`) — and the full resolve issues
+    `mkdir` + `realpath` + `chmod` syscalls every time even though the
+    answer is process-stable. Run on the asyncio loop that made it a
+    top event-loop blocker (faulthandler dumps showed `ba_home` as the
+    single most frequent blocking frame). So memoize the result keyed by
+    the env inputs that are the only thing that can change it. The key is
+    read fresh from the environment on every call (NOT cached at import),
+    so a test that swaps `BETTER_AGENT_HOME`/`BETTER_CLAUDE_HOME`
+    mid-process still re-resolves — preserving the contract in this
+    module's docstring. Steady-state calls are now syscall-free.
+    """
+    env_primary = os.environ.get(_PRIMARY_HOME_ENV, "").strip()
+    env_legacy = os.environ.get(_LEGACY_HOME_ENV, "").strip()
+    cache_key = (env_primary, env_legacy)
+    cached = _HOME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    # Cold path: serialize first-resolve per env so concurrent callers
+    # don't all run the mkdir/chmod/alias setup. Double-check inside the
+    # lock. The body never re-enters ba_home(), so no deadlock.
+    with _HOME_CACHE_LOCK:
+        cached = _HOME_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        root = _resolve_home_uncached()
+        _HOME_CACHE[cache_key] = root
+        return root
 
 
 # Alias to satisfy requirements extension and global rules.

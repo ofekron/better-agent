@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import tempfile
+import os
 import sys
 from unittest import mock
 from pathlib import Path
@@ -2632,6 +2633,18 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     )
 
 
+def test_session_list_filter_sort_keeps_only_page_candidates() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _filter_sort_page_for_list(")
+    end = source.index("def _filter_sessions_for_list_preserving_order(", start)
+    helper_source = source[start:end]
+    assert "heapq.heapreplace(selected, item)" in helper_source
+    assert "heapq.heappush(selected, item)" in helper_source
+    assert "heapq.nlargest(" not in helper_source
+    assert "selected.append(" not in helper_source
+    assert "total += 1" in helper_source
+
+
 def test_startup_warms_virtual_session_summaries_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
@@ -2902,6 +2915,74 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
     assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
 
 
+def test_ba_home_memoizes_resolution_off_loop() -> None:
+    """`ba_home()` is called hundreds of times (incl. per-request auth) and
+    faulthandler dumps showed it as the single most frequent event-loop
+    blocking frame, because every call ran mkdir + realpath + chmod syscalls.
+    Lock in the memoization: (1) source keeps the env-keyed cache and never
+    caches at import; (2) a cache hit issues no filesystem resolve; (3) an env
+    swap still re-resolves (test-isolation contract)."""
+    source = (ROOT / "paths.py").read_text(encoding="utf-8")
+    assert "_HOME_CACHE" in source
+    assert "def reset_home_cache(" in source
+    assert "def _resolve_home_uncached(" in source
+    # The hot fn must consult the cache before resolving.
+    fn_start = source.index("def ba_home(")
+    fn_end = source.index("\nbc_home = ba_home", fn_start)
+    fn_source = source[fn_start:fn_end]
+    assert "_HOME_CACHE.get(cache_key)" in fn_source
+    assert "os.environ.get(_PRIMARY_HOME_ENV" in fn_source  # key read fresh, not import-cached
+
+    # Behavioral: cache hit must not call the resolver (proves syscall-free).
+    import importlib
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="ba-elb-test-")
+    prev_primary = os.environ.get("BETTER_AGENT_HOME")
+    prev_legacy = os.environ.get("BETTER_CLAUDE_HOME")
+    try:
+        os.environ["BETTER_AGENT_HOME"] = home
+        os.environ["BETTER_CLAUDE_HOME"] = home
+        paths = importlib.import_module("paths")
+        paths.reset_home_cache()
+        first = paths.ba_home()
+        sentinel = {"called": False}
+        real = paths._resolve_home_uncached
+
+        def _boom():
+            sentinel["called"] = True
+            raise AssertionError("ba_home cache hit must not re-resolve")
+
+        paths._resolve_home_uncached = _boom
+        try:
+            again = paths.ba_home()
+        finally:
+            paths._resolve_home_uncached = real
+        assert again == first
+        assert sentinel["called"] is False
+
+        # Env swap re-resolves onto the new home.
+        other = tempfile.mkdtemp(prefix="ba-elb-test2-")
+        os.environ["BETTER_AGENT_HOME"] = other
+        os.environ["BETTER_CLAUDE_HOME"] = other
+        swapped = paths.ba_home()
+        assert str(swapped).startswith(other)
+    finally:
+        if prev_primary is None:
+            os.environ.pop("BETTER_AGENT_HOME", None)
+        else:
+            os.environ["BETTER_AGENT_HOME"] = prev_primary
+        if prev_legacy is None:
+            os.environ.pop("BETTER_CLAUDE_HOME", None)
+        else:
+            os.environ["BETTER_CLAUDE_HOME"] = prev_legacy
+        try:
+            import importlib as _il
+            _il.import_module("paths").reset_home_cache()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
     test_ownership_projection_uses_dedicated_executor()
@@ -3024,4 +3105,5 @@ if __name__ == "__main__":
     test_search_sessions_response_cache_uses_metadata_version()
     test_session_summaries_response_cache_precedes_lookup()
     test_internal_communication_worker_lookup_is_off_loop()
+    test_ba_home_memoizes_resolution_off_loop()
     print("PASS event loop blocking regressions")
