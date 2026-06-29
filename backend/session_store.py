@@ -1802,6 +1802,18 @@ def _write_index_sidecar(
         raise
 
 
+def _write_index_sidecar_best_effort(
+    fp: tuple[int, int, int],
+    fork_index: dict[str, str],
+    root_forks: dict[str, set[str]],
+    root_signatures: dict[str, tuple[int, int]],
+) -> None:
+    try:
+        _write_index_sidecar(fp, fork_index, root_forks, root_signatures)
+    except OSError:
+        pass
+
+
 def _persist_index_sidecar_if_loaded() -> None:
     global _index_fingerprint
     with _index_lock:
@@ -1836,10 +1848,6 @@ def _install_index_snapshot(
     _root_index_signatures.update(root_signatures)
     _index_fingerprint = fp
     _negative_root_resolve_cache.clear()
-    try:
-        _write_index_sidecar(fp, fork_index, root_forks, root_signatures)
-    except OSError:
-        pass
 
 
 def _refresh_index() -> None:
@@ -1873,6 +1881,7 @@ def _refresh_index() -> None:
                 if _index_fingerprint is not None and _index_fingerprint == fp:
                     return
                 _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
+            _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
             return
 
 
@@ -1895,6 +1904,7 @@ def _ensure_index() -> None:
                 return
             _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
             _index_loaded = True
+        _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
 
 
 def _resolve_root_id(sid: str) -> Optional[str]:
