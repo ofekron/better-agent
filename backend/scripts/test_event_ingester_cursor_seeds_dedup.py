@@ -159,11 +159,97 @@ def _run_session_event_meta_seeds_cursor() -> bool:
     return ok
 
 
+def _run_session_event_meta_uses_valid_sidecar() -> bool:
+    root = "root-session-meta-sidecar-test"
+    sid = "sid-session-meta-sidecar-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-session-meta-sidecar"},
+        source="prior-run", msg_id="msg-1",
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    sidecar_path = ba_home() / "sessions" / root / "event_meta.json"
+    sidecar_path.write_text(
+        json.dumps({
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "seq": 77,
+            "max_seq_by_sid": {sid: 88},
+            "render_seq_by_sid": {sid: 99},
+            "root_events_version": 3,
+            "root_events_candidate_version": 2,
+            "root_events_by_sid": {sid: [{"type": "agent_message", "data": {"ok": True}}]},
+        }),
+        encoding="utf-8",
+    )
+
+    fresh = EventIngester()
+    has_events, cursor, render_by_sid = fresh.session_event_meta(root)
+    ok = (
+        has_events
+        and cursor == 77
+        and render_by_sid == {sid: 99}
+        and fresh._max_seq_by_sid.get(root) == {sid: 88}
+        and fresh._root_events_version.get(root) == 3
+        and fresh._root_events_candidate_version.get(root) == 2
+        and fresh.root_events_by_sid(root) == {sid: [{"type": "agent_message", "data": {"ok": True}}]}
+    )
+    print(
+        f"  {PASS if ok else FAIL} session_event_meta uses valid event-meta sidecar"
+        f"{'' if ok else f' — cursor={cursor} render={render_by_sid} max={fresh._max_seq_by_sid.get(root)}'}"
+    )
+    return ok
+
+
+def _run_session_event_meta_ignores_stale_sidecar() -> bool:
+    root = "root-session-meta-stale-sidecar-test"
+    sid = "sid-session-meta-stale-sidecar-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-session-meta-stale-sidecar-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    sidecar_path = ba_home() / "sessions" / root / "event_meta.json"
+    sidecar_path.write_text(
+        json.dumps({
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "seq": 77,
+            "max_seq_by_sid": {sid: 88},
+            "render_seq_by_sid": {sid: 99},
+            "root_events_version": 3,
+            "root_events_candidate_version": 2,
+        }),
+        encoding="utf-8",
+    )
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-session-meta-stale-sidecar-2"},
+        source="prior-run", msg_id="msg-2",
+    )
+
+    fresh = EventIngester()
+    has_events, cursor, render_by_sid = fresh.session_event_meta(root)
+    ok = has_events and cursor == 2 and render_by_sid == {sid: 2}
+    print(
+        f"  {PASS if ok else FAIL} session_event_meta ignores stale event-meta sidecar"
+        f"{'' if ok else f' — cursor={cursor} render={render_by_sid}'}"
+    )
+    return ok
+
+
 def main() -> int:
     try:
         ok = _run()
         ok = _run_max_seq_seeds_cursor() and ok
         ok = _run_session_event_meta_seeds_cursor() and ok
+        ok = _run_session_event_meta_uses_valid_sidecar() and ok
+        ok = _run_session_event_meta_ignores_stale_sidecar() and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

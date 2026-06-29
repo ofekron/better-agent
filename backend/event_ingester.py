@@ -137,6 +137,100 @@ class EventIngester:
     def _events_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "events.jsonl"
 
+    def _event_meta_path(self, root_id: str) -> Path:
+        return self._root_dir(root_id) / "event_meta.json"
+
+    @staticmethod
+    def _event_file_signature(path: Path) -> Optional[tuple[int, int]]:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _load_event_meta_sidecar_locked(
+        self, root_id: str, path: Path,
+    ) -> Optional[dict[str, int]]:
+        signature = self._event_file_signature(path)
+        if signature is None:
+            return None
+        try:
+            sidecar = json.loads(
+                self._event_meta_path(root_id).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        if (
+            sidecar.get("mtime_ns") != signature[0]
+            or sidecar.get("size") != signature[1]
+        ):
+            return None
+        max_by_sid = {
+            str(k): int(v)
+            for k, v in (sidecar.get("max_seq_by_sid") or {}).items()
+            if isinstance(k, str)
+        }
+        render_by_sid = {
+            str(k): int(v)
+            for k, v in (sidecar.get("render_seq_by_sid") or {}).items()
+            if isinstance(k, str)
+        }
+        self._max_seq_by_sid[root_id] = max_by_sid
+        self._render_seq_by_sid[root_id] = render_by_sid
+        self._root_events_version[root_id] = int(sidecar.get("root_events_version") or 0)
+        self._root_events_candidate_version[root_id] = int(
+            sidecar.get("root_events_candidate_version") or 0
+        )
+        root_events = sidecar.get("root_events_by_sid")
+        if isinstance(root_events, dict):
+            self._root_events_cache[root_id] = (
+                self._root_events_version[root_id],
+                {
+                    str(sid): events
+                    for sid, events in root_events.items()
+                    if isinstance(sid, str) and isinstance(events, list)
+                },
+            )
+        self._seq[root_id] = int(sidecar.get("seq") or 0)
+        self._next_offset[root_id] = signature[1]
+        return dict(max_by_sid)
+
+    def _write_event_meta_sidecar_locked(
+        self,
+        root_id: str,
+        path: Path,
+        *,
+        max_by_sid: dict[str, int],
+        render_by_sid: dict[str, int],
+        root_events_version: int,
+        root_events_candidate_version: int,
+        seq: int,
+        root_events_by_sid: Optional[dict[str, list[dict]]] = None,
+    ) -> None:
+        signature = self._event_file_signature(path)
+        if signature is None:
+            return
+        sidecar_path = self._event_meta_path(root_id)
+        tmp_path = sidecar_path.with_suffix(".json.tmp")
+        payload = {
+            "mtime_ns": signature[0],
+            "size": signature[1],
+            "seq": seq,
+            "max_seq_by_sid": max_by_sid,
+            "render_seq_by_sid": render_by_sid,
+            "root_events_version": root_events_version,
+            "root_events_candidate_version": root_events_candidate_version,
+            "root_events_by_sid": root_events_by_sid or {},
+        }
+        try:
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp_path, sidecar_path)
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
     def _open_append_handle(self, root_id: str, path: Path) -> Any:
         fh = open(path, "a", encoding="utf-8")
         with self._guard:
@@ -739,6 +833,9 @@ class EventIngester:
             self._root_events_version[root_id] = 0
             self._root_events_candidate_version[root_id] = 0
             return {}
+        sidecar = self._load_event_meta_sidecar_locked(root_id, path)
+        if sidecar is not None:
+            return sidecar
         out: dict[str, int] = {}
         render_out: dict[str, int] = {}
         render_projection_version = 0
@@ -786,13 +883,32 @@ class EventIngester:
         self._max_seq_by_sid[root_id] = out
         self._render_seq_by_sid[root_id] = render_out
         self._root_events_version[root_id] = render_projection_version
-        self._root_events_candidate_version[root_id] = len(
+        root_events_candidate_version = len(
             root_event_candidate_seqs - resolved_root_event_seqs
         )
+        self._root_events_candidate_version[root_id] = root_events_candidate_version
         self._seq[root_id] = parsed_lines
         self._seq_offsets[root_id] = seq_offsets
         self._next_offset[root_id] = cur_offset
         self._full_scan_cache[root_id] = (cur_offset, all_entries)
+        root_events_by_sid = (
+            self._build_root_events_projection(all_entries)
+            if root_events_candidate_version > 0 else {}
+        )
+        self._root_events_cache[root_id] = (
+            render_projection_version,
+            root_events_by_sid,
+        )
+        self._write_event_meta_sidecar_locked(
+            root_id,
+            path,
+            max_by_sid=out,
+            render_by_sid=render_out,
+            root_events_version=render_projection_version,
+            root_events_candidate_version=root_events_candidate_version,
+            seq=parsed_lines,
+            root_events_by_sid=root_events_by_sid,
+        )
         return dict(out)
 
     @staticmethod
