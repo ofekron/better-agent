@@ -80,6 +80,79 @@ describe("FileViewer title", () => {
     expect(screen.queryByTestId("file-viewer-md-monaco")).toBeNull();
   });
 
+  it("copies the current content in its original form", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("/api/file/draft")
+        ? { exists: false }
+        : { content: "# Title\n\n**Bold**", language: "markdown" },
+    } as Response));
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/notes.md"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("file-viewer-md-formatted").textContent).toContain("# Title");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("# Title\n\n**Bold**");
+    });
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  it("copies rendered selections with styled html", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("/api/file/draft")
+        ? { exists: false }
+        : { content: "**Bold**", language: "markdown" },
+    } as Response));
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/notes.md"
+        onClose={() => {}}
+      />,
+    );
+
+    const formatted = await screen.findByTestId("file-viewer-md-formatted");
+    await waitFor(() => expect(formatted.textContent).toContain("**Bold**"));
+    const bold = formatted.querySelector("[data-test-md]");
+    expect(bold).toBeTruthy();
+    const range = document.createRange();
+    range.selectNode(bold as Node);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const data: Record<string, string> = {};
+    const event = new Event("copy", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: {
+        setData: vi.fn((type: string, value: string) => {
+          data[type] = value;
+        }),
+      },
+    });
+    document.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(data["text/plain"]).toBe("**Bold**");
+    expect(data["text/html"]).toContain("**Bold**");
+    expect(data["text/html"]).toContain("style=");
+  });
+
   it("shows when the loaded file changed on disk", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
       const text = String(url);
