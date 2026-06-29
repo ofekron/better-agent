@@ -731,6 +731,25 @@ def test_event_summary_scan_reuses_full_scan_cache() -> None:
     assert "for index, entry in enumerate(entries):" in summary_source
 
 
+def test_message_hydration_reuses_full_scan_cache() -> None:
+    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert "def cached_rows_for_byte_range(" in ingester_source
+    cache_start = ingester_source.index("def cached_rows_for_byte_range(")
+    cache_end = ingester_source.index("def root_events_by_sid(", cache_start)
+    cache_source = ingester_source[cache_start:cache_end]
+    assert "cached = self._full_scan_cache.get(root_id)" in cache_source
+    assert "line_start >= byte_end" in cache_source
+    assert "rows.append(entry)" in cache_source
+
+    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    owned_start = journal_source.index("def _read_owned_range(")
+    owned_end = journal_source.index("def _read_raw_range(", owned_start)
+    owned_source = journal_source[owned_start:owned_end]
+    assert "event_ingester.cached_rows_for_byte_range(" in owned_source
+    assert "if raw is None:" in owned_source
+    assert "self._read_raw_range(" in owned_source
+
+
 def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -1417,6 +1436,7 @@ if __name__ == "__main__":
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
+    test_message_hydration_reuses_full_scan_cache()
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()

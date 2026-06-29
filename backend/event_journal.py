@@ -1376,9 +1376,13 @@ class EventJournalReader:
         owning message's context, so filtering by `context_id` here would
         wrongly drop it (matches the former resolved-branch semantics,
         which filtered by msg_id only)."""
-        raw = self._read_raw_range(
-            session_id, byte_start, byte_end, context_id=None,
+        raw = event_ingester.cached_rows_for_byte_range(
+            session_id, byte_start, byte_end,
         )
+        if raw is None:
+            raw = self._read_raw_range(
+                session_id, byte_start, byte_end, context_id=None,
+            )
         out: list[dict] = []
         for row in raw:
             if row.get("type") == "event_ownership_resolved":
