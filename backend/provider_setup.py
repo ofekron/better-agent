@@ -6,6 +6,7 @@ import hashlib
 import shutil
 import sys
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,10 +108,55 @@ def installer_for(kind: str) -> ProviderInstaller:
 
 
 async def provider_setup_status(kind: str) -> dict[str, Any]:
-    installer = installer_for(kind)
-    prerequisite = await _check_argv(installer.prerequisite_argv)
-    cli = await _check_argv(installer.verify_argv)
-    return _public_status(installer, prerequisite, cli)
+    cached = _STATUS_CACHE.get(kind)
+    now = time.monotonic()
+    if cached and now - cached[0] <= _STATUS_TTL_SECONDS:
+        return _copy_status(cached[1])
+    task = _STATUS_INFLIGHT.get(kind)
+    if cached:
+        if task is None:
+            _STATUS_INFLIGHT[kind] = asyncio.create_task(_refresh_status_cache(kind))
+        return _copy_status(cached[1])
+    if task is None:
+        task = asyncio.create_task(_refresh_status_cache(kind))
+        _STATUS_INFLIGHT[kind] = task
+    return _copy_status(await task)
+
+
+async def _refresh_status_cache(kind: str) -> dict[str, Any]:
+    try:
+        installer = installer_for(kind)
+        prerequisite, cli = await asyncio.gather(
+            _check_argv(installer.prerequisite_argv),
+            _check_argv(installer.verify_argv),
+        )
+        status = _public_status(installer, prerequisite, cli)
+        _STATUS_CACHE[kind] = (time.monotonic(), status)
+        return status
+    finally:
+        if _STATUS_INFLIGHT.get(kind) is asyncio.current_task():
+            _STATUS_INFLIGHT.pop(kind, None)
+
+
+def clear_status_cache(kind: str | None = None) -> None:
+    if kind is None:
+        _STATUS_CACHE.clear()
+        _STATUS_INFLIGHT.clear()
+        return
+    _STATUS_CACHE.pop(kind, None)
+    _STATUS_INFLIGHT.pop(kind, None)
+
+
+def _copy_status(status: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(status)
+    for key in ("prerequisite", "verify", "install"):
+        value = copied.get(key)
+        if isinstance(value, dict):
+            copied[key] = dict(value)
+    command = copied.get("install_command")
+    if isinstance(command, list):
+        copied["install_command"] = list(command)
+    return copied
 
 
 # ---- Streaming install registry ----------------------------------------
@@ -127,6 +173,9 @@ LineFn = Callable[[str, str], Awaitable[None]]
 _INSTALL_RUNS: dict[str, dict[str, Any]] = {}
 _INSTALL_TASKS: dict[str, asyncio.Task] = {}
 _MAX_LINES = 1000
+_STATUS_TTL_SECONDS = 60.0
+_STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_STATUS_INFLIGHT: dict[str, asyncio.Task] = {}
 
 
 def _now_iso() -> str:
@@ -216,6 +265,7 @@ async def _run_install(
         return
 
     cli = await _check_argv(installer.verify_argv)
+    clear_status_cache(kind)
     run["returncode"] = result.get("returncode")
     run["installed"] = bool(cli["ok"])
     run["state"] = "succeeded" if (result.get("ok") and cli["ok"]) else "failed"
