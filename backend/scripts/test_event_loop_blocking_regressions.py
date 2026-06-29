@@ -74,7 +74,10 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "text = await serialized_task" in ws_source
     assert "text = await asyncio.to_thread(" in ws_source
     assert "json.dumps," in ws_source
+    assert "ws_send_lock = asyncio.Lock()" in source
+    assert "async with ws_send_lock:" in ws_source
     assert "await websocket.send_text(text)" in ws_source
+    assert "ws.send_json.lock_wait" in ws_source
     assert "ws.send_json.serialize_off_loop" in ws_source
     assert "await websocket.send_json(event_dict)" not in ws_source
     orchestrator_source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
