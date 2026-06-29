@@ -660,6 +660,20 @@ def test_tree_stub_cache_key_reads_render_seq_once() -> None:
     assert "render_seq_for_sid(" not in key_source
 
 
+def test_session_event_meta_uses_combined_ingester_read() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _session_event_meta(")
+    helper_end = source.index("def _session_event_meta_cache_fresh(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "event_ingester.session_event_meta(root_id)" in helper_source
+    assert "event_ingester.max_seq_by_sid(root_id)" not in helper_source
+    assert "event_ingester.cursor(root_id)" not in helper_source
+    assert "event_ingester.render_seq_by_sid(root_id)" not in helper_source
+
+    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert "def session_event_meta(self, root_id: str)" in ingester_source
+
+
 def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -894,6 +908,7 @@ def test_sidebar_summary_omits_worker_refs() -> None:
 
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "def _projection_snapshot()" in source
     assert "def _has_projection_snapshot()" in source
     assert "def _summary_has_projection(" in source
     assert "def _start_summary_projection_repair(" in source
@@ -907,11 +922,16 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     assert "_summary_projection_repair_running = False" in repair_source
     assert "finally:" in repair_source
     assert "updates: dict[str, dict] = {}" in repair_source
+    assert "projection_snapshot = _projection_snapshot()" in repair_source
+    assert "_requirement_tags_for_session(sid)" not in repair_source
+    assert "_markers_for_session(sid)" not in repair_source
     assert repair_source.count("_summary_index_version += 1") == 1
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
     assert "summary_projection_present = False" in build_source
+    assert "projection_snapshot = _projection_snapshot()" in build_source
+    assert "_build_summary_for_root(data, projection_snapshot)" in build_source
     assert "if _summary_has_projection(summary):" in build_source
     assert "if _has_projection_snapshot() or summary_projection_present:" in build_source
     assert "_start_summary_projection_repair()" in build_source

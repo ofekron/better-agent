@@ -669,6 +669,26 @@ class EventIngester:
             cached = self._render_seq_by_sid.get(root_id)
             return dict(cached) if cached else {}
 
+    def session_event_meta(self, root_id: str) -> tuple[bool, int, dict[str, int]]:
+        """Return has-events, root cursor, and render watermarks in one pass."""
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            max_by_sid = self._max_seq_by_sid.get(root_id)
+            render_by_sid = self._render_seq_by_sid.get(root_id)
+            if max_by_sid is None or render_by_sid is None:
+                max_by_sid = self._scan_max_seq(root_id)
+                render_by_sid = self._render_seq_by_sid.get(root_id) or {}
+            cursor = self._seq.get(root_id)
+            if cursor is None:
+                path = self._events_path(root_id)
+                if not path.exists():
+                    cursor = 0
+                else:
+                    with open(path, encoding="utf-8") as f:
+                        cursor = sum(1 for _ in f)
+                self._seq[root_id] = cursor
+            return bool(max_by_sid), int(cursor), dict(render_by_sid)
+
     def max_seq_for_sid(self, root_id: str, sid: str) -> int:
         """Scalar variant: max seq for a single sid. Returns 0 if unknown.
 

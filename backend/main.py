@@ -173,10 +173,7 @@ def _session_event_meta(root_id: str) -> tuple[bool, int, dict[str, int]]:
     if cached is not None and cached[0] == fingerprint:
         return cached[1], cached[2], dict(cached[3])
 
-    max_by_sid = event_ingester.max_seq_by_sid(root_id)
-    has_events = bool(max_by_sid)
-    barrier_seq = event_ingester.cursor(root_id) if has_events else 0
-    max_context = event_ingester.render_seq_by_sid(root_id) if has_events else {}
+    has_events, barrier_seq, max_context = event_ingester.session_event_meta(root_id)
     _session_event_meta_cache[root_id] = (
         fingerprint,
         has_events,
