@@ -5,15 +5,6 @@ import { makeAssistantMsg, makeRun, makeSession, makeUserMsg } from "./fixtures"
 import { buildInlineTagsPreamble } from "../src/utils/inlineTagsPrompt";
 import type { InlineTag } from "../src/types/inlineTag";
 
-function setViewportWidth(width: number) {
-  Object.defineProperty(window, "innerWidth", {
-    configurable: true,
-    writable: true,
-    value: width,
-  });
-  window.dispatchEvent(new Event("resize"));
-}
-
 async function typeAndSteer(h: Awaited<ReturnType<typeof renderApp>>, text: string) {
   const input = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement | null;
   if (!input) throw new Error("input textarea not present");
@@ -44,13 +35,6 @@ async function typeAndQueue(h: Awaited<ReturnType<typeof renderApp>>, text: stri
     return;
   }
   throw new Error("queue action not present");
-}
-
-async function pressEmptyEnter(h: Awaited<ReturnType<typeof renderApp>>) {
-  const input = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement | null;
-  if (!input) throw new Error("input textarea not present");
-  fireEvent.keyDown(input, { key: "Enter" });
-  await h.flush();
 }
 
 async function waitForNoSendingMessages(h: Awaited<ReturnType<typeof renderApp>>) {
@@ -169,42 +153,6 @@ describe("steer prompt events", () => {
     });
     expect(h.outbound.some((frame) => frame.type === "cancel_queued")).toBe(false);
     expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
-    h.unmount();
-  });
-
-  it("steers the queued prompt on empty Enter for steerable streaming sessions", async () => {
-    setViewportWidth(1280);
-    const session = makeSession({
-      provider_id: "codex",
-      messages: [
-        makeUserMsg({ id: "u1", content: "start work" }),
-        makeAssistantMsg({ id: "a1", isStreaming: true }),
-      ],
-      queued_prompts: [{
-        id: "q1",
-        content: "queued steer",
-        client_id: "client-q1",
-      }],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    h.emit({
-      type: "run_state",
-      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
-    });
-    await h.flush();
-
-    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
-    await pressEmptyEnter(h);
-
-    expect(h.outbound).toContainEqual(
-      expect.objectContaining({
-        type: "promote_queued",
-        app_session_id: session.id,
-        action: "steer",
-      }),
-    );
-    expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
     h.unmount();
   });
 

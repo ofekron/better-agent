@@ -666,12 +666,9 @@ export function InputArea({
           files={queuedPrompt.files}
           filesCount={queuedPrompt.filesCount}
           onPromote={onPromoteQueued}
-          onSteer={canSteer && _isStreaming ? onSteerQueued : undefined}
           onCancel={onCancelQueued!}
           onEdit={onQueuedTextEdit}
           onSaveToNote={onQueuedToNote ?? undefined}
-          steerLabel={t("input.steerButton")}
-          steerTitle={t("input.steerTitle")}
           interruptLabel={t("input.interruptButton")}
           interruptTitle={t("input.interruptTitle")}
           cancelLabel={t("app.cancel")}
@@ -1029,12 +1026,9 @@ function QueuedPromptBanner({
   files,
   filesCount,
   onPromote,
-  onSteer,
   onCancel,
   onEdit,
   onSaveToNote,
-  steerLabel,
-  steerTitle,
   interruptLabel,
   interruptTitle,
   cancelLabel,
@@ -1049,12 +1043,9 @@ function QueuedPromptBanner({
   files?: FileAttachment[];
   filesCount?: number;
   onPromote: () => void;
-  onSteer?: () => void;
   onCancel: () => void;
   onEdit?: (text: string) => void;
   onSaveToNote?: (text: string) => void;
-  steerLabel: string;
-  steerTitle: string;
   interruptLabel: string;
   interruptTitle: string;
   cancelLabel: string;
@@ -1172,16 +1163,6 @@ function QueuedPromptBanner({
             {summaryBits.join(" · ")}
           </span>
         )}
-        {onSteer && (
-          <button
-            className="promote-btn"
-            data-testid="queued-steer-btn"
-            onClick={onSteer}
-            title={steerTitle}
-          >
-            {steerLabel}
-          </button>
-        )}
         <button
           className="promote-btn interrupt"
           data-testid="queued-interrupt-btn"
@@ -1249,19 +1230,6 @@ function QueuedPromptBanner({
               </button>
             )}
           </>
-        )}
-        {onSteer && (
-          <button
-            className="promote-btn"
-            data-testid="queued-steer-btn"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onSteer();
-            }}
-            title={steerTitle}
-          >
-            {steerLabel}
-          </button>
         )}
         <button
           className="promote-btn interrupt"
@@ -1389,16 +1357,6 @@ function QueuedPromptBanner({
               </button>
             )}
           </>
-        )}
-        {onSteer && (
-          <button
-            className="promote-btn"
-            data-testid="queued-steer-btn"
-            onClick={onSteer}
-            title={steerTitle}
-          >
-            {steerLabel}
-          </button>
         )}
         <button
           className="promote-btn interrupt"
