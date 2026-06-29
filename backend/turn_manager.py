@@ -579,7 +579,7 @@ class TurnManager:
     def run_state_remove(self, app_session_id: str, run_id: str) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
-            logger.info(
+            logger.debug(
                 "RUNSTATE_DBG[remove_noop:%s] sid=%s — no entries to remove",
                 run_id[:8], app_session_id[:8],
             )
@@ -812,7 +812,7 @@ class TurnManager:
     ) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
-            logger.info(
+            logger.debug(
                 "RUNSTATE_DBG[set_pid_noop:%s] sid=%s pid=%s — no entries",
                 run_id[:8], app_session_id[:8], pid,
             )
@@ -825,7 +825,7 @@ class TurnManager:
                     app_session_id, f"set_pid:{run_id[:8]}:{pid}",
                 )
                 return
-        logger.info(
+        logger.debug(
             "RUNSTATE_DBG[set_pid_nomatch:%s] sid=%s pid=%s — run_id absent",
             run_id[:8], app_session_id[:8], pid,
         )
