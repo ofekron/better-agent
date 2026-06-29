@@ -1186,6 +1186,20 @@ def test_get_session_strips_synthetic_events_off_loop() -> None:
     assert "strip_ms" in helper_source
 
 
+def test_session_detail_response_bytes_are_cached() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_session_detail_response_cache" in source
+    assert "def _session_detail_cache_get(" in source
+    assert "def _session_detail_cache_put(" in source
+    assert "def _session_detail_response_cache_key_sync(" in source
+    route_start = source.index("async def get_session(")
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "_session_detail_cache_get(cache_key)" in route_source
+    assert "_session_reconcile_snapshot_and_schedule" in route_source
+    assert "_session_detail_cache_put(cache_key, tree)" in route_source
+
+
 def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     finalize_start = source.index("async def _finalize_when_done(")
@@ -1387,7 +1401,9 @@ if __name__ == "__main__":
     test_requirement_tag_refresh_is_off_startup_loop()
     test_machine_nodes_readiness_check_is_off_startup_loop()
     test_sessions_route_does_not_runtime_check_machine_nodes()
+    test_session_organization_refresh_is_coalesced_background_work()
     test_get_session_strips_synthetic_events_off_loop()
+    test_session_detail_response_bytes_are_cached()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
