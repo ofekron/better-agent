@@ -2050,11 +2050,11 @@ class TurnManager:
                                 if session_id_field == "supervisor_agent_session_id":
                                     discovery_mode = "supervisor"
                                 else:
-                                    _disc_rec = session_manager.get(
-                                        primary_session_id or app_session_id
-                                    )
                                     discovery_mode = (
-                                        (_disc_rec or {}).get("orchestration_mode")
+                                        session_manager.get_field(
+                                            primary_session_id or app_session_id,
+                                            "orchestration_mode",
+                                        )
                                         or "manager"
                                     )
                                 session_manager.set_agent_sid(
