@@ -397,6 +397,8 @@ def test_internal_workers_list_runs_projection_off_loop() -> None:
     projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
     assert "session_manager.get_fields(" in projection_source
     assert "session_manager.get_lite(" not in projection_source
+    assert "pair_records: list[dict[str, Any]] = []" in projection_source
+    assert projection_source.index("pair_records.append(rec)") < projection_source.index("compute_jsonl_path(")
 
 
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
