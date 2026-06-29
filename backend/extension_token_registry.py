@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from pathlib import Path
 
 from paths import ba_home
@@ -29,6 +30,8 @@ _LOCK = threading.Lock()
 # invalidates the cache instead of being silently invisible until restart.
 _cache_key: tuple[str, int, int] | None = None
 _cache: dict[str, str] | None = None
+_last_fingerprint_check = 0.0
+_FINGERPRINT_TTL_SECONDS = 0.25
 
 
 def _path() -> Path:
@@ -44,9 +47,17 @@ def _fingerprint(path: Path) -> tuple[str, int, int]:
 
 
 def _load_locked() -> dict[str, str]:
-    global _cache_key, _cache
+    global _cache_key, _cache, _last_fingerprint_check
     path = _path()
+    now = time.monotonic()
+    if (
+        _cache is not None
+        and _cache_key is not None
+        and now - _last_fingerprint_check < _FINGERPRINT_TTL_SECONDS
+    ):
+        return _cache
     key = _fingerprint(path)
+    _last_fingerprint_check = now
     if _cache is not None and _cache_key == key:
         return _cache
     try:
@@ -86,8 +97,9 @@ def mint(extension_id: str) -> str:
             token = secrets.token_urlsafe(32)
             data[extension_id] = token
             _persist_locked(data)
-            global _cache, _cache_key
+            global _cache, _cache_key, _last_fingerprint_check
             _cache, _cache_key = data, _fingerprint(_path())
+            _last_fingerprint_check = time.monotonic()
         return token
 
 
@@ -112,5 +124,6 @@ def revoke(extension_id: str) -> None:
         data = dict(_load_locked())
         if data.pop(extension_id, None) is not None:
             _persist_locked(data)
-            global _cache, _cache_key
+            global _cache, _cache_key, _last_fingerprint_check
             _cache, _cache_key = data, _fingerprint(_path())
+            _last_fingerprint_check = time.monotonic()
