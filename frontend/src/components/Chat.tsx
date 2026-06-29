@@ -390,6 +390,7 @@ interface Props {
   /** Currently queued prompt (shown in banner). */
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
   onPromoteQueued: () => void;
+  onSteerQueued?: () => void;
   onCancelQueued?: () => void;
   onQueuedTextEdit?: (text: string) => void;
   /** When the supervisor toggle is on, renders a "Review" button. */
@@ -428,6 +429,7 @@ interface Props {
   sessionTabsSort?: string;
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
+  onToggleTopbarPin?: (id: string, pinned: boolean) => void;
   onSelectTab?: (id: string) => void;
   onTabCapacityChange?: (capacity: number) => void;
   /** Optional node rendered at the TOP of the message scroll area,
@@ -511,6 +513,7 @@ export function Chat({
   onForkAndSend,
   queuedPrompt,
   onPromoteQueued,
+  onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
   onReviewLastWork,
@@ -532,6 +535,7 @@ export function Chat({
   sessionTabsSort = "last_opened_at",
   providers = [],
   onCloseTab,
+  onToggleTopbarPin,
   onSelectTab,
   onTabCapacityChange,
   headerNode,
@@ -1146,6 +1150,7 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onToggleTopbarPin={onToggleTopbarPin ?? (() => {})}
           onMeasuredCapacityChange={onTabCapacityChange}
         />
       )}
@@ -1447,6 +1452,7 @@ export function Chat({
               onImagesChange={onImagesChange}
               queuedPrompt={queuedPrompt}
               onPromoteQueued={onPromoteQueued}
+              onSteerQueued={onSteerQueued}
               onCancelQueued={onCancelQueued}
               onQueuedTextEdit={onQueuedTextEdit}
               onReviewLastWork={onReviewLastWork}
