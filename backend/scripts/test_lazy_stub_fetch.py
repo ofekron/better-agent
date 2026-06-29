@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 import _test_home
@@ -36,6 +37,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import render_stub  # noqa: E402
+from event_journal import event_journal_reader  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -77,6 +79,17 @@ def _worker_event(delegation_id: str, uuid: str, text: str = "x") -> dict:
     }
 
 
+def _wait_for_summaries(sid: str, msg_ids: list[str], timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        summaries = event_journal_reader.message_event_summaries(sid)
+        if all((summaries.get(msg_id) or {}).get("event_count", 0) > 0 for msg_id in msg_ids):
+            return
+        time.sleep(0.02)
+    summaries = event_journal_reader.message_event_summaries(sid)
+    raise AssertionError(f"journal summaries not ready for {msg_ids}: {summaries}")
+
+
 def _mk_two_turn_session() -> tuple[str, str, str]:
     """Manager session with two completed turns. Turn 1 (asst1) has 3
     renderable events; turn 2 (asst2, the latest) has 2."""
@@ -105,6 +118,7 @@ def _mk_two_turn_session() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"])
     asst2_id = _turn("q2", ["b1", "b2"])
+    _wait_for_summaries(sid, [asst1_id, asst2_id])
     return sid, asst1_id, asst2_id
 
 
@@ -151,6 +165,7 @@ def _mk_two_turn_session_with_worker() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"], with_worker=True)
     asst2_id = _turn("q2", ["b1", "b2"])
+    _wait_for_summaries(sid, [asst1_id, asst2_id])
     return sid, asst1_id, asst2_id
 
 
