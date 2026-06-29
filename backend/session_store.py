@@ -128,6 +128,8 @@ def _infer_user_initiated(session: dict) -> bool:
 
 
 _SESSIONS_DIR = ba_home() / "sessions"
+_SESSIONS_DIR_READY = False
+_SESSIONS_DIR_READY_LOCK = threading.Lock()
 
 
 def _sessions_dir() -> Path:
@@ -135,7 +137,14 @@ def _sessions_dir() -> Path:
 
 
 def _ensure_dir():
-    _sessions_dir().mkdir(parents=True, exist_ok=True)
+    global _SESSIONS_DIR_READY
+    if _SESSIONS_DIR_READY:
+        return
+    with _SESSIONS_DIR_READY_LOCK:
+        if _SESSIONS_DIR_READY:
+            return
+        _sessions_dir().mkdir(parents=True, exist_ok=True)
+        _SESSIONS_DIR_READY = True
 
 
 # ── Fork index ────────────────────────────────────────────────────────

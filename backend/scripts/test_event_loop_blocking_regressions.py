@@ -1818,11 +1818,19 @@ def test_summary_index_cache_is_sidecar() -> None:
 def test_session_store_sessions_dir_is_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_SESSIONS_DIR = ba_home() / \"sessions\"" in source
+    assert "_SESSIONS_DIR_READY = False" in source
+    assert "_SESSIONS_DIR_READY_LOCK = threading.Lock()" in source
     sessions_dir_start = source.index("def _sessions_dir()")
     sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
     sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
     assert "return _SESSIONS_DIR" in sessions_dir_source
     assert "ba_home()" not in sessions_dir_source
+    ensure_start = source.index("def _ensure_dir()")
+    ensure_end = source.index("# ── Fork index", ensure_start)
+    ensure_source = source[ensure_start:ensure_end]
+    assert "if _SESSIONS_DIR_READY:\n        return" in ensure_source
+    assert "_sessions_dir().mkdir(parents=True, exist_ok=True)" in ensure_source
+    assert "_SESSIONS_DIR_READY = True" in ensure_source
 
 
 def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
