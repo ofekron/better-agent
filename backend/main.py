@@ -131,7 +131,7 @@ _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
-_local_visible_order_cache: dict[tuple[str, int], tuple[list[str], int]] = {}
+_local_visible_order_cache: dict[tuple[str, str | None, int], tuple[list[str], int]] = {}
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
@@ -2619,8 +2619,7 @@ def _can_page_default_local_visible_order(
     content_scores: dict[str, int],
 ) -> bool:
     return (
-        project_path is None
-        and not (search or "").strip()
+        not (search or "").strip()
         and not show_archived
         and file_edit_mode is None
         and not folder_ids
@@ -2633,10 +2632,10 @@ def _can_page_default_local_visible_order(
     )
 
 
-def _local_visible_order_ids(sort_by: str) -> tuple[list[str], int]:
+def _local_visible_order_ids(sort_by: str, project_path: str | None = None) -> tuple[list[str], int]:
     import working_mode as _wm
-    version = session_store.summary_order_version()
-    key = (sort_by, version)
+    version = session_store.summary_index_version()
+    key = (sort_by, project_path, version)
     cached = _local_visible_order_cache.get(key)
     if cached is not None:
         perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
@@ -2646,6 +2645,8 @@ def _local_visible_order_ids(sort_by: str) -> tuple[list[str], int]:
     visible_ids: list[str] = []
     with perf.timed("sessions.list.local.visible_order_build"):
         for summary in session_store.get_session_summaries_by_ids(ordered_ids):
+            if project_path is not None and summary.get("cwd") != project_path:
+                continue
             if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
                 continue
             sid = summary.get("id")
@@ -2690,7 +2691,7 @@ def _local_session_page_for_sidebar_preserving_order(
         content_scores=content_scores,
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
-            visible_ids, total = _local_visible_order_ids(sort_by)
+            visible_ids, total = _local_visible_order_ids(sort_by, project_path)
             page_ids = visible_ids[offset:offset + limit]
             return session_store.get_session_summaries_by_ids(page_ids), total
     with perf.timed("sessions.list.local.ordered_ids"):
