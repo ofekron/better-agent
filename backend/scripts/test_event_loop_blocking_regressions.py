@@ -973,7 +973,15 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "def _session_detail_projection_roots_for_page(" in source
     assert "def _warm_session_detail_projection_roots(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
-    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, pending)" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_BATCH" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS" in source
+    detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
+    detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
+    detail_warm_source = source[detail_warm_start:detail_warm_end]
+    assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)" in detail_warm_source
+    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in detail_warm_source
+    assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)" in detail_warm_source
     warm_start = source.index("def _schedule_session_event_meta_warm(")
     warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
     warm_source = source[warm_start:warm_end]

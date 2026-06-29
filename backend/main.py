@@ -98,6 +98,9 @@ _SESSION_EVENT_META_GLOBAL_WARM_LIMIT = 250
 _SESSION_EVENT_META_GLOBAL_WARM_BATCH = 4
 _SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS = 30.0
 _SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS = 0.25
+_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 1.0
+_SESSION_DETAIL_PAGE_WARM_BATCH = 2
+_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS = 0.15
 _SESSION_DETAIL_WARM_MSG_LIMIT = 50
 _SESSION_DETAIL_WARM_EXCHANGE_COUNT = 3
 _sessions_list_response_cache: dict[
@@ -317,7 +320,12 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
         return
 
     try:
-        await asyncio.to_thread(_warm_session_detail_projection_roots_sync, pending)
+        await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)
+        for idx in range(0, len(pending), _SESSION_DETAIL_PAGE_WARM_BATCH):
+            batch = pending[idx:idx + _SESSION_DETAIL_PAGE_WARM_BATCH]
+            await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)
+            if idx + _SESSION_DETAIL_PAGE_WARM_BATCH < len(pending):
+                await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)
     finally:
         for root_id in pending:
             _session_detail_projection_warm_inflight.discard(root_id)
