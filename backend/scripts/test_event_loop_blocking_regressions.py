@@ -946,6 +946,17 @@ def test_summary_worker_count_uses_count_projection() -> None:
     assert "_worker_count_cache.clear()" in worker_source
 
 
+def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def _upsert_summary(")
+    end = source.index("def _drafts_path(", start)
+    upsert_source = source[start:end]
+    assert "sidecar_current = True" in upsert_source
+    assert "if not summary_changed:" in upsert_source
+    assert "sidecar_current = _touch_summary_file_current(root[\"id\"])" in upsert_source
+    assert "if summary_changed or not sidecar_current:" in upsert_source
+
+
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshot()" in source
@@ -1300,6 +1311,8 @@ if __name__ == "__main__":
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_sidebar_summary_omits_worker_refs()
+    test_summary_worker_count_uses_count_projection()
+    test_summary_sidecar_stat_only_for_unchanged_summary()
     test_summary_index_skips_empty_projection_scan()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_project_match_rebuild_skips_unchanged_session_state()
