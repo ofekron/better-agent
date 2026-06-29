@@ -1082,7 +1082,7 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshot()" in source
-    assert "def _has_projection_snapshot()" in source
+    assert "def _has_projection_snapshot()" not in source
     assert "def _start_summary_projection_repair(" in source
     assert "_summary_projection_repair_lock = threading.Lock()" in source
     assert "_summary_projection_repair_running = False" in source
@@ -1101,6 +1101,12 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
+    cache_start = build_source.index("cached_summaries = _load_summary_index_cache(")
+    pass_start = build_source.index("# Trees migrated in Pass 2")
+    cache_source = build_source[cache_start:pass_start]
+    assert "if _has_projection_snapshot()" not in cache_source
+    assert "_start_summary_projection_repair()" in cache_source
+    assert "return" in cache_source
     assert "projection_snapshot = _projection_snapshot()" in build_source
     assert "organization_projection = session_organization_store.enrichment_projection()" in build_source
     assert "_build_summary_for_root(" in build_source
