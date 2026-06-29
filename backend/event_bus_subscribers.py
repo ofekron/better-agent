@@ -483,3 +483,61 @@ def bind_post_turn_hooks() -> None:
         name="extension_post_turn_hooks",
     )
     logger.info("event_bus: registered extension post-turn hooks subscriber")
+
+
+def bind_pre_turn_hooks() -> None:
+    """Dispatch ``lifecycle.turn_start`` to every installed extension that
+    declares an ``entrypoints.hooks.pre_turn`` backend path. Fire-and-forget,
+    isolated errors — one failing hook never blocks another or the turn.
+
+    Mirror of ``bind_post_turn_hooks``: subscribes to the existing
+    turn-start bus event the orchestrator already publishes, so it touches no
+    turn-execution path (no convergence-invariant risk). Each hook is a
+    sandboxed backend-host invocation via ``invoke_extension_backend``. The
+    body carries the turn context (session id + payload); hooks fetch whatever
+    else they need (prompt, cwd) via core internal endpoints, exactly as
+    post-turn hooks do."""
+    import extension_backend_loader
+
+    def _log_task_exception(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception:
+            logger.exception("pre-turn hook task raised")
+
+    async def _on_turn_start(event: BusEvent) -> None:
+        try:
+            import extension_store
+            hooks = extension_store.pre_turn_hooks()
+            if not hooks:
+                return
+            from env_compat import get_env
+            import json as _json
+            base_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
+            body = _json.dumps({
+                "session_id": event.sid,
+                "app_session_id": event.sid,
+                "turn_type": event.type,
+                "payload": event.payload or {},
+            }).encode("utf-8")
+            for ext_id, path in hooks:
+                async def _invoke(eid: str = ext_id, p: str = path) -> None:
+                    try:
+                        await extension_backend_loader.invoke_extension_backend(
+                            eid, p.lstrip("/"), method="POST", body_bytes=body, base_url=base_url,
+                        )
+                    except Exception:
+                        logger.exception("pre-turn hook %s failed", eid)
+                t = asyncio.create_task(_invoke(), name=f"pre-turn-{ext_id}-{event.sid[:8]}")
+                t.add_done_callback(_log_task_exception)
+        except Exception:
+            logger.exception("pre-turn hook dispatch failed for %s", event.sid)
+
+    bus.unsubscribe("extension_pre_turn_hooks")
+    bus.subscribe(
+        "lifecycle.turn_start",
+        _on_turn_start,
+        priority=300,
+        name="extension_pre_turn_hooks",
+    )
+    logger.info("event_bus: registered extension pre-turn hooks subscriber")
