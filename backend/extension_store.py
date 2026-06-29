@@ -210,6 +210,7 @@ _required_artifact_update_checked: set[str] = set()
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
+    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["llm_tasks"].items() if _pid(k)},
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
@@ -4706,6 +4707,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "has_page": bool(entrypoints.get("page")),
         "harness_delivery": harness_delivery_mode(extension_id),
         "harness_additions": extension_harness_additions(record),
+        "internal_llm_tasks": extension_internal_llm_tasks(record),
         "ui": get_ui_settings(extension_id),
         "mcp": extension_mcp_servers(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),
@@ -4717,6 +4719,21 @@ def extension_config(extension_id: str) -> dict[str, Any]:
             "effective": effective_permissions(record),
         },
     }
+
+
+def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
+    return list(_BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()))
+
+
+def extension_internal_llm_task_keys() -> set[str]:
+    task_keys: set[str] = set()
+    for record in list_extensions(include_hidden=True):
+        if record.get("enabled") is False:
+            continue
+        task_keys.update(extension_internal_llm_tasks(record))
+    return task_keys
 
 
 def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, str]]:

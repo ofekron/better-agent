@@ -19,9 +19,14 @@ type Assignment = {
 
 const INHERIT = "";
 
-export function InternalLLMSetting() {
+interface InternalLLMSettingProps {
+  tasks?: string[];
+  showHint?: boolean;
+}
+
+export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: InternalLLMSettingProps = {}) {
   const { t } = useTranslation();
-  const [tasks, setTasks] = useState<string[]>([]);
+  const [loadedTasks, setLoadedTasks] = useState<string[]>([]);
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [providers, setProviders] = useState<Provider[]>([]);
   const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
@@ -32,7 +37,7 @@ export function InternalLLMSetting() {
       fetch(`${API}/api/settings/internal-llm`)
         .then((r) => r.json())
         .then((data: { tasks?: string[]; assignments?: Record<string, Assignment> }) => {
-          setTasks(data.tasks || []);
+          setLoadedTasks(data.tasks || []);
           setAssignments(data.assignments || {});
         }),
     ).promise.catch(() => {});
@@ -92,10 +97,12 @@ export function InternalLLMSetting() {
   };
 
   const taskLabel = (task: string) => t(`settings.internalLlmTask.${task}`, task);
+  const tasks = taskOverride ?? loadedTasks;
+  if (tasks.length === 0) return null;
 
   return (
     <div className="internal-llm-setting">
-      <div className="context-strategy-hint">{t("settings.internalLlmHint")}</div>
+      {showHint && <div className="context-strategy-hint">{t("settings.internalLlmHint")}</div>}
       {tasks.map((task) => {
         const a = assignments[task] || {};
         const provider = effectiveProvider(task);
