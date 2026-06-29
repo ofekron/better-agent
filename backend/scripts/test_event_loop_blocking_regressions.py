@@ -882,6 +882,15 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     assert "await asyncio.to_thread(project_update_store.total_unseen)" in project_source
 
 
+def test_extension_list_reconciliation_is_off_loop() -> None:
+    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
+    route_start = source.index("async def list_extensions(")
+    route_end = source.index("@router.get(\"/builtin-ids\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
+    assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
+
+
 def test_internal_communication_worker_lookup_is_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     resolver_start = source.index("async def _resolve_communication_target(")
@@ -949,6 +958,7 @@ if __name__ == "__main__":
     test_extension_backend_get_skips_body_stream()
     test_extension_backend_invoke_has_split_perf_timers()
     test_builtin_extension_core_dispatch_precedes_backend_spec_lookup()
+    test_extension_list_reconciliation_is_off_loop()
     test_search_sessions_response_cache_uses_metadata_version()
     test_internal_communication_worker_lookup_is_off_loop()
     print("PASS event loop blocking regressions")
