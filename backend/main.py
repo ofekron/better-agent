@@ -363,6 +363,7 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
                     root_id,
                     msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
                     exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
+                    known_root_id=root_id,
                 )
                 if cache_key is not None and _session_detail_cache_has(cache_key):
                     continue
@@ -6223,19 +6224,27 @@ def _session_detail_response_cache_key_sync(
     *,
     msg_limit: int,
     exchange_count: Optional[int],
+    known_root_id: str | None = None,
 ) -> tuple | None:
-    root_id = session_manager._root_id_for(session_id)
+    root_id = known_root_id or session_manager._root_id_for(session_id)
     if not isinstance(root_id, str):
         return None
     has_events, barrier_seq, max_context = _session_event_meta(root_id)
     watermarks = _session_detail_watermarks(
         root_id, has_events, barrier_seq, max_context,
     )
-    tree_key = session_manager.root_tree_stub_cache_key(
-        session_id,
-        msg_limit=msg_limit,
-        exchange_count=exchange_count,
-    )
+    if known_root_id:
+        tree_key = session_manager.root_tree_stub_cache_key_for_root(
+            root_id,
+            msg_limit=msg_limit,
+            exchange_count=exchange_count,
+        )
+    else:
+        tree_key = session_manager.root_tree_stub_cache_key(
+            session_id,
+            msg_limit=msg_limit,
+            exchange_count=exchange_count,
+        )
     if tree_key is None:
         return None
     return (
