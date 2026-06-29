@@ -2249,15 +2249,23 @@ def test_render_hydrate_worker_fingerprint_is_batched() -> None:
 
 def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     helper_start = source.index("def _session_detail_cached_key_still_current(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "session_manager.root_tree_stub_cache_key(" in helper_source
+    assert "session_manager._root_id_for(session_id)" not in helper_source
+    assert "cached_tree_key = key[1]" in helper_source
     assert "session_manager.root_tree_stub_cache_key_for_root(" in helper_source
-    assert "known_root_id: str | None = None" in helper_source
     assert "_session_event_file_fingerprint(root_id)" in helper_source
     assert "_session_event_meta(" not in helper_source
     assert "_session_detail_response_cache_key_sync(" not in helper_source
+    assert "known_root_id: Optional[str] = None" in manager_source
+    assert "known_root_id=root_id if isinstance(root_id, str) else None" in source
+    root_helper_start = manager_source.index("def root_tree_stub_cache_key_for_root(")
+    root_helper_end = manager_source.index("def get_message_full(", root_helper_start)
+    root_helper_source = manager_source[root_helper_start:root_helper_end]
+    assert "self._load_root_impl(root_id, hydrate_events=False)" in root_helper_source
+    assert "self._load_root(root_id" not in root_helper_source
 
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)

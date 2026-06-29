@@ -2060,12 +2060,17 @@ class SessionManager:
         *,
         msg_limit: int = 50,
         exchange_count: Optional[int] = None,
+        known_root_id: Optional[str] = None,
     ) -> Optional[tuple[dict, tuple]]:
-        rid = self._root_id_for(sid)
+        rid = known_root_id or self._root_id_for(sid)
         if rid is None:
             return None
         with self._lock_for_root(rid):
-            root = self._load_root(sid, hydrate_events=False)
+            root = (
+                self._load_root_impl(rid, hydrate_events=False)
+                if known_root_id
+                else self._load_root(sid, hydrate_events=False)
+            )
             if root is None:
                 return None
             return self._build_stubbed_tree(
@@ -2099,7 +2104,7 @@ class SessionManager:
         exchange_count: Optional[int] = None,
     ) -> Optional[tuple]:
         with self._lock_for_root(root_id):
-            root = self._load_root(root_id, hydrate_events=False)
+            root = self._load_root_impl(root_id, hydrate_events=False)
             if root is None:
                 return None
             return self._tree_stub_cache_key(
