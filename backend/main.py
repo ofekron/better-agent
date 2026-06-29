@@ -7769,6 +7769,15 @@ async def on_startup():
         name="startup-summary-index-warm",
     )
 
+    asyncio.create_task(
+        run_task(
+            "project_update_counts_warm",
+            "startup_tasks.project_update_counts_warm",
+            project_update_store.warm_counts,
+        ),
+        name="startup-project-update-counts-warm",
+    )
+
     import session_search_index
 
     def _rebuild_session_search_index_if_empty() -> None:
