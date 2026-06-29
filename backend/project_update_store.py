@@ -17,6 +17,7 @@ from paths import ba_home
 _lock = threading.Lock()
 _counts_loaded = False
 _unseen_counts: dict[str, int] = {}
+_total_unseen_count = 0
 
 
 def _updates_dir() -> Path:
@@ -47,10 +48,11 @@ def _read_entries_locked(project_id: str) -> list[dict]:
 
 
 def _ensure_counts_locked() -> None:
-    global _counts_loaded
+    global _counts_loaded, _total_unseen_count
     if _counts_loaded:
         return
     _unseen_counts.clear()
+    total = 0
     d = _updates_dir()
     if d.exists():
         for path in d.glob("*.jsonl"):
@@ -60,14 +62,20 @@ def _ensure_counts_locked() -> None:
                     count += 1
             if count:
                 _unseen_counts[path.stem] = count
+                total += count
+    _total_unseen_count = total
     _counts_loaded = True
 
 
 def _set_count_locked(project_id: str, count: int) -> None:
+    global _total_unseen_count
+    previous = _unseen_counts.get(project_id, 0)
     if count > 0:
         _unseen_counts[project_id] = count
+        _total_unseen_count += count - previous
         return
     _unseen_counts.pop(project_id, None)
+    _total_unseen_count -= previous
 
 
 def append(project_id: str, text: str) -> dict:
@@ -83,7 +91,7 @@ def append(project_id: str, text: str) -> dict:
         _ensure_counts_locked()
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
-        _unseen_counts[project_id] = _unseen_counts.get(project_id, 0) + 1
+        _set_count_locked(project_id, _unseen_counts.get(project_id, 0) + 1)
     return entry
 
 
@@ -103,14 +111,14 @@ def total_unseen() -> int:
     """Sum of unseen counts across every project that has an update log."""
     with _lock:
         _ensure_counts_locked()
-        return sum(_unseen_counts.values())
+        return _total_unseen_count
 
 
 def peek_total_unseen() -> int | None:
     with _lock:
         if not _counts_loaded:
             return None
-        return sum(_unseen_counts.values())
+        return _total_unseen_count
 
 
 def mark_seen(project_id: str, entry_ids: list[str]) -> int:
