@@ -83,8 +83,6 @@ _INTERNAL_KINDS = {
     "streaming_set",
     "stopped_at_set",
     "processed_lines_advanced",
-    "user_msg_appended",
-    "assistant_msg_appended",
     "assistant_msg_removed",
     "trace_id_set",
     "session_token_usage_added",
@@ -258,6 +256,17 @@ class SessionWSBroadcaster:
             # the updated snapshot so the canonical user message reflects
             # the failure — otherwise the brief error flash from the
             # `error` WS event is overwritten by the stale persisted msg.
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [msg],
+                    },
+                })
+            return
+        if kind in ("user_msg_appended", "assistant_msg_appended"):
             msg = change.get("msg")
             if msg is not None:
                 self._dispatch({
