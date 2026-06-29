@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import _test_home
@@ -279,14 +280,25 @@ def test_search_content_filters_before_pagination(client: TestClient) -> bool:
     _write_events("content-old", "needle", "needle")
     _write(_record("miss", "2026-06-21T00:00:00+00:00"))
 
-    response = client.get(
-        "/api/sessions?search=needle&search_fields=content,title&offset=1&limit=1",
-        headers=HEADERS,
-    )
+    response = None
+    body = {}
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=content,title&offset=1&limit=1",
+            headers=HEADERS,
+        )
+        if response.status_code != 200:
+            break
+        body = response.json()
+        if body.get("total") == 3:
+            break
+        time.sleep(0.05)
+    if response is None:
+        raise AssertionError("list response was not attempted")
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions search pagination status {response.status_code}")
         return False
-    body = response.json()
     ids = [session["id"] for session in body.get("sessions", [])]
     ok = (
         ids == ["metadata-new"]
