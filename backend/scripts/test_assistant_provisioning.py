@@ -244,6 +244,35 @@ def test_rename_force_overrides_lock() -> bool:
     return ok
 
 
+def test_ensure_singleton_is_user_visible() -> bool:
+    original_prompt = assistant_ui._system_prompt
+    assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
+    try:
+        hidden = session_manager.create(
+            name="Assistant",
+            cwd=str(_TMP_HOME),
+            source="extension",
+            user_initiated=False,
+        )
+        assistant_ui._write_state({"session_id": hidden["id"]})
+        healed = assistant_ui.ensure_singleton()
+        ok = True
+        if healed.get("source") != "extension":
+            print(f"{FAIL} ensure_singleton source={healed.get('source')!r}")
+            ok = False
+        if healed.get("user_initiated") is not True:
+            print(f"{FAIL} ensure_singleton user_initiated={healed.get('user_initiated')!r}")
+            ok = False
+        if not healed.get("name_locked"):
+            print(f"{FAIL} ensure_singleton did not lock the canonical name")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_singleton creates/heals a user-visible Assistant session")
+        return ok
+    finally:
+        assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
+
+
 def main_run() -> int:
     tests = [
         test_capability_contexts_deliver_per_provider,
@@ -251,6 +280,7 @@ def main_run() -> int:
         test_capability_contexts_content_is_bounded,
         test_rename_refused_when_locked,
         test_rename_force_overrides_lock,
+        test_ensure_singleton_is_user_visible,
     ]
     results = []
     for fn in tests:

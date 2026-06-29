@@ -1545,6 +1545,22 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
     return result
 
 
+def _validate_backend_retry_on_exit(raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ExtensionError("entrypoints.backend_retry_on_exit must be an array")
+    result: list[str] = []
+    for index, value in enumerate(raw):
+        route = str(value or "").strip().strip("/")
+        if not route or route == "default" or route.startswith(".") or ".." in route.split("/"):
+            raise ExtensionError(
+                f"entrypoints.backend_retry_on_exit[{index}] must be a backend route subpath"
+            )
+        result.append(route)
+    return tuple(dict.fromkeys(result))
+
+
 def validate_manifest(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ExtensionError("Manifest must be a JSON object")
@@ -1608,6 +1624,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             entrypoints_raw.get("applied_config"), extension_id=extension_id
         ),
         "backend_timeouts": _validate_backend_timeouts(entrypoints_raw.get("backend_timeouts")),
+        "backend_retry_on_exit": _validate_backend_retry_on_exit(
+            entrypoints_raw.get("backend_retry_on_exit")
+        ),
     }
     if entrypoints["frontend"] and len(Path(entrypoints["frontend"]).parts) < 2:
         raise ExtensionError("entrypoints.frontend must live under a dedicated asset directory")
@@ -4316,6 +4335,7 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
         "entrypoint": entrypoint,
         "entrypoint_kind": entrypoint_kind,
         "backend_timeouts": dict(entrypoints.get("backend_timeouts") or {}),
+        "backend_retry_on_exit": list(entrypoints.get("backend_retry_on_exit") or []),
         "prefix": f"/api/extensions/{manifest['id']}/backend",
         "permissions": dict(manifest.get("permissions") or {}),
         "effective_permissions": effective_permissions(record),
