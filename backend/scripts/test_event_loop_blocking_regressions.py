@@ -760,6 +760,36 @@ def test_machine_node_snapshot_reads_are_off_loop() -> None:
     assert "await asyncio.to_thread(_local_node_id_or_primary)" in dispatch_source
 
 
+def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
+    source = (ROOT / "stores" / "pending_approvals.py").read_text(encoding="utf-8")
+    assert "_pending_cache_lock = threading.Lock()" in source
+    assert "_pending_cache:" in source
+    assert "def _invalidate_pending_cache()" in source
+    assert "def _pending_snapshot()" in source
+    list_start = source.index("def list_pending(")
+    list_end = source.index("@perf.timed_fn(\"store.approval.transition\")", list_start)
+    list_source = source[list_start:list_end]
+    assert "records = _pending_snapshot()" in list_source
+    assert "_dir().glob(\"*.json\")" not in list_source
+    assert "path.read_text" not in list_source
+
+    create_start = source.index("def create(")
+    create_end = source.index("def get(", create_start)
+    create_source = source[create_start:create_end]
+    transition_start = source.index("def _transition_locked(")
+    transition_end = source.index("def approve(", transition_start)
+    transition_source = source[transition_start:transition_end]
+    assert "_invalidate_pending_cache()" in create_source
+    assert "_invalidate_pending_cache()" in transition_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("async def internal_list_pending_approvals(")
+    route_end = main_source.index("@app.post(\"/api/internal/tool-approvals/request\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)" in route_source
+    assert "pending_approvals.list_pending(cwd=cwd)" not in route_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source
@@ -1079,6 +1109,7 @@ if __name__ == "__main__":
     test_private_extension_reconcile_skips_current_smoked_install()
     test_pending_node_polling_uses_public_projection_cache()
     test_machine_node_snapshot_reads_are_off_loop()
+    test_pending_approval_listing_uses_cached_projection_off_loop()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
     test_startup_reenqueue_reads_sessions_off_loop()
     test_startup_does_not_warm_unread_by_hydrating_sessions()
