@@ -1190,7 +1190,8 @@ class Coordinator:
         import uuid
         import team_messaging
 
-        sender, target = team_messaging.validate_message_route(
+        sender, target = await asyncio.to_thread(
+            team_messaging.validate_message_route,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
@@ -1202,7 +1203,8 @@ class Coordinator:
             model=model,
             reasoning_effort=reasoning_effort,
         )
-        metadata = team_messaging.build_message_metadata(
+        metadata = await asyncio.to_thread(
+            team_messaging.build_message_metadata,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
@@ -1239,7 +1241,8 @@ class Coordinator:
                 target_session_id=target_session_id,
             )
         try:
-            session_manager.add_queued_prompt(
+            await asyncio.to_thread(
+                session_manager.add_queued_prompt,
                 target_session_id,
                 team_messaging.queue_payload(
                     queue_item_id=queue_item_id,
@@ -1250,7 +1253,8 @@ class Coordinator:
                     target_session_id=target_session_id,
                 ),
             )
-            cli_prompt = team_messaging.format_team_message_prompt(
+            cli_prompt = await asyncio.to_thread(
+                team_messaging.format_team_message_prompt,
                 message,
                 metadata,
                 target_session_id=target_session_id,
@@ -1275,7 +1279,11 @@ class Coordinator:
                 },
             })
         except Exception:
-            session_manager.remove_queued_prompt(target_session_id, queue_item_id)
+            await asyncio.to_thread(
+                session_manager.remove_queued_prompt,
+                target_session_id,
+                queue_item_id,
+            )
             if cancel_panel_watch is not None:
                 cancel_panel_watch()
             raise

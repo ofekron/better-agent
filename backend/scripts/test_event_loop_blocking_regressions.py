@@ -2203,6 +2203,18 @@ def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
     )
 
 
+def test_submit_team_message_sync_store_work_off_loop() -> None:
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    start = source.index("async def submit_team_message(")
+    end = source.index("    def _resolve_delegation_run_config(", start)
+    submit_source = source[start:end]
+    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in submit_source
+    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in submit_source
+    assert "await asyncio.to_thread(\n                session_manager.add_queued_prompt" in submit_source
+    assert "cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt" in submit_source
+    assert "await asyncio.to_thread(\n                session_manager.remove_queued_prompt" in submit_source
+
+
 def test_default_session_page_uses_visible_order_cache() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("def _local_visible_order_ids(")
