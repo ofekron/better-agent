@@ -1535,7 +1535,7 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
-    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
+    assert "_sessions_list_cache_get(cache_key) if cache_response else None" in route_source
     assert "search_query" in cache_source
     assert "\n        search,\n" not in cache_source
     assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
@@ -2361,8 +2361,9 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     route_source = source[route_start:route_end]
     assert "content_limit=_session_search_candidate_limit(offset, limit)" in route_source
     assert "content_limit=max(offset + limit, 1)" not in route_source
-    assert "cache_response = not search_query" in route_source
-    assert "_sessions_list_cache_get(cache_key) if cache_response else None" in route_source
+    assert "cache_response = not (" in route_source
+    assert "session_store.SEARCH_FIELD_CONTENT in effective_search_fields" in route_source
+    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
 
 
 def test_startup_warms_virtual_session_summaries_off_loop() -> None:

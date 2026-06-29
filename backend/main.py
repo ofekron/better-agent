@@ -4821,7 +4821,10 @@ async def get_sessions(
         _remote_sessions_cache_version_snapshot() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
-    cache_response = not search_query
+    cache_response = not (
+        search_query
+        and session_store.SEARCH_FIELD_CONTENT in effective_search_fields
+    )
     cached_response = _sessions_list_cache_get(cache_key) if cache_response else None
     if cached_response is not None:
         perf.record("sessions.list.response_cache.hit", 1.0)
