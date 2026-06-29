@@ -2646,10 +2646,11 @@ async def internal_project_update_total(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     await _require_project_structure_internal_async(x_internal_token)
-    count = project_update_store.peek_total_unseen()
-    if count is None:
-        count = await asyncio.to_thread(project_update_store.total_unseen)
-    return {"count": count}
+    with perf.timed("internal.project_updates.total"):
+        count = project_update_store.peek_total_unseen()
+        if count is None:
+            count = await asyncio.to_thread(project_update_store.total_unseen)
+        return {"count": count}
 
 
 @app.post("/api/internal/project-updates/counts-batch")
@@ -2663,11 +2664,12 @@ async def internal_project_update_counts_batch(
         raise HTTPException(status_code=400, detail="cwds must be a list of strings")
     from paths import encode_cwd
 
-    project_ids = [encode_cwd(cwd) for cwd in cwds]
-    counts = project_update_store.peek_unseen_counts(project_ids)
-    if counts is None:
-        counts = await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
-    return counts
+    with perf.timed("internal.project_updates.counts_batch"):
+        project_ids = [encode_cwd(cwd) for cwd in cwds]
+        counts = project_update_store.peek_unseen_counts(project_ids)
+        if counts is None:
+            counts = await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
+        return counts
 
 
 @app.post("/api/internal/project-updates/unseen")
@@ -11848,12 +11850,13 @@ async def internal_list_pending_nodes(
 
     Secrets never leave the server — only the display fingerprint does."""
     import node_link
-    pending = node_link.public_pending_nodes_cached()
-    if pending is None:
-        pending = await asyncio.to_thread(node_link.public_pending_nodes)
-    return {
-        "pending_nodes": pending,
-    }
+    with perf.timed("internal.machine_nodes.pending"):
+        pending = node_link.public_pending_nodes_cached()
+        if pending is None:
+            pending = await asyncio.to_thread(node_link.public_pending_nodes)
+        return {
+            "pending_nodes": pending,
+        }
 
 
 @app.post("/api/internal/machine-nodes/approve")

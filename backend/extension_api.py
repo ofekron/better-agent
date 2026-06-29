@@ -272,15 +272,17 @@ async def _dispatch_machine_nodes_core_backend(
 ) -> JSONResponse | None:
     if request.method == "GET" and path == "nodes":
         import node_store
-        return JSONResponse(await asyncio.to_thread(node_store.snapshot))
+        with perf.timed("extension.machine_nodes.nodes"):
+            return JSONResponse(await asyncio.to_thread(node_store.snapshot))
     if request.method == "GET" and path == "pending_nodes":
         import node_link
-        pending = node_link.public_pending_nodes_cached()
-        if pending is None:
-            pending = await asyncio.to_thread(node_link.public_pending_nodes)
-        return JSONResponse({
-            "pending_nodes": pending,
-        })
+        with perf.timed("extension.machine_nodes.pending_nodes"):
+            pending = node_link.public_pending_nodes_cached()
+            if pending is None:
+                pending = await asyncio.to_thread(node_link.public_pending_nodes)
+            return JSONResponse({
+                "pending_nodes": pending,
+            })
     if request.method == "GET" and path == "local_node_id":
         def _local_node_id_or_primary() -> str:
             try:
@@ -289,8 +291,9 @@ async def _dispatch_machine_nodes_core_backend(
             except Exception:
                 return "primary"
 
-        node_id = await asyncio.to_thread(_local_node_id_or_primary)
-        return JSONResponse({"node_id": node_id})
+        with perf.timed("extension.machine_nodes.local_node_id"):
+            node_id = await asyncio.to_thread(_local_node_id_or_primary)
+            return JSONResponse({"node_id": node_id})
     if request.method == "POST" and path.startswith("pending_nodes/"):
         parts = path.split("/")
         if len(parts) != 3 or parts[2] not in {"approve", "deny"}:
@@ -324,25 +327,27 @@ async def _dispatch_project_structure_core_backend(
     if request.method == "GET" and path == "project-updates/total":
         import project_update_store
 
-        count = project_update_store.peek_total_unseen()
-        if count is None:
-            count = await asyncio.to_thread(project_update_store.total_unseen)
-        return JSONResponse({"count": count})
+        with perf.timed("extension.project_updates.total"):
+            count = project_update_store.peek_total_unseen()
+            if count is None:
+                count = await asyncio.to_thread(project_update_store.total_unseen)
+            return JSONResponse({"count": count})
     if request.method != "POST" or path != "project-updates/counts-batch":
         return None
 
     import project_update_store
     from paths import encode_cwd
 
-    body = await request.json()
-    cwds = (body or {}).get("cwds") if isinstance(body, dict) else None
-    if not isinstance(cwds, list) or any(not isinstance(cwd, str) for cwd in cwds):
-        return JSONResponse({"detail": "cwds must be a list of strings"}, status_code=400)
-    project_ids = [encode_cwd(cwd) for cwd in cwds]
-    counts = project_update_store.peek_unseen_counts(project_ids)
-    if counts is None:
-        counts = await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
-    return JSONResponse(counts)
+    with perf.timed("extension.project_updates.counts_batch"):
+        body = await request.json()
+        cwds = (body or {}).get("cwds") if isinstance(body, dict) else None
+        if not isinstance(cwds, list) or any(not isinstance(cwd, str) for cwd in cwds):
+            return JSONResponse({"detail": "cwds must be a list of strings"}, status_code=400)
+        project_ids = [encode_cwd(cwd) for cwd in cwds]
+        counts = project_update_store.peek_unseen_counts(project_ids)
+        if counts is None:
+            counts = await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
+        return JSONResponse(counts)
 
 
 @router.post("/install")
