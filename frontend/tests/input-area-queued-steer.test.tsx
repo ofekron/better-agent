@@ -280,6 +280,31 @@ describe("InputArea queued prompt promote action", () => {
     );
   });
 
+  it("renders comment-only inline tags as visible queued cards on desktop", () => {
+    setViewportWidth(1280);
+    renderInputArea(true, "", {
+      queuedPrompt: {
+        id: "q1",
+        preview: "<inline-tags><comment>Verify card rendering on desktop</comment><comment>Confirm comment cards stay visible and summarized</comment></inline-tags> Remaining user text after the comment tags.",
+      },
+    });
+
+    const banner = screen.getByTestId("queued-prompt-banner");
+    expect(within(banner).getByText("Verify card rendering on desktop")).toBeTruthy();
+    expect(within(banner).getByText("Confirm comment cards stay visible and summarized")).toBeTruthy();
+    expect(within(banner).getByText("Remaining user text after the comment tags.")).toBeTruthy();
+    expect(banner.textContent).not.toContain("<inline-tags>");
+    expect(banner.classList.contains("has-tags")).toBe(true);
+
+    fireEvent.click(within(banner).getByRole("button", { name: "Minimize queued prompt" }));
+
+    const minimized = screen.getByTestId("queued-prompt-banner");
+    expect(within(minimized).getByText("Verify card rendering on desktop")).toBeTruthy();
+    expect(within(minimized).getByText("Confirm comment cards stay visible and summarized")).toBeTruthy();
+    expect(within(minimized).getByText("Remaining user text after the comment tags.")).toBeTruthy();
+    expect(minimized.getAttribute("data-minimized")).toBe("true");
+  });
+
   it("opens queued prompt editing from the explicit edit button", () => {
     const onQueuedTextEdit = vi.fn();
     renderInputArea(true, "", { onQueuedTextEdit });

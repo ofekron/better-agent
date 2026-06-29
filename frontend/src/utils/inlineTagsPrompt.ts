@@ -58,6 +58,7 @@ export interface ParsedInlineComment {
 }
 
 const C_RE = /<c\b([^>]*)>([\s\S]*?)<\/c\s*>/g;
+const COMMENT_RE = /<comment\b([^>]*)>([\s\S]*?)<\/comment\s*>/g;
 const SEL_RE = /<sel>([\s\S]*?)<\/sel\s*>/;
 const ATTR_RE_LOCAL = /([\w-]+)=(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
 
@@ -73,11 +74,11 @@ function parseAttrs(s: string): Record<string, string> {
 
 export function parseInlineTagsBody(body: string): ParsedInlineComment[] {
   const out: ParsedInlineComment[] = [];
-  const re = new RegExp(C_RE.source, "g");
+  const re = new RegExp(`${C_RE.source}|${COMMENT_RE.source}`, "g");
   let m: RegExpExecArray | null;
   while ((m = re.exec(body)) !== null) {
-    const attrs = parseAttrs(m[1] || "");
-    const inner = m[2] ?? "";
+    const attrs = parseAttrs(m[1] || m[3] || "");
+    const inner = m[2] ?? m[4] ?? "";
     const selM = inner.match(SEL_RE);
     const selected = selM ? selM[1] : undefined;
     const comment = inner.replace(SEL_RE, "").trim();
