@@ -2061,6 +2061,7 @@ _SIDEBAR_WORKING_MODE_META_KEYS = {
 
 def _sidebar_session_payload(session: dict) -> dict:
     payload = dict(session)
+    payload.pop("first_prompt", None)
     meta = payload.get("working_mode_meta")
     if isinstance(meta, dict):
         payload["working_mode_meta"] = {

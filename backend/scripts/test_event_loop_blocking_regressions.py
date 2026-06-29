@@ -494,6 +494,10 @@ def test_session_organization_query_builds_tag_sets_only_for_tag_filter() -> Non
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _sidebar_state_snapshot()" in main_source
+    payload_start = main_source.index("def _sidebar_session_payload(")
+    payload_end = main_source.index("def _sidebar_state_snapshot(", payload_start)
+    payload_source = main_source[payload_start:payload_end]
+    assert 'payload.pop("first_prompt", None)' in payload_source
     start = main_source.index("def _decorate_local_sidebar_sessions(")
     end = main_source.index("def _local_sessions_for_sidebar(", start)
     decorate_source = main_source[start:end]
