@@ -580,10 +580,14 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_summary_sorted_cache_version" in source
     assert "_summary_sorted_id_cache" in source
+    assert "_summary_sorted_id_caches" in source
     assert "_summary_order_version" in source
     assert "_summary_projected_cache_version" not in source
     assert "_summary_projected_cache" not in source
     assert "_replace_summary_projection_field" in source
+    assert "def ordered_session_summary_ids(" in source
+    assert "def _summary_order_changed(" in source
+    assert '"last_user_prompt_at"' in source
     start = source.index("def list_sessions()")
     end = source.index("def iter_all_sessions()", start)
     list_source = source[start:end]
@@ -593,6 +597,30 @@ def test_session_list_uses_sorted_summary_cache() -> None:
     assert "_summary_index[sid]" in list_source
     assert "_requirement_tags_snapshot()" not in list_source
     assert "_markers_snapshot()" not in list_source
+
+
+def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
+    helper_end = source.index("def _root_session_file_path(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "session_manager.ordered_summary_ids(sort_by)" in helper_source
+    assert "_filter_sort_sessions_for_list(" not in helper_source
+    assert "sessions.list.local.ordered_filter" in helper_source
+
+    route_start = source.index("def _build_local_sessions_page_for_list(")
+    route_end = source.index("@app.get(\"/api/sessions\")", route_start)
+    route_source = source[route_start:route_end]
+    gate_start = source.index("def _can_page_local_summary_order(")
+    gate_end = source.index("def _build_local_sessions_page_for_list(", gate_start)
+    gate_source = source[gate_start:gate_end]
+    assert 'sort_by in {"updated_at", "last_user_prompt_at"}' in gate_source
+    assert 'sort_by == "last_user_prompt_at"' in route_source
+    assert "sessions.list.local_order_page" in route_source
+    assert "sessions.list.virtual_count" in route_source
+    assert route_source.index("sessions.list.local_order_page") < route_source.index(
+        'sessions.list.local"):'
+    )
 
 
 def test_session_list_skips_impossible_virtual_filters() -> None:
@@ -1766,6 +1794,7 @@ if __name__ == "__main__":
     test_project_aggregates_use_bulk_cached_state()
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
+    test_session_list_pages_last_user_prompt_order_before_full_sort()
     test_session_list_waits_briefly_for_partial_summary_warm()
     test_session_list_does_not_prewarm_snapshots()
     test_session_list_warms_event_meta_off_path()

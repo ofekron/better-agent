@@ -2533,6 +2533,9 @@ class SessionManager:
         """Return the sidebar summary of every root session."""
         return session_store.list_sessions()
 
+    def ordered_summary_ids(self, sort_by: str) -> list[str]:
+        return session_store.ordered_session_summary_ids(sort_by)
+
     def iter_all(self):
         """Yield every session record (root + every embedded fork,
         depth-first). Returns deep copies so callers can iterate without
