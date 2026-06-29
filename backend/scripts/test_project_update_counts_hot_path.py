@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import _test_home
 
@@ -15,6 +16,7 @@ if _BACKEND not in sys.path:
 
 import project_update_store  # noqa: E402
 import extension_store  # noqa: E402
+from project_match import worker as project_match_worker  # noqa: E402
 
 
 def test_counts_are_cached_after_warmup() -> bool:
@@ -81,11 +83,22 @@ def test_builtin_enabled_state_is_fingerprint_cached() -> bool:
         extension_store._ENABLED_CACHE.clear()
 
 
+def test_project_match_rebuild_skips_unchanged_sessions() -> bool:
+    sessions = Path(_TMP_HOME) / "sessions"
+    sessions.mkdir(exist_ok=True)
+    (sessions / "a.json").write_text('{"id":"a","cwd":"/a","messages":[]}', encoding="utf-8")
+    (sessions / "a.summary.json").write_text("{}", encoding="utf-8")
+    fingerprint = project_match_worker.sessions_fingerprint()
+    result = project_match_worker.rebuild_index(fingerprint)
+    return result == {"rebuilt": False, "fingerprint": fingerprint}
+
+
 def run() -> int:
     tests = [
         ("counts are cached after warmup", test_counts_are_cached_after_warmup),
         ("mark_seen updates cached count", test_mark_seen_updates_cached_count),
         ("builtin enabled state is fingerprint cached", test_builtin_enabled_state_is_fingerprint_cached),
+        ("project match rebuild skips unchanged sessions", test_project_match_rebuild_skips_unchanged_sessions),
     ]
     failures: list[str] = []
     try:

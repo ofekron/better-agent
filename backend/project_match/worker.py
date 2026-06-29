@@ -3,11 +3,38 @@ from __future__ import annotations
 from typing import Optional
 
 
-def rebuild_index() -> bool:
+def sessions_fingerprint() -> tuple[int, int, int]:
+    from paths import ba_home
+
+    count = 0
+    newest_mtime_ns = 0
+    total_size = 0
+    sessions_dir = ba_home() / "sessions"
+    try:
+        files = sessions_dir.glob("*.json")
+    except OSError:
+        return (0, 0, 0)
+    for path in files:
+        if path.name.endswith(".summary.json"):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        count += 1
+        newest_mtime_ns = max(newest_mtime_ns, stat.st_mtime_ns)
+        total_size += stat.st_size
+    return (count, newest_mtime_ns, total_size)
+
+
+def rebuild_index(previous_fingerprint: tuple[int, int, int] | None = None) -> dict:
+    fingerprint = sessions_fingerprint()
+    if previous_fingerprint is not None and fingerprint == previous_fingerprint:
+        return {"rebuilt": False, "fingerprint": fingerprint}
     from project_match import rebuild
 
     rebuild()
-    return True
+    return {"rebuilt": True, "fingerprint": fingerprint}
 
 
 def suggest_project_payload(prompt: str, current_cwd: str) -> Optional[dict]:
