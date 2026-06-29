@@ -258,25 +258,33 @@ def list_worker_projection(cwd: str, limit: int = 20) -> list[dict]:
     so the manager doesn't see references to dead sessions.
     """
     out: list[dict] = []
-    for w in list_workers(""):
-        agent_session_id = w.get("agent_session_id")
-        if not agent_session_id:
-            continue
-        bc = _sm.get_fields(agent_session_id, ("cwd", "name"))
-        if not bc:
-            continue
-        out.append({
-            "agent_session_id": agent_session_id,
-            "registry_cwd": w.get("cwd") or bc.get("cwd") or cwd,
-            "cwd": w.get("cwd") or bc.get("cwd") or "",
-            "description": bc.get("name") or "(untitled)",
-            "orchestration_mode": w.get("orchestration_mode"),
-            "node_id": w.get("node_id") or "primary",
-            "last_active": w.get("last_active", ""),
-            "delegation_count": w.get("delegation_count", 0),
-        })
-        if len(out) >= limit:
-            break
+    workers = list_workers("")
+    chunk_size = max(limit * 2, 20)
+    for start in range(0, len(workers), chunk_size):
+        chunk = workers[start:start + chunk_size]
+        fields_by_sid = _sm.get_fields_many(
+            [str(w.get("agent_session_id") or "") for w in chunk],
+            ("cwd", "name"),
+        )
+        for w in chunk:
+            agent_session_id = w.get("agent_session_id")
+            if not agent_session_id:
+                continue
+            bc = fields_by_sid.get(agent_session_id)
+            if not bc:
+                continue
+            out.append({
+                "agent_session_id": agent_session_id,
+                "registry_cwd": w.get("cwd") or bc.get("cwd") or cwd,
+                "cwd": w.get("cwd") or bc.get("cwd") or "",
+                "description": bc.get("name") or "(untitled)",
+                "orchestration_mode": w.get("orchestration_mode"),
+                "node_id": w.get("node_id") or "primary",
+                "last_active": w.get("last_active", ""),
+                "delegation_count": w.get("delegation_count", 0),
+            })
+            if len(out) >= limit:
+                return out
     return out
 
 
