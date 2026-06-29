@@ -98,6 +98,139 @@ def test_event_emitter_shapes():
     assert lines[-1]["parentUuid"] is not None
 
 
+def test_openai_bash_alias_input_ingests_as_canonical_command():
+    runner = _mod("runner_openai")
+    for alias in ("cmd", "shell_command"):
+        with tempfile.TemporaryDirectory() as d:
+            emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
+            emitter.feed_tool_call_delta(
+                0,
+                "call_bash",
+                "bash",
+                json.dumps({alias: "echo hi"}),
+            )
+            calls = emitter.finalize_tool_calls()
+            emitter.close()
+            lines = [
+                json.loads(l)
+                for l in (Path(d) / "ev.jsonl").read_text().splitlines()
+            ]
+
+        tool_use = lines[-1]["message"]["content"][0]
+        assert tool_use["name"] == "Bash"
+        assert tool_use["input"] == {"command": "echo hi"}
+        assert calls == [{
+            "id": "call_bash",
+            "name": "Bash",
+            "arguments": json.dumps({"command": "echo hi"}, ensure_ascii=False),
+        }]
+
+
+def test_openai_bash_alias_input_dispatches_canonical_command():
+    runner = _mod("runner_openai")
+
+    for alias in ("cmd", "shell_command"):
+        seen = []
+
+        def fake_bash(args, cwd):
+            seen.append(args)
+            return "ok"
+
+        with tempfile.TemporaryDirectory() as d:
+            emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
+            original_bash = runner.TOOL_HANDLERS.get("Bash")
+            runner.TOOL_HANDLERS["Bash"] = fake_bash
+            try:
+                result = asyncio.run(runner._dispatch_tool(
+                    {
+                        "id": "call_bash",
+                        "name": "Bash",
+                        "arguments": json.dumps({alias: "echo hi"}),
+                    },
+                    Path(d),
+                    "app-session",
+                    Path(d),
+                    True,
+                    False,
+                    "",
+                    "",
+                    emitter,
+                    {},
+                    runner.LockRegistry(),
+                    False,
+                ))
+            finally:
+                if original_bash is None:
+                    runner.TOOL_HANDLERS.pop("Bash", None)
+                else:
+                    runner.TOOL_HANDLERS["Bash"] = original_bash
+                emitter.close()
+
+        assert result == "ok"
+        assert seen == [{"command": "echo hi"}]
+
+
+def test_openai_bash_explicit_command_wins_over_alias():
+    runner = _mod("runner_openai")
+    raw = {"cmd": "echo alias", "command": "echo canonical"}
+    assert runner._canonical_tool_input("Bash", raw) == {
+        "command": "echo canonical",
+    }
+
+
+def test_openai_bash_alias_approval_uses_canonical_command():
+    runner = _mod("runner_openai")
+    approvals = []
+
+    def fake_approval(**kwargs):
+        approvals.append(kwargs)
+        return True
+
+    def fake_bash(args, cwd):
+        return "ok"
+
+    with tempfile.TemporaryDirectory() as d:
+        emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
+        original_approval = runner.request_tool_approval
+        original_bash = runner.TOOL_HANDLERS.get("Bash")
+        runner.request_tool_approval = fake_approval
+        runner.TOOL_HANDLERS["Bash"] = fake_bash
+        try:
+            result = asyncio.run(runner._dispatch_tool(
+                {
+                    "id": "call_bash",
+                    "name": "Bash",
+                    "arguments": json.dumps({"cmd": "echo hi"}),
+                },
+                Path(d),
+                "app-session",
+                Path(d),
+                False,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                {},
+                runner.LockRegistry(),
+                False,
+            ))
+        finally:
+            runner.request_tool_approval = original_approval
+            if original_bash is None:
+                runner.TOOL_HANDLERS.pop("Bash", None)
+            else:
+                runner.TOOL_HANDLERS["Bash"] = original_bash
+            emitter.close()
+
+    assert result == "ok"
+    assert approvals
+    assert approvals[0]["tool_name"] == "Bash"
+    assert approvals[0]["summary"] == {
+        "tool": "Bash",
+        "input": {"command": "echo hi"},
+    }
+
+
 def test_bash_tool_scrubs_provider_and_internal_secrets():
     runner = _mod("runner_openai")
     old_env = os.environ.copy()
