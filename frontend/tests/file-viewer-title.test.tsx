@@ -280,12 +280,59 @@ describe("FileViewer title", () => {
     expect(await screen.findByTestId("file-viewer-latest-diff")).toBeTruthy();
     expect(screen.getByTestId("mock-diff-original").textContent).toBe("one");
     expect(screen.getByTestId("mock-diff-modified").textContent).toBe("two");
+    expect(document.querySelector(".file-comment-bar")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
 
     await waitFor(() => expect(screen.queryByText("Changed")).toBeNull());
     expect(fileReadCount).toBe(2);
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("does not let file comments consume latest diff space", async () => {
+    let fileReadCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const text = String(url);
+      if (text.includes("/api/file/draft")) {
+        return {
+          ok: true,
+          json: async () => ({ exists: false }),
+        } as Response;
+      }
+      if (text.includes("/api/file/metadata")) {
+        return {
+          ok: true,
+          json: async () => ({ path: "/tmp/project/app.ts", mtime_ns: 2, size: 4 }),
+        } as Response;
+      }
+      fileReadCount += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          content: fileReadCount === 1 ? "one" : "two",
+          language: "typescript",
+          path: "/tmp/project/app.ts",
+          mtime_ns: fileReadCount === 1 ? 1 : 2,
+          size: fileReadCount === 1 ? 3 : 4,
+        }),
+      } as Response;
+    });
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/app.ts"
+        onClose={() => {}}
+        onAddFileTag={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Changed");
+    expect(document.querySelector(".file-comment-bar")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Diff" }));
+
+    expect(await screen.findByTestId("file-viewer-latest-diff")).toBeTruthy();
+    expect(document.querySelector(".file-comment-bar")).toBeNull();
   });
 
   it("loads a persisted draft and saves it to the original file", async () => {

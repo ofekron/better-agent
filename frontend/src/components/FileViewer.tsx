@@ -865,6 +865,7 @@ export function FileViewer({
   const showMonaco = isDiffMode || kind === "code" || kind === "json";
   const canSaveViewedContent = !isDiffMode && !showLatestDiff && (showMonaco || kind === "markdown");
   const canCopyOriginalContent = !isDiffMode && !showLatestDiff && kind !== "pdf" && kind !== "video";
+  const canCommentOnFile = !!onAddFileTag && !isDiffMode && !showLatestDiff;
   const hasUnsavedOriginalChanges = dirty || hasDraft;
   const synced = !stale && !hasUnsavedOriginalChanges && !showLatestDiff;
   const rawUrl = `${API}/api/file/raw?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}&_v=${rawVersion}`;
@@ -1123,7 +1124,7 @@ export function FileViewer({
         />
       ) : null}
 
-      {onAddFileTag && (
+      {canCommentOnFile && (
         <FileCommentBar
           selection={pendingSelection}
           onSubmit={handleSubmitComment}

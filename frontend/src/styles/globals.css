@@ -12042,7 +12042,7 @@ pre .inline-tag-highlight {
 .file-comment-input {
   flex: 1;
   min-width: 0;
-  resize: vertical;
+  resize: none;
   font-family: inherit;
   font-size: calc(13px * var(--app-font-scale));
   padding: 6px 8px;
@@ -12066,6 +12066,18 @@ pre .inline-tag-highlight {
   min-height: 0;
 }
 .file-viewer > section > div {
+  height: 100%;
+}
+.file-viewer-latest-diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.file-viewer-latest-diff > section {
+  flex: 1;
+  min-height: 0;
+}
+.file-viewer-latest-diff > section > div {
   height: 100%;
 }
 .file-viewer-rendered-wrap {
