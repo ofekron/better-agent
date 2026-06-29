@@ -713,6 +713,24 @@ def test_session_event_meta_uses_combined_ingester_read() -> None:
     assert "def session_event_meta(self, root_id: str)" in ingester_source
 
 
+def test_event_summary_scan_reuses_full_scan_cache() -> None:
+    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    max_start = source.index("def _scan_max_seq(")
+    max_end = source.index("    @staticmethod\n    def _affects_render_projection", max_start)
+    max_source = source[max_start:max_end]
+    assert "all_entries: list[dict] = []" in max_source
+    assert "self._full_scan_cache[root_id] = (cur_offset, all_entries)" in max_source
+    assert "self._seq_offsets[root_id] = seq_offsets" in max_source
+
+    summary_start = source.index("def _scan_summaries(")
+    summary_end = source.index("    def close(", summary_start)
+    summary_source = source[summary_start:summary_end]
+    assert "cached = self._full_scan_cache.get(root_id)" in summary_source
+    assert "entries = cached[1]" in summary_source
+    assert "self._update_summary_line(" in summary_source
+    assert "for index, entry in enumerate(entries):" in summary_source
+
+
 def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -1398,6 +1416,7 @@ if __name__ == "__main__":
     test_session_detail_has_split_perf_timers()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
+    test_event_summary_scan_reuses_full_scan_cache()
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()

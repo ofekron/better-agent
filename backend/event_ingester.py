@@ -745,9 +745,17 @@ class EventIngester:
         root_event_candidate_seqs: set[int] = set()
         resolved_root_event_seqs: set[int] = set()
         parsed_lines = 0
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+        seq_offsets: list[int] = []
+        all_entries: list[dict] = []
+        cur_offset = 0
+        with open(path, "rb") as f:
+            while True:
+                line_start = cur_offset
+                raw = f.readline()
+                if not raw:
+                    break
+                cur_offset += len(raw)
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
                     continue
                 try:
@@ -755,6 +763,8 @@ class EventIngester:
                 except json.JSONDecodeError:
                     continue
                 parsed_lines += 1
+                seq_offsets.append(line_start)
+                all_entries.append(entry)
                 sid = entry.get("sid")
                 seq = entry.get("seq")
                 if not isinstance(sid, str) or not isinstance(seq, int):
@@ -780,6 +790,9 @@ class EventIngester:
             root_event_candidate_seqs - resolved_root_event_seqs
         )
         self._seq[root_id] = parsed_lines
+        self._seq_offsets[root_id] = seq_offsets
+        self._next_offset[root_id] = cur_offset
+        self._full_scan_cache[root_id] = (cur_offset, all_entries)
         return dict(out)
 
     @staticmethod
@@ -1477,6 +1490,27 @@ class EventIngester:
         where `_ensure_open` has not run. Caller holds lock."""
         out: dict[str, dict] = {}
         resolutions: dict[int, str] = {}
+        file_size = path.stat().st_size
+        cached = self._full_scan_cache.get(root_id)
+        offsets = self._seq_offsets.get(root_id)
+        if (
+            cached is not None
+            and cached[0] == file_size
+            and offsets is not None
+            and len(offsets) >= len(cached[1])
+        ):
+            entries = cached[1]
+            for index, entry in enumerate(entries):
+                line_start = offsets[index]
+                if index + 1 < len(offsets):
+                    line_end = offsets[index + 1]
+                else:
+                    line_end = self._next_offset.get(root_id, file_size)
+                self._update_summary_line(
+                    out, resolutions, root_id,
+                    entry, line_start, line_end, tail,
+                )
+            return out, resolutions
         seq_offsets: list[int] = []
         with open(path, "rb") as f:
             while True:
