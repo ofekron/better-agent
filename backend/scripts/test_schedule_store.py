@@ -66,6 +66,31 @@ def main() -> int:
           and rec["last_fired_at"] is not None,
           "recurring → fire_at advanced past now, last_fired_at stamped")
 
+    print("T2b hot reads reuse parsed cache")
+    original_loads = schedule_store.json.loads
+    loads = {"count": 0}
+
+    def counted_loads(*args, **kwargs):
+        loads["count"] += 1
+        return original_loads(*args, **kwargs)
+
+    schedule_store._data_cache = None
+    schedule_store.json.loads = counted_loads
+    try:
+        first = schedule_store.list_for_session("s1")
+        second = schedule_store.list_for_session("s1")
+        check(loads["count"] == 1, "schedule list reuses parsed config on hot reads")
+        first[0]["prompt"] = "mutated"
+        check(second[0]["prompt"] != "mutated", "schedule list returns isolated cached data")
+        updated = schedule_store.create(
+            app_session_id="hot", prompt="new", kind="once", fire_at=soon,
+        )
+        after_write_loads = loads["count"]
+        check(schedule_store.get(updated["id"]) is not None, "schedule write refreshes parsed cache")
+        check(loads["count"] == after_write_loads, "schedule get does not reparse after write")
+    finally:
+        schedule_store.json.loads = original_loads
+
     print("T3 validation bounds")
     bads = [
         dict(prompt="x", kind="recurring", interval_seconds=5),
