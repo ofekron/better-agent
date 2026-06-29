@@ -39,6 +39,7 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(" in source
     assert "def _warning_off_loop(" in source
+    assert "def _frontend_log_off_loop(" in source
 
     monitor_start = source.index("async def _event_loop_lag_monitor()")
     monitor_end = source.index("asyncio.create_task(", monitor_start)
@@ -51,6 +52,12 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     ws_source = source[ws_start:ws_end]
     assert "_warning_off_loop(" in ws_source
     assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in ws_source
+
+    frontend_start = source.index("async def frontend_log(")
+    frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
+    frontend_source = source[frontend_start:frontend_end]
+    assert "_frontend_log_off_loop(log_level, line)" in frontend_source
+    assert "frontend_logger.log(log_level, line)" not in frontend_source
 
 
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
