@@ -254,6 +254,22 @@ def test_concurrent_appends_are_not_lost() -> bool:
 
 
 def test_list_all_cache_isolated_and_invalidated() -> bool:
+    source = open(virtual_session_store.__file__, "r", encoding="utf-8").read()
+    list_start = source.index("def list_all()")
+    list_end = source.index("def get(", list_start)
+    list_source = source[list_start:list_end]
+    for timer in (
+        "virtual_sessions.list.load",
+        "virtual_sessions.list.copy_cached",
+        "virtual_sessions.list.project",
+        "virtual_sessions.list.sort",
+        "virtual_sessions.list.cache_copy",
+        "virtual_sessions.list.copy_result",
+    ):
+        if timer not in list_source:
+            print(f"  missing virtual list timer {timer}")
+            return False
+
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     sid = f"virtual:{ext}:cached-list"
     virtual_session_store.upsert(
