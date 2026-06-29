@@ -589,6 +589,16 @@ def test_user_input_file_store_calls_are_off_loop() -> None:
     )
 
 
+def test_shortcut_picker_wait_budget_is_small() -> None:
+    source = (ROOT / "shortcut_picker.py").read_text(encoding="utf-8")
+    assert "_PICK_WAIT_TIMEOUT_SECS = 0.25" in source
+    pick_start = source.index("async def pick_shortcuts(")
+    pick_source = source[pick_start:]
+    assert "asyncio.wait_for(" in pick_source
+    assert "asyncio.shield(_cached_pick(key, _pick_uncached))" in pick_source
+    assert "return all_shortcuts" in pick_source
+
+
 def test_stubbed_tree_build_does_not_search_tree_per_node() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     start = source.index("def _build_stubbed_tree(")

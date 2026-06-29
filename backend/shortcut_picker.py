@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECS = 300.0
 _CACHE_MAX = 128
-_PICK_WAIT_TIMEOUT_SECS = 1.5
+_PICK_WAIT_TIMEOUT_SECS = 0.25
 _cache: dict[str, tuple[float, list[str]]] = {}
 _inflight: dict[str, asyncio.Task[list[str]]] = {}
 _lock = asyncio.Lock()
