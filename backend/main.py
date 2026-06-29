@@ -627,9 +627,6 @@ def _session_summaries_cache_get(key: tuple) -> Response | None:
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _session_summaries_response_cache.pop(key, None)
         return None
-    if cached[2] != _sessions_list_transient_state_version():
-        _session_summaries_response_cache.pop(key, None)
-        return None
     return _sessions_list_response(cached[1])
 
 
@@ -649,7 +646,7 @@ def _session_summaries_cache_put(key: tuple, value: dict) -> Response:
     _session_summaries_response_cache[key] = (
         time.monotonic(),
         content,
-        _sessions_list_transient_state_version(),
+        0,
     )
     return _sessions_list_response(content)
 
@@ -6458,12 +6455,6 @@ async def get_session_summaries(ids: str = Query("")):
     ]
     if not requested_ids:
         return {"sessions": []}
-    summaries = await asyncio.to_thread(
-        _local_session_summaries_by_ids_for_sidebar,
-        requested_ids,
-    )
-    by_id = {str(session.get("id")): session for session in summaries if session.get("id")}
-    ordered = [by_id[sid] for sid in requested_ids if sid in by_id]
     cache_key = (
         tuple(requested_ids),
         session_store.summary_index_version(),

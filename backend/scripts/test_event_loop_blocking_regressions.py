@@ -1609,10 +1609,27 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     assert "\n        search,\n" not in cache_source
     assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
     assert "tuple(sorted(effective_search_fields))" in route_source
-
     store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def search_metadata_version()" in store_source
     assert "return _summary_metadata_version" in store_source
+
+
+def test_session_summaries_response_cache_precedes_lookup() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = source.index("@app.get(\"/api/sessions/summaries\")")
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/stats\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "cached_response = _session_summaries_cache_get(cache_key)" in route_source
+    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
+        "_local_session_summaries_by_ids_for_sidebar"
+    )
+    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
+        "_decorate_local_sidebar_sessions"
+    )
+    cache_start = route_source.index("cache_key = (")
+    cache_end = route_source.index("cached_response = _session_summaries_cache_get(cache_key)", cache_start)
+    cache_source = route_source[cache_start:cache_end]
+    assert "_sessions_list_transient_state_version()" not in cache_source
 
 
 def test_session_list_waits_briefly_for_partial_summary_warm() -> None:
@@ -2863,5 +2880,6 @@ if __name__ == "__main__":
     test_project_update_total_is_maintained_projection()
     test_extension_list_reconciliation_is_off_loop()
     test_search_sessions_response_cache_uses_metadata_version()
+    test_session_summaries_response_cache_precedes_lookup()
     test_internal_communication_worker_lookup_is_off_loop()
     print("PASS event loop blocking regressions")
