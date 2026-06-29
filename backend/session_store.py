@@ -234,14 +234,25 @@ def _replace_summary_projection_field(
     session_id: str,
     field: str,
     value: object,
-) -> None:
+) -> bool:
     global _summary_index_version
+    updated: dict | None = None
     with _summary_index_lock:
         summary = _summary_index.get(session_id)
-        if summary is None or summary.get(field) == value:
-            return
-        _summary_index[session_id] = {**summary, field: value}
-        _summary_index_version += 1
+        if summary is None:
+            return False
+        if summary.get(field) == value:
+            updated = dict(summary)
+        else:
+            updated = {**summary, field: value}
+            _summary_index[session_id] = updated
+            _summary_index_version += 1
+    if updated is not None:
+        try:
+            _write_summary_file(session_id, updated)
+        except Exception:
+            pass
+    return True
 
 
 def _summary_metadata_changed(before: Optional[dict], after: dict) -> bool:
@@ -645,7 +656,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
     return affected
 
 
-def _upsert_summary(root: dict) -> None:
+def _upsert_summary(root: dict, *, preserve_projection_fields: bool = False) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
@@ -659,6 +670,10 @@ def _upsert_summary(root: dict) -> None:
             existing = _summary_index.get(root["id"])
             if existing and existing.get("pending_eng_session_id"):
                 summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
+            if preserve_projection_fields and existing:
+                for projection_field in ("current_todos", "current_tasks"):
+                    if projection_field in existing:
+                        summary[projection_field] = existing[projection_field]
             if existing == summary:
                 summary_changed = False
             else:
@@ -3373,7 +3388,12 @@ def copy_persistable_tree(root: dict) -> dict:
 
 
 @perf.timed_fn("store.session.write_full")
-def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
+def write_session_full(
+    root: dict,
+    *,
+    bump_updated_at: bool = True,
+    preserve_projection_fields: bool = False,
+) -> None:
     """Write the whole ROOT tree to disk. Caller MUST pass a root dict
     (the top-level record), not an embedded fork — embedded fork writes
     happen by mutating the in-memory root and calling this function on
@@ -3461,7 +3481,7 @@ def write_session_full(root: dict, *, bump_updated_at: bool = True) -> None:
     # concurrent `list_sessions` observe the new summary while the
     # on-disk file is still the old one.
     with perf.timed("store.session.write_full.summary"):
-        _upsert_summary(root)
+        _upsert_summary(root, preserve_projection_fields=preserve_projection_fields)
 
 
 def list_sessions() -> list[dict]:
@@ -3547,11 +3567,47 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
         return []
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
-        return [
-            _summary_index[sid]
+        found = {
+            sid: _summary_index[sid]
             for sid in ids
             if sid in _summary_index
-        ]
+        }
+    missing = [sid for sid in ids if sid not in found]
+    for sid in missing:
+        summary = _load_summary_for_requested_id(sid)
+        if summary is not None:
+            found[sid] = summary
+    return [found[sid] for sid in ids if sid in found]
+
+
+def _load_summary_for_requested_id(sid: str) -> Optional[dict]:
+    path = _sessions_dir() / f"{sid}.json"
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("id") != sid:
+            return None
+        summary = _build_summary_for_root(_migrate_session(raw))
+        _publish_requested_summary(sid, summary)
+        _write_summary_file(sid, summary)
+        return summary
+    except (json.JSONDecodeError, KeyError, ValueError, OSError):
+        return None
+
+
+def _publish_requested_summary(sid: str, summary: dict) -> None:
+    global _summary_index_version, _summary_order_version, _summary_metadata_version
+    with _summary_index_lock:
+        existing = _summary_index.get(sid)
+        if existing == summary:
+            return
+        _summary_index[sid] = summary
+        _summary_index_version += 1
+        if _summary_order_changed(existing, summary):
+            _summary_order_version += 1
+        if _summary_metadata_changed(existing, summary):
+            _summary_metadata_version += 1
 
 
 def iter_all_sessions() -> Iterator[dict]:
