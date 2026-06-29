@@ -719,7 +719,7 @@ class ClaudeProvider(Provider):
         cleanup = True
         try:
             while True:
-                if complete_path.exists():
+                if await asyncio.to_thread(complete_path.exists):
                     break
                 # No heartbeat-based stuck detection — a live process is
                 # assumed to be doing useful work (long tool calls, model
@@ -727,7 +727,10 @@ class ClaudeProvider(Provider):
                 if rs.popen.poll() is not None:
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while not complete_path.exists() and loop.time() < grace_end:
+                    while (
+                        not await asyncio.to_thread(complete_path.exists)
+                        and loop.time() < grace_end
+                    ):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)
                     break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
@@ -737,7 +740,7 @@ class ClaudeProvider(Provider):
             # late-flushed final line is captured under its msg_id first.
             await self._await_tailer_drained(rs)
 
-            if rs.popen.poll() is None and complete_path.exists():
+            if rs.popen.poll() is None and await asyncio.to_thread(complete_path.exists):
                 # Turn done, process still alive. Tailer lifetime =
                 # process lifetime (late post-Result CLI flushes keep
                 # flowing) and the run stays registered so the
@@ -782,7 +785,10 @@ class ClaudeProvider(Provider):
         lingering_sentinel = rs.run_dir / "lingering"
         try:
             while rs.popen.poll() is None:
-                if not rs.lingering and lingering_sentinel.exists():
+                if (
+                    not rs.lingering
+                    and await asyncio.to_thread(lingering_sentinel.exists)
+                ):
                     rs.lingering = True
                     await self._publish_lingering(rs, True)
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
