@@ -3706,8 +3706,8 @@ def reconcile_runtime_skills() -> int:
     for record in _active_records_from_data(data):
         if harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_RUNTIME:
             continue
-        install_root = Path(str(record["source"].get("install_path") or "")).resolve()
-        if not install_root.exists():
+        install_root = runtime_package_root_for_record(record)
+        if install_root is None or not install_root.exists():
             continue
         manifest = record["manifest"]
         extension_id = manifest["id"]
@@ -3957,8 +3957,8 @@ def _mcp_server_configs_for_delivery(
             continue
         if not _record_runtime_ready(record):
             continue
-        install_root = Path(str(record["source"].get("install_path") or "")).resolve()
-        if not install_root.exists():
+        install_root = runtime_package_root_for_record(record)
+        if install_root is None or not install_root.exists():
             continue
         manifest = record["manifest"]
         if manifest["id"] in disabled_extension_ids:
@@ -4051,8 +4051,8 @@ def _runtime_mcp_server_config_for_item(
     item: dict[str, Any],
     inputs: dict[str, Any],
 ) -> dict[str, Any] | None:
-    install_root = Path(str(record["source"].get("install_path") or "")).resolve()
-    if not install_root.exists():
+    install_root = runtime_package_root_for_record(record)
+    if install_root is None or not install_root.exists():
         return None
     manifest = record["manifest"]
     backend_url = str(
@@ -4289,7 +4289,9 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
         return None
     if not has_permission(record, "backend_routes"):
         return None
-    install_root = Path(str(record["source"].get("install_path") or "")).resolve()
+    install_root = runtime_package_root_for_record(record)
+    if install_root is None:
+        return None
     entrypoint = ""
     entrypoint_kind = "module" if backend_module else "file"
     if backend_path:
@@ -4332,14 +4334,19 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
         frontend_path = str(manifest.get("entrypoints", {}).get("frontend") or "")
         if not frontend_path:
             continue
-        install_root = Path(str(record["source"].get("install_path") or "")).resolve()
-        entrypoint = (install_root / frontend_path).resolve()
-        if not entrypoint.is_relative_to(install_root) or not entrypoint.is_file():
+        runtime_root = runtime_package_root_for_record(record)
+        if runtime_root is None:
             continue
-        # Bust browser/PWA caches when an extension is upgraded: the asset
-        # URL itself carries the install commit sha, so a new version becomes
-        # a new module URL in the JS module map (no stale dynamic-import).
-        v = str(record["source"].get("commit_sha") or "")[:12] or "unversioned"
+        entrypoint = (runtime_root / frontend_path).resolve()
+        if not entrypoint.is_relative_to(runtime_root) or not entrypoint.is_file():
+            continue
+        # Bust browser/PWA caches when an extension changes. Packaged
+        # extensions use their install commit. Local private source mode also
+        # mixes in frontend asset fingerprints so live source edits get new
+        # module URLs without reinstalling the extension.
+        frontend_modules = manifest.get("entrypoints", {}).get("frontend_modules") or []
+        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
+        v = _frontend_asset_version(record, runtime_root, frontend_assets)
         bust = f"?v={v}"
         entries.append(
             {
@@ -4356,7 +4363,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                         "module": item["module"],
                         "module_url": f"/api/extensions/{manifest['id']}/frontend/{item['module']}{bust}",
                     }
-                    for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
+                    for item in frontend_modules
                 ],
             }
         )
@@ -4364,7 +4371,55 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
 
 
 def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
-    return (store_fingerprint(),)
+    source_fingerprints: list[tuple[Any, ...]] = []
+    for record in _active_records():
+        source = record.get("source") or {}
+        if source.get("type") != "better_agent_local" or private_local_runtime_mode() != _PRIVATE_LOCAL_RUNTIME_SOURCE:
+            continue
+        manifest = record.get("manifest") or {}
+        frontend_path = str(manifest.get("entrypoints", {}).get("frontend") or "")
+        if not frontend_path:
+            continue
+        runtime_root = runtime_package_root_for_record(record)
+        if runtime_root is None:
+            continue
+        frontend_modules = manifest.get("entrypoints", {}).get("frontend_modules") or []
+        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
+        source_fingerprints.append(
+            (
+                str(manifest.get("id") or ""),
+                str(runtime_root),
+                _frontend_assets_fingerprint(runtime_root, frontend_assets),
+            )
+        )
+    return (store_fingerprint(), private_local_runtime_mode(), tuple(source_fingerprints))
+
+
+def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> tuple[tuple[str, int, int], ...]:
+    fingerprints: list[tuple[str, int, int]] = []
+    for raw in asset_paths:
+        if not raw:
+            continue
+        try:
+            rel_path = _clean_rel_path(raw, field="asset_path")
+            path = (runtime_root / rel_path).resolve()
+            if not path.is_relative_to(runtime_root) or not path.is_file():
+                fingerprints.append((rel_path, -1, -1))
+                continue
+            stat = path.stat()
+            fingerprints.append((rel_path, stat.st_mtime_ns, stat.st_size))
+        except (ExtensionError, OSError):
+            fingerprints.append((str(raw), -1, -1))
+    return tuple(fingerprints)
+
+
+def _frontend_asset_version(record: dict[str, Any], runtime_root: Path, asset_paths: list[str]) -> str:
+    base = str((record.get("source") or {}).get("commit_sha") or "")[:12] or "unversioned"
+    source = record.get("source") or {}
+    if source.get("type") != "better_agent_local" or private_local_runtime_mode() != _PRIVATE_LOCAL_RUNTIME_SOURCE:
+        return base
+    digest = hashlib.sha256(repr(_frontend_assets_fingerprint(runtime_root, asset_paths)).encode("utf-8")).hexdigest()[:12]
+    return f"{base}-{digest}"
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -4377,12 +4432,14 @@ def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
     if not frontend_path:
         raise ExtensionError("Extension has no frontend entrypoint")
     requested = _clean_rel_path(asset_path or frontend_path, field="asset_path")
-    install_root = Path(str(record["source"].get("install_path") or "")).resolve()
-    frontend_entrypoint = (install_root / frontend_path).resolve()
+    runtime_root = runtime_package_root_for_record(record)
+    if runtime_root is None:
+        raise ExtensionError("Extension is not installed")
+    frontend_entrypoint = (runtime_root / frontend_path).resolve()
     frontend_root = frontend_entrypoint.parent
-    if frontend_root == install_root:
+    if frontend_root == runtime_root:
         raise ExtensionError("Extension frontend entrypoint must live under a dedicated asset directory")
-    target = (install_root / requested).resolve()
+    target = (runtime_root / requested).resolve()
     if not target.is_relative_to(frontend_root) or not target.is_file():
         raise ExtensionError("Extension frontend asset not found")
     return target
