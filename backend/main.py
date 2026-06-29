@@ -105,7 +105,7 @@ _SESSION_DETAIL_WARM_MSG_LIMIT = 50
 _SESSION_DETAIL_WARM_EXCHANGE_COUNT = None
 _sessions_list_response_cache: dict[
     tuple,
-    tuple[float, bytes, tuple[str, ...], tuple],
+    tuple[float, bytes, tuple[int, int, int]],
 ] = {}
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
@@ -479,21 +479,11 @@ def _session_detail_simple_cache_key_from_full(
     return None
 
 
-def _sessions_list_transient_fingerprint(session_ids: list[str]) -> tuple:
-    if not session_ids:
-        return ()
-    running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
-    unread_by_sid = session_manager.unread_counts_snapshot()
-    pending_input_by_sid = user_input_store.pending_counts_by_session()
-    return tuple(
-        (
-            sid,
-            sid in running_sids,
-            monitoring_by_sid.get(sid, "stopped"),
-            unread_by_sid.get(sid, 0),
-            pending_input_by_sid.get(sid, 0),
-        )
-        for sid in session_ids
+def _sessions_list_transient_state_version() -> tuple[int, int, int]:
+    return (
+        coordinator.turn_manager.cached_state_version(),
+        session_manager.unread_counts_version(),
+        user_input_store.pending_counts_version_loaded(),
     )
 
 
@@ -504,7 +494,7 @@ def _sessions_list_cache_get(key: tuple) -> Response | None:
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _sessions_list_response_cache.pop(key, None)
         return None
-    if cached[3] != _sessions_list_transient_fingerprint(list(cached[2])):
+    if cached[2] != _sessions_list_transient_state_version():
         _sessions_list_response_cache.pop(key, None)
         return None
     return _sessions_list_response(cached[1])
@@ -523,16 +513,10 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    session_ids = tuple(
-        str(session.get("id") or "")
-        for session in value.get("sessions", [])
-        if isinstance(session, dict) and session.get("id")
-    )
     _sessions_list_response_cache[key] = (
         time.monotonic(),
         content,
-        session_ids,
-        _sessions_list_transient_fingerprint(list(session_ids)),
+        _sessions_list_transient_state_version(),
     )
     return _sessions_list_response(content)
 
