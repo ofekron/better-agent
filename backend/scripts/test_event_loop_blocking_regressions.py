@@ -2057,6 +2057,19 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     assert "root_mtime_ns=file_signature[0] if file_signature is not None else None" in write_source
 
 
+def test_root_resolution_consults_loaded_index_before_filesystem_exists() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def _resolve_root_id(")
+    end = source.index("def _session_path(", start)
+    helper_source = source[start:end]
+    assert "_ensure_index()" in helper_source
+    assert "sid in _root_index_signatures" in helper_source
+    assert "sid in _fork_index" in helper_source
+    assert helper_source.index("sid in _root_index_signatures") < helper_source.index(
+        "(_sessions_dir() / f\"{sid}.json\").exists()"
+    )
+
+
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshot()" in source
@@ -2938,6 +2951,7 @@ if __name__ == "__main__":
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()
+    test_root_resolution_consults_loaded_index_before_filesystem_exists()
     test_summary_index_skips_empty_projection_scan()
     test_summary_index_validates_missing_summary_before_provider_context()
     test_extension_audit_inventory_refresh_is_off_provider_hot_path()
