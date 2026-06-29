@@ -13367,10 +13367,9 @@ async def websocket_chat(websocket: WebSocket):
         perf.record("ws.send_json", elapsed_ms)
         if elapsed_ms > 250.0:
             logger.warning(
-                "slow WebSocket send type=%s elapsed_ms=%.1f bytes=%d",
+                "slow WebSocket send type=%s elapsed_ms=%.1f",
                 event_dict.get("type") if isinstance(event_dict, dict) else None,
                 elapsed_ms,
-                len(json.dumps(event_dict, separators=(",", ":"), default=str)),
             )
 
     # Per-connection token so subscription bookkeeping in the coordinator

@@ -117,6 +117,13 @@ def main() -> int:
         failures,
     )
     check(
+        "direct uvicorn launch disables websocket compression",
+        "--ws-per-message-deflate false" in text
+        and app_entry_text.count("ws_per_message_deflate=False") >= 2
+        and "ws_per_message_deflate=False" in main_text,
+        failures,
+    )
+    check(
         "restart waits gracefully before force kill",
         "wait_for_backend_exit() {" in text
         and "Restart requested — waiting up to ${GRACEFUL_RESTART_TIMEOUT_SECONDS}s for graceful shutdown..." in text

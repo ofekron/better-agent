@@ -104,6 +104,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
             host="0.0.0.0",
             port=_env_port("BETTER_CLAUDE_NODE_PORT", 8002),
             proxy_headers=False,
+            ws_per_message_deflate=False,
         )
         return 0
     import main
@@ -113,6 +114,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         host=user_prefs.get_network_bind_address(),
         port=_env_port("BETTER_CLAUDE_BACKEND_PORT", 8000),
         proxy_headers=False,
+        ws_per_message_deflate=False,
     )
     return 0
 
