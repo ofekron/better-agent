@@ -88,6 +88,26 @@ class _FakeCoordinator:
         raise AssertionError("non-fork provider must be rejected before target init")
 
 
+def test_ephemeral_fork_delegations_do_not_share_pair_lock():
+    coord = _FakeCoordinator(_Provider(supports_fork=True, kind="claude"))
+    persistent_a = _delegation.lock_for_delegation(
+        coord, CALLER_SID, WORKER_SID, "fork", ephemeral=False,
+    )
+    persistent_b = _delegation.lock_for_delegation(
+        coord, CALLER_SID, WORKER_SID, "fork", ephemeral=False,
+    )
+    ephemeral_a = _delegation.lock_for_delegation(
+        coord, CALLER_SID, WORKER_SID, "fork", ephemeral=True,
+    )
+    ephemeral_b = _delegation.lock_for_delegation(
+        coord, CALLER_SID, WORKER_SID, "fork", ephemeral=True,
+    )
+
+    assert persistent_a is persistent_b
+    assert ephemeral_a is not ephemeral_b
+    assert ephemeral_a is not persistent_a
+
+
 def _fake_get_worker(cwd: str, agent_session_id: str):
     if agent_session_id != WORKER_SID:
         return None

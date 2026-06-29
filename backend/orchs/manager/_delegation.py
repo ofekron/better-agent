@@ -138,7 +138,10 @@ def lock_for_delegation(
     caller_agent_session_id: str,
     worker_agent_session_id: str,
     run_mode: str,
+    ephemeral: bool = False,
 ) -> asyncio.Lock:
+    if ephemeral:
+        return asyncio.Lock()
     if run_mode == "direct":
         return coordinator.pair_locks.setdefault(
             ("direct-worker", worker_agent_session_id),
@@ -532,7 +535,7 @@ async def run_delegation(
     await coordinator.turn_manager.emit_run_state(app_session_id)
     try:
         lock = lock_for_delegation(
-            coordinator, app_session_id, worker_session_id, run_mode,
+            coordinator, app_session_id, worker_session_id, run_mode, ephemeral,
         )
         wait_started = perf.stamp_enq()
         async with lock:
