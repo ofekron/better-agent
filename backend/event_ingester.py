@@ -977,6 +977,37 @@ class EventIngester:
                         matched.append(entry)
             return matched
 
+    def cached_rows_for_byte_range(
+        self, root_id: str, byte_start: int, byte_end: int,
+    ) -> Optional[list[dict]]:
+        path = self._events_path(root_id)
+        if not path.exists() or byte_end <= byte_start:
+            return []
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            return None
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            cached = self._full_scan_cache.get(root_id)
+            offsets = self._seq_offsets.get(root_id)
+            if (
+                cached is None
+                or cached[0] != file_size
+                or offsets is None
+                or len(offsets) < len(cached[1])
+            ):
+                return None
+            rows: list[dict] = []
+            for index, entry in enumerate(cached[1]):
+                line_start = offsets[index]
+                if line_start < byte_start:
+                    continue
+                if line_start >= byte_end:
+                    break
+                rows.append(entry)
+            return rows
+
     def root_events_by_sid(self, root_id: str) -> dict[str, list[dict]]:
         path = self._events_path(root_id)
         if not path.exists():
