@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ import extension_backend_loader
 import perf
 
 router = APIRouter(prefix="/api/extensions", tags=["extensions"])
+logger = logging.getLogger(__name__)
 
 _PROJECTION_RESPONSE_CACHE_TTL_SECONDS = 5.0
 _projection_response_cache: dict[tuple[str, tuple[Any, ...]], tuple[float, bytes]] = {}
@@ -196,32 +198,49 @@ async def dispatch_backend_extension_base(extension_id: str, request: Request):
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def dispatch_backend_extension(extension_id: str, path: str, request: Request):
-    with perf.timed("extension.backend.core_fast"):
-        core_response = await _dispatch_core_builtin_backend(
-            extension_id,
-            path,
-            request,
-        )
-    if core_response is not None:
-        return core_response
-    with perf.timed("extension.backend.spec"):
-        backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
-    with perf.timed("extension.backend.core_after_spec"):
-        core_response = await _dispatch_core_builtin_backend(
-            extension_id,
-            path,
-            request,
-            backend_spec=backend_spec,
-        )
-    if core_response is not None:
-        return core_response
-    with perf.timed("extension.backend.dispatch"):
-        return await extension_backend_loader.dispatch_extension_backend_request(
-            extension_id,
-            path,
-            request,
-            backend_spec=backend_spec,
-        )
+    started = time.perf_counter()
+    response_source = "unknown"
+    try:
+        with perf.timed("extension.backend.core_fast"):
+            core_response = await _dispatch_core_builtin_backend(
+                extension_id,
+                path,
+                request,
+            )
+        if core_response is not None:
+            response_source = "core_fast"
+            return core_response
+        with perf.timed("extension.backend.spec"):
+            backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
+        with perf.timed("extension.backend.core_after_spec"):
+            core_response = await _dispatch_core_builtin_backend(
+                extension_id,
+                path,
+                request,
+                backend_spec=backend_spec,
+            )
+        if core_response is not None:
+            response_source = "core_after_spec"
+            return core_response
+        with perf.timed("extension.backend.dispatch"):
+            response_source = "extension"
+            return await extension_backend_loader.dispatch_extension_backend_request(
+                extension_id,
+                path,
+                request,
+                backend_spec=backend_spec,
+            )
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= 50:
+            logger.info(
+                "slow extension backend %s %s/%s source=%s elapsed=%.1fms",
+                request.method,
+                extension_id,
+                path.strip("/"),
+                response_source,
+                elapsed_ms,
+            )
 
 
 async def _dispatch_core_builtin_backend(
