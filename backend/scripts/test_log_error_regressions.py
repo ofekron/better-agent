@@ -451,6 +451,49 @@ def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
         shutil.rmtree(claude_home, ignore_errors=True)
 
 
+def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-miss-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for idx in range(helpers._RUN_STATE_RECENT_SCAN_LIMIT + 8):
+            run_dir = runs / f"run-{idx}"
+            run_dir.mkdir()
+            (run_dir / "state.json").write_text(
+                json.dumps({"session_id": f"other-{idx}"}),
+                encoding="utf-8",
+            )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+
+        found = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        check(found is None, "jsonl helper returns missing run-state sid", failures)
+        _, _, candidates, _ = helpers._RUN_STATE_RECENT_INDEX or ("", 0.0, (), {})
+        check(
+            len(candidates) == helpers._RUN_STATE_RECENT_SCAN_LIMIT,
+            "jsonl helper bounds run-state miss to recent index",
+            failures,
+        )
+    finally:
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
 def main() -> int:
     failures: list[str] = []
     try:
@@ -464,6 +507,7 @@ def main() -> int:
         test_jsonl_path_coalesces_concurrent_provider_index(failures)
         test_jsonl_path_targets_run_state_by_sid(failures)
         test_jsonl_path_reuses_recent_run_state_index(failures)
+        test_jsonl_path_run_state_miss_stays_bounded(failures)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:

@@ -13,8 +13,6 @@ import os
 import time
 import json
 import logging
-import shutil
-import subprocess
 import heapq
 import threading
 from pathlib import Path
@@ -27,7 +25,6 @@ _JSONL_PATH_NEGATIVE_TTL_S = 5.0
 _JSONL_INDEX_TTL_S = 5.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
-_RUN_STATE_LOOKUP_TIMEOUT_S = 1.5
 _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
 _CLAUDE_PATH_INDEX_LOCK = threading.Lock()
 _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
@@ -203,41 +200,7 @@ def _recent_state_index(root: Path) -> dict[str, list[Path]]:
 
 
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
-    recent = _recent_state_index(root).get(agent_sid, [])
-    if recent:
-        return recent
-    rg = shutil.which("rg")
-    if rg is None:
-        matches: list[Path] = []
-        for state_path in root.glob("*/state.json"):
-            try:
-                if agent_sid in state_path.read_text(encoding="utf-8", errors="ignore"):
-                    matches.append(state_path)
-            except OSError:
-                continue
-        return matches
-    try:
-        proc = subprocess.run(
-            [
-                rg,
-                "--files-with-matches",
-                "--fixed-strings",
-                "--glob",
-                "state.json",
-                agent_sid,
-                str(root),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=_RUN_STATE_LOOKUP_TIMEOUT_S,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return []
-    if proc.returncode not in (0, 1):
-        return []
-    return [Path(line) for line in proc.stdout.splitlines() if line]
+    return _recent_state_index(root).get(agent_sid, [])
 
 
 def _run_state_path_for_sid(agent_sid: str) -> Optional[Path]:
