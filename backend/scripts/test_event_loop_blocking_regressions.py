@@ -295,6 +295,17 @@ def test_publish_event_default_path_skips_temp_ack_subscribers() -> None:
     assert "event_journal_ack_" not in default_source
 
 
+def test_broadcast_session_journal_write_runs_off_loop() -> None:
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    start = source.index("async def broadcast_session(")
+    end = source.index("async def broadcast_global(", start)
+    broadcast_source = source[start:end]
+    assert "await asyncio.to_thread(" in broadcast_source
+    assert "self._broadcast_session_sync" in broadcast_source
+    assert "await publish_event(" not in broadcast_source
+    assert "publish_event_sync(" in broadcast_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")

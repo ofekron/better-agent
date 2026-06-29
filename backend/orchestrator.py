@@ -3415,21 +3415,37 @@ class Coordinator:
         broadcasts it to that session's WS subscribers from disk —
         callers never touch `ws_callbacks` directly for per-session
         frames."""
-        from event_journal import publish_event
-        root_id = session_manager._root_id_for(app_session_id) or app_session_id
         try:
-            await publish_event(
-                session_id=root_id,
-                context_id=app_session_id,
-                event_type=event_type,
-                data=data,
-                source=source,
+            await asyncio.to_thread(
+                self._broadcast_session_sync,
+                app_session_id,
+                event_type,
+                data,
+                source,
             )
         except Exception:
             logger.exception(
                 "broadcast_session ingest failed sid=%s type=%s",
                 app_session_id, event_type,
             )
+
+    def _broadcast_session_sync(
+        self,
+        app_session_id: str,
+        event_type: str,
+        data: dict,
+        source: str,
+    ) -> None:
+        from event_journal import publish_event_sync
+
+        root_id = session_manager._root_id_for(app_session_id) or app_session_id
+        publish_event_sync(
+            session_id=root_id,
+            context_id=app_session_id,
+            event_type=event_type,
+            data=data,
+            source=source,
+        )
 
     async def broadcast_global(self, event_type: str, data: dict) -> None:
         """Cross-session UI invalidation ping. Fire-and-forget; failures
