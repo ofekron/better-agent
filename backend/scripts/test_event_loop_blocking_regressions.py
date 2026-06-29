@@ -1506,6 +1506,8 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
     assert "_metadata_text_cache" in source
+    assert "_metadata_trigram_index" in source
+    assert "_start_metadata_search_index_warm()" in source
     assert "_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()" in source
     assert "_summary_metadata_version" in source
     rows_start = source.index("def _metadata_search_rows(")
@@ -1523,6 +1525,8 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "cache_key = (query_lower, metadata_fields, _summary_metadata_version)" in search_source
     assert "cached = _metadata_search_cache.get(cache_key)" in search_source
     assert "return dict(cached)" in search_source
+    assert "candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)" in search_source
+    assert "if candidate_ids is not None and sid not in candidate_ids:" in search_source
     assert "rows = _metadata_search_rows()" in search_source
     assert "for sid, title, first_prompt in rows:" in search_source
     assert "title.count(query_lower)" in search_source
