@@ -57,6 +57,8 @@ _PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
+_RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
+_RECONCILED_STORE_LOCK = threading.Lock()
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
     "canvas",
@@ -286,7 +288,10 @@ def _projection_cache_put(name: str, key: tuple[Any, ...], value: Any) -> Any:
 
 
 def _clear_projection_cache() -> None:
+    global _RECONCILED_STORE_FINGERPRINT
     _PROJECTION_CACHE.clear()
+    with _RECONCILED_STORE_LOCK:
+        _RECONCILED_STORE_FINGERPRINT = None
 
 
 def _install_root() -> Path:
@@ -3099,7 +3104,18 @@ def list_extensions(*, include_hidden: bool = False) -> list[dict[str, Any]]:
 
 
 def list_extensions_with_reconciliation(*, include_hidden: bool = False) -> tuple[list[dict[str, Any]], bool]:
+    global _RECONCILED_STORE_FINGERPRINT
+    path_key = str(_store_path())
+    fingerprint = store_fingerprint()
+    with _RECONCILED_STORE_LOCK:
+        reconciled = _RECONCILED_STORE_FINGERPRINT == (path_key, fingerprint)
+    if reconciled:
+        data = _load()
+        return _list_extensions_from_data(data, include_hidden=include_hidden), False
+
     data, _changed, public_changed = _load_with_changes()
+    with _RECONCILED_STORE_LOCK:
+        _RECONCILED_STORE_FINGERPRINT = (path_key, store_fingerprint())
     return _list_extensions_from_data(data, include_hidden=include_hidden), public_changed
 
 
