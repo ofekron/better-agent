@@ -2174,6 +2174,12 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     assert "sessions.list.node_snapshot" not in route_source
     assert "_builtin_extension_runtime_ready_fast" not in route_source
     assert "_builtin_extension_runtime_ready(" not in route_source
+    helper_start = source.index("def _machine_nodes_enabled_cached(")
+    helper_end = source.index("def _sessions_list_response(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "asyncio.create_task(_refresh())" in helper_source
+    assert "await asyncio.to_thread(\n                        _builtin_extension_enabled" in helper_source
+    assert "return cached[1]" in helper_source
 
 
 def test_sessions_route_uses_cached_remote_node_sessions() -> None:

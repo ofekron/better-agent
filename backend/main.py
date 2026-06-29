@@ -143,6 +143,7 @@ _SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50
 _SIDEBAR_PAYLOAD_CACHE_MAX = 4096
 _SIDEBAR_DECORATED_CACHE_MAX = 1024
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
+_machine_nodes_enabled_refresh_task: asyncio.Task | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 _HOT_PATH_EXECUTOR = ThreadPoolExecutor(
     max_workers=8,
@@ -460,13 +461,29 @@ def _schedule_session_event_meta_warm(page: list[dict]) -> None:
 
 
 def _machine_nodes_enabled_cached() -> bool:
-    global _machine_nodes_enabled_cache
+    global _machine_nodes_enabled_cache, _machine_nodes_enabled_refresh_task
     now = time.monotonic()
     cached = _machine_nodes_enabled_cache
     if (
         cached is not None
         and now - cached[0] <= _MACHINE_NODES_ENABLED_TTL_SECONDS
     ):
+        return cached[1]
+    if cached is not None:
+        if _machine_nodes_enabled_refresh_task is None or _machine_nodes_enabled_refresh_task.done():
+            async def _refresh() -> None:
+                global _machine_nodes_enabled_cache
+                try:
+                    enabled = await asyncio.to_thread(
+                        _builtin_extension_enabled,
+                        extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
+                    )
+                except Exception:
+                    logger.debug("machine nodes enabled refresh failed", exc_info=True)
+                    return
+                _machine_nodes_enabled_cache = (time.monotonic(), enabled)
+
+            _machine_nodes_enabled_refresh_task = asyncio.create_task(_refresh())
         return cached[1]
     enabled = _builtin_extension_enabled(
         extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
