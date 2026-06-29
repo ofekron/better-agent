@@ -1002,7 +1002,7 @@ class GeminiJsonlTailer(JsonlEventTailer):
         if self._pending_lines:
             return self._pending_lines.pop(0)
         while not self._stop_event.is_set():
-            new_lines = self._read_new_lines()
+            new_lines = await asyncio.to_thread(self._read_new_lines)
             if new_lines:
                 self._pending_lines = new_lines[1:]
                 return new_lines[0]
