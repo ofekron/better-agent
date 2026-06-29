@@ -206,6 +206,21 @@ def test_runner_uuid_is_deterministic() -> bool:
     return a["data"]["uuid"] == b["data"]["uuid"]
 
 
+def test_capability_context_labels_team_message() -> bool:
+    prompt = runner_copilot._prepend_capability_context("<team_message>done</team_message>", {
+        "source": "team_message",
+        "capability_contexts": [{
+            "name": "Runtime",
+            "category": "system",
+            "content": "Use runtime context.",
+        }],
+    })
+    return (
+        "## Message\n\n<team_message>" in prompt
+        and "## User prompt\n\n<team_message>" not in prompt
+    )
+
+
 TESTS = [
     ("registry_resolves_copilot", test_registry_resolves_copilot),
     ("capability_matrix", test_capability_matrix),
@@ -220,6 +235,7 @@ TESTS = [
     ("runner_normalizes_event_types", test_runner_normalizes_event_types),
     ("runner_normalizer_skips_bookkeeping", test_runner_normalizer_skips_bookkeeping),
     ("runner_uuid_is_deterministic", test_runner_uuid_is_deterministic),
+    ("capability_context_labels_team_message", test_capability_context_labels_team_message),
 ]
 
 

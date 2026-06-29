@@ -77,7 +77,7 @@ import { Setup } from "./components/Setup";
 import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
 import { NotesPanel } from "./components/NotesPanel";
-import { TodosPanel, visibleTodoCount } from "./components/TodosPanel";
+import { TodosPanel, todoProgress } from "./components/TodosPanel";
 import { CommentsPanel } from "./components/CommentsPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import Icon from "./components/Icon";
@@ -2200,16 +2200,19 @@ function AppMain({
   );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
-  // tabs order chosen from Settings stays live.
+  // tabs visibility and order chosen from Settings stay live.
   const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
   const [sessionTabsStatusSort, setSessionTabsStatusSort] = useState(false);
+  const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
     const apply = (d: {
       sessions_tabs_sort?: unknown;
       sessions_tabs_status_sort?: unknown;
+      sessions_tabs_visible?: unknown;
     }) => {
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
       if (typeof d.sessions_tabs_status_sort === "boolean") setSessionTabsStatusSort(d.sessions_tabs_status_sort);
+      if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
     };
     const off = eventBus.subscribe("user_prefs_changed", (p) => apply(p as Record<string, unknown>));
     return off;
@@ -2253,6 +2256,9 @@ function AppMain({
         }
         if (typeof data.sessions_tabs_status_sort === "boolean") {
           setSessionTabsStatusSort(data.sessions_tabs_status_sort);
+        }
+        if (typeof data.sessions_tabs_visible === "boolean") {
+          setSessionTabsVisible(data.sessions_tabs_visible);
         }
         if (data.first_run_wizard_done === false && !firstRunWizardOpenedRef.current) {
           firstRunWizardOpenedRef.current = true;
@@ -2381,6 +2387,10 @@ function AppMain({
         ? sessionInlineTags.map((t, i) => ({ ...t, displayNumber: i + 1 }))
         : (EMPTY_INLINE_TAGS as import("./types/inlineTag").InlineTag[]),
     [sessionInlineTags],
+  );
+  const currentTodoProgress = todoProgress(
+    currentSession?.current_todos ?? [],
+    currentSession?.current_tasks ?? [],
   );
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
   // Aggressively emphasize the focused comment's highlight spans.
@@ -6220,6 +6230,7 @@ function AppMain({
                 );
               }}
               openSessions={sortedOpenSessions}
+              sessionTabsVisible={sessionTabsVisible}
               sessionTabsSort={sessionTabsSort}
               providers={providers}
               onCloseTab={handleCloseTab}
@@ -6781,13 +6792,8 @@ function AppMain({
                     patchRightPanel(currentSession.id, { tab: "todos", clearAutoReasons: true });
                 }}
               >
-                {visibleTodoCount(currentSession?.current_todos ?? []) +
-                  visibleTodoCount(currentSession?.current_tasks ?? []) >
-                0
-                  ? `${t("rightPanel.todos")} (${
-                      visibleTodoCount(currentSession?.current_todos ?? []) +
-                      visibleTodoCount(currentSession?.current_tasks ?? [])
-                    })`
+                {currentTodoProgress.visible > 0
+                  ? `${t("rightPanel.todos")} (${currentTodoProgress.visible})`
                   : t("rightPanel.todos")}
               </button>
               <button

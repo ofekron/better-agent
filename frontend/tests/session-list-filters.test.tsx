@@ -107,6 +107,27 @@ describe("SessionList advanced filters", () => {
     vi.useRealTimers();
   });
 
+  it("counts todo and task progress with completed duplicates winning", () => {
+    renderList([
+      makeSession({
+        id: "todo-task-session",
+        name: "Todo task session",
+        current_todos: [
+          { content: "Shared item", status: "pending" },
+          { content: "Todo only", status: "in_progress" },
+        ],
+        current_tasks: [
+          { content: "Shared item", status: "completed" },
+          { content: "Task only", status: "pending" },
+        ],
+      }),
+    ]);
+
+    const badge = within(rowBySessionId("todo-task-session")).getByTestId("session-todo-badge");
+    expect(badge.textContent).toBe("1/3");
+    expect(badge.getAttribute("data-todo-state")).toBe("progress");
+  });
+
   it("unpins a specific pinned session from the row button", () => {
     const onPin = vi.fn();
     renderList(

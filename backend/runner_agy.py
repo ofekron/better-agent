@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from capability_contexts import prepend_capability_context
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from cli_paths import resolve_cli_binary
 from prompt_templates import render_prompt
@@ -254,23 +255,7 @@ def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optio
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
-    blocks: list[str] = []
-    for item in inputs.get("capability_contexts") or []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        name = str(item.get("name") or "Capability")
-        category = str(item.get("category") or "capability")
-        blocks.append(f"## {name} ({category})\n\n{content.strip()}")
-    if not blocks:
-        return prompt
-    prefix = render_prompt(
-        "runner/capability_context.md",
-        {"blocks": "\n\n".join(blocks)},
-    )
-    return f"{prefix}\n\n{prompt}" if prompt else prefix
+    return prepend_capability_context(prompt, inputs)
 
 
 def _materialize_attachments(run_dir: Path, images: list) -> list[Path]:

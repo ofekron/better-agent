@@ -1848,6 +1848,7 @@ async def _retry_recovered_run(
         session_id=resume_sid,  # --resume target
         mode=mode,
         app_session_id=app_sid,
+        source=inp.get("source"),
         disallowed_tools=inp.get("disallowed_tools"),
         setting_sources=inp.get("setting_sources"),
         backend_url=inp.get("backend_url"),

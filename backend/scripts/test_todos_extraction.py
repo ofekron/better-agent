@@ -1189,8 +1189,8 @@ def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
     if "Already done" not in out:
         print(f"  completed session work missing from reminder: {out!r}")
         return False
-    if out.count("Duplicate shared") != 1 or "- [in_progress] Duplicate shared" not in out:
-        print(f"  duplicate todo/task content not deduped with open status: {out!r}")
+    if out.count("Duplicate shared") != 1 or "- [completed] Duplicate shared" not in out:
+        print(f"  duplicate todo/task content not deduped with completed status: {out!r}")
         return False
 
     all_done = {

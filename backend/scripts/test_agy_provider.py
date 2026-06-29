@@ -15,12 +15,25 @@ sys.path.insert(0, str(_BACKEND))
 import config_store  # noqa: E402
 from provider import _resolve_class  # noqa: E402
 from provider_agy import AgyProvider, fetch_agy_models  # noqa: E402
-from runner_agy import _agy_worker_events, _materialize_agy_run_home, main as runner_main  # noqa: E402
+from runner_agy import _agy_worker_events, _materialize_agy_run_home, _prepend_capability_context, main as runner_main  # noqa: E402
 
 
 def check(cond: bool, msg: str) -> None:
     if not cond:
         raise AssertionError(msg)
+
+
+def test_agy_capability_context_labels_team_message() -> None:
+    prompt = _prepend_capability_context("<team_message>done</team_message>", {
+        "source": "team_message",
+        "capability_contexts": [{
+            "name": "Runtime",
+            "category": "system",
+            "content": "Use runtime context.",
+        }],
+    })
+    check("## Message\n\n<team_message>" in prompt, "agy labels team messages as Message")
+    check("## User prompt\n\n<team_message>" not in prompt, "agy does not label team messages as User prompt")
 
 
 def _make_fake_agy(bin_dir: Path) -> Path:
@@ -576,6 +589,7 @@ def main() -> int:
         test_config_dir_does_not_export_claude_env,
         test_model_fetch_and_runner,
         test_native_subagent_events_from_agy_db,
+        test_agy_capability_context_labels_team_message,
         test_worker_envelopes_hydrate_from_events_jsonl,
         test_wrapped_worker_envelopes_route_to_panel,
         test_agy_run_home_overlay_carries_library_for_auth,

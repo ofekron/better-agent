@@ -11,6 +11,31 @@ interface TodoPresentation<T extends TodoItem | TaskItem> {
   previous: T[];
 }
 
+type WorkItem = TodoItem | TaskItem;
+
+export function mergeTodoWorkItems(
+  todos: TodoItem[],
+  tasks: TaskItem[],
+): WorkItem[] {
+  const items: WorkItem[] = [];
+  const seen = new Map<string, number>();
+  for (const item of [...todos, ...tasks]) {
+    const content = String(item.content || "Untitled todo").trim().replace(/\s+/g, " ");
+    const key = content.toLocaleLowerCase();
+    const normalized = { ...item, content };
+    const existingIndex = seen.get(key);
+    if (existingIndex !== undefined) {
+      if (items[existingIndex].status !== "completed" && normalized.status === "completed") {
+        items[existingIndex] = normalized;
+      }
+      continue;
+    }
+    seen.set(key, items.length);
+    items.push(normalized);
+  }
+  return items;
+}
+
 export function splitTodoPresentation<T extends TodoItem | TaskItem>(
   items: T[],
 ): TodoPresentation<T> {
@@ -40,6 +65,15 @@ export function splitTodoPresentation<T extends TodoItem | TaskItem>(
 
 export function visibleTodoCount(items: Array<TodoItem | TaskItem>): number {
   return splitTodoPresentation(items).current.length;
+}
+
+export function todoProgress(todos: TodoItem[], tasks: TaskItem[]) {
+  const items = mergeTodoWorkItems(todos, tasks);
+  return {
+    total: items.length,
+    done: items.filter((item) => item.status === "completed").length,
+    visible: visibleTodoCount(items),
+  };
 }
 
 export function TodoItemRow({

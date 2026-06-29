@@ -44,6 +44,9 @@ class _FakeSessionManager:
     def get_ref(self, sid: str):
         return self.sess
 
+    def _root_id_for(self, sid: str):
+        return sid
+
     def set_agent_sid(self, *args, **kwargs):
         pass
 
@@ -53,10 +56,16 @@ class _FakeSessionManager:
     def set_stopped_at(self, sid: str, msg_id: str, value):
         pass
 
+    def set_streaming(self, *args, **kwargs):
+        pass
+
     def set_msg_completed(self, sid: str, msg_id: str, value):
         self.completed_msg_ids.append(msg_id)
 
     def set_msg_stopped(self, *args, **kwargs):
+        pass
+
+    def update_running_content(self, *args, **kwargs):
         pass
 
     def get(self, sid: str):
@@ -95,7 +104,7 @@ def test_recovery_targets_descriptor_message_not_latest() -> None:
     def _fake_replay(**kwargs):
         replayed.append(kwargs["msg_id"])
 
-    def _fake_completion(persist_sid, msg_id):
+    def _fake_completion(persist_sid, msg_id, **_kwargs):
         fake_sm.set_msg_completed(persist_sid, msg_id, True)
 
     try:
@@ -328,6 +337,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(run_dir / "input.json", {
         "prompt": "retry me",
+        "source": "team_message",
         "cwd": "/tmp",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "token",
@@ -348,9 +358,11 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         def __init__(self) -> None:
             self._runs = {}
             self.started: list[str] = []
+            self.kwargs: dict = {}
 
         def start_run(self, *, run_id: str, **kwargs) -> None:
             self.started.append(run_id)
+            self.kwargs = kwargs
             self._runs[run_id] = _Run()
 
     class _TurnManager:
@@ -411,6 +423,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("active_run_ids updated", coordinator.turn_manager.active_run_ids == {"sid": [new_run_id]})
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
     check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
+    check("retry preserves source", provider.kwargs.get("source") == "team_message")
 
 
 def main() -> int:
