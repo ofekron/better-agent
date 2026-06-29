@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import uuid
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,7 @@ _VALID_ORCH_MODES = ("team", "native")
 _VALID_WORKER_POLICIES = ("ask", "approve", "deny")
 
 _lock = threading.RLock()
+_data_cache: tuple[tuple[int, int], dict] | None = None
 
 
 def _path() -> Path:
@@ -34,10 +36,23 @@ def _empty() -> dict:
     return {"version": SCHEMA_VERSION, "tasks": []}
 
 
+def _fingerprint() -> tuple[int, int]:
+    try:
+        st = _path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _read() -> dict:
+    global _data_cache
     path = _path()
     if not path.exists():
         return _empty()
+    fingerprint = _fingerprint()
+    cached = _data_cache
+    if cached is not None and cached[0] == fingerprint:
+        return copy.deepcopy(cached[1])
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -58,11 +73,14 @@ def _read() -> dict:
     if not isinstance(raw["tasks"], list):
         logger.error("task_store: 'tasks' is not a list - returning empty store")
         return _empty()
+    _data_cache = (fingerprint, copy.deepcopy(raw))
     return raw
 
 
 def _write(data: dict) -> None:
+    global _data_cache
     write_json(_path(), data)
+    _data_cache = (_fingerprint(), copy.deepcopy(data))
 
 
 def _clean_str(value, *, field: str, max_len: int, required: bool) -> str:
