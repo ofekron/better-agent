@@ -553,6 +553,16 @@ def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     assert "def cached_state_snapshot(" in turn_source
 
 
+def test_session_discovery_reads_mode_without_deepcopy() -> None:
+    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    start = source.index('if event.type == "session_discovered":')
+    end = source.index('if event.type in ("complete", "error"):', start)
+    discovery_source = source[start:end]
+    assert 'session_manager.get_field(' in discovery_source
+    assert '"orchestration_mode"' in discovery_source
+    assert 'session_manager.get(' not in discovery_source
+
+
 def test_project_aggregates_use_bulk_cached_state() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     start = source.index("def _project_aggregates(")
@@ -1799,6 +1809,7 @@ if __name__ == "__main__":
     test_startup_defers_requirement_and_project_match_warmers()
     test_sidebar_organization_enrichment_stays_in_summary_index()
     test_sidebar_decoration_uses_bulk_cached_state()
+    test_session_discovery_reads_mode_without_deepcopy()
     test_project_aggregates_use_bulk_cached_state()
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
