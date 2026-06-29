@@ -983,6 +983,8 @@ def test_session_list_warms_event_meta_off_path() -> None:
     detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
     detail_warm_source = source[detail_warm_start:detail_warm_end]
+    assert "def _session_detail_projection_cache_fresh(" in detail_warm_source
+    assert "if _session_detail_projection_cache_fresh(root_id):" in detail_warm_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)" in detail_warm_source
     assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in detail_warm_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)" in detail_warm_source
@@ -1195,6 +1197,7 @@ def test_event_projections_warm_in_background() -> None:
     assert "_session_detail_response_cache_key_sync(" in detail_warm_source
     assert "_session_detail_cache_has(cache_key)" in detail_warm_source
     assert "_session_detail_snapshot_sync(" in detail_warm_source
+    assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("event_ingester.message_event_summaries(root_id)")
     assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("_session_detail_snapshot_sync(")
     assert "_session_detail_cache_put(cache_key, tree)" in detail_warm_source
     assert "_SESSION_DETAIL_WARM_EXCHANGE_COUNT" in detail_warm_source
