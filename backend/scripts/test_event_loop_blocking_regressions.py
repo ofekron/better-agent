@@ -998,10 +998,18 @@ def test_session_list_warms_event_meta_off_path() -> None:
 def test_session_list_reads_user_prefs_once() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _session_list_user_prefs(" in source
+    assert "_session_list_user_prefs_cache" in source
+    assert "_SESSION_LIST_USER_PREFS_TTL_SECONDS" in source
+    prefs_start = source.index("def _session_list_user_prefs(")
+    prefs_end = source.index("_GIT_STATUS_TTL_SECONDS", prefs_start)
+    prefs_source = source[prefs_start:prefs_end]
+    assert "time.monotonic()" in prefs_source
+    assert "user_prefs.get_all()" in prefs_source
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
-    assert "await asyncio.to_thread(_session_list_user_prefs)" in route_source
+    assert "_session_list_user_prefs()" in route_source
+    assert "await asyncio.to_thread(_session_list_user_prefs)" not in route_source
     assert "user_prefs.get_folder_view_enabled()" not in route_source
     assert "user_prefs.get_session_sort()" not in route_source
     assert "user_prefs.get_session_status_sort()" not in route_source
