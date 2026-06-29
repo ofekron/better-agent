@@ -833,3 +833,5 @@
   "session.source.extension": "Extension",
   "session.source.internal": "Internal"
 }
+  "settings.extensionsEnabled": "已启用",
+  "settings.extensionsDisabled": "已停用",

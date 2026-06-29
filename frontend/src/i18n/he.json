@@ -868,3 +868,5 @@
   "session.source.extension": "Extension",
   "session.source.internal": "Internal"
 }
+  "settings.extensionsEnabled": "פעיל",
+  "settings.extensionsDisabled": "כבוי",

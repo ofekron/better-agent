@@ -833,3 +833,5 @@
   "session.source.extension": "Extension",
   "session.source.internal": "Internal"
 }
+  "settings.extensionsEnabled": "Включено",
+  "settings.extensionsDisabled": "Отключено",

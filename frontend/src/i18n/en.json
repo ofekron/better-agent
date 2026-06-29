@@ -886,3 +886,5 @@
   "session.source.extension": "Extension",
   "session.source.internal": "Internal"
 }
+  "settings.extensionsEnabled": "Enabled",
+  "settings.extensionsDisabled": "Disabled",
