@@ -378,6 +378,37 @@ def test_list_all_summary_cache_skips_full_payload_copy() -> bool:
     return any(session.get("id") == sid for session in cached)
 
 
+def test_cold_list_all_skips_full_payload_copy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:cold-summary-path"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Cold summary path",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    virtual_session_store._cache_signature = None
+    virtual_session_store._cache_data = None
+    virtual_session_store._summary_cache_signature = None
+    virtual_session_store._summary_cache = None
+    virtual_session_store._summary_cache_fresh_until = 0.0
+    original = virtual_session_store.deepcopy
+
+    def guarded_deepcopy(value):
+        if isinstance(value, dict) and isinstance(value.get("sessions"), dict):
+            raise AssertionError("cold list_all copied full virtual session store")
+        return original(value)
+
+    virtual_session_store.deepcopy = guarded_deepcopy
+    try:
+        listed = virtual_session_store.list_all()
+    finally:
+        virtual_session_store.deepcopy = original
+    return any(session.get("id") == sid for session in listed)
+
+
 def test_list_all_hot_cache_skips_store_load() -> bool:
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     sid = f"virtual:{ext}:hot-cache"
@@ -552,6 +583,7 @@ TESTS = [
     ("concurrent appends are not lost", test_concurrent_appends_are_not_lost),
     ("list_all cache is isolated + invalidated", test_list_all_cache_isolated_and_invalidated),
     ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
+    ("cold list_all skips full payload copy", test_cold_list_all_skips_full_payload_copy),
     ("list_all hot cache skips store load", test_list_all_hot_cache_skips_store_load),
     ("list_all returns cached projection when store lock busy", test_list_all_returns_cached_projection_when_store_lock_busy),
     ("write warms summary cache for recent list", test_write_warms_summary_cache_for_recent_list),
