@@ -698,8 +698,11 @@ export function useSession(authStatus?: string) {
         });
         const filters = filterSnapshot;
         if (filters.projectPath) params.set("project_path", filters.projectPath);
-        if (filters.search?.trim()) params.set("search", filters.search.trim());
-        if (filters.searchFields) params.set("search_fields", filters.searchFields.join(","));
+        const searchQuery = filters.search?.trim() ?? "";
+        if (searchQuery) {
+          params.set("search", searchQuery);
+          if (filters.searchFields) params.set("search_fields", filters.searchFields.join(","));
+        }
         if (filters.showArchived) params.set("show_archived", "true");
         if (filters.fileEditMode === "yes") params.set("file_edit_mode", "true");
         if (filters.fileEditMode === "no") params.set("file_edit_mode", "false");

@@ -541,6 +541,34 @@ describe("useSession.selectSession — optimistic swap", () => {
     });
   });
 
+  it("omits search fields from session-list requests when search is empty", async () => {
+    const a = makeSession({ id: "a", name: "Search title" });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      result.current.setSessionListFilters({
+        search: "",
+        searchFields: ["content", "title", "first_prompt"],
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      const sessionListUrls = gate!.urls.filter((url) => url.includes("/api/sessions?"));
+      expect(sessionListUrls.at(-1)).not.toContain("search=");
+      expect(sessionListUrls.at(-1)).not.toContain("search_fields=");
+    });
+  });
+
   it("does not locally prepend a created session while search filters are active", async () => {
     const existing = makeSession({ id: "a", name: "Search title" });
     const created = makeSession({ id: "created", name: "Session 12:35" });
