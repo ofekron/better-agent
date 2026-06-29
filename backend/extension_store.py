@@ -4211,11 +4211,12 @@ def post_turn_hooks() -> list[tuple[str, str]]:
     declaring a ``entrypoints.hooks.post_turn`` backend path."""
     out: list[tuple[str, str]] = []
     for record in list_extensions():
-        if not _record_active(record) or not _record_runtime_ready(record):
+        if not _record_active(record):
             continue
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get("post_turn")
-        if path:
-            out.append((record["manifest"]["id"], str(path)))
+        if not path or not _record_runtime_ready(record):
+            continue
+        out.append((record["manifest"]["id"], str(path)))
     return out
 
 
@@ -4224,22 +4225,24 @@ def pre_turn_hooks() -> list[tuple[str, str]]:
     declaring a ``entrypoints.hooks.pre_turn`` backend path."""
     out: list[tuple[str, str]] = []
     for record in list_extensions():
-        if not _record_active(record) or not _record_runtime_ready(record):
+        if not _record_active(record):
             continue
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get("pre_turn")
-        if path:
-            out.append((record["manifest"]["id"], str(path)))
+        if not path or not _record_runtime_ready(record):
+            continue
+        out.append((record["manifest"]["id"], str(path)))
     return out
 
 
 def session_event_hooks() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for record in list_extensions():
-        if not _record_active(record) or not _record_runtime_ready(record):
+        if not _record_active(record):
             continue
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get("session_event")
-        if path:
-            out.append((record["manifest"]["id"], str(path)))
+        if not path or not _record_runtime_ready(record):
+            continue
+        out.append((record["manifest"]["id"], str(path)))
     return out
 
 
