@@ -2702,7 +2702,7 @@ def _local_visible_order_ids(sort_by: str, project_path: str | None = None) -> t
     ordered_ids = session_manager.ordered_summary_ids(sort_by)
     visible_ids: list[str] = []
     with perf.timed("sessions.list.local.visible_order_build"):
-        for summary in session_store.get_session_summaries_by_ids(ordered_ids):
+        for summary in session_store.get_indexed_session_summaries_by_ids(ordered_ids):
             if project_path is not None and summary.get("cwd") != project_path:
                 continue
             if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
@@ -2758,7 +2758,7 @@ def _local_session_page_for_sidebar_preserving_order(
     total = 0
     end = offset + limit
     with perf.timed("sessions.list.local.ordered_filter"):
-        for session in session_store.get_session_summaries_by_ids(ordered_ids):
+        for session in session_store.get_indexed_session_summaries_by_ids(ordered_ids):
             if _wm.should_hide_from_sidebar(session):
                 continue
             if not _session_matches_list_filters(
