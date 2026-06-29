@@ -1275,14 +1275,24 @@ class EventJournalReader:
             worker_id=worker_id,
             delegate_id=delegate_id,
         )
+        summaries_start = time.perf_counter()
         summaries = self.message_event_summaries(
             session_id,
             sid_filter=context_id,
         )
+        perf.record(
+            "event_journal.message_cache.summaries",
+            (time.perf_counter() - summaries_start) * 1000,
+        )
         summary = summaries.get(message_id)
         if not summary:
             return None
+        resolutions_start = time.perf_counter()
         resolutions = event_ingester.ownership_resolutions(session_id)
+        perf.record(
+            "event_journal.message_cache.resolutions",
+            (time.perf_counter() - resolutions_start) * 1000,
+        )
         res_version = len(resolutions)
         key = (session_id, context_id, message_id)
         # Effective bounds: summary byte_start/byte_end already span the
@@ -1303,11 +1313,16 @@ class EventJournalReader:
             if grow_only and cached.byte_end < byte_end:
                 # Hot streaming path: same span start, no new resolution
                 # — only append the new tail and filter it.
+                read_start = time.perf_counter()
                 cached.events.extend(self._read_owned_range(
                     session_id, message_id,
                     cached.byte_end, byte_end,
                     resolutions=resolutions,
                 ))
+                perf.record(
+                    "event_journal.message_cache.read_grow",
+                    (time.perf_counter() - read_start) * 1000,
+                )
                 cached.byte_end = byte_end
                 cached.seq_end = seq_end
                 cached.frontend_events = None
@@ -1315,10 +1330,15 @@ class EventJournalReader:
                 # Cold, shrunk, start moved earlier, or a new resolution
                 # landed (which can reassign a mid-span row) — full
                 # effective re-read.
+                read_start = time.perf_counter()
                 events = self._read_owned_range(
                     session_id, message_id,
                     byte_start, byte_end,
                     resolutions=resolutions,
+                )
+                perf.record(
+                    "event_journal.message_cache.read_full",
+                    (time.perf_counter() - read_start) * 1000,
                 )
                 cached = _MessageCacheEntry(
                     events=events,
