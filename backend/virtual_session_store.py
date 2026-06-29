@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import perf
 from paths import ba_home
 
 _lock = threading.Lock()
@@ -315,31 +316,37 @@ def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def list_all() -> list[dict[str, Any]]:
     global _summary_cache, _summary_cache_signature
     with _lock:
-        data = _load_shared_locked()
+        with perf.timed("virtual_sessions.list.load"):
+            data = _load_shared_locked()
         signature = _cache_signature
         if (
             signature is not None
             and _summary_cache_signature == signature
             and _summary_cache is not None
         ):
-            return _copy_summaries(_summary_cache)
+            with perf.timed("virtual_sessions.list.copy_cached"):
+                return _copy_summaries(_summary_cache)
         sessions = data.get("sessions") or {}
         out: list[dict[str, Any]] = []
-        for session in sessions.values():
-            if not (
-                isinstance(session, dict)
-                and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
-            ):
-                continue
-            summary = dict(session)
-            summary.pop("synthetic_messages", None)
-            summary.pop("messages", None)
-            out.append(summary)
-        out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
+        with perf.timed("virtual_sessions.list.project"):
+            for session in sessions.values():
+                if not (
+                    isinstance(session, dict)
+                    and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
+                ):
+                    continue
+                summary = dict(session)
+                summary.pop("synthetic_messages", None)
+                summary.pop("messages", None)
+                out.append(summary)
+        with perf.timed("virtual_sessions.list.sort"):
+            out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
         if signature is not None:
             _summary_cache_signature = signature
-            _summary_cache = _copy_summaries(out)
-        return _copy_summaries(out)
+            with perf.timed("virtual_sessions.list.cache_copy"):
+                _summary_cache = _copy_summaries(out)
+        with perf.timed("virtual_sessions.list.copy_result"):
+            return _copy_summaries(out)
 
 
 def get(session_id: str) -> dict[str, Any] | None:
