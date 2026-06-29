@@ -1936,6 +1936,25 @@ class SessionManager:
             exchange_count=exchange_count, tree=True,
         )
 
+    def get_root_tree_stubbed_with_cache_key(
+        self,
+        sid: str,
+        *,
+        msg_limit: int = 50,
+        exchange_count: Optional[int] = None,
+    ) -> Optional[tuple[dict, tuple]]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            root = self._load_root(sid, hydrate_events=False)
+            if root is None:
+                return None
+            return self._build_stubbed_tree(
+                root, rid, msg_limit, exchange_count,
+                return_cache_key=True,
+            )
+
     def root_tree_stub_cache_key(
         self,
         sid: str,
@@ -2178,7 +2197,9 @@ class SessionManager:
         rid: str,
         msg_limit: int,
         exchange_count: Optional[int],
-    ) -> Optional[dict]:
+        *,
+        return_cache_key: bool = False,
+    ) -> Optional[dict] | Optional[tuple[dict, tuple]]:
         """Build a full tree copy with per-node stubbed messages from cache.
         Caller MUST hold the per-root lock."""
         cache_key = self._tree_stub_cache_key(
@@ -2188,7 +2209,8 @@ class SessionManager:
         if cached is not None:
             perf.record("session.stubbed_tree_cache.hit", 1.0)
             self._tree_stub_cache.move_to_end(cache_key)
-            return _copy_jsonish(cached)
+            tree = _copy_jsonish(cached)
+            return (tree, cache_key) if return_cache_key else tree
         perf.record("session.stubbed_tree_cache.miss", 1.0)
 
         def _copy_node(node: dict) -> dict:
@@ -2261,7 +2283,7 @@ class SessionManager:
         self._tree_stub_cache[cache_key] = _copy_jsonish(tree)
         if len(self._tree_stub_cache) > self._tree_stub_cache_max:
             self._tree_stub_cache.popitem(last=False)
-        return tree
+        return (tree, cache_key) if return_cache_key else tree
 
     def _compute_messages_snapshot(
         self, node_sid: str, rid: str, node: dict,

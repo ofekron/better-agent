@@ -107,6 +107,7 @@ _sessions_list_response_cache: dict[
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
+_session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 16
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
@@ -197,6 +198,19 @@ def _session_event_meta(root_id: str) -> tuple[bool, int, dict[str, int]]:
         dict(max_context),
     )
     return has_events, barrier_seq, dict(max_context)
+
+
+def _session_detail_watermarks(
+    root_id: str,
+    has_events: bool,
+    barrier_seq: int,
+    max_context: dict[str, int],
+) -> dict[str, int]:
+    if max_context:
+        return dict(max_context)
+    if has_events and barrier_seq > 0:
+        return {root_id: barrier_seq}
+    return {}
 
 
 def _session_event_meta_cache_fresh(root_id: str) -> bool:
@@ -397,7 +411,13 @@ def _session_detail_cache_get(key: tuple) -> Response | None:
 
 def _session_detail_cache_put(key: tuple, value: dict) -> Response:
     while len(_session_detail_response_cache) >= _SESSION_DETAIL_RESPONSE_CACHE_MAX:
-        _session_detail_response_cache.popitem(last=False)
+        old_key, _ = _session_detail_response_cache.popitem(last=False)
+        old_simple = _session_detail_simple_cache_key_from_full(old_key)
+        if (
+            old_simple is not None
+            and _session_detail_response_cache_latest.get(old_simple) == old_key
+        ):
+            _session_detail_response_cache_latest.pop(old_simple, None)
     content = json.dumps(
         value,
         ensure_ascii=False,
@@ -405,7 +425,25 @@ def _session_detail_cache_put(key: tuple, value: dict) -> Response:
         separators=(",", ":"),
     ).encode("utf-8")
     _session_detail_response_cache[key] = content
+    simple_key = _session_detail_simple_cache_key_from_full(key)
+    if simple_key is not None:
+        _session_detail_response_cache_latest[simple_key] = key
     return Response(content=content, media_type="application/json")
+
+
+def _session_detail_simple_cache_key_from_full(
+    key: tuple,
+) -> tuple[str, int, Optional[int]] | None:
+    if (
+        len(key) >= 2
+        and isinstance(key[0], str)
+        and isinstance(key[1], tuple)
+        and len(key[1]) >= 3
+        and isinstance(key[1][1], int)
+        and (key[1][2] is None or isinstance(key[1][2], int))
+    ):
+        return (key[0], key[1][1], key[1][2])
+    return None
 
 
 def _sessions_list_cache_get(key: tuple) -> Response | None:
@@ -4921,6 +4959,7 @@ def _session_detail_snapshot_sync(
     *,
     msg_limit: int,
     exchange_count: Optional[int],
+    include_cache_key: bool = False,
 ) -> Optional[dict]:
     root_id = session_manager._root_id_for(session_id)
     barrier_seq = 0
@@ -4939,9 +4978,20 @@ def _session_detail_snapshot_sync(
         max_context = {}
     gen_before = session_manager._reconcile_gen.get(root_id or "", 0) if root_id else 0
     tree_start = time.perf_counter()
-    tree = session_manager.get_root_tree_stubbed(
-        session_id, msg_limit=msg_limit, exchange_count=exchange_count,
-    )
+    detail_cache_key = None
+    if include_cache_key:
+        built = session_manager.get_root_tree_stubbed_with_cache_key(
+            session_id, msg_limit=msg_limit, exchange_count=exchange_count,
+        )
+        if built is None:
+            tree = None
+        else:
+            tree, tree_key = built
+            detail_cache_key = (session_id, tree_key)
+    else:
+        tree = session_manager.get_root_tree_stubbed(
+            session_id, msg_limit=msg_limit, exchange_count=exchange_count,
+        )
     tree_ms = (time.perf_counter() - tree_start) * 1000
     perf.record("sessions.detail.tree", tree_ms)
     if not tree:
@@ -4978,7 +5028,9 @@ def _session_detail_snapshot_sync(
             )
         if has_events:
             max_context_start = time.perf_counter()
-            tree["max_seq_by_sid"] = dict(max_context)
+            tree["max_seq_by_sid"] = _session_detail_watermarks(
+                root_id, has_events, barrier_seq, max_context,
+            )
             max_context_ms = (time.perf_counter() - max_context_start) * 1000
             perf.record("sessions.detail.max_context_copy", max_context_ms)
         else:
@@ -4991,6 +5043,8 @@ def _session_detail_snapshot_sync(
                 root_id[:8], total_ms, max_context_ms, strip_ms, has_events,
             )
         tree["file_path"] = str(_session_path(root_id))
+    if detail_cache_key is not None:
+        tree["_detail_response_cache_key_parts"] = detail_cache_key
     return tree
 
 
@@ -5004,6 +5058,9 @@ def _session_detail_response_cache_key_sync(
     if not isinstance(root_id, str):
         return None
     has_events, barrier_seq, max_context = _session_event_meta(root_id)
+    watermarks = _session_detail_watermarks(
+        root_id, has_events, barrier_seq, max_context,
+    )
     tree_key = session_manager.root_tree_stub_cache_key(
         session_id,
         msg_limit=msg_limit,
@@ -5017,7 +5074,7 @@ def _session_detail_response_cache_key_sync(
         _session_event_file_fingerprint(root_id),
         has_events,
         barrier_seq,
-        tuple(sorted(max_context.items())),
+        tuple(sorted(watermarks.items())),
     )
 
 
@@ -5068,12 +5125,20 @@ async def get_session(
     if virtual:
         return virtual
 
-    cache_key = await asyncio.to_thread(
-        _session_detail_response_cache_key_sync,
-        session_id,
-        msg_limit=msg_limit,
-        exchange_count=exchange_count,
-    )
+    simple_cache_key = (session_id, msg_limit, exchange_count)
+    cached_full_key = _session_detail_response_cache_latest.get(simple_cache_key)
+    cache_key = None
+    if cached_full_key is not None:
+        current_key = await asyncio.to_thread(
+            _session_detail_response_cache_key_sync,
+            session_id,
+            msg_limit=msg_limit,
+            exchange_count=exchange_count,
+        )
+        if current_key == cached_full_key:
+            cache_key = current_key
+        else:
+            _session_detail_response_cache_latest.pop(simple_cache_key, None)
     if cache_key is not None:
         cached = _session_detail_cache_get(cache_key)
         if cached is not None:
@@ -5090,10 +5155,33 @@ async def get_session(
         session_id,
         msg_limit=msg_limit,
         exchange_count=exchange_count,
+        include_cache_key=True,
     )
     perf.record("sessions.detail.worker", (time.perf_counter() - worker_start) * 1000)
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    if cache_key is None:
+        cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)
+        root_id = tree.get("id")
+        if (
+            isinstance(cache_key_parts, tuple)
+            and len(cache_key_parts) == 2
+            and isinstance(root_id, str)
+        ):
+            has_events, barrier_seq, max_context = _session_event_meta(root_id)
+            watermarks = _session_detail_watermarks(
+                root_id, has_events, barrier_seq, max_context,
+            )
+            cache_key = (
+                cache_key_parts[0],
+                cache_key_parts[1],
+                _session_event_file_fingerprint(root_id),
+                has_events,
+                barrier_seq,
+                tuple(sorted(watermarks.items())),
+            )
+    else:
+        tree.pop("_detail_response_cache_key_parts", None)
     if cache_key is not None:
         return _session_detail_cache_put(cache_key, tree)
     return _json_bytes_response(tree)

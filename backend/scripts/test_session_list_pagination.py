@@ -22,7 +22,6 @@ import main  # noqa: E402
 import auth  # noqa: E402
 import session_search_index  # noqa: E402
 import session_store  # noqa: E402
-import user_prefs  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -119,24 +118,18 @@ def test_default_list_preserves_summary_order_without_resort(client: TestClient)
     _write(_record("pinned-old", "2026-06-15T00:00:00+00:00", pinned=True))
 
     original = main._filter_sort_sessions_for_list
-    original_folder_view = user_prefs.get_folder_view_enabled
-    original_sort = user_prefs.get_session_sort
-    original_status_sort = user_prefs.get_session_status_sort
+    original_prefs = main._session_list_user_prefs
 
     def fail_full_sort(*_args, **_kwargs):
         raise AssertionError("default session list should preserve summary order")
 
     main._filter_sort_sessions_for_list = fail_full_sort
-    user_prefs.get_folder_view_enabled = lambda: False
-    user_prefs.get_session_sort = lambda: "updated_at"
-    user_prefs.get_session_status_sort = lambda: False
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
     try:
         response = client.get("/api/sessions?offset=1&limit=1", headers=HEADERS)
     finally:
         main._filter_sort_sessions_for_list = original
-        user_prefs.get_folder_view_enabled = original_folder_view
-        user_prefs.get_session_sort = original_sort
-        user_prefs.get_session_status_sort = original_status_sort
+        main._session_list_user_prefs = original_prefs
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions presorted fast path status {response.status_code}")
         return False

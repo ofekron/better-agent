@@ -1354,7 +1354,10 @@ def test_session_detail_response_bytes_are_cached() -> None:
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
     assert "_session_detail_cache_get(cache_key)" in route_source
+    assert "_session_detail_response_cache_latest.get(simple_cache_key)" in route_source
+    assert "if cached_full_key is not None:" in route_source
     assert "_session_reconcile_snapshot_and_schedule" in route_source
+    assert "include_cache_key=True" in route_source
     assert "_session_detail_cache_put(cache_key, tree)" in route_source
 
 
