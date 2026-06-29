@@ -1202,10 +1202,13 @@ class _MessageCacheEntry:
     events_fingerprint: tuple[int, int]
 
 
+DEFAULT_MESSAGE_CACHE_SIZE = 128
+
+
 class EventJournalReader:
     """Runtime source of truth for journal reads and cached projections."""
 
-    def __init__(self, *, message_cache_size: int = 20) -> None:
+    def __init__(self, *, message_cache_size: int = DEFAULT_MESSAGE_CACHE_SIZE) -> None:
         self._message_cache_size = message_cache_size
         self._message_cache: OrderedDict[
             tuple[str, str, str], _MessageCacheEntry

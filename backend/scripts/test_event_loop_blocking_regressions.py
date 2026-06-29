@@ -501,6 +501,8 @@ def test_connected_session_fallback_sorts_only_requested_page() -> None:
 
 def test_message_cache_hydration_has_substep_perf_metrics() -> None:
     source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    assert "DEFAULT_MESSAGE_CACHE_SIZE = 128" in source
+    assert "message_cache_size: int = DEFAULT_MESSAGE_CACHE_SIZE" in source
     start = source.index("def _ensure_message_cache(")
     end = source.index("def read_message_frontend_events(", start)
     cache_source = source[start:end]
