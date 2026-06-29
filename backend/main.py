@@ -506,6 +506,24 @@ def _json_bytes_response(value: dict) -> Response:
     return Response(content=content, media_type="application/json")
 
 
+def _sessions_list_response_maybe_cache(
+    cache_key: tuple,
+    value: dict,
+    *,
+    cache_response: bool,
+) -> Response:
+    if cache_response:
+        return _sessions_list_cache_put(cache_key, value)
+    return _sessions_list_response(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
 def _session_detail_cache_get(key: tuple) -> Response | None:
     content = _session_detail_response_cache.get(key)
     if content is None:
@@ -605,6 +623,25 @@ def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> 
             content_generation = session_search_index.generation()
         return (session_store.search_metadata_version(), content_generation)
     return (session_store.summary_version(), virtual_session_store.version_token())
+
+
+def _sessions_list_content_search_ready(
+    search_query: str,
+    search_fields: set[str],
+    *,
+    offset: int,
+    limit: int,
+) -> bool:
+    if (
+        not search_query
+        or session_store.SEARCH_FIELD_CONTENT not in search_fields
+    ):
+        return True
+    import session_search_index
+    return session_search_index.has_cached_result(
+        search_query,
+        _session_search_candidate_limit(offset, limit),
+    )
 
 
 def _remote_sessions_cache_version_snapshot() -> int:
@@ -4850,15 +4887,17 @@ async def get_sessions(
         _remote_sessions_cache_version_snapshot() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
-    cache_response = not (
-        search_query
-        and session_store.SEARCH_FIELD_CONTENT in effective_search_fields
-    )
-    cached_response = _sessions_list_cache_get(cache_key) if cache_response else None
+    cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:
         perf.record("sessions.list.response_cache.hit", 1.0)
         return cached_response
     perf.record("sessions.list.response_cache.miss", 1.0)
+    cache_response = _sessions_list_content_search_ready(
+        search_query,
+        effective_search_fields,
+        offset=offset,
+        limit=limit,
+    )
     if not connected:
         page, total = await _run_hot_path(
             "sessions.list.local_page_thread",
@@ -4875,15 +4914,10 @@ async def get_sessions(
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
         }
-        if cache_response:
-            return _sessions_list_cache_put(cache_key, response_payload)
-        return _sessions_list_response(
-            json.dumps(
-                response_payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
+        return _sessions_list_response_maybe_cache(
+            cache_key,
+            response_payload,
+            cache_response=cache_response,
         )
 
     content_scores: dict[str, int] = {}
@@ -5124,7 +5158,7 @@ async def get_sessions(
                 None,
             )
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_cache_put(cache_key, {
+        return _sessions_list_response_maybe_cache(cache_key, {
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -5132,7 +5166,7 @@ async def get_sessions(
             "has_more": end < local_total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        })
+        }, cache_response=cache_response)
 
     if (
         can_page_remote_local_order
@@ -5149,7 +5183,7 @@ async def get_sessions(
                 None,
             )
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_cache_put(cache_key, {
+        return _sessions_list_response_maybe_cache(cache_key, {
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -5157,7 +5191,7 @@ async def get_sessions(
             "has_more": end < local_total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        })
+        }, cache_response=cache_response)
 
     state_snapshot = (
         await asyncio.to_thread(_sidebar_state_snapshot)
@@ -5270,15 +5304,10 @@ async def get_sessions(
                 separators=(",", ":"),
             ).encode("utf-8")
         )
-    if cache_response:
-        return _sessions_list_cache_put(cache_key, response_payload)
-    return _sessions_list_response(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
+    return _sessions_list_response_maybe_cache(
+        cache_key,
+        response_payload,
+        cache_response=cache_response,
     )
 
 

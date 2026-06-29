@@ -32,7 +32,14 @@ HEADERS = {"Authorization": f"Bearer {auth.create_token('test')}"}
 def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
-        shutil.rmtree(sessions_dir)
+        for attempt in range(5):
+            try:
+                shutil.rmtree(sessions_dir)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
     session_store._fork_index.clear()
     session_store._index_loaded = False
     session_store._summary_index.clear()
@@ -40,6 +47,12 @@ def _reset_home() -> None:
     main._sessions_list_response_cache.clear()
     main._remote_sessions_cache.clear()
     main._remote_sessions_cache_version = 0
+    with session_search_index._lock:
+        session_search_index._close_writer_connection_locked()
+    session_search_index._close_readonly_connection()
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    session_search_index._index_generation += 1
     index_path = Path(_TMP_HOME) / "session_search_index.sqlite3"
     index_path.unlink(missing_ok=True)
 
@@ -379,6 +392,62 @@ def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool
     ids = [session["id"] for session in second.json().get("sessions", [])]
     ok = second.status_code == 200 and ids == ["matched"]
     print(f"{PASS if ok else FAIL} /api/sessions repeated search uses response cache")
+    return ok
+
+
+def test_repeated_content_session_search_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("matched", "2026-06-20T00:00:00+00:00"))
+    _write_events("matched", "needle body")
+    first = client.get(
+        "/api/sessions?search=needle&search_fields=content",
+        headers=HEADERS,
+    )
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions first cached content search status {first.status_code}")
+        return False
+
+    deadline = time.monotonic() + 2.0
+    content_ready = False
+    while time.monotonic() < deadline:
+        if session_search_index.has_cached_result(
+            "needle",
+            main._session_search_candidate_limit(0, 50),
+        ):
+            content_ready = True
+            break
+        time.sleep(0.05)
+    if not content_ready:
+        print(f"{FAIL} /api/sessions content search cache did not warm")
+        return False
+    warm = client.get(
+        "/api/sessions?search=needle&search_fields=content",
+        headers=HEADERS,
+    )
+    if warm.status_code != 200:
+        print(f"{FAIL} /api/sessions warm content search status {warm.status_code}")
+        return False
+
+    original = main._build_local_sessions_page_for_list
+
+    def fail_recompute(*_args, **_kwargs):
+        raise AssertionError("identical content session search should use response cache")
+
+    main._build_local_sessions_page_for_list = fail_recompute
+    try:
+        second = client.get(
+            "/api/sessions?search=needle&search_fields=content",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions repeated content search recomputed page")
+        return False
+    finally:
+        main._build_local_sessions_page_for_list = original
+
+    ids = [session["id"] for session in second.json().get("sessions", [])]
+    ok = second.status_code == 200 and ids == ["matched"]
+    print(f"{PASS if ok else FAIL} /api/sessions repeated content search uses response cache")
     return ok
 
 
@@ -760,6 +829,7 @@ def main_run() -> int:
         ok = test_search_content_filters_before_pagination(client) and ok
         ok = test_search_avoids_full_sidebar_list(client) and ok
         ok = test_repeated_session_search_uses_response_cache(client) and ok
+        ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
