@@ -42,6 +42,15 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
+
+def _copy_jsonish(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _copy_jsonish(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_jsonish(v) for v in value]
+    return value
+
+
 # Draft-persist coalescer window. Bounds the worst-case data loss on
 # backend crash for typed-but-unsent draft text. Reads of the in-memory
 # state still see the latest mutation synchronously — only the disk
@@ -2161,7 +2170,7 @@ class SessionManager:
         if cached is not None:
             perf.record("session.stubbed_tree_cache.hit", 1.0)
             self._tree_stub_cache.move_to_end(cache_key)
-            return copy.deepcopy(cached)
+            return _copy_jsonish(cached)
         perf.record("session.stubbed_tree_cache.miss", 1.0)
 
         def _copy_node(node: dict) -> dict:
@@ -2231,7 +2240,7 @@ class SessionManager:
                 "stubbed_tree %s: nodes=%d root_events_sids=%d root_events=%.1fms",
                 rid[:8], attached, len(root_events_by_sid), root_events_ms,
             )
-        self._tree_stub_cache[cache_key] = copy.deepcopy(tree)
+        self._tree_stub_cache[cache_key] = _copy_jsonish(tree)
         if len(self._tree_stub_cache) > self._tree_stub_cache_max:
             self._tree_stub_cache.popitem(last=False)
         return tree
