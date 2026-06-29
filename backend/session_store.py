@@ -180,6 +180,7 @@ _summary_order_version = 0
 _summary_metadata_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_id_cache: list[str] = []
+_summary_sorted_id_caches: dict[str, tuple[int, list[str]]] = {}
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -543,11 +544,25 @@ def summary_version() -> int:
 
 
 def _summary_order_key(summary: Optional[dict]) -> tuple[bool, float]:
+    return _summary_sort_key(summary, "updated_at")
+
+
+def _summary_sort_key(summary: Optional[dict], sort_by: str) -> tuple[bool, float]:
     if not summary:
         return (False, 0.0)
     return (
         bool(summary.get("pinned", False)),
-        timestamp_sort_value(summary.get("updated_at")),
+        timestamp_sort_value(summary.get(sort_by)),
+    )
+
+
+def _summary_order_changed(before: Optional[dict], after: dict) -> bool:
+    if before is None:
+        return True
+    sort_fields = ("updated_at", "last_user_prompt_at")
+    return bool(before.get("pinned", False)) != bool(after.get("pinned", False)) or any(
+        timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
+        for field in sort_fields
     )
 
 
@@ -647,7 +662,7 @@ def _upsert_summary(root: dict) -> None:
             else:
                 _summary_index[root["id"]] = summary
                 _summary_index_version += 1
-                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                if _summary_order_changed(existing, summary):
                     _summary_order_version += 1
                 summary_changed = True
                 if _summary_metadata_changed(existing, summary):
@@ -1229,7 +1244,7 @@ def _do_build_summary_index_unsafe() -> None:
                                 existing = _summary_index.get(sid)
                                 _summary_index[sid] = summary
                                 _summary_index_version += 1
-                                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                                if _summary_order_changed(existing, summary):
                                     _summary_order_version += 1
                                 if _summary_metadata_changed(existing, summary):
                                     _summary_metadata_version += 1
@@ -1265,7 +1280,7 @@ def _do_build_summary_index_unsafe() -> None:
                 existing = _summary_index.get(data["id"])
                 _summary_index[data["id"]] = summary
                 _summary_index_version += 1
-                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                if _summary_order_changed(existing, summary):
                     _summary_order_version += 1
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
@@ -3475,6 +3490,27 @@ def list_sessions() -> list[dict]:
             for sid in _summary_sorted_id_cache
             if sid in _summary_index
         ]
+
+
+def ordered_session_summary_ids(sort_by: str) -> list[str]:
+    _ensure_summary_index(blocking=False)
+    with _summary_index_lock:
+        cached = _summary_sorted_id_caches.get(sort_by)
+        if cached is None or cached[0] != _summary_order_version:
+            cached = (
+                _summary_order_version,
+                [
+                    str(summary.get("id"))
+                    for summary in sorted(
+                        _summary_index.values(),
+                        key=lambda summary: _summary_sort_key(summary, sort_by),
+                        reverse=True,
+                    )
+                    if summary.get("id")
+                ],
+            )
+            _summary_sorted_id_caches[sort_by] = cached
+        return list(cached[1])
 
 
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:

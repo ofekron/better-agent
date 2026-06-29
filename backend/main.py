@@ -2314,6 +2314,57 @@ def _local_session_summaries_by_ids_for_sidebar(session_ids: list[str]) -> list[
         return [s for s in summaries if not _wm.should_hide_from_sidebar(s)]
 
 
+def _local_session_page_for_sidebar_preserving_order(
+    *,
+    sort_by: str,
+    offset: int,
+    limit: int,
+    project_path: str | None,
+    search: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    content_scores: dict[str, int],
+) -> tuple[list[dict], int]:
+    import working_mode as _wm
+    with perf.timed("sessions.list.local.ordered_ids"):
+        ordered_ids = session_manager.ordered_summary_ids(sort_by)
+    page_ids: list[str] = []
+    total = 0
+    end = offset + limit
+    with perf.timed("sessions.list.local.ordered_filter"):
+        for session in session_store.get_session_summaries_by_ids(ordered_ids):
+            if _wm.should_hide_from_sidebar(session):
+                continue
+            if not _session_matches_list_filters(
+                session,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=folder_ids,
+                tag_ids=tag_ids,
+                provider_ids=provider_ids,
+                model_ids=model_ids,
+                modes=modes,
+                sources=sources,
+                content_scores=content_scores,
+            ):
+                continue
+            if offset <= total < end:
+                sid = session.get("id")
+                if sid:
+                    page_ids.append(str(sid))
+            total += 1
+    with perf.timed("sessions.list.local.ordered_page_lookup"):
+        return session_store.get_session_summaries_by_ids(page_ids), total
+
+
 def _root_session_file_path(session_id: str) -> str:
     return f"{_root_sessions_dir_path()}/{session_id}.json"
 
@@ -3889,7 +3940,22 @@ def _can_preserve_summary_order(
         not search_query
         and not appended_virtual_sessions
         and not folder_view
-        and sort_by == "updated_at"
+        and sort_by in {"updated_at", "last_user_prompt_at"}
+        and not status_sort
+    )
+
+
+def _can_page_local_summary_order(
+    *,
+    search_query: str,
+    folder_view: bool,
+    sort_by: str,
+    status_sort: bool,
+) -> bool:
+    return (
+        not search_query
+        and not folder_view
+        and sort_by in {"updated_at", "last_user_prompt_at"}
         and not status_sort
     )
 
@@ -4023,6 +4089,49 @@ def _build_local_sessions_page_for_list(
         sort_by=sort_by,
         status_sort=status_sort,
     )
+    can_page_local_order = _can_page_local_summary_order(
+        search_query=search_query,
+        folder_view=folder_view,
+        sort_by=sort_by,
+        status_sort=status_sort,
+    )
+    may_include_virtual = _session_filters_may_include_virtual(
+        file_edit_mode=file_edit_mode,
+        folder_ids=folder_ids,
+        tag_ids=tag_ids,
+        modes=modes,
+        sources=sources,
+    )
+    if can_page_local_order and (not may_include_virtual or sort_by == "last_user_prompt_at"):
+        with perf.timed("sessions.list.local_order_page"):
+            page_source, local_total = _local_session_page_for_sidebar_preserving_order(
+                sort_by=sort_by,
+                offset=offset,
+                limit=limit,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=folder_ids,
+                tag_ids=tag_ids,
+                provider_ids=provider_ids,
+                model_ids=model_ids,
+                modes=modes,
+                sources=sources,
+                content_scores=content_scores,
+            )
+        virtual_total = 0
+        if may_include_virtual and sort_by == "last_user_prompt_at":
+            with perf.timed("sessions.list.virtual_count"):
+                _virtual_page, virtual_total = virtual_session_store.list_recent(
+                    1,
+                    exclude_id=session_search.ASK_SINGLETON_ID,
+                )
+        if len(page_source) >= limit or not may_include_virtual:
+            total = local_total + virtual_total
+            with perf.timed("sessions.list.page_decorate"):
+                page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
+            return page, total
     if search_query:
         selected_search_fields = _split_session_search_fields(search_fields)
         content_max_wait_seconds = (
@@ -4042,13 +4151,7 @@ def _build_local_sessions_page_for_list(
     else:
         with perf.timed("sessions.list.local"):
             out = _local_session_summaries_for_sidebar()
-        if _session_filters_may_include_virtual(
-            file_edit_mode=file_edit_mode,
-            folder_ids=folder_ids,
-            tag_ids=tag_ids,
-            modes=modes,
-            sources=sources,
-        ):
+        if may_include_virtual:
             with perf.timed("sessions.list.virtual"):
                 if default_virtual_page:
                     virtual_sessions, virtual_total = virtual_session_store.list_recent(
