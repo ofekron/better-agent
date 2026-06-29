@@ -661,23 +661,20 @@ class TurnManager:
             pid = r.get("pid")
             run_id = r.get("run_id")
             if pid is None:
+                if self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S:
+                    alive.append(r)
+                    continue
                 if run_id in active_ids and sid in self.cancel_events:
                     alive.append(r)
                     continue
                 if run_id in active_ids and r.get("retrying"):
                     alive.append(r)
                     continue
-                if (
-                    run_id in active_ids
-                    and self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S
-                ):
-                    alive.append(r)
-                else:
-                    logger.warning(
-                        "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
-                        (run_id or "?")[:8], sid[:8],
-                    )
-                    dropped.append(r)
+                logger.warning(
+                    "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
+                    (run_id or "?")[:8], sid[:8],
+                )
+                dropped.append(r)
                 continue
             if _pid_alive(pid):
                 alive.append(r)
