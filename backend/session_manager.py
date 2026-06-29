@@ -5348,7 +5348,7 @@ class SessionManager:
         if rid is None:
             return []
         with self._lock_for_root(rid):
-            sess = self._cached(sid)
+            sess = self._cached(sid, hydrate_events=False)
             if sess is None:
                 return []
             return list(sess.get("current_todos") or [])
@@ -5388,7 +5388,7 @@ class SessionManager:
         if rid is None:
             return []
         with self._lock_for_root(rid):
-            sess = self._cached(sid)
+            sess = self._cached(sid, hydrate_events=False)
             if sess is None:
                 return []
             return list(sess.get("current_tasks") or [])

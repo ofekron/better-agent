@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Optional, Union
 
 import perf
 from event_bus import BusEvent, EventBus, bus
+from event_shape import RENDER_EVENT_TYPES, frontend_events_from_journal_rows
 from event_ingester import event_ingester
 
 EVENT_JOURNAL_EVENT = "event_journal.event"
@@ -33,13 +34,6 @@ EVENT_JOURNAL_TURN_MESSAGE_SET = "event_journal.turn_message_set"
 EVENT_JOURNAL_TURN_FINISHED = "event_journal.turn_finished"
 EVENT_JOURNAL_WRITTEN = "event_journal.written"
 EVENT_JOURNAL_WRITE_FAILED = "event_journal.write_failed"
-RENDER_EVENT_TYPES = frozenset({
-    "agent_message",
-    "manager_event",
-    "model_switched",
-    "steer_prompt",
-    "worker_event",
-})
 # Worker-fork tailer backup rows. Owned by the worker panel, never by a
 # message: excluded from ownership resolution and from every render /
 # message-read attachment path. MUST stay a value no legacy writer ever
@@ -1575,29 +1569,7 @@ class EventJournalReader:
         # UUID (latest wins).  Without this dedup the native-only path
         # would return every snapshot and the frontend would render
         # triplicated text bubbles.
-        events: list[dict] = []
-        uuid_idx: dict[str, int] = {}
-        for entry in rows:
-            event_type = entry.get("type")
-            if event_type not in RENDER_EVENT_TYPES:
-                continue
-            data = entry.get("data", {})
-            if event_type == "manager_event" and isinstance(data, dict):
-                inner = data.get("event")
-                if isinstance(inner, dict):
-                    ev = inner
-                else:
-                    continue
-            else:
-                ev = {"type": event_type, "data": data}
-            uid = (ev.get("data") or {}).get("uuid") if isinstance(ev, dict) else None
-            if uid and uid in uuid_idx:
-                events[uuid_idx[uid]] = ev
-            else:
-                if uid:
-                    uuid_idx[uid] = len(events)
-                events.append(ev)
-        return events
+        return frontend_events_from_journal_rows(rows)
 
     def read_unattached_events(
         self,

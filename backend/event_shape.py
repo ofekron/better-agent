@@ -15,6 +15,53 @@ deferred-import dodge from `main.py` goes away.
 
 from __future__ import annotations
 
+RENDER_EVENT_TYPES = frozenset({
+    "agent_message",
+    "manager_event",
+    "model_switched",
+    "steer_prompt",
+    "worker_event",
+})
+
+
+def frontend_event_from_journal_row(
+    row: dict, *, include_seq: bool = False,
+) -> dict | None:
+    event_type = row.get("type")
+    if event_type not in RENDER_EVENT_TYPES:
+        return None
+    data = row.get("data", {})
+    if event_type == "manager_event" and isinstance(data, dict):
+        inner = data.get("event")
+        if not isinstance(inner, dict):
+            return None
+        event = dict(inner)
+    else:
+        event = {"type": event_type, "data": data}
+    if include_seq:
+        event["seq"] = row.get("seq")
+    return event
+
+
+def frontend_events_from_journal_rows(
+    rows: list[dict], *, include_seq: bool = False,
+) -> list[dict]:
+    events: list[dict] = []
+    uuid_idx: dict[str, int] = {}
+    for row in rows:
+        event = frontend_event_from_journal_row(row, include_seq=include_seq)
+        if event is None:
+            continue
+        data = event.get("data") if isinstance(event, dict) else None
+        uid = data.get("uuid") if isinstance(data, dict) else None
+        if uid and uid in uuid_idx:
+            events[uuid_idx[uid]] = event
+            continue
+        if uid:
+            uuid_idx[uid] = len(events)
+        events.append(event)
+    return events
+
 
 def is_synthetic_event(event: dict) -> bool:
     if not isinstance(event, dict):
