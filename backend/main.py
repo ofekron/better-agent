@@ -294,7 +294,6 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
             _session_event_meta(root_id)
             summaries = session_store.get_session_summaries_by_ids([root_id])
             if not summaries or int(summaries[0].get("message_count") or 0) > 0:
-                event_ingester.message_event_summaries(root_id)
                 cache_key = _session_detail_response_cache_key_sync(
                     root_id,
                     msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
@@ -302,6 +301,7 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
                 )
                 if cache_key is not None and _session_detail_cache_has(cache_key):
                     continue
+                event_ingester.message_event_summaries(root_id)
                 tree = _session_detail_snapshot_sync(
                     root_id,
                     msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
@@ -318,6 +318,8 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
     for root_id in root_ids:
         if root_id in _session_detail_projection_warm_inflight:
             continue
+        if _session_detail_projection_cache_fresh(root_id):
+            continue
         _session_detail_projection_warm_inflight.add(root_id)
         pending.append(root_id)
     if not pending:
@@ -333,6 +335,18 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
     finally:
         for root_id in pending:
             _session_detail_projection_warm_inflight.discard(root_id)
+
+
+def _session_detail_projection_cache_fresh(root_id: str) -> bool:
+    try:
+        cache_key = _session_detail_response_cache_key_sync(
+            root_id,
+            msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
+            exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
+        )
+    except Exception:
+        return False
+    return cache_key is not None and _session_detail_cache_has(cache_key)
 
 
 def _session_event_projection_warm_roots(limit: int) -> list[str]:
