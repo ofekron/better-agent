@@ -962,6 +962,15 @@ class SessionManager:
         rid = self._node_root_id.get(sid)
         if rid is not None:
             return rid
+        rid = session_store._loaded_root_id_for(sid)
+        if rid is not None:
+            self._node_root_id[sid] = rid
+            self._node_root_missing_until.pop(sid, None)
+            return rid
+        if session_store.session_file_fingerprint(sid) is not None:
+            self._node_root_id[sid] = sid
+            self._node_root_missing_until.pop(sid, None)
+            return sid
         now = time.monotonic()
         if self._node_root_missing_until.get(sid, 0.0) > now:
             return None
@@ -1771,6 +1780,14 @@ class SessionManager:
             root = self._roots.get(rid)
             if root is not None:
                 return session_store._find_in_tree(root, sid) is not None
+        rid = session_store._loaded_root_id_for(sid)
+        if rid is not None:
+            self._node_root_id[sid] = rid
+            return True
+        if session_store.session_file_fingerprint(sid) is not None:
+            self._node_root_id[sid] = sid
+            self._node_root_missing_until.pop(sid, None)
+            return True
         rid = session_store._resolve_root_id(sid)
         if rid is None:
             return False

@@ -456,6 +456,14 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
         name="open a",
     ))
     session_store.wait_for_summary_index(1.0, min_published=1)
+    deadline = time.monotonic() + 1.0
+    version = session_store.summary_index_version()
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        current = session_store.summary_index_version()
+        if current == version:
+            break
+        version = current
 
     first = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
     if first.status_code != 200:

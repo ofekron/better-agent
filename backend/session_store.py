@@ -791,6 +791,7 @@ def _upsert_summary(
     *,
     preserve_projection_fields: bool = False,
     root_mtime_ns: int | None = None,
+    sync_sidecar: bool = False,
 ) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
@@ -839,11 +840,18 @@ def _upsert_summary(
                     root_mtime_ns=root_mtime_ns,
                 )
         if summary_changed or not sidecar_current:
-            _schedule_summary_sidecar_write(
-                root["id"],
-                summary,
-                root_mtime_ns=root_mtime_ns,
-            )
+            if sync_sidecar:
+                _write_summary_file(
+                    root["id"],
+                    summary,
+                    root_mtime_ns=root_mtime_ns,
+                )
+            else:
+                _schedule_summary_sidecar_write(
+                    root["id"],
+                    summary,
+                    root_mtime_ns=root_mtime_ns,
+                )
     except Exception:
         # Summary file write failure is non-fatal — in-memory index is
         # authoritative. Next write will overwrite.
@@ -1176,7 +1184,7 @@ def _summary_sidecar_writer_loop() -> None:
                     root_mtime_ns=root_mtime_ns,
                 )
         except Exception:
-            logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
+            _logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
         finally:
             _summary_sidecar_write_queue.task_done()
 
@@ -2228,6 +2236,35 @@ def _persist_index_sidecar_if_loaded() -> None:
     _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
 
 
+def _refresh_index_sidecar_for_written_root(
+    root: dict,
+    file_signature: tuple[int, int] | None,
+) -> None:
+    if file_signature is None:
+        return
+    raw = _read_index_sidecar_payload()
+    if raw is None:
+        return
+    parsed = _parse_index_sidecar(raw)
+    if parsed is None:
+        return
+    fork_index, root_forks, root_signatures = parsed
+    root_id = str(root.get("id") or "")
+    if not root_id:
+        return
+    for fork_id in root_forks.get(root_id, set()):
+        fork_index.pop(fork_id, None)
+    fork_ids = _fork_ids_for_root(root)
+    for fork_id in fork_ids:
+        fork_index[fork_id] = root_id
+    if fork_ids:
+        root_forks[root_id] = fork_ids
+    else:
+        root_forks.pop(root_id, None)
+    root_signatures[root_id] = file_signature
+    _write_index_sidecar(_dir_fingerprint(), fork_index, root_forks, root_signatures)
+
+
 def _install_index_snapshot(
     fp: tuple[int, int, int],
     fork_index: dict[str, str],
@@ -2330,6 +2367,15 @@ def _ensure_index() -> None:
         _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
 
 
+def _loaded_root_id_for(sid: str) -> Optional[str]:
+    with _index_lock:
+        if not _index_loaded:
+            return None
+        if sid in _root_index_signatures:
+            return sid
+        return _fork_index.get(sid)
+
+
 def _resolve_root_id(sid: str) -> Optional[str]:
     """Return the root id for any session id (root or fork). None if
     the id is unknown.
@@ -2338,6 +2384,11 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     once before giving up — covers the case where another process
     (CLI, second backend) created a fork after this process started."""
     global _negative_root_resolve_global_until
+    loaded_root_id = _loaded_root_id_for(sid)
+    if loaded_root_id is not None:
+        return loaded_root_id
+    if (_sessions_dir() / f"{sid}.json").exists():
+        return sid
     _ensure_index()
     with _index_lock:
         if sid in _root_index_signatures:
@@ -3937,9 +3988,12 @@ def write_session_full(
                 index_loaded = _index_loaded
         else:
             index_loaded = False
-    if index_loaded and fork_topology_changed:
+    if index_loaded and (fork_topology_changed or root.get("forks")):
         with perf.timed("store.session.write_full.index_sidecar"):
             _persist_index_sidecar_if_loaded()
+    elif root.get("forks"):
+        with perf.timed("store.session.write_full.index_sidecar"):
+            _refresh_index_sidecar_for_written_root(root, file_signature)
     # INVARIANT: update summary index AFTER the durable write (post
     # `os.replace`). A summary update before the replace would let a
     # concurrent `list_sessions` observe the new summary while the
@@ -3949,6 +4003,7 @@ def write_session_full(
             root,
             preserve_projection_fields=preserve_projection_fields,
             root_mtime_ns=file_signature[0] if file_signature is not None else None,
+            sync_sidecar=bool(root.get("forks")),
         )
 
 
