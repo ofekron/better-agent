@@ -321,20 +321,10 @@ def hydrate_msg_events_from_jsonl(
                 worker_raw = named_raw
             for raw in worker_raw:
                 ev = _row_event(raw)
-                before_worker = (
-                    _message_timeline_fingerprint(m)
-                    if watch_change
-                    else None
-                )
                 strategy.apply_event(
                     app_session_id=sid, msg=m, event=ev,
                     ctx=ctx, source_is_provider_stream=False,
                 )
-                if (
-                    before_worker is not None
-                    and _message_timeline_fingerprint(m) != before_worker
-                ):
-                    changed_for_stub = True
             if (
                 pre_worker_fingerprint is not None
                 and _message_timeline_fingerprint(m) != pre_worker_fingerprint
