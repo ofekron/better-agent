@@ -339,6 +339,17 @@ def test_connected_session_fallback_sorts_only_requested_page() -> None:
     assert "_filter_sort_sessions_for_list" not in fallback_source
 
 
+def test_message_cache_hydration_has_substep_perf_metrics() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    start = source.index("def _ensure_message_cache(")
+    end = source.index("def read_message_frontend_events(", start)
+    cache_source = source[start:end]
+    assert "event_journal.message_cache.summaries" in cache_source
+    assert "event_journal.message_cache.resolutions" in cache_source
+    assert "event_journal.message_cache.read_full" in cache_source
+    assert "event_journal.message_cache.read_grow" in cache_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
