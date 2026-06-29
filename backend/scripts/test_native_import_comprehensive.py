@@ -187,10 +187,26 @@ def test_internal_import_prompt_filter() -> None:
         "<verdict-prompt>\nYou are an adversarial supervisor.",
         "Better Agent requires a parent-session reply after subagent work.",
         "Better Agent run.sh startup checker for Z.AI",
+        "Adversarial review under 200 words. Symptom: duplicate prompt send.",
+        "Read-only adversarial validation in /Users/ofekron/better-claude. Do not edit files.",
+        "In /Users/ofekron/better-claude, read-only: find where allowed reasoning_effort values are defined.",
+        "Please review the following git diff representing the addition of a template option.",
+        "Investigate this TestApe product bug in /Users/ofekron/testape and return commit-ready facts.",
+        "Using the TestApe web adapter, open http://localhost:3000/ and capture a screenshot.",
+        "open https://example.com and report the visible H1 text --- You are the dedicated TestApe UI-testing expert.",
+        "A device worker must fill a login form. Username is literal 'alice@example.com'.",
+        "A sign-in form has two fields. Field 'username' takes the literal value 'alice@example.com'.",
+        "Convert these verified discoveries into small reusable transition flows/subflows.",
+        "Analyze these detector/run measurements for wall-clock, retry, polling, and replay cost.",
+        "Preserve observed analytics confirmations from this run evidence.",
+        "Runtime UI test only. Do not inspect files. Do not run shell commands.",
+        "Reply with exactly: TESTAPE_OK",
     ]
     for prompt in internal:
         check(F(prompt), f"internal prompt not filtered: {prompt[:60]}")
     check(not F("Fix imported session filtering"), "real user prompt filtered")
+    check(not F("Use TestApe to debug this app issue"), "real user TestApe request filtered")
+    check(not F("review this feature and fix problems"), "ordinary review request filtered")
 
 
 # --------------------------------------------------------------------------- #
