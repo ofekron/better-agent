@@ -16,6 +16,7 @@ import logging
 import shutil
 import subprocess
 import heapq
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,7 @@ _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_LOOKUP_TIMEOUT_S = 1.5
 _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
+_CLAUDE_PATH_INDEX_LOCK = threading.Lock()
 _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_RECENT_INDEX: tuple[str, float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]] | None = None
 
@@ -108,14 +110,27 @@ def _claude_path_index() -> dict[str, Path]:
         cached_key, ts, cached = _CLAUDE_PATH_INDEX
         if cached_key == key and now - ts < _JSONL_INDEX_TTL_S:
             return cached
+    if not _CLAUDE_PATH_INDEX_LOCK.acquire(blocking=False):
+        if _CLAUDE_PATH_INDEX is not None:
+            cached_key, _ts, cached = _CLAUDE_PATH_INDEX
+            if cached_key == key:
+                return cached
+        with _CLAUDE_PATH_INDEX_LOCK:
+            if _CLAUDE_PATH_INDEX is None:
+                return {}
+            cached_key, _ts, cached = _CLAUDE_PATH_INDEX
+            return cached if cached_key == key else {}
     indexed: dict[str, Path] = {}
     try:
-        for path in projects.glob("*/*.jsonl"):
-            indexed.setdefault(path.stem, path)
-    except OSError:
-        indexed = {}
-    _CLAUDE_PATH_INDEX = (key, now, indexed)
-    return indexed
+        try:
+            for path in projects.glob("*/*.jsonl"):
+                indexed.setdefault(path.stem, path)
+        except OSError:
+            indexed = {}
+        _CLAUDE_PATH_INDEX = (key, now, indexed)
+        return indexed
+    finally:
+        _CLAUDE_PATH_INDEX_LOCK.release()
 
 
 def _run_state_cache_get(root_key: str, agent_sid: str) -> tuple[bool, Optional[Path]]:
