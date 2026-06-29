@@ -575,8 +575,10 @@ def _upsert_summary(root: dict) -> None:
     # atomic write (tmpfile + os.replace) so a crash mid-write leaves the
     # previous file intact. Non-fatal — in-memory index is authoritative.
     try:
-        with perf.timed("store.session.summary.sidecar_stat"):
-            sidecar_current = _touch_summary_file_current(root["id"])
+        sidecar_current = True
+        if not summary_changed:
+            with perf.timed("store.session.summary.sidecar_stat"):
+                sidecar_current = _touch_summary_file_current(root["id"])
         if summary_changed or not sidecar_current:
             with perf.timed("store.session.summary.sidecar_write"):
                 _write_summary_file(root["id"], summary)
