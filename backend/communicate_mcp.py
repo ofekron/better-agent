@@ -11,8 +11,12 @@ from typing import Any
 from env_compat import get_env, require_env
 from mcp.server.fastmcp import FastMCP
 
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    DEFAULT_ASK_MODE,
+    normalize_ask_mode,
+)
 from orchestration_tool_descriptions import (
-    ASYNC_DESCRIPTION,
     ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION,
@@ -43,7 +47,6 @@ def _env_required(name: str) -> str:
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -96,6 +99,9 @@ def _communication_payload(
     target_worker_id: str,
     target_worker_pool: str,
     message: str,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
@@ -111,6 +117,9 @@ def _communication_payload(
         "target_worker_id": target_worker_id,
         "target_worker_pool": target_worker_pool,
         "message": message,
+        "provider_id": (provider_id or "").strip() or None,
+        "model": (model or "").strip(),
+        "reasoning_effort": (reasoning_effort or "").strip() or None,
     }
 
 
@@ -119,23 +128,22 @@ def mssg_response(
     target_session_id: str = "",
     target_worker_id: str = "",
     target_worker_pool: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
-    payload = _communication_payload(target_session_id, target_worker_id, target_worker_pool, message)
+    payload = _communication_payload(
+        target_session_id,
+        target_worker_id,
+        target_worker_pool,
+        message,
+        provider_id,
+        model,
+        reasoning_effort,
+    )
     if payload.get("success") is False:
         return payload
     return _post_json("/api/internal/mssg", payload, timeout=30.0)
-
-
-def async_communicate_response(
-    message: str,
-    target_session_id: str = "",
-    target_worker_id: str = "",
-    target_worker_pool: str = "",
-) -> dict[str, Any]:
-    payload = _communication_payload(target_session_id, target_worker_id, target_worker_pool, message)
-    if payload.get("success") is False:
-        return payload
-    return _post_json("/api/internal/async-communicate", payload, timeout=30.0)
 
 
 def delegate_task_response(
@@ -178,6 +186,10 @@ def ask_response(
     worker_description: str = "",
     worker_registry_cwd: str = "",
     ephemeral: bool = False,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    mode: str = DEFAULT_ASK_MODE,
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
@@ -188,6 +200,12 @@ def ask_response(
     run_mode = (run_mode or "direct").strip() or "direct"
     if run_mode not in ("direct", "fork"):
         return {"success": False, "error": "run_mode must be 'direct' or 'fork'"}
+    try:
+        mode = normalize_ask_mode(mode)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+        return {"success": False, "error": "async ask mode requires run_mode='direct'"}
     if run_mode == "fork" and not target_session_id:
         return {"success": False, "error": "run_mode='fork' requires target_session_id"}
     if ephemeral and run_mode != "fork":
@@ -195,7 +213,7 @@ def ask_response(
 
     # The manager session is both the team-message sender and the fork caller.
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
-    model = _env("BETTER_CLAUDE_MODEL")
+    selected_model = (model or "").strip() or _env("BETTER_CLAUDE_MODEL")
     cwd = _env("BETTER_CLAUDE_CWD")
 
     if run_mode == "fork":
@@ -207,7 +225,9 @@ def ask_response(
             "instructions": message,
             "worker_session_id": target_session_id,
             "worker_description": worker_description,
-            "model": model,
+            "model": selected_model,
+            "provider_id": (provider_id or "").strip() or None,
+            "reasoning_effort": (reasoning_effort or "").strip() or None,
             "cwd": cwd,
             "client_delegation_id": client_delegation_id,
             "run_mode": "fork",
@@ -223,6 +243,10 @@ def ask_response(
         "target_worker_pool": target_worker_pool,
         "message": message,
         "ask_id": ask_id,
+        "mode": mode,
+        "provider_id": (provider_id or "").strip() or None,
+        "model": (model or "").strip(),
+        "reasoning_effort": (reasoning_effort or "").strip() or None,
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -362,13 +386,14 @@ def build_server() -> FastMCP:
         "communicate",
         instructions=(
             "Team tools for Better Agent sessions: mssg (queued message, "
-            "joined to your turn), async (detached message to a "
-            "known session that expects a later mssg reply), delegate_task "
+            "fire-and-forget), ask (waits by default; mode="
+            "'continue_and_expect_mssg_back_async' continues and expects a "
+            "later mssg reply), delegate_task "
             "(detached handoff — offload "
             "heavy tangential/off-topic real work so you can remain focused; "
             "not for reviews; auto-routing may run session search and has a "
             "cost; set target_session_id only when you already know the target "
-            "to bypass routing), ask (synchronous; run_mode='fork' runs an "
+            "to bypass routing), run_mode='fork' runs an "
             "isolated branch from existing session context for reviews/checks; "
             "do not use fork for brand-new sessions), create_session (standalone "
             "session; orchestration_mode='team' is for complex tasks that need "
@@ -387,27 +412,18 @@ def build_server() -> FastMCP:
             target_session_id: str = "",
             target_worker_id: str = "",
             target_worker_pool: str = "",
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
         ) -> dict[str, Any]:
             return _safe_result(mssg_response)(
                 message,
                 target_session_id,
                 target_worker_id,
                 target_worker_pool,
-            )
-
-    if "async" not in disabled_tools:
-        @server.tool(name="async", description=ASYNC_DESCRIPTION)
-        def async_(
-            message: str,
-            target_session_id: str = "",
-            target_worker_id: str = "",
-            target_worker_pool: str = "",
-        ) -> dict[str, Any]:
-            return _safe_result(async_communicate_response)(
-                message,
-                target_session_id,
-                target_worker_id,
-                target_worker_pool,
+                provider_id,
+                model,
+                reasoning_effort,
             )
 
     if "delegate_task" not in disabled_tools:
@@ -476,6 +492,10 @@ def build_server() -> FastMCP:
             worker_description: str = "",
             worker_registry_cwd: str = "",
             ephemeral: bool = False,
+            provider_id: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+            mode: str = DEFAULT_ASK_MODE,
         ) -> dict[str, Any]:
             return _safe_result(ask_response)(
                 message,
@@ -486,6 +506,10 @@ def build_server() -> FastMCP:
                 worker_description,
                 worker_registry_cwd,
                 ephemeral,
+                provider_id,
+                model,
+                reasoning_effort,
+                mode,
             )
 
     @server.tool(description=CREATE_WORKER_DESCRIPTION)

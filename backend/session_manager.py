@@ -5427,6 +5427,36 @@ class SessionManager:
             bump_updated_at=False,
         )
 
+    def unpin_others(self, keep_sid: str) -> Optional[list[str]]:
+        keep = self.get_ref(keep_sid)
+        if keep is None:
+            return None
+        unpinned_ids: list[str] = []
+        for session in self.list():
+            sid = session.get("id")
+            if not sid or sid == keep_sid or not session.get("pinned"):
+                continue
+            updated = self.set_pinned(sid, False)
+            if updated:
+                unpinned_ids.append(sid)
+        return unpinned_ids
+
+    def set_topbar_pinned(self, sid: str, value: bool) -> Optional[dict]:
+        pinned = bool(value)
+        pinned_at = datetime.now().isoformat() if pinned else None
+
+        def _do(s: dict) -> None:
+            s["topbar_pinned"] = pinned
+            s["topbar_pinned_at"] = pinned_at
+        return self._run(
+            sid, _do, {
+                "kind": "topbar_pinned_set",
+                "value": pinned,
+                "topbar_pinned_at": pinned_at,
+            },
+            bump_updated_at=False,
+        )
+
     def set_marker(self, sid: str, extension_id: str, marker: dict) -> Optional[dict]:
         """Set an extension's attention marker on a session. Projection-only
         (markers live in the disposable session_store projection, not the

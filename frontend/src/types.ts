@@ -1038,6 +1038,8 @@ export interface Session {
   browser_harness_enabled?: boolean;
   browser_harness_headless?: boolean;
   pinned?: boolean;
+  topbar_pinned?: boolean;
+  topbar_pinned_at?: string | null;
   archived?: boolean;
   /** User opted this session in as eligible for the Team worker picker.
    * Only sessions with this flag appear in the "mark existing" picker. */

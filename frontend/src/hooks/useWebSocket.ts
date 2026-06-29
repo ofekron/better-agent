@@ -1178,6 +1178,8 @@ export function useWebSocket(
               provider_id?: string;
               supervisor_enabled?: boolean;
               pinned?: boolean;
+              topbar_pinned?: boolean;
+              topbar_pinned_at?: string | null;
               archived?: boolean;
               working_mode?: Session["working_mode"];
               working_mode_meta?: Session["working_mode_meta"];

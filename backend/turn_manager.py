@@ -1072,6 +1072,8 @@ class TurnManager:
         trace_step_name: str,
         session_id_field: str,
         mode: Literal["native", "manager"],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         client_id: Optional[str] = None,
         supervised: bool = False,
         supervisor_agent_session_id: Optional[str] = None,
@@ -1287,6 +1289,8 @@ class TurnManager:
                 files=files,
                 cwd=cwd,
                 model=model,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
                 session_id=resume_sid,
                 ws_callback=ws_callback,
                 app_session_id=app_session_id,
@@ -1330,7 +1334,7 @@ class TurnManager:
                 and new_sid != session.get(session_id_field)
                 and session_id_field != "supervisor_agent_session_id"
             ):
-                provider = self._c.provider_for_session(app_session_id)
+                provider = self._c.provider_for_run(app_session_id, provider_id)
                 persist_mode = session.get("orchestration_mode") or mode
                 with session_manager.batch(persist_id):
                     session_manager.set_agent_sid(
@@ -1616,6 +1620,8 @@ class TurnManager:
         cancel_event: asyncio.Event,
         session_id_field: str,
         mode: Literal["native", "manager"],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         fork: bool = False,
         supervised: bool = False,
         supervisor_agent_session_id: Optional[str] = None,
@@ -1631,7 +1637,10 @@ class TurnManager:
 
         _session_rec = session_manager.get(primary_session_id or app_session_id)
         bt_enabled = bool((_session_rec or {}).get("browser_harness_enabled", False))
-        reasoning_effort = (_session_rec or {}).get("reasoning_effort")
+        reasoning_effort = (
+            str(reasoning_effort or "").strip()
+            or (_session_rec or {}).get("reasoning_effort")
+        )
 
         from env_compat import get_env
         backend_url: Optional[str] = (_session_rec or {}).get("backend_url") or get_env(
@@ -1639,7 +1648,7 @@ class TurnManager:
         )
         internal_token: Optional[str] = self._c.internal_token
 
-        provider = self._c.provider_for_session(primary_session_id or app_session_id)
+        provider = self._c.provider_for_run(primary_session_id or app_session_id, provider_id)
         provider_kind = getattr(provider, "KIND", "")
         run_setting_sources: Optional[list[str]] = (
             [] if supervised else None

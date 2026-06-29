@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator import Coordinator
 from orchs.manager import bootstrap
 from session_manager import manager as session_manager
+import config_store
 import team_messaging
 
 
@@ -151,6 +152,79 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert "target_session_id" not in queued[0]
     assert "kind" not in queued[0]
     assert "idempotency_key" not in queued[0]
+
+
+def test_submit_team_message_uses_delegation_message_model_preference(monkeypatch):
+    sender = session_manager.create(
+        name="manager",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="sender-model",
+    )
+    target = session_manager.create(
+        name="worker",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="target-model",
+    )
+    provider_id = config_store.get_default_provider()["id"]
+    original = config_store.get_internal_llm_assignments()
+    config_store.set_internal_llm_assignments({
+        **original,
+        "delegation_message": {"provider_id": provider_id, "model": "delegation-model"},
+    })
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    def fake_submit_prompt(sid: str, params: dict) -> str:
+        captured["sid"] = sid
+        captured["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+    try:
+        result = asyncio.run(coordinator.submit_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="use preferred model",
+        ))
+    finally:
+        config_store.set_internal_llm_assignments(original)
+
+    assert result["success"] is True
+    assert captured["params"]["provider_id"] == provider_id
+    assert captured["params"]["model"] == "delegation-model"
+    assert captured["params"]["allow_model_override"] is True
+
+
+def test_submit_team_message_explicit_model_overrides_preference(monkeypatch):
+    sender = session_manager.create(name="manager", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="worker", cwd="/repo", orchestration_mode="native")
+    provider_id = config_store.get_default_provider()["id"]
+    original = config_store.get_internal_llm_assignments()
+    config_store.set_internal_llm_assignments({
+        **original,
+        "delegation_message": {"provider_id": provider_id, "model": "preference-model"},
+    })
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    def fake_submit_prompt(sid: str, params: dict) -> str:
+        captured["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+    try:
+        asyncio.run(coordinator.submit_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="override",
+            model="explicit-model",
+        ))
+    finally:
+        config_store.set_internal_llm_assignments(original)
+
+    assert captured["params"]["model"] == "explicit-model"
 
 
 def test_submit_team_message_can_expect_async_mssg_response(monkeypatch):

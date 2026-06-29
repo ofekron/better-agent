@@ -48,10 +48,14 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import extension_store
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    normalize_ask_mode,
+)
 from env_compat import get_env
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
-    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -234,6 +238,18 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Message to enqueue for the target session.",
         },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for this continuation turn.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for this continuation turn.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for this continuation turn.",
+        },
     },
     "required": ["message"],
 }
@@ -334,6 +350,18 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "do not use fork for brand-new sessions."
             ),
         },
+        "mode": {
+            "type": "string",
+            "enum": [
+                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+            ],
+            "description": (
+                "wait_and_grab_last_mssg_in_turn waits and returns the reply; "
+                "continue_and_expect_mssg_back_async returns after enqueue and "
+                "expects a later mssg back."
+            ),
+        },
         "worker_description": {
             "type": "string",
             "description": (
@@ -354,6 +382,18 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
                 "delete its Better Agent session after the call."
             ),
         },
+        "provider_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — provider for this continuation/fork turn.",
+        },
+        "model": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — model for this continuation/fork turn.",
+        },
+        "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — reasoning effort for this continuation/fork turn.",
+        },
     },
     "required": ["message"],
 }
@@ -361,7 +401,6 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -910,6 +949,9 @@ def _build_mssg_tool(
             "target_worker_id": target_worker_id,
             "target_worker_pool": target_worker_pool,
             "message": message,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
         }
         try:
             result = await asyncio.to_thread(_post_mssg_sync, payload)
@@ -918,54 +960,6 @@ def _build_mssg_tool(
         return _tool_success_result(result)
 
     return mssg
-
-
-def _build_async_tool(
-    *,
-    sender_session_id: str,
-    backend_url: str,
-    internal_token: str,
-):
-    def _post_async_communicate_sync(payload: dict) -> dict:
-        return _post_loopback_sync(
-            payload,
-            backend_url=backend_url,
-            internal_token=internal_token,
-            url_path="/api/internal/async-communicate",
-            timeout=30,
-            non_json_t_key="runner.mssg_non_json",
-            log_prefix="async POST",
-            backoff_cap=5.0,
-        )
-
-    @tool("async", _ASYNC_DESCRIPTION, _MSSG_INPUT_SCHEMA)
-    async def async_(args: dict[str, Any]) -> dict[str, Any]:
-        target_session_id = str(args.get("target_session_id") or "").strip()
-        target_worker_id = str(args.get("target_worker_id") or "").strip()
-        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
-        message = str(args.get("message") or "").strip()
-        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": "one target and message are required",
-                }],
-                "is_error": True,
-            }
-        payload = {
-            "sender_session_id": sender_session_id,
-            "target_session_id": target_session_id,
-            "target_worker_id": target_worker_id,
-            "target_worker_pool": target_worker_pool,
-            "message": message,
-        }
-        try:
-            result = await asyncio.to_thread(_post_async_communicate_sync, payload)
-        except Exception as e:
-            return _tool_error_response("async", e)
-        return _tool_success_result(result)
-
-    return async_
 
 
 def _build_delegate_task_tool(
@@ -1215,6 +1209,13 @@ def _build_ask_tool(
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
+        try:
+            mode = normalize_ask_mode(args.get("mode"))
+        except ValueError as exc:
+            return {
+                "content": [{"type": "text", "text": str(exc)}],
+                "is_error": True,
+            }
         if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return {
                 "content": [{
@@ -1226,6 +1227,11 @@ def _build_ask_tool(
         if run_mode not in ("direct", "fork"):
             return {
                 "content": [{"type": "text", "text": "run_mode must be 'direct' or 'fork'"}],
+                "is_error": True,
+            }
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+            return {
+                "content": [{"type": "text", "text": "async ask mode requires run_mode='direct'"}],
                 "is_error": True,
             }
         ephemeral = bool(args.get("ephemeral"))
@@ -1258,7 +1264,9 @@ def _build_ask_tool(
                 "instructions": message,
                 "worker_session_id": target_session_id,
                 "worker_description": worker_description,
-                "model": model,
+                "provider_id": str(args.get("provider_id") or "").strip() or None,
+                "model": str(args.get("model") or "").strip() or model,
+                "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
@@ -1295,6 +1303,10 @@ def _build_ask_tool(
             "target_worker_pool": target_worker_pool,
             "message": message,
             "ask_id": ask_id,
+            "mode": mode,
+            "provider_id": str(args.get("provider_id") or "").strip() or None,
+            "model": str(args.get("model") or "").strip(),
+            "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
         }
 
         def _post_ask_sync() -> dict:
@@ -1303,11 +1315,11 @@ def _build_ask_tool(
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/ask",
-                timeout=_DELEGATE_HTTP_TIMEOUT,
+                timeout=30 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else _DELEGATE_HTTP_TIMEOUT,
                 non_json_t_key="runner.mssg_non_json",
                 log_prefix="ask POST",
                 backoff_cap=60.0,
-                recover=lambda: _recover_ask_result(ask_id),
+                recover=(None if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else lambda: _recover_ask_result(ask_id)),
             )
 
         try:
@@ -2137,12 +2149,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         communicate_tools = []
         if "mssg" not in disabled_builtin_tools:
             communicate_tools.append(_build_mssg_tool(
-                sender_session_id=str(mssg_sender_session_id),
-                backend_url=backend_url,
-                internal_token=internal_token,
-            ))
-        if "async" not in disabled_builtin_tools:
-            communicate_tools.append(_build_async_tool(
                 sender_session_id=str(mssg_sender_session_id),
                 backend_url=backend_url,
                 internal_token=internal_token,

@@ -29,6 +29,10 @@ from typing import Any, Optional
 
 from pathlib import Path
 from capability_contexts import normalize_capability_contexts
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    normalize_ask_mode,
+)
 from backend_instance_lock import (
     acquire_backend_instance_lock,
     release_backend_instance_lock,
@@ -537,17 +541,32 @@ def _remote_sessions_cache_version_snapshot() -> int:
         return _remote_sessions_cache_version
 
 
-def _copy_remote_sessions(sessions: list[dict]) -> list[dict]:
-    return [dict(session) for session in sessions if isinstance(session, dict)]
+def _copy_remote_sessions(sessions: list[dict], *, limit: int | None = None) -> list[dict]:
+    out: list[dict] = []
+    for session in sessions:
+        if isinstance(session, dict):
+            out.append(dict(session))
+            if limit is not None and len(out) >= limit:
+                break
+    return out
 
 
-def _remote_sessions_cache_get(node_id: str) -> tuple[list[dict] | None, bool]:
+def _remote_sessions_cache_get(
+    node_id: str,
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict] | None, bool, int]:
     with _remote_sessions_cache_lock:
         cached = _remote_sessions_cache.get(node_id)
     if cached is None:
-        return None, False
+        return None, False, 0
     age = time.monotonic() - cached[0]
-    return _copy_remote_sessions(cached[1]), age <= _REMOTE_SESSIONS_CACHE_TTL_SECONDS
+    sessions = cached[1]
+    return (
+        _copy_remote_sessions(sessions, limit=limit),
+        age <= _REMOTE_SESSIONS_CACHE_TTL_SECONDS,
+        len(sessions),
+    )
 
 
 def _remote_sessions_cache_put(node_id: str, sessions: list[dict]) -> None:
@@ -595,7 +614,7 @@ def _schedule_remote_sessions_refresh(node_id: str) -> None:
 
 
 async def _remote_sessions_for_sidebar(node_id: str) -> list[dict]:
-    cached, fresh = _remote_sessions_cache_get(node_id)
+    cached, fresh, _total = _remote_sessions_cache_get(node_id)
     if cached is not None:
         if fresh:
             perf.record("sessions.list.remote_cache.hit", 1.0)
@@ -609,8 +628,12 @@ async def _remote_sessions_for_sidebar(node_id: str) -> list[dict]:
     return sessions
 
 
-def _remote_sessions_for_sidebar_cached(node_id: str) -> list[dict] | None:
-    cached, fresh = _remote_sessions_cache_get(node_id)
+def _remote_sessions_for_sidebar_cached(
+    node_id: str,
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict], int] | None:
+    cached, fresh, total = _remote_sessions_cache_get(node_id, limit=limit)
     if cached is None:
         perf.record("sessions.list.remote_cache.deferred_miss", 1.0)
         _schedule_remote_sessions_refresh(node_id)
@@ -620,7 +643,7 @@ def _remote_sessions_for_sidebar_cached(node_id: str) -> list[dict] | None:
     else:
         perf.record("sessions.list.remote_cache.deferred_stale", 1.0)
         _schedule_remote_sessions_refresh(node_id)
-    return cached
+    return cached, total
 
 
 def _schedule_virtual_sessions_recent_refresh(limit: int) -> None:
@@ -1677,6 +1700,34 @@ def _validate_provider_model(
         status_code=400,
         detail=f"{name} does not support model={model!r}",
     )
+
+
+async def _validate_optional_run_selector(
+    sender_session_id: str,
+    provider_id: str,
+    model: str,
+) -> None:
+    if not provider_id and not model:
+        return
+    sender = await _session_lite(sender_session_id)
+    resolved_provider_id = (
+        provider_id
+        or str((sender or {}).get("provider_id") or "").strip()
+        or None
+    )
+    resolved_model = model
+    if not resolved_model and provider_id:
+        provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
+        resolved_model = str(provider.get("default_model") or "").strip()
+        if not resolved_model:
+            name = provider.get("name") or provider_id
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} has no default model configured",
+            )
+    if not resolved_model:
+        resolved_model = str((sender or {}).get("model") or "").strip()
+    await asyncio.to_thread(_validate_provider_model, resolved_provider_id, resolved_model)
 
 
 def _validate_provider_default_reasoning_effort(
@@ -4628,10 +4679,14 @@ async def get_sessions(
                     local_total += virtual_total
             with perf.timed("sessions.list.remote.cached_first_page"):
                 for nid in connected:
-                    remote = _remote_sessions_for_sidebar_cached(nid)
-                    if remote is None:
+                    cached_remote = _remote_sessions_for_sidebar_cached(
+                        nid,
+                        limit=max(offset + limit, 1),
+                    )
+                    if cached_remote is None:
                         deferred_sidebar_projection = True
                         continue
+                    remote, remote_total = cached_remote
                     for rs in remote:
                         rs["node_id"] = nid
                         rs.setdefault("is_running", False)
@@ -4640,7 +4695,7 @@ async def get_sessions(
                         out.append(rs)
                         projected_first_page_sessions.append(rs)
                         appended_remote_sessions = True
-                    local_total += len(remote)
+                    local_total += remote_total
             handled_remote_sessions = True
             if deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions:
                 end = offset + limit
@@ -6657,18 +6712,9 @@ async def mark_session_opened(session_id: str):
 
 @app.post("/api/sessions/{session_id}/unpin-others")
 async def unpin_other_sessions(session_id: str, body: dict = Body(default={})):
-    keep_session = await asyncio.to_thread(session_manager.get_ref, session_id)
-    if not keep_session:
+    unpinned_ids = await asyncio.to_thread(session_manager.unpin_others, session_id)
+    if unpinned_ids is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    sessions = await asyncio.to_thread(_local_sessions_for_sidebar)
-    unpinned_ids: list[str] = []
-    for session in sessions:
-        sid = session.get("id")
-        if not sid or sid == session_id or not session.get("pinned"):
-            continue
-        updated = await asyncio.to_thread(session_manager.set_pinned, sid, False)
-        if updated:
-            unpinned_ids.append(sid)
     return {
         "id": session_id,
         "unpinned_ids": unpinned_ids,
@@ -9137,7 +9183,9 @@ async def internal_ask_fork(
             instructions=body["instructions"],
             worker_session_id=worker_session_id,
             worker_description=str(body.get("worker_description") or ""),
+            provider_id=str(body.get("provider_id") or "").strip(),
             model=body["model"],
+            reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
             cwd=body["cwd"],
             justification=body.get("justification"),
             proposed_orchestration_mode=body.get("proposed_orchestration_mode"),
@@ -10209,23 +10257,87 @@ async def internal_mssg(
             detail="sender_session_id, one target, and message are required",
         )
     try:
+        requested_provider_id = str(body.get("provider_id") or "").strip()
+        requested_model = str(body.get("model") or "").strip()
+        await _validate_optional_run_selector(
+            sender_session_id,
+            requested_provider_id,
+            requested_model,
+        )
         target_session_id = await _resolve_communication_target(body)
         return await coordinator.submit_team_message(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
             message=message,
+            detach=True,
+            provider_id=requested_provider_id,
+            model=requested_model,
+            reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/internal/async-communicate")
-async def internal_async_communicate(
+async def _ask_continue_and_expect_mssg_back_async(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    sender_session_id: str,
+    message: str,
+    requested_provider_id: str,
+    requested_model: str,
+) -> dict[str, Any]:
+    target_worker_pool = str(body.get("target_worker_pool") or "").strip()
+    has_exact_target = (
+        str(body.get("target_session_id") or "").strip()
+        or str(body.get("target_worker_id") or "").strip()
+    )
+    if target_worker_pool and not has_exact_target:
+        target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
+        if not target:
+            queued = await _enqueue_worker_pool_message(
+                tag=target_worker_pool,
+                sender_session_id=sender_session_id,
+                prompt=message,
+                expect_mssg_response=True,
+                provider_id=requested_provider_id,
+                model=requested_model,
+                reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+            )
+            return {"success": True, "queued": True, **queued}
+        target_session_id = str(target.get("agent_session_id") or "")
+    else:
+        target_session_id = await _resolve_communication_target(body)
+    return await coordinator.submit_team_message(
+        sender_session_id=sender_session_id,
+        target_session_id=target_session_id,
+        message=message,
+        detach=True,
+        expect_mssg_response=True,
+        provider_id=requested_provider_id,
+        model=requested_model,
+        reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+    )
+
+
+async def _ask_wait_and_grab_last_mssg_in_turn(
+    body: dict,
+    sender_session_id: str,
+    message: str,
+    requested_provider_id: str,
+    requested_model: str,
+) -> dict[str, Any]:
+    target_session_id = await _resolve_communication_target(body)
+    return await coordinator.ask_team_message(
+        sender_session_id=sender_session_id,
+        target_session_id=target_session_id,
+        message=message,
+        ask_id=str(body.get("ask_id") or ""),
+        provider_id=requested_provider_id,
+        model=requested_model,
+        reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+    )
+
+
+async def _handle_internal_ask(body: dict) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
     if not sender_session_id or not message:
@@ -10234,30 +10346,28 @@ async def internal_async_communicate(
             detail="sender_session_id, one target, and message are required",
         )
     try:
-        target_worker_pool = str(body.get("target_worker_pool") or "").strip()
-        has_exact_target = (
-            str(body.get("target_session_id") or "").strip()
-            or str(body.get("target_worker_id") or "").strip()
+        requested_provider_id = str(body.get("provider_id") or "").strip()
+        requested_model = str(body.get("model") or "").strip()
+        await _validate_optional_run_selector(
+            sender_session_id,
+            requested_provider_id,
+            requested_model,
         )
-        if target_worker_pool and not has_exact_target:
-            target = await asyncio.to_thread(_pick_idle_pool_worker, target_worker_pool)
-            if not target:
-                queued = await _enqueue_worker_pool_message(
-                    tag=target_worker_pool,
-                    sender_session_id=sender_session_id,
-                    prompt=message,
-                    expect_mssg_response=True,
-                )
-                return {"success": True, "queued": True, **queued}
-            target_session_id = str(target.get("agent_session_id") or "")
-        else:
-            target_session_id = await _resolve_communication_target(body)
-        return await coordinator.submit_team_message(
-            sender_session_id=sender_session_id,
-            target_session_id=target_session_id,
-            message=message,
-            detach=True,
-            expect_mssg_response=True,
+        mode = normalize_ask_mode(body.get("mode"))
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC:
+            return await _ask_continue_and_expect_mssg_back_async(
+                body,
+                sender_session_id,
+                message,
+                requested_provider_id,
+                requested_model,
+            )
+        return await _ask_wait_and_grab_last_mssg_in_turn(
+            body,
+            sender_session_id,
+            message,
+            requested_provider_id,
+            requested_model,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -10290,25 +10400,10 @@ async def internal_ask(
 ):
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    sender_session_id = str(body.get("sender_session_id") or "").strip()
-    message = str(body.get("message") or "").strip()
-    if not sender_session_id or not message:
-        raise HTTPException(
-            status_code=400,
-            detail="sender_session_id, one target, and message are required",
-        )
     try:
-        target_session_id = await _resolve_communication_target(body)
-        return await coordinator.ask_team_message(
-            sender_session_id=sender_session_id,
-            target_session_id=target_session_id,
-            message=message,
-            ask_id=str(body.get("ask_id") or ""),
-        )
+        return await _handle_internal_ask(body)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="ask timed out")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/internal/test/force-context-overflow")
@@ -11133,8 +11228,16 @@ async def internal_session_bridge_delegate(
     returns the target's final message."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    caller_sid = str(body.get("app_session_id") or "")
+    requested_provider_id = str(body.get("provider_id") or "").strip()
+    requested_model = str(body.get("model") or "").strip()
+    await _validate_optional_run_selector(
+        caller_sid,
+        requested_provider_id,
+        requested_model,
+    )
     result = await session_bridge.delegate(
-        caller_sid=str(body.get("app_session_id") or ""),
+        caller_sid=caller_sid,
         target_sid=str(body.get("session_id") or ""),
         prompt=str(body.get("prompt") or ""),
         run_mode=str(body.get("run_mode") or ""),
@@ -11142,6 +11245,9 @@ async def internal_session_bridge_delegate(
         display_prompt=str(body.get("display_prompt") or "") or None,
         source=str(body.get("source") or "") or None,
         client_id=str(body.get("client_id") or "") or None,
+        provider_id=requested_provider_id,
+        model=requested_model,
+        reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
     )
     return result
 
@@ -11733,6 +11839,9 @@ async def _enqueue_worker_pool_message(
     sender_session_id: str,
     prompt: str,
     expect_mssg_response: bool,
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict:
     from stores import worker_store as _ws
 
@@ -11742,6 +11851,9 @@ async def _enqueue_worker_pool_message(
         "sender_session_id": sender_session_id,
         "prompt": prompt,
         "expect_mssg_response": expect_mssg_response,
+        "provider_id": provider_id,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     queued = await asyncio.to_thread(_ws.enqueue_pool_task, tag, item)
@@ -11779,6 +11891,9 @@ async def _process_worker_pool_queue(tag: str) -> None:
             message=str(item.get("prompt") or ""),
             detach=True,
             expect_mssg_response=bool(item.get("expect_mssg_response")),
+            provider_id=str(item.get("provider_id") or ""),
+            model=str(item.get("model") or ""),
+            reasoning_effort=str(item.get("reasoning_effort") or ""),
         )
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)

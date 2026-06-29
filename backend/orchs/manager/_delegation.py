@@ -159,6 +159,8 @@ async def run_delegation(
     worker_description: str,
     model: str,
     cwd: str,
+    provider_id: str = "",
+    reasoning_effort: str = "",
     justification: Optional[str] = None,
     proposed_orchestration_mode: Optional[str] = None,
     client_delegation_id: Optional[str] = None,
@@ -292,7 +294,7 @@ async def run_delegation(
                 cancel_event=cancel_event,
                 delegation_id=delegation_id,
                 app_session_id=app_session_id,
-                provider_id=coordinator.provider_for_session(app_session_id).id,
+                provider_id=provider_id or coordinator.provider_for_session(app_session_id).id,
                 node_id=effective_node_id,
             )
         else:
@@ -723,10 +725,10 @@ async def run_delegation_locked(
     worker_backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
     worker_internal_token = coordinator.internal_token
 
-    provider = coordinator.provider_for_session(worker_agent_session_id)
+    provider = coordinator.provider_for_run(worker_agent_session_id, provider_id)
     provider_run_config = worker_session.get("provider_run_config") or None
     capability_contexts = worker_session.get("capability_contexts") or None
-    reasoning_effort = worker_session.get("reasoning_effort")
+    reasoning_effort = reasoning_effort or worker_session.get("reasoning_effort")
     if machine_completion:
         worker_prompt = instructions
     else:

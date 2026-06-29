@@ -412,6 +412,9 @@ class Client:
         display_prompt: str = "",
         source: str = "",
         client_id: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
         timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
         return self._post(
@@ -425,6 +428,9 @@ class Client:
                 "client_id": client_id,
                 "run_mode": run_mode,
                 "approval": approval,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=timeout,
         )
@@ -941,6 +947,9 @@ class Client:
         target_worker_id: str = "",
         target_worker_pool: str = "",
         ask_id: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
         timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
         """Send a message to one session, worker, or worker pool and block."""
@@ -953,6 +962,9 @@ class Client:
                 "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": ask_id,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=timeout,
         )
@@ -964,6 +976,9 @@ class Client:
         *,
         target_worker_id: str = "",
         target_worker_pool: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         """Send a joined message to one session, worker, or worker pool."""
         return self._post(
@@ -974,6 +989,9 @@ class Client:
                 "target_worker_id": target_worker_id,
                 "target_worker_pool": target_worker_pool,
                 "message": message,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=30.0,
         )
@@ -985,6 +1003,9 @@ class Client:
         *,
         target_worker_id: str = "",
         target_worker_pool: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         """Send a detached message to one session, worker, or worker pool."""
         return self._post(
@@ -995,6 +1016,9 @@ class Client:
                 "target_worker_id": target_worker_id,
                 "target_worker_pool": target_worker_pool,
                 "message": message,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=30.0,
         )

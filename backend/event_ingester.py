@@ -38,6 +38,12 @@ _STUB_NON_RENDER_TYPES = frozenset({
     "worker_prep_cancelled",
 })
 _MAX_OPEN_APPEND_HANDLES = 64
+# Stable-storage fsync cadence for the background flusher. `fh.flush()`
+# (kernel page-cache visibility — what cross-process tailers and readers
+# actually need) stays synchronous on the ingest path; only `os.fsync()`
+# (OS/power-crash durability, beyond the clean-restart convergence
+# invariant) is deferred and batched here. See `_mark_fsync_dirty`.
+_FSYNC_INTERVAL = 0.25
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -78,6 +84,18 @@ class EventIngester:
         self._seq: dict[str, int] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        # Background stable-storage flusher. Root ids that have flushed
+        # (kernel-visible) but not yet fsync'd land in `_fsync_dirty`; a
+        # daemon thread fsyncs each still-open handle every `_FSYNC_INTERVAL`.
+        # `_fsync_thread` is started lazily on first dirty mark so tests
+        # that never ingest don't spawn it. The thread runs for the
+        # process lifetime; `_fsync_dirty_now` drains synchronously
+        # (e.g. on shutdown) without killing it — the module-level
+        # singleton is reused after `close_all`, so a permanent stop
+        # flag would silently disable durability for the rest of life.
+        self._fsync_dirty: set[str] = set()
+        self._fsync_cond = threading.Condition()
+        self._fsync_thread: Optional[threading.Thread] = None
         # Per-root UUID sets for dedup. Bounded: cleared on close().
         self._seen_uuids: dict[str, set[str]] = {}
         self._seen_event_owners: dict[str, dict[str, set[Optional[str]]]] = {}
@@ -308,9 +326,18 @@ class EventIngester:
     def _close_handle_locked(self, root_id: str) -> None:
         with self._guard:
             pair = self._handles.pop(root_id, None)
+        with self._fsync_cond:
+            self._fsync_dirty.discard(root_id)
         if not pair:
             return
         _, fh = pair
+        # Drain durability for this handle synchronously — once closed
+        # the background flusher can no longer reach it.
+        try:
+            fh.flush()
+            os.fsync(fh.fileno())
+        except OSError:
+            logger.debug("close fsync failed for %s", root_id, exc_info=True)
         fh.close()
 
     def _prune_append_handles(self, *, exclude_root_id: str) -> None:
@@ -331,6 +358,85 @@ class EventIngester:
                 self._close_handle_locked(victim_id)
             finally:
                 victim_lock.release()
+
+    # -- background stable-storage flusher -------------------------------
+    # Why: `os.fsync()` per ingest event is the single biggest blocking
+    # cost on the ingestion hot path (reqs [26]/[27]). It only buys
+    # OS/power-crash durability, which is beyond the clean-restart
+    # convergence invariant — `fh.flush()` already makes the line
+    # kernel-visible so cross-process tailers and in-process readers
+    # observe it immediately, and raises on write failure so the
+    # tailer's cursor-advance rule is preserved. We batch the fsync on
+    # a daemon thread instead.
+    def _mark_fsync_dirty(self, root_id: str) -> None:
+        """Called after a synchronous `fh.flush()`: the new bytes are
+        kernel-visible, so record that the root needs a deferred fsync."""
+        with self._fsync_cond:
+            if self._fsync_thread is None:
+                self._start_fsync_thread_locked()
+            self._fsync_dirty.add(root_id)
+            self._fsync_cond.notify_all()
+
+    def _start_fsync_thread_locked(self) -> None:
+        if self._fsync_thread is None:
+            t = threading.Thread(
+                target=self._fsync_loop, name="event-ingester-fsync",
+                daemon=True,
+            )
+            self._fsync_thread = t
+            t.start()
+
+    def _fsync_loop(self) -> None:
+        while True:
+            with self._fsync_cond:
+                if not self._fsync_dirty:
+                    self._fsync_cond.wait(timeout=_FSYNC_INTERVAL)
+                dirty = sorted(self._fsync_dirty)
+            # Fsync outside `_fsync_cond` so a slow disk can't block
+            # dirty-marking. Re-fetch the CURRENT handle under `_guard`
+            # per root: an evicted/closed root's data was fsync'd in the
+            # close path, so skipping it is correct; this also never
+            # touches a recycled fd.
+            for root_id in dirty:
+                with self._guard:
+                    pair = self._handles.get(root_id)
+                    fh = pair[1] if pair is not None else None
+                if fh is None:
+                    continue
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    # Stable-storage failure (EIO etc.): the line IS
+                    # kernel-visible, so the convergence invariant holds,
+                    # but the operator must see it — escalate, don't hide
+                    # it at debug.
+                    logger.error(
+                        "background fsync failed for %s; durability at risk",
+                        root_id, exc_info=True,
+                    )
+                with self._fsync_cond:
+                    self._fsync_dirty.discard(root_id)
+
+    def _fsync_dirty_now(self) -> None:
+        """Synchronous fsync of every currently-dirty root. Used by
+        `close_all` so pending background durability isn't lost. Does
+        NOT stop the flusher — the singleton is reused after `close_all`."""
+        with self._fsync_cond:
+            dirty = sorted(self._fsync_dirty)
+            self._fsync_dirty.clear()
+            self._fsync_cond.notify_all()
+        for root_id in dirty:
+            with self._guard:
+                pair = self._handles.get(root_id)
+                fh = pair[1] if pair is not None else None
+            if fh is None:
+                continue
+            try:
+                fh.flush()
+                os.fsync(fh.fileno())
+            except OSError:
+                logger.error("shutdown fsync failed for %s; durability at risk",
+                             root_id, exc_info=True)
 
     def _ensure_open(self, root_id: str) -> tuple[Path, Any]:
         with self._guard:
@@ -684,12 +790,15 @@ class EventIngester:
                 fh, root_id, seq, sid, event_type, data, source,
                 run_id, msg_id, cwd, assume_exists,
             )
-            # Durable fence: a caller that observes a returned seq has
-            # the guarantee that the line is on disk past kernel buffers.
-            # OSError/IOError propagate so the tailer's
-            # "don't advance cursor on dispatch failure" rule kicks in.
+            # Kernel fence: `flush()` makes the line visible in the
+            # kernel page cache so cross-process tailers / in-process
+            # readers observe it immediately, and raises on write
+            # failure so the tailer's "don't advance cursor on dispatch
+            # failure" rule kicks in. Stable-storage `fsync` (OS/power-
+            # crash durability, beyond the convergence invariant) is
+            # batched on the background flusher — see `_mark_fsync_dirty`.
             fh.flush()
-            os.fsync(fh.fileno())
+            self._mark_fsync_dirty(root_id)
 
         # Orphan-event signal: a `msg_id=None` line for a sid whose
         # latest assistant msg is already finalized arrives AFTER the
@@ -783,7 +892,7 @@ class EventIngester:
                     run_id, msg_id, cwd, assume_exists,
                 )
             fh.flush()
-            os.fsync(fh.fileno())
+            self._mark_fsync_dirty(root_id)
         return seqs
 
     def cursor(self, root_id: str) -> int:
@@ -1809,6 +1918,9 @@ class EventIngester:
                 self._root_events_candidate_version.pop(root_id, None)
 
     def close_all(self) -> None:
+        # Drain pending background durability before closing handles so
+        # shutdown can't lose not-yet-fsync'd events.
+        self._fsync_dirty_now()
         root_ids = set(self._handles) | set(self._seq)
         for root_id in list(root_ids):
             self.close(root_id)

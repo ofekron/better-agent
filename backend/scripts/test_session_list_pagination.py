@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 import _test_home
@@ -36,6 +37,9 @@ def _reset_home() -> None:
     session_store._index_loaded = False
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
+    main._sessions_list_response_cache.clear()
+    main._remote_sessions_cache.clear()
+    main._remote_sessions_cache_version = 0
     index_path = Path(_TMP_HOME) / "session_search_index.sqlite3"
     index_path.unlink(missing_ok=True)
 
@@ -391,11 +395,18 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
         pinned=True,
     ))
 
-    response = client.post(
-        "/api/sessions/keep/unpin-others",
-        headers=HEADERS,
-        json={"project_path": "/tmp/project-a"},
+    original = main._local_sessions_for_sidebar
+    main._local_sessions_for_sidebar = lambda: (_ for _ in ()).throw(
+        AssertionError("unpin-others must not build the decorated sidebar list")
     )
+    try:
+        response = client.post(
+            "/api/sessions/keep/unpin-others",
+            headers=HEADERS,
+            json={"project_path": "/tmp/project-a"},
+        )
+    finally:
+        main._local_sessions_for_sidebar = original
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions unpin-others status {response.status_code}")
         return False
@@ -418,6 +429,31 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
         and updated_by_id.get("other-project") == "2026-06-17T00:00:00+00:00"
     )
     print(f"{PASS if ok else FAIL} /api/sessions unpin-others ignores backend filters")
+    return ok
+
+
+def test_new_session_defaults_to_pinned_and_sorts_above_pinned(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("older-pinned", "2026-06-19T00:00:00+00:00", pinned=True))
+
+    response = client.post(
+        "/api/sessions",
+        headers=HEADERS,
+        json={"orchestration_mode": "native", "cwd": "/tmp/test-session-pagination"},
+    )
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions create status {response.status_code}")
+        return False
+    created = response.json()
+    listing = client.get("/api/sessions?offset=0&limit=10", headers=HEADERS).json()
+    ids = [session["id"] for session in listing.get("sessions", [])]
+    by_id = {session["id"]: session for session in listing.get("sessions", [])}
+    ok = (
+        created.get("pinned") is True
+        and by_id.get(created.get("id"), {}).get("pinned") is True
+        and ids[:2] == [created.get("id"), "older-pinned"]
+    )
+    print(f"{PASS if ok else FAIL} new sessions default pinned and sort above pinned")
     return ok
 
 
@@ -448,6 +484,49 @@ def test_pin_endpoint_unpins_specific_session(client: TestClient) -> bool:
         and updated_by_id.get("specific") == "2026-06-19T00:00:00+00:00"
     )
     print(f"{PASS if ok else FAIL} /api/sessions pin endpoint unpins one session")
+    return ok
+
+
+def test_topbar_pin_endpoint_lists_pinned_sessions(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "topbar",
+        "2026-06-19T00:00:00+00:00",
+        topbar_pinned=False,
+    ))
+    _write(_record_with(
+        "normal",
+        "2026-06-18T00:00:00+00:00",
+        topbar_pinned=False,
+    ))
+
+    response = client.put(
+        "/api/sessions/topbar/topbar-pin",
+        headers=HEADERS,
+        json={"pinned": True},
+    )
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions topbar-pin status {response.status_code}")
+        return False
+    listing = client.get("/api/sessions/topbar-pinned", headers=HEADERS)
+    if listing.status_code != 200:
+        print(f"{FAIL} /api/sessions/topbar-pinned status {listing.status_code}")
+        return False
+    sessions = listing.json().get("sessions", [])
+    by_id = {session["id"]: session for session in sessions}
+    updated = client.get("/api/sessions?offset=0&limit=10", headers=HEADERS).json()
+    updated_by_id = {
+        session["id"]: session.get("updated_at")
+        for session in updated.get("sessions", [])
+    }
+    ok = (
+        response.json().get("topbar_pinned") is True
+        and [session.get("id") for session in sessions] == ["topbar"]
+        and by_id["topbar"].get("topbar_pinned") is True
+        and isinstance(by_id["topbar"].get("topbar_pinned_at"), str)
+        and updated_by_id.get("topbar") == "2026-06-19T00:00:00+00:00"
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions topbar pin lists pinned sessions")
     return ok
 
 
@@ -525,6 +604,68 @@ def test_session_list_does_not_schedule_snapshot_prewarm(client: TestClient) -> 
     return ok
 
 
+def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool:
+    _reset_home()
+    for index in range(3):
+        _write(_record(
+            f"local-{index}",
+            f"2026-06-2{index}T00:00:00+00:00",
+        ))
+    remote = [
+        {
+            "id": f"remote-{index}",
+            "name": f"remote-{index}",
+            "updated_at": "2026-06-19T00:00:00+00:00",
+            "created_at": "2026-06-19T00:00:00+00:00",
+        }
+        for index in range(100)
+    ]
+    main._remote_sessions_cache["node-a"] = (time.monotonic(), remote)
+    main._remote_sessions_cache_version += 1
+
+    fake_node_store = types.SimpleNamespace(
+        connected_worker_node_ids_snapshot=lambda: (1, ("node-a",)),
+    )
+    original_node_store = sys.modules.get("node_store")
+    original_enabled = main._machine_nodes_enabled_cached
+    original_prefs = main._session_list_user_prefs
+    copied_lengths: list[int] = []
+    original_copy = main._copy_remote_sessions
+
+    def tracking_copy(sessions, *, limit=None):
+        copied = original_copy(sessions, limit=limit)
+        if limit is not None:
+            copied_lengths.append(len(copied))
+        return copied
+
+    sys.modules["node_store"] = fake_node_store
+    main._machine_nodes_enabled_cached = lambda: True
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    main._copy_remote_sessions = tracking_copy
+    try:
+        response = client.get("/api/sessions?offset=0&limit=2", headers=HEADERS)
+    finally:
+        main._copy_remote_sessions = original_copy
+        main._session_list_user_prefs = original_prefs
+        main._machine_nodes_enabled_cached = original_enabled
+        if original_node_store is None:
+            sys.modules.pop("node_store", None)
+        else:
+            sys.modules["node_store"] = original_node_store
+    if response.status_code != 200:
+        print(f"{FAIL} connected /api/sessions capped remote status {response.status_code}")
+        return False
+    body = response.json()
+    ok = (
+        body.get("total") == 103
+        and len(body.get("sessions") or []) == 2
+        and copied_lengths
+        and max(copied_lengths) <= 2
+    )
+    print(f"{PASS if ok else FAIL} connected /api/sessions caps remote cache copy")
+    return ok
+
+
 def main_run() -> int:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     try:
@@ -538,10 +679,13 @@ def main_run() -> int:
         ok = test_search_avoids_full_sidebar_list(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
+        ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok
+        ok = test_topbar_pin_endpoint_lists_pinned_sessions(client) and ok
         ok = test_sidebar_strips_heavy_working_mode_meta(client) and ok
         ok = test_session_list_source_filter_user_awareness(client) and ok
         ok = test_session_list_does_not_schedule_snapshot_prewarm(client) and ok
+        ok = test_connected_first_page_caps_remote_cache_copy(client) and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

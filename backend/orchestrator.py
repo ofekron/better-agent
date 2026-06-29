@@ -727,6 +727,27 @@ class Coordinator:
                 )
         return default_provider()
 
+    def provider_for_run(self, app_session_id: str, provider_id: Optional[str] = None):
+        pid = str(provider_id or "").strip()
+        if not pid:
+            return self.provider_for_session(app_session_id)
+        try:
+            prov = get_provider(pid)
+            if not prov.defunct:
+                return prov
+            logger.warning(
+                "per-turn provider_id %s is defunct for session %s — falling back to session provider",
+                pid,
+                app_session_id,
+            )
+        except KeyError:
+            logger.warning(
+                "per-turn provider_id %s is unknown for session %s — falling back to session provider",
+                pid,
+                app_session_id,
+            )
+        return self.provider_for_session(app_session_id)
+
     async def rewind_session(self, app_session_id: str, agent_sid: str, anchor_uuid: str) -> None:
         """Public rewind API for submodules that need to rewind a claude
         session without reaching into private methods."""
@@ -1161,6 +1182,10 @@ class Coordinator:
         message: str,
         detach: bool = False,
         expect_mssg_response: bool = False,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        model_task_key: str = "delegation_message",
     ) -> dict:
         import uuid
         import team_messaging
@@ -1168,6 +1193,14 @@ class Coordinator:
         sender, target = team_messaging.validate_message_route(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
+        )
+        run_config = self._resolve_delegation_run_config(
+            model_task_key,
+            sender=sender,
+            target=target,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         metadata = team_messaging.build_message_metadata(
             sender_session_id=sender_session_id,
@@ -1227,7 +1260,10 @@ class Coordinator:
                 "app_session_id": target_session_id,
                 "prompt": message,
                 "cli_prompt": cli_prompt,
-                "model": target.get("model") or sender.get("model") or "",
+                "provider_id": run_config.get("provider_id") or "",
+                "model": run_config.get("model") or "",
+                "reasoning_effort": run_config.get("reasoning_effort") or "",
+                "allow_model_override": True,
                 "cwd": target.get("cwd") or sender.get("cwd") or "",
                 "orchestration_mode": target.get("orchestration_mode") or "team",
                 "source": team_messaging.SOURCE,
@@ -1248,6 +1284,40 @@ class Coordinator:
             "queued_id": queue_item_id,
             "target_session_id": target_session_id,
             "expects_response": expect_mssg_response,
+        }
+
+    def _resolve_delegation_run_config(
+        self,
+        task_key: str,
+        *,
+        sender: dict,
+        target: Optional[dict] = None,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+    ) -> dict[str, str]:
+        import config_store
+
+        provider_id = str(provider_id or "").strip()
+        model = str(model or "").strip()
+        reasoning_effort = str(reasoning_effort or "").strip()
+        assignment = config_store.get_internal_llm_task(task_key)
+        if assignment:
+            resolved = config_store.resolve_internal_llm(task_key)
+            provider_id = provider_id or str(resolved.get("provider_id") or "").strip()
+            model = model or str(resolved.get("model") or "").strip()
+            reasoning_effort = (
+                reasoning_effort
+                or str(resolved.get("reasoning_effort") or "").strip()
+            )
+        if provider_id and not model:
+            provider = config_store.get_provider(provider_id) or {}
+            model = str(provider.get("default_model") or "").strip()
+        target = target or {}
+        return {
+            "provider_id": provider_id or str(target.get("provider_id") or sender.get("provider_id") or "").strip(),
+            "model": model or str(target.get("model") or sender.get("model") or "").strip(),
+            "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or sender.get("reasoning_effort") or "").strip(),
         }
 
     def register_mssg_turn_waiter(
@@ -1361,20 +1431,15 @@ class Coordinator:
         policy = config_store.get_delegate_task_policy()
         caller = sender_session_id
         caller_session = session_manager.get(caller) or {}
-        delegate_provider_id = provider_id or caller_session.get("provider_id")
-        if not model and provider_id:
-            provider = config_store.get_provider(provider_id) or {}
-            model = str(provider.get("default_model") or "").strip()
-            if not model:
-                name = provider.get("name") or provider_id
-                raise ValueError(f"{name} has no default model configured")
-        if not model:
-            model = caller_session.get("model") or ""
-        delegate_reasoning_effort = (
-            reasoning_effort
-            if reasoning_effort != ""
-            else caller_session.get("reasoning_effort")
+        create_config = self._resolve_delegation_run_config(
+            "delegation_task",
+            sender=caller_session,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
+        delegate_provider_id = create_config.get("provider_id") or None
+        delegate_reasoning_effort = create_config.get("reasoning_effort") or None
         if run_mode not in ("direct", "fork"):
             raise ValueError("run_mode must be direct or fork")
         if run_mode == "fork" and not target_session_id:
@@ -1389,7 +1454,7 @@ class Coordinator:
                 target = self._delegate_task_create_session(
                     caller,
                     task,
-                    model,
+                    create_config.get("model") or "",
                     cwd,
                     provider_id=delegate_provider_id,
                     reasoning_effort=delegate_reasoning_effort,
@@ -1408,7 +1473,7 @@ class Coordinator:
                     target = self._delegate_task_create_session(
                         caller,
                         task,
-                        model,
+                        create_config.get("model") or "",
                         cwd,
                         provider_id=delegate_provider_id,
                         reasoning_effort=delegate_reasoning_effort,
@@ -1449,7 +1514,7 @@ class Coordinator:
                     proposed_description=(task or "")[:200] or "delegate_task",
                     proposed_orchestration_mode="native",
                     instructions_preview=task,
-                    model=model or "",
+                    model=create_config.get("model") or "",
                 )
             except Exception:
                 self.approval_waiters.pop(dt_id, None)
@@ -1478,9 +1543,22 @@ class Coordinator:
                         "target_session_id": target}
 
         # Dispatch detached (does not join the sender's turn).
+        target_session = session_manager.get(target) or {}
+        run_config = self._resolve_delegation_run_config(
+            "delegation_task",
+            sender=caller_session,
+            target=target_session,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
         await self.submit_team_message(
             sender_session_id=caller, target_session_id=target,
             message=task, detach=True,
+            provider_id=run_config.get("provider_id") or "",
+            model=run_config.get("model") or "",
+            reasoning_effort=run_config.get("reasoning_effort") or "",
+            model_task_key="delegation_task",
         )
         created_target = session_manager.get(target) if created else None
         return {
@@ -1749,6 +1827,10 @@ class Coordinator:
         message: str,
         ask_id: str = "",
         timeout_s: float = 24 * 60 * 60,
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        model_task_key: str = "delegation_ask",
     ) -> dict:
         import uuid
         import ask_status_store
@@ -1769,6 +1851,14 @@ class Coordinator:
         sender, target = team_messaging.validate_message_route(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
+        )
+        run_config = self._resolve_delegation_run_config(
+            model_task_key,
+            sender=sender,
+            target=target,
+            provider_id=provider_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         metadata = team_messaging.build_message_metadata(
             sender_session_id=sender_session_id,
@@ -1853,7 +1943,10 @@ class Coordinator:
                     "app_session_id": target_session_id,
                     "prompt": message,
                     "cli_prompt": cli_prompt,
-                    "model": target.get("model") or sender.get("model") or "",
+                    "provider_id": run_config.get("provider_id") or "",
+                    "model": run_config.get("model") or "",
+                    "reasoning_effort": run_config.get("reasoning_effort") or "",
+                    "allow_model_override": True,
                     "cwd": target.get("cwd") or sender.get("cwd") or "",
                     "orchestration_mode": target.get("orchestration_mode") or "team",
                     "source": team_messaging.ASK_SOURCE,
@@ -3635,6 +3728,8 @@ class Coordinator:
         model: str,
         cwd: str,
         ws_callback: Callable[[dict], Awaitable[None]],
+        provider_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         images: Optional[list] = None,
         files: Optional[list] = None,
         orchestration_mode: Optional[str] = None,
@@ -3649,6 +3744,7 @@ class Coordinator:
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         file_discussion_id: Optional[str] = None,
+        allow_model_override: bool = False,
     ) -> None:
         # `source`/`user_initiated` flow through to run_turn; the
         # scheduler submits source="schedule", user_initiated=False so
@@ -3711,7 +3807,7 @@ class Coordinator:
             cwd = stored_cwd
 
         stored_model = session.get("model")
-        if stored_model:
+        if stored_model and not allow_model_override:
             if model and model != stored_model:
                 logger.warning(
                     "Discarding per-turn model=%r for session %s; "
@@ -3719,6 +3815,12 @@ class Coordinator:
                     model, app_session_id, stored_model,
                 )
             model = stored_model
+        elif allow_model_override:
+            if not model:
+                model = stored_model or ""
+        else:
+            provider_id = None
+            reasoning_effort = None
 
         # Note: WS registration is owned by the /ws/chat handler in main.py,
         # which registers before putting the prompt on the queue. No need to
@@ -3777,6 +3879,8 @@ class Coordinator:
                     model=model,
                     cwd=cwd,
                     ws_callback=ws_callback,
+                    provider_id=provider_id,
+                    reasoning_effort=reasoning_effort,
                     images=images,
                     files=files,
                     trace_step_name="supervisor_direct",
@@ -3852,6 +3956,8 @@ class Coordinator:
                 model=model,
                 cwd=cwd,
                 ws_callback=ws_callback,
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
                 images=images,
                 files=files,
                 client_id=client_id,
@@ -3916,6 +4022,8 @@ class Coordinator:
         worker_description: str,
         model: str,
         cwd: str,
+        provider_id: str = "",
+        reasoning_effort: str = "",
         justification: Optional[str] = None,
         proposed_orchestration_mode: Optional[str] = None,
         client_delegation_id: Optional[str] = None,
@@ -3934,7 +4042,9 @@ class Coordinator:
             instructions=instructions,
             worker_session_id=worker_session_id,
             worker_description=worker_description,
+            provider_id=provider_id,
             model=model,
+            reasoning_effort=reasoning_effort,
             cwd=cwd,
             justification=justification,
             proposed_orchestration_mode=proposed_orchestration_mode,

@@ -67,6 +67,9 @@ def delegate_to_session_response(
     display_prompt: str = "",
     source: str = "",
     client_id: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
     # app_session_id is auto-injected by call_internal.
     try:
@@ -80,6 +83,9 @@ def delegate_to_session_response(
                 "client_id": client_id,
                 "run_mode": run_mode,
                 "approval": approval,
+                "provider_id": provider_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
             },
             timeout=_DELEGATE_TIMEOUT,
         )
@@ -146,13 +152,25 @@ def build_server() -> FastMCP:
         display_prompt: str = "",
         source: str = "",
         client_id: str = "",
+        provider_id: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         """Run a prompt against ANY user-chosen session (fork / continue / new) and
         WAIT for its result, returned inline. The cross-session, user-driven
         counterpart to delegate_task — unlike delegate_task (detached, team-routed),
         this blocks and returns the answer."""
         return delegate_to_session_response(
-            prompt, run_mode, approval, session_id, display_prompt, source, client_id
+            prompt,
+            run_mode,
+            approval,
+            session_id,
+            display_prompt,
+            source,
+            client_id,
+            provider_id,
+            model,
+            reasoning_effort,
         )
 
     @server.tool()
