@@ -27,6 +27,7 @@ providers re-applies env; previous providers' settings stay intact.
 """
 
 import logging
+import copy
 import os
 import threading
 import traceback
@@ -53,9 +54,20 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
+_state_cache_lock = threading.RLock()
+_state_cache: tuple[tuple[int, int], dict] | None = None
+
 
 def _config_path():
     return ba_home() / "config.json"
+
+
+def _config_fingerprint() -> tuple[int, int]:
+    try:
+        stat = _config_path().stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _engine_env_path():
@@ -417,32 +429,44 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     return {"default_provider_id": pid, "providers": [provider]}
 
 
+def _normalize_loaded_state(raw: dict) -> dict:
+    providers = raw["providers"]
+    active = raw.get("default_provider_id")
+    if not any(p.get("id") == active for p in providers):
+        active = providers[0]["id"] if providers else None
+    return {
+        "default_provider_id": active,
+        "providers": providers,
+        "delegate_task_policy": _normalize_delegate_task_policy(
+            raw.get("delegate_task_policy")
+        ),
+        "disabled_builtin_tools": _normalize_disabled_builtin_tools(
+            raw.get("disabled_builtin_tools")
+        ),
+        "disabled_builtin_extensions": _normalize_disabled_builtin_extensions(
+            raw.get("disabled_builtin_extensions")
+        ),
+        "internal_llm": _normalize_internal_llm(raw.get("internal_llm")),
+    }
+
+
 def _load_state() -> dict:
+    global _state_cache
+    fingerprint = _config_fingerprint()
+    with _state_cache_lock:
+        if _state_cache is not None and _state_cache[0] == fingerprint:
+            return copy.deepcopy(_state_cache[1])
     raw = read_json(_config_path(), {})
     if not raw:
         state = _seed_default_state()
         _save_state(state)
-        return state
+        return _load_state()
     # New schema?
     if "providers" in raw and isinstance(raw.get("providers"), list):
-        providers = raw["providers"]
-        active = raw.get("default_provider_id")
-        if not any(p.get("id") == active for p in providers):
-            active = providers[0]["id"] if providers else None
-        return {
-            "default_provider_id": active,
-            "providers": providers,
-            "delegate_task_policy": _normalize_delegate_task_policy(
-                raw.get("delegate_task_policy")
-            ),
-            "disabled_builtin_tools": _normalize_disabled_builtin_tools(
-                raw.get("disabled_builtin_tools")
-            ),
-            "disabled_builtin_extensions": _normalize_disabled_builtin_extensions(
-                raw.get("disabled_builtin_extensions")
-            ),
-            "internal_llm": _normalize_internal_llm(raw.get("internal_llm")),
-        }
+        state = _normalize_loaded_state(raw)
+        with _state_cache_lock:
+            _state_cache = (fingerprint, copy.deepcopy(state))
+        return state
     # Old flat schema → migrate, persist, then drop the legacy keychain
     # slot. Order matters: save first so a crash during _delete_legacy_api_key
     # leaves the new schema in place; the new keychain slot was populated
@@ -450,7 +474,7 @@ def _load_state() -> dict:
     state = _migrate_flat_to_providers(raw)
     _save_state(state)
     _delete_legacy_api_key()
-    return state
+    return _load_state()
 
 
 def _log_removed_providers(new_providers: list) -> None:
@@ -480,9 +504,10 @@ def _log_removed_providers(new_providers: list) -> None:
 
 
 def _save_state(state: dict) -> None:
+    global _state_cache
     new_providers = state.get("providers", [])
     _log_removed_providers(new_providers)
-    write_json(_config_path(), {
+    payload = {
         "default_provider_id": state.get("default_provider_id"),
         "providers": state.get("providers", []),
         "delegate_task_policy": state.get("delegate_task_policy", "auto"),
@@ -493,7 +518,10 @@ def _save_state(state: dict) -> None:
             state.get("disabled_builtin_extensions")
         ),
         "internal_llm": _normalize_internal_llm(state.get("internal_llm")),
-    })
+    }
+    write_json(_config_path(), payload)
+    with _state_cache_lock:
+        _state_cache = (_config_fingerprint(), copy.deepcopy(_normalize_loaded_state(payload)))
 
 
 # ----------------------------------------------------------------------------
