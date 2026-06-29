@@ -4069,6 +4069,7 @@ class SessionManager:
             if m is None:
                 return
             m["content"] = content
+            m["_content_dirty"] = False
         return self._run(
             sid, _do,
             {"kind": "running_content_updated", "msg_id": msg_id, "content": content},

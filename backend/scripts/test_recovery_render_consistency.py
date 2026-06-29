@@ -225,6 +225,53 @@ def test_reconcile_reextracts_content_from_jsonl_only_events() -> bool:
     return True
 
 
+def test_reconcile_repairs_empty_content_when_event_counts_match() -> bool:
+    from main import _reconcile_msg_events_from_jsonl
+    from orchs import ApplyEventCtx, get_strategy
+
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant("native")
+    strategy = get_strategy("native")
+    sess = session_manager.get_ref(app_sid)
+    asst = next(m for m in sess["messages"] if m["id"] == asst_id)
+    strategy.apply_event(
+        app_session_id=app_sid,
+        msg=asst,
+        event={
+            "type": "agent_message",
+            "data": {
+                "uuid": "matched-count-content",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "matched text"}],
+                },
+            },
+        },
+        ctx=ApplyEventCtx(root_id=app_sid),
+        source_is_provider_stream=True,
+    )
+    session_manager.set_streaming(app_sid, asst_id, False)
+    event_ingester.close(app_sid)
+
+    live = next(
+        m for m in session_manager.get_ref(app_sid)["messages"]
+        if m["id"] == asst_id
+    )
+    live["content"] = ""
+    live["_content_dirty"] = True
+
+    tree = session_manager.get_root_tree(app_sid)
+    _reconcile_msg_events_from_jsonl(tree)
+    repaired = next(
+        m for m in session_manager.get(app_sid)["messages"]
+        if m["id"] == asst_id
+    )
+    if repaired.get("content") != "matched text":
+        print(f"  count-match reconcile skipped content repair: {repaired.get('content')!r}")
+        return False
+    return repaired.get("_content_dirty") is not True
+
+
 def test_reconcile_does_not_clobber_streaming_msg_content() -> bool:
     """Reconcile must NOT update content on a still-streaming msg —
     live content is owned by apply_event during the turn; rewriting it
@@ -510,6 +557,8 @@ TESTS = [
         test_manager_recovery_still_pins_session_id),
     ("reconcile re-extracts content from events.jsonl-only assistant text",
         test_reconcile_reextracts_content_from_jsonl_only_events),
+    ("reconcile repairs empty content when event counts match",
+        test_reconcile_repairs_empty_content_when_event_counts_match),
     ("reconcile does NOT clobber streaming msg content",
         test_reconcile_does_not_clobber_streaming_msg_content),
     ("DIV-1: WS messages_replay carries orphan events (parity with REST)",

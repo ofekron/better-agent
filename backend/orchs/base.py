@@ -827,12 +827,19 @@ class OrchestrationStrategy(ABC):
         )
 
 
-    def _refresh_message_content_from_latest_event(self, msg: dict, event: dict) -> None:
+    def _refresh_message_content_from_event_projection(self, msg: dict, event: dict) -> None:
         from event_shape import extract_output_text, strip_synthetic_events
 
         content = extract_output_text(strip_synthetic_events([event]))
         if content:
             msg["content"] = content
+            msg["_content_dirty"] = False
+            return
+        events = self._events_list(msg)
+        if events:
+            projected = extract_output_text(strip_synthetic_events(events))
+            if projected != (msg.get("content") or ""):
+                msg["content"] = projected
             msg["_content_dirty"] = False
             return
         msg["_content_dirty"] = True
@@ -1084,6 +1091,8 @@ class OrchestrationStrategy(ABC):
             if existing_idx is not None:
                 existing = evs[existing_idx]
                 if existing == normalized:
+                    if bool(msg.get("_content_dirty")) or not msg.get("content"):
+                        self._refresh_message_content_from_event_projection(msg, normalized)
                     # Identical re-apply: full no-op for both render
                     # tree and events.jsonl. Early-return is safe here
                     # because `event_ingester.ingest`'s `uid:sha256(data)`
@@ -1115,7 +1124,7 @@ class OrchestrationStrategy(ABC):
                 # for every streaming snapshot.
                 self._replace_event(app_session_id, msg_id, normalized, ev_uuid)
                 evs[existing_idx] = normalized
-                self._refresh_message_content_from_latest_event(msg, normalized)
+                self._refresh_message_content_from_event_projection(msg, normalized)
                 # uid_idx[ev_uuid] unchanged — same uuid, same index.
                 # Fall through to side-effect blocks + ingest tail.
             else:
@@ -1147,7 +1156,7 @@ class OrchestrationStrategy(ABC):
                 if ev_uuid not in uid_idx:
                     uid_idx[ev_uuid] = len(evs)
                     evs.append(normalized)
-                self._refresh_message_content_from_latest_event(msg, normalized)
+                self._refresh_message_content_from_event_projection(msg, normalized)
                 if source_is_provider_stream:
                     session_manager.bump_unread(app_session_id, msg_id)
 

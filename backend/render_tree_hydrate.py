@@ -256,6 +256,12 @@ def hydrate_msg_events_from_jsonl(
                 if m.get("isStreaming"):
                     all_match = False
                     break
+                if (
+                    (bool(m.get("_content_dirty")) or not m.get("content"))
+                    and strategy._events_list(m)
+                ):
+                    all_match = False
+                    break
                 mid = m["id"]
                 jsonl_count = len(by_msg_id.get(mid, []))
                 msg_count = len(strategy._events_list(m))
