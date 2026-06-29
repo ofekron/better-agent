@@ -547,6 +547,7 @@ async def run_delegation(
                 instructions=instructions,
                 instructions_preview=instructions_preview,
                 worker_agent_session_id=worker_session_id,
+                worker_session=worker_session,
                 worker_description=display_description,
                 worker_orchestration_mode=mode,
                 worker_parent_claude_sid=live_parent_sid,
@@ -585,6 +586,7 @@ async def run_delegation_locked(
     instructions: str,
     instructions_preview: str,
     worker_agent_session_id: str,
+    worker_session: dict,
     worker_description: str,
     worker_orchestration_mode: str,
     worker_parent_claude_sid: Optional[str],
@@ -615,9 +617,8 @@ async def run_delegation_locked(
     # Route via the read-path helper so remote-pinned workers resolve
     # to primary's shadow file instead of a non-existent local path.
     with perf.timed("delegate.resolve_fork_inputs"):
-        worker_session_for_path = session_manager.get(worker_agent_session_id)
         parent_jsonl = await _compute_jsonl_read_path_off_loop(
-            cwd, worker_parent_claude_sid, worker_session_for_path,
+            cwd, worker_parent_claude_sid, worker_session,
         )
         parent_line_count_now = (
             await asyncio.to_thread(count_jsonl_lines, parent_jsonl)
@@ -641,7 +642,7 @@ async def run_delegation_locked(
     if run_mode == "direct":
         needs_fork = False
         resume_sid = worker_parent_claude_sid
-        fork_bc = worker_session_for_path
+        fork_bc = worker_session
         fork_agent_session_id = worker_agent_session_id
     elif ephemeral:
         needs_fork = True
@@ -720,15 +721,9 @@ async def run_delegation_locked(
     worker_internal_token = coordinator.internal_token
 
     provider = coordinator.provider_for_session(worker_agent_session_id)
-    provider_run_config = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("provider_run_config") or None
-    capability_contexts = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("capability_contexts") or None
-    reasoning_effort = (
-        session_manager.get(worker_agent_session_id) or {}
-    ).get("reasoning_effort")
+    provider_run_config = worker_session.get("provider_run_config") or None
+    capability_contexts = worker_session.get("capability_contexts") or None
+    reasoning_effort = worker_session.get("reasoning_effort")
     if machine_completion:
         worker_prompt = instructions
     else:
