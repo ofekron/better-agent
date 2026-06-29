@@ -3292,6 +3292,7 @@ class Coordinator:
         # Was missing → broadcast_global raised ValueError on every toggle.
         "message_auto_retry_changed",
         "message_content_updated",
+        "message_continuation_changed",
         # Backend startup-task lifecycle. Authoritative state lives in
         # `startup_task_registry` (in-memory); REST snapshot via
         # `GET /api/startup_tasks` for first paint, WS push for live

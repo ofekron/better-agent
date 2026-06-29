@@ -152,6 +152,8 @@ export type WSEventType =
   | "message_auto_retry_changed"
   // Backend projected final/recovered assistant text for a message.
   | "message_content_updated"
+  // Backend toggled the context-window continuation banner.
+  | "message_continuation_changed"
   // Per-turn session-picker payload (`propose_sessions` result) stamped on
   // the producing assistant message; drives the inline picker per turn.
   | "message_ask_result_changed"
