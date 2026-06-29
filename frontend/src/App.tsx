@@ -4303,7 +4303,21 @@ function AppMain({
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
         capabilityContexts,
       };
-      offlineQueue.enqueue(offlineEntry);
+      const offlineQueued = offlineQueue.enqueue(offlineEntry);
+      if (!offlineQueued) {
+        logPromptSend("app_offline_persist_failed", {
+          app_session_id: sessionId,
+          client_id: clientIdForMsg,
+          connected,
+          queue_size: offlineQueue.queue.length,
+        }, "error");
+        retryPayloadsRef.current.delete(clientIdForMsg);
+        if (sendMode === "queue") takePendingQueueDraft(sessionId, clientIdForMsg);
+        setPendingForSession(sessionId, (prev) =>
+          prev.filter((m) => m.id !== clientIdForMsg)
+        );
+        return false;
+      }
 
       if (currentSession.offline_pending) {
         logPromptSend("app_offline_pending_session", {
@@ -4383,7 +4397,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user
@@ -4797,7 +4811,7 @@ function AppMain({
     ) => {
       if (config.fileEditEnabled) {
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
-        return;
+        return false;
       }
       const id = uuidv4();
       const now = new Date().toISOString();
@@ -4825,8 +4839,7 @@ function AppMain({
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
       };
-      addOfflineSession(localSession);
-      offlineQueue.enqueue({
+      const offlineQueued = offlineQueue.enqueue({
         type: "create_session",
         clientId,
         session: localSession,
@@ -4835,6 +4848,8 @@ function AppMain({
         files: files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
       });
+      if (!offlineQueued) return false;
+      addOfflineSession(localSession);
       if (initialPrompt) {
         setPendingForSession(id, () => [{
           id: clientId,
@@ -4849,8 +4864,9 @@ function AppMain({
       setNewSessionModalOpen(false);
       setInvestigationCtx(undefined);
       navigate(sessionPath(id));
+      return true;
     },
-    [addOfflineSession, offlineQueue, navigate, setPendingForSession],
+    [addOfflineSession, offlineQueue, navigate, setPendingForSession, t],
   );
 
   const queueInitialPromptForSession = useCallback(
@@ -4862,7 +4878,7 @@ function AppMain({
       files: FilePayload[],
     ) => {
       const clientId = `investigate-${Date.now()}`;
-      offlineQueue.enqueue({
+      const offlineQueued = offlineQueue.enqueue({
         sessionId,
         clientId,
         prompt: initialPrompt,
@@ -4874,6 +4890,7 @@ function AppMain({
         sendMode: "queue",
         capabilityContexts: config.capabilityContexts,
       });
+      if (!offlineQueued) return false;
       setPendingForSession(sessionId, (prev) => [
         ...prev,
         {
@@ -4886,6 +4903,7 @@ function AppMain({
           status: "offline",
         },
       ]);
+      return true;
     },
     [offlineQueue, setPendingForSession],
   );
@@ -4903,6 +4921,30 @@ function AppMain({
         media_type: file.mediaType,
         size: file.size,
       }));
+
+      const finishCreatedSession = (session: Session) => {
+        if (!session?.id) return true;
+        if (initialPrompt) {
+          const pending = {
+            sessionId: session.id,
+            prompt: initialPrompt,
+            images,
+            files,
+            model: config.main.model,
+            cwd: config.cwd,
+            orchestrationMode: config.orchestrationMode,
+            capabilityContexts: config.capabilityContexts,
+          };
+          const promptAccepted = sendInitialPromptToSession(pending)
+            || queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
+          if (!promptAccepted) return false;
+        }
+        setNewSessionModalOpen(false);
+        setInvestigationCtx(undefined);
+        navigateToCreatedSession(session);
+        return true;
+      };
+
       if (!config.fileEditEnabled) {
         try {
           const session = await createSession({
@@ -4919,26 +4961,7 @@ function AppMain({
             capabilityContexts: config.capabilityContexts,
             folderId: config.folderId,
           });
-          setNewSessionModalOpen(false);
-          setInvestigationCtx(undefined);
-          if (session?.id) {
-            navigateToCreatedSession(session);
-            if (initialPrompt) {
-              const pending = {
-                sessionId: session.id,
-                prompt: initialPrompt,
-                images,
-                files,
-                model: config.main.model,
-                cwd: config.cwd,
-                orchestrationMode: config.orchestrationMode,
-                capabilityContexts: config.capabilityContexts,
-              };
-              if (!sendInitialPromptToSession(pending)) {
-                queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
-              }
-            }
-          }
+          finishCreatedSession(session);
         } catch (e) {
           if (isRetryableOfflineError(e)) {
             queueLocalFirstSession(
@@ -4955,12 +4978,13 @@ function AppMain({
         }
         return;
       }
+
       if (!connected) {
         queueLocalFirstSession(config, initialPrompt, images, files);
         return;
       }
-      try {
 
+      try {
         const session = await createSession({
           name: "",
           model: config.main.model,
@@ -4977,26 +5001,7 @@ function AppMain({
           capabilityContexts: config.capabilityContexts,
           folderId: config.folderId,
         });
-        setNewSessionModalOpen(false);
-        setInvestigationCtx(undefined);
-        if (session?.id) {
-          navigateToCreatedSession(session);
-          if (initialPrompt) {
-            const pending = {
-              sessionId: session.id,
-              prompt: initialPrompt,
-              images,
-              files,
-              model: config.main.model,
-              cwd: config.cwd,
-              orchestrationMode: config.orchestrationMode,
-              capabilityContexts: config.capabilityContexts,
-            };
-            if (!sendInitialPromptToSession(pending)) {
-              queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
-            }
-          }
-        }
+        finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
           queueLocalFirstSession(config, initialPrompt, images, files);
@@ -5008,6 +5013,7 @@ function AppMain({
     },
     [connected, createSession, queueInitialPromptForSession, queueLocalFirstSession, navigateToCreatedSession, sendInitialPromptToSession],
   );
+
 
   const handleInvestigate = useCallback((data: InvestigationData) => {
     setInvestigationCtx({ prompt: data.prompt, images: data.images });
@@ -5670,6 +5676,15 @@ function AppMain({
           {t(offlineQueue.queue.length === 1 ? "app.offlineQueued_1" : "app.offlineQueued_other", {
             count: offlineQueue.queue.length,
           })}
+        </div>
+      )}
+      {offlineQueue.persistFailed && (
+        <div className="offline-banner offline-banner--warn" role="alert">
+          <span className="offline-banner-dot" />
+          {t(
+            "app.offlinePersistFailed",
+            "Storage is full — queued actions can't be saved offline and may be lost if you reload. Free up space or get back online soon.",
+          )}
         </div>
       )}
       {restartError && (
