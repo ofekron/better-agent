@@ -318,7 +318,7 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
     for root_id in root_ids:
         if root_id in _session_detail_projection_warm_inflight:
             continue
-        if _session_detail_projection_cache_fresh(root_id):
+        if _session_detail_warm_cache_present(root_id):
             continue
         _session_detail_projection_warm_inflight.add(root_id)
         pending.append(root_id)
@@ -337,15 +337,13 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
             _session_detail_projection_warm_inflight.discard(root_id)
 
 
-def _session_detail_projection_cache_fresh(root_id: str) -> bool:
-    try:
-        cache_key = _session_detail_response_cache_key_sync(
-            root_id,
-            msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
-            exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
-        )
-    except Exception:
-        return False
+def _session_detail_warm_cache_present(root_id: str) -> bool:
+    simple_key = (
+        root_id,
+        _SESSION_DETAIL_WARM_MSG_LIMIT,
+        _SESSION_DETAIL_WARM_EXCHANGE_COUNT,
+    )
+    cache_key = _session_detail_response_cache_latest.get(simple_key)
     return cache_key is not None and _session_detail_cache_has(cache_key)
 
 
