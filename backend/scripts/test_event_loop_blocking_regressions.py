@@ -495,6 +495,34 @@ def test_session_list_skips_impossible_virtual_filters() -> None:
     assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in route_source
 
 
+def test_session_list_preserves_summary_order_when_no_virtual_rows() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _can_preserve_summary_order(")
+    helper_end = source.index("def _session_filters_may_include_virtual(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "appended_virtual_sessions: bool" in helper_source
+    assert "and not appended_virtual_sessions" in helper_source
+    assert "virtual_sessions: list[dict]" not in helper_source
+
+    local_start = source.index("def _build_local_sessions_page_for_list(")
+    local_end = source.index("@app.get(\"/api/sessions\")", local_start)
+    local_source = source[local_start:local_end]
+    assert "appended_virtual_sessions = False" in local_source
+    assert "virtual_sidebar_sessions = [" in local_source
+    assert "if virtual_sidebar_sessions:" in local_source
+    assert "appended_virtual_sessions = True" in local_source
+    assert "appended_virtual_sessions=appended_virtual_sessions" in local_source
+
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "appended_virtual_sessions = False" in route_source
+    assert "virtual_sidebar_sessions = [" in route_source
+    assert "if virtual_sidebar_sessions:" in route_source
+    assert "appended_virtual_sessions = True" in route_source
+    assert "_filter_sessions_for_list_preserving_order" in route_source
+
+
 def test_session_tag_filter_uses_summary_projection() -> None:
     store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert '"tag_filter_ids": _tag_filter_ids(' in store_source

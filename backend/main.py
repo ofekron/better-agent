@@ -3456,14 +3456,14 @@ def _filter_sessions_for_list_preserving_order(
 def _can_preserve_summary_order(
     *,
     search_query: str,
-    virtual_sessions: list[dict],
+    appended_virtual_sessions: bool,
     folder_view: bool,
     sort_by: str,
     status_sort: bool,
 ) -> bool:
     return (
         not search_query
-        and not virtual_sessions
+        and not appended_virtual_sessions
         and not folder_view
         and sort_by == "updated_at"
         and not status_sort
@@ -3511,7 +3511,7 @@ def _build_local_sessions_page_for_list(
     content_scores: dict[str, int] = {}
     state_snapshot = _sidebar_state_snapshot() if status_sort else None
     search_query = (search or "").strip()
-    virtual_sessions: list[dict] = []
+    appended_virtual_sessions = False
     if search_query:
         selected_search_fields = _split_session_search_fields(search_fields)
         content_max_wait_seconds = (
@@ -3540,17 +3540,20 @@ def _build_local_sessions_page_for_list(
         ):
             with perf.timed("sessions.list.virtual"):
                 virtual_sessions = virtual_session_store.list_all()
-            out.extend(
+            virtual_sidebar_sessions = [
                 session
                 for session in virtual_sessions
                 if session.get("id") != session_search.ASK_SINGLETON_ID
-            )
+            ]
+            if virtual_sidebar_sessions:
+                out.extend(virtual_sidebar_sessions)
+                appended_virtual_sessions = True
         else:
             perf.record("sessions.list.virtual.skipped", 1.0)
     with perf.timed("sessions.list.filter_sort"):
         if _can_preserve_summary_order(
             search_query=search_query,
-            virtual_sessions=virtual_sessions,
+            appended_virtual_sessions=appended_virtual_sessions,
             folder_view=folder_view,
             sort_by=sort_by,
             status_sort=status_sort,
@@ -3722,6 +3725,7 @@ async def get_sessions(
         })
 
     content_scores: dict[str, int] = {}
+    appended_virtual_sessions = False
     if search_query:
         with perf.timed("sessions.list.search_scores"):
             content_scores = await _sidebar_search_scores(
@@ -3746,11 +3750,14 @@ async def get_sessions(
         ):
             with perf.timed("sessions.list.virtual"):
                 virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
-            out.extend(
+            virtual_sidebar_sessions = [
                 session
                 for session in virtual_sessions
                 if session.get("id") != session_search.ASK_SINGLETON_ID
-            )
+            ]
+            if virtual_sidebar_sessions:
+                out.extend(virtual_sidebar_sessions)
+                appended_virtual_sessions = True
         else:
             perf.record("sessions.list.virtual.skipped", 1.0)
 
@@ -3803,25 +3810,48 @@ async def get_sessions(
         else None
     )
     with perf.timed("sessions.list.filter_sort"):
-        out = await asyncio.to_thread(
-            _filter_sort_sessions_for_list,
-            out,
-            project_path=project_path,
-            search=search,
-            show_archived=show_archived,
-            file_edit_mode=file_edit_mode,
-            folder_ids=_split_session_filter(folder_ids),
+        if _can_preserve_summary_order(
+            search_query=search_query,
+            appended_virtual_sessions=appended_virtual_sessions,
             folder_view=effective_folder_view,
-            tag_ids=_split_session_filter(tag_ids),
-            provider_ids=_split_session_filter(provider_ids),
-            model_ids=_split_session_filter(model_ids),
-            modes=_split_session_filter(modes),
-            sources=_split_session_filter(sources),
-            content_scores=content_scores,
             sort_by=effective_sort_by,
             status_sort=effective_status_sort,
-            state_snapshot=state_snapshot,
-        )
+        ):
+            out = await asyncio.to_thread(
+                _filter_sessions_for_list_preserving_order,
+                out,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=filters["folder_ids"],
+                tag_ids=filters["tag_ids"],
+                provider_ids=filters["provider_ids"],
+                model_ids=filters["model_ids"],
+                modes=filters["modes"],
+                sources=filters["sources"],
+                content_scores=content_scores,
+            )
+        else:
+            out = await asyncio.to_thread(
+                _filter_sort_sessions_for_list,
+                out,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=filters["folder_ids"],
+                folder_view=effective_folder_view,
+                tag_ids=filters["tag_ids"],
+                provider_ids=filters["provider_ids"],
+                model_ids=filters["model_ids"],
+                modes=filters["modes"],
+                sources=filters["sources"],
+                content_scores=content_scores,
+                sort_by=effective_sort_by,
+                status_sort=effective_status_sort,
+                state_snapshot=state_snapshot,
+            )
     total = len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
