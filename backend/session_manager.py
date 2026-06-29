@@ -2327,14 +2327,8 @@ class SessionManager:
             self._native_event_summaries(rid, node_sid)
             if use_journal_summaries else {}
         )
-        render_max_seq = 0
-        for summary in summaries.values():
-            for event in summary.get("last_events") or []:
-                if not isinstance(event, dict):
-                    continue
-                seq = event.get("seq")
-                if isinstance(seq, int) and seq > render_max_seq:
-                    render_max_seq = seq
+        from event_ingester import event_ingester
+        render_max_seq = event_ingester.render_seq_for_sid(rid, node_sid)
         summaries_ms = (time.perf_counter() - summaries_start) * 1000
         perf.record("session.compute_snapshot.summaries", summaries_ms)
 
