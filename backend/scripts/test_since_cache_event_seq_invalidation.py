@@ -104,6 +104,45 @@ def _append_late_events_via_apply(
     return late_events
 
 
+def _with_reconcile_probe(sid: str, changes: list[dict], new_cursor: int) -> bool:
+    from event_journal import event_journal_reader
+
+    original_fn = session_manager._reconcile_fn
+    original_current_seq = event_journal_reader.current_seq
+    original_cursor = session_manager._reconcile_cursor.get(sid)
+    original_gen = session_manager._reconcile_gen.get(sid)
+    calls = []
+    try:
+        session_manager._reconcile_cursor[sid] = 0
+        session_manager._reconcile_gen[sid] = 7
+
+        def _probe(root_id: str, *, after_seq: int = 0) -> list[dict]:
+            calls.append((root_id, after_seq))
+            return changes
+
+        session_manager._reconcile_fn = _probe
+        event_journal_reader.current_seq = lambda root_id: new_cursor
+        session_manager._sync_reconcile(sid)
+        return (
+            calls == [(sid, 0)]
+            and session_manager._reconcile_cursor.get(sid) == new_cursor
+            and session_manager._reconcile_gen.get(sid) == (
+                8 if changes else 7
+            )
+        )
+    finally:
+        session_manager._reconcile_fn = original_fn
+        event_journal_reader.current_seq = original_current_seq
+        if original_cursor is None:
+            session_manager._reconcile_cursor.pop(sid, None)
+        else:
+            session_manager._reconcile_cursor[sid] = original_cursor
+        if original_gen is None:
+            session_manager._reconcile_gen.pop(sid, None)
+        else:
+            session_manager._reconcile_gen[sid] = original_gen
+
+
 def _run() -> bool:
     results: list[tuple[str, bool, str]] = []
 
@@ -176,6 +215,20 @@ def _run() -> bool:
         "second snapshot includes late event uuids",
         ok,
         f"missing {all_uuids - set(uuids2)}",
+    ))
+
+    ok = _with_reconcile_probe(sid, [], 100)
+    results.append((
+        "no-op reconcile advances cursor without cache-gen bump",
+        ok,
+        "cursor-only reconcile invalidated snapshots",
+    ))
+
+    ok = _with_reconcile_probe(sid, [{"app_session_id": sid}], 101)
+    results.append((
+        "changed reconcile bumps cache generation",
+        ok,
+        "projection changes did not invalidate snapshots",
     ))
 
     # Report

@@ -759,18 +759,16 @@ class SessionManager:
         cursor_ms = (time.perf_counter() - cursor_start) * 1000
         if new_cursor is not None:
             self._reconcile_cursor[root_id] = new_cursor
-        # Bump generation so _since_cache entries built before this
-        # reconcile are invalidated on next read — only when new events
-        # were actually processed (cursor advanced).
-        changed = new_cursor is not None and new_cursor > cursor
+        cursor_advanced = new_cursor is not None and new_cursor > cursor
+        changed = cursor_advanced and bool(changes)
         if changed:
             self._reconcile_gen[root_id] = gen_before + 1
         logger.info(
             "_sync_reconcile %s: cursor=%d->%s gen=%d->%d changes=%d "
-            "bumped=%s reconcile=%.1fms cursor=%.1fms",
+            "advanced=%s bumped=%s reconcile=%.1fms cursor=%.1fms",
             root_id[:8], cursor, new_cursor, gen_before,
-            self._reconcile_gen.get(root_id, 0), len(changes), changed,
-            reconcile_ms, cursor_ms,
+            self._reconcile_gen.get(root_id, 0), len(changes),
+            cursor_advanced, changed, reconcile_ms, cursor_ms,
         )
         return changes
 
@@ -783,17 +781,20 @@ class SessionManager:
         event_journal_reader.read_through(root_id, required_seq)
         cursor = self._reconcile_cursor.get(root_id, 0)
         gen_before = self._reconcile_gen.get(root_id, 0)
-        self._reconcile_fn(root_id, after_seq=cursor)
+        changes = self._reconcile_fn(root_id, after_seq=cursor) or []
         new_cursor = event_journal_reader.current_seq(root_id)
         if new_cursor is not None:
             self._reconcile_cursor[root_id] = new_cursor
-        changed = new_cursor is not None and new_cursor > cursor
+        cursor_advanced = new_cursor is not None and new_cursor > cursor
+        changed = cursor_advanced and bool(changes)
         if changed:
             self._reconcile_gen[root_id] = gen_before + 1
         logger.info(
-            "reconcile_through %s: cursor=%d->%s gen=%d->%d required_seq=%d changed=%s",
+            "reconcile_through %s: cursor=%d->%s gen=%d->%d required_seq=%d "
+            "changes=%d advanced=%s bumped=%s",
             root_id[:8], cursor, new_cursor, gen_before,
-            self._reconcile_gen.get(root_id, 0), required_seq, changed,
+            self._reconcile_gen.get(root_id, 0), required_seq, len(changes),
+            cursor_advanced, changed,
         )
 
     def apply_journal_ownership_resolution(
