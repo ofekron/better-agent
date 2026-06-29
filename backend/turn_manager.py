@@ -1213,7 +1213,15 @@ class TurnManager:
                         assistant_msg=msg,
                         run_id=turn_run_id,
                     )
-                    with session_manager.batch(persist_to):
+                    msg_id = msg.get("id")
+                    with session_manager.message_batch(
+                        persist_to,
+                        msg_id,
+                        hydrate_events=False,
+                    ) as (_node, live_msg):
+                        if live_msg is not msg:
+                            assistant_msg_holder[0] = live_msg
+                            msg = live_msg
                         self._apply_event_to_assistant_msg(
                             app_session_id,
                             event_dict,
