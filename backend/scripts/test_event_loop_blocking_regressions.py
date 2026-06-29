@@ -1507,6 +1507,7 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "_metadata_search_cache" in source
     assert "_metadata_text_cache" in source
     assert "_metadata_trigram_index" in source
+    assert "_METADATA_NGRAM_MAX_SIZE = 3" in source
     assert "_start_metadata_search_index_warm()" in source
     assert "_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()" in source
     assert "_summary_metadata_version" in source
@@ -1532,6 +1533,11 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "title.count(query_lower)" in search_source
     assert "first_prompt.count(query_lower)" in search_source
     assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source
+    candidate_start = source.index("def _metadata_candidate_ids(")
+    candidate_end = source.index("def _metadata_search_scores(", candidate_start)
+    candidate_source = source[candidate_start:candidate_end]
+    assert "grams = _metadata_query_grams(query_lower)" in candidate_source
+    assert "_metadata_trigrams(query_lower)" not in candidate_source
 
 
 def test_search_summary_lookup_uses_maintained_projection() -> None:
