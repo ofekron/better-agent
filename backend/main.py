@@ -2,8 +2,9 @@
 
 import asyncio
 import collections
+import contextvars
 import copy
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
 import json
 import logging
@@ -134,6 +135,28 @@ _SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50
 _SIDEBAR_PAYLOAD_CACHE_MAX = 4096
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
+_HOT_PATH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="hot-path",
+)
+
+
+async def _run_hot_path(name: str, fn, /, *args, **kwargs):
+    queued_at = time.perf_counter()
+    ctx = contextvars.copy_context()
+
+    def _call():
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, *args, **kwargs)
+
+    start = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _HOT_PATH_EXECUTOR,
+            _call,
+        )
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
 
 
 def _latest_assistant_message_id(session: dict) -> Optional[str]:
@@ -4553,8 +4576,11 @@ async def get_sessions(
         return cached_response
     perf.record("sessions.list.response_cache.miss", 1.0)
     if not connected:
-        with perf.timed("sessions.list.local_page_thread"):
-            page, total = await asyncio.to_thread(_build_local_sessions_page_for_list, **filters)
+        page, total = await _run_hot_path(
+            "sessions.list.local_page_thread",
+            _build_local_sessions_page_for_list,
+            **filters,
+        )
         _schedule_session_event_meta_warm(page)
         response_payload = {
             "sessions": page,
@@ -4628,7 +4654,8 @@ async def get_sessions(
     else:
         if can_page_remote_local_order:
             with perf.timed("sessions.list.remote.local_order_candidates"):
-                out, local_total = await asyncio.to_thread(
+                out, local_total = await _run_hot_path(
+                    "sessions.list.remote.local_order_candidates.worker",
                     _local_session_page_for_sidebar_preserving_order,
                     sort_by=effective_sort_by,
                     offset=0,
@@ -4648,7 +4675,10 @@ async def get_sessions(
                 local_page_candidates = out
         else:
             with perf.timed("sessions.list.local"):
-                out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
+                out = await _run_hot_path(
+                    "sessions.list.local.worker",
+                    _local_session_summaries_for_sidebar,
+                )
         if (
             can_page_remote_local_order
             and local_total is not None
@@ -5985,14 +6015,15 @@ async def get_session(
     perf.record("sessions.detail.response_cache.miss", 1.0)
 
     worker_start = time.perf_counter()
-    tree = await asyncio.to_thread(
+    tree = await _run_hot_path(
+        "sessions.detail.worker",
         _session_detail_snapshot_sync,
         session_id,
         msg_limit=msg_limit,
         exchange_count=exchange_count,
         include_cache_key=True,
     )
-    perf.record("sessions.detail.worker", (time.perf_counter() - worker_start) * 1000)
+    perf.record("sessions.detail.worker.total", (time.perf_counter() - worker_start) * 1000)
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     if cache_key is None:
@@ -9112,6 +9143,7 @@ async def on_shutdown():
         _project_match_executor.shutdown(wait=False, cancel_futures=True)
         _project_match_executor = None
         _project_match_ready = False
+    _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
     # before hitting disk — without this drain a clean shutdown would

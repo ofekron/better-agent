@@ -1304,9 +1304,9 @@ def test_session_detail_has_split_perf_timers() -> None:
     helper_start = source.index("def _session_detail_snapshot_sync(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "await asyncio.to_thread(\n        _session_detail_snapshot_sync," in route_source
+    assert "await _run_hot_path(\n        \"sessions.detail.worker\"" in route_source
     assert "session_manager.get_root_tree_stubbed" not in route_source
-    assert 'perf.record("sessions.detail.worker"' in route_source
+    assert 'perf.record("sessions.detail.worker"' not in route_source
     assert "return _json_bytes_response(tree)" in route_source
     json_response_start = source.index("def _json_bytes_response(")
     json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
@@ -1322,6 +1322,25 @@ def test_session_detail_has_split_perf_timers() -> None:
         "sessions.detail.total",
     ):
         assert f'perf.record("{timer}"' in helper_source
+
+
+def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("async def _run_hot_path(")
+    helper_end = source.index("def _latest_assistant_message_id(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "_HOT_PATH_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"hot-path\"" in source
+    assert "run_in_executor(\n            _HOT_PATH_EXECUTOR" in helper_source
+    assert 'perf.record(f"{name}.queue_wait"' in helper_source
+    assert "perf.record(name," in helper_source
+
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "await _run_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
+    assert "await asyncio.to_thread(_build_local_sessions_page_for_list" not in route_source
+    assert "await _run_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
 
 
 def test_sidebar_summary_omits_worker_refs() -> None:
@@ -2027,6 +2046,7 @@ if __name__ == "__main__":
     test_session_list_warms_event_meta_off_path()
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
+    test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
