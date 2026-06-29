@@ -32,6 +32,11 @@ Gemini. When adding or changing a provider-facing feature, implement the
 equivalent behavior for every supported provider in the same turn, or stop and
 ask if true parity is not possible.
 
+Always reason from the user's stated requirement when reading code. Code can be
+wrong, stale, or shaped by an older requirement; if the code looks irrational
+against the requirement, verify the requirement and ask before preserving the
+current behavior.
+
 All provider implementations must be aware of backend and frontend restarts and
 be as tolerant of them as possible. Design provider-facing flows to resume,
 rehydrate, or reconnect cleanly after either side restarts, without assuming a
