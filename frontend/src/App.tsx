@@ -204,6 +204,31 @@ const EMPTY_EVENTS: readonly import("./types").WSEvent[] = Object.freeze([]);
 const EMPTY_INLINE_TAGS: readonly import("./types/inlineTag").InlineTag[] =
   Object.freeze([]);
 const MAX_TAB_CAP = 15;
+const OPEN_SESSION_FRESHNESS_FIELDS = [
+  "updated_at",
+  "last_user_prompt_at",
+  "last_opened_at",
+  "topbar_pinned_at",
+] as const;
+
+function openSessionFreshness(session: Session): number {
+  let newest = -Infinity;
+  for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+    const value = session[field];
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) newest = Math.max(newest, ms);
+  }
+  return newest;
+}
+
+function mergeOpenSessionRecord(current: Session | undefined, incoming: Session): Session {
+  if (!current) return incoming;
+  const currentFreshness = openSessionFreshness(current);
+  const incomingFreshness = openSessionFreshness(incoming);
+  if (incomingFreshness < currentFreshness) return current;
+  return { ...current, ...incoming };
+}
 
 const ProviderConfigSyncPage = lazyWithRetry(() =>
   import("@better-agent/provider-config-sync-ui").then((m) => ({
@@ -1619,6 +1644,14 @@ function AppMain({
         draftDebounceRef.current.has(sessionId),
       );
       applySessionMetadata(sessionId, toApply);
+      setOpenSessionRecords((prev) => {
+        const session = prev[sessionId] || getNode(sessionId);
+        if (!session) return prev;
+        return {
+          ...prev,
+          [sessionId]: mergeOpenSessionRecord(session, { ...session, ...toApply }),
+        };
+      });
       if ("topbar_pinned" in toApply) {
         const nextPinned = Boolean(toApply.topbar_pinned);
         const session = getNode(sessionId);
@@ -3288,6 +3321,30 @@ function AppMain({
   const [missingOpenSessionIds, setMissingOpenSessionIds] = useState<Record<string, true>>({});
 
   useEffect(() => {
+    setOpenSessionRecords((prev) => {
+      let next: Record<string, Session> | null = null;
+      for (const session of sessions) {
+        if (!prev[session.id]) continue;
+        const merged = mergeOpenSessionRecord(prev[session.id], session);
+        if (merged === prev[session.id]) continue;
+        if (!next) next = { ...prev };
+        next[session.id] = merged;
+      }
+      return next ?? prev;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!currentTree?.id) return;
+    setOpenSessionRecords((prev) => {
+      const merged = mergeOpenSessionRecord(prev[currentTree.id], currentTree);
+      return merged === prev[currentTree.id]
+        ? prev
+        : { ...prev, [currentTree.id]: merged };
+    });
+  }, [currentTree]);
+
+  useEffect(() => {
     const confirmed = new Set(sessions.map((s) => s.id));
     if (currentTree?.id) confirmed.add(currentTree.id);
     for (const id of Object.keys(openSessionRecords)) confirmed.add(id);
@@ -3523,7 +3580,12 @@ function AppMain({
         })
         .then((session: Session | null) => {
           if (cancelled || !session?.id) return;
-          setOpenSessionRecords((prev) => ({ ...prev, [session.id]: session }));
+          setOpenSessionRecords((prev) => {
+            const merged = mergeOpenSessionRecord(prev[session.id], session);
+            return merged === prev[session.id]
+              ? prev
+              : { ...prev, [session.id]: merged };
+          });
         })
         .catch(() => {})
         .finally(() => {
@@ -3614,7 +3676,7 @@ function AppMain({
   );
 
   const findOpenSessionRecord = useCallback(
-    (id: string) => sessions.find((s) => s.id === id) || openSessionRecords[id],
+    (id: string) => openSessionRecords[id] || sessions.find((s) => s.id === id),
     [openSessionRecords, sessions],
   );
 
@@ -3705,14 +3767,17 @@ function AppMain({
   ]);
   const visibleOpenSessions = useMemo(
     () => {
-      const pinned = sortedOpenSessions.filter((session) => session.topbar_pinned);
-      const regular = sortedOpenSessions.filter((session) => !session.topbar_pinned);
+      const displaySessions = sortedOpenSessions.filter(
+        (session) => session.id !== currentTree?.id,
+      );
+      const pinned = displaySessions.filter((session) => session.topbar_pinned);
+      const regular = displaySessions.filter((session) => !session.topbar_pinned);
       return [
         ...pinned,
         ...regular.slice(0, Math.max(0, visibleOpenTabCapacity - pinned.length)),
       ];
     },
-    [sortedOpenSessions, visibleOpenTabCapacity],
+    [currentTree?.id, sortedOpenSessions, visibleOpenTabCapacity],
   );
 
   const navigateToCreatedSession = useCallback(

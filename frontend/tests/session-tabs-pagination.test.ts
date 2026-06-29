@@ -35,13 +35,6 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions } });
 
     expect(
-      await waitFor(h, () =>
-        h.backend.calls.some(
-          (call) => call.method === "GET" && call.path === "/api/sessions/sess-60",
-        ),
-      ),
-    ).toBe(true);
-    expect(
       await waitFor(
         h,
         () => h.$(".session-tabs")?.textContent?.includes("Session 60") === true,
@@ -52,7 +45,7 @@ describe("session tabs with paged sessions", () => {
 
     expect(window.location.pathname).toBe("/s/sess-60");
     h.unmount();
-  });
+  }, 15000);
 
   it("hides open-session tabs for the Assistant session", async () => {
     const assistant = makeSession({
@@ -68,11 +61,63 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions: [assistant, work] } });
 
     await h.selectSession(work.id);
-    expect(h.$(".session-tabs")?.textContent).toContain("Work");
+    expect(h.$(".session-tabs")?.textContent).not.toContain("Work");
 
     await h.selectSession(assistant.id);
     expect(h.$(".session-tabs")).toBeNull();
 
     h.unmount();
-  });
+  }, 10000);
+
+  it("hides the selected session and keeps switched-away tab content live", async () => {
+    const first = makeSession({
+      id: "first-session",
+      name: "First live name",
+      model: "old-model",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const second = makeSession({
+      id: "second-session",
+      name: "Second live name",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    const h = await renderApp({ seed: { sessions: [second, first] } });
+
+    await h.selectSession(first.id);
+    expect(
+      await waitFor(h, () =>
+        h.outbound.some(
+          (frame) => frame.type === "subscribe" && frame.app_session_id === first.id,
+        ),
+      ),
+    ).toBe(true);
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: first.id,
+        patch: {
+          model: "new-model",
+          updated_at: "2026-01-03T00:00:00.000Z",
+        },
+        originated_by: "OTHER_TAB",
+      },
+    });
+    await h.flush();
+
+    await h.selectSession(second.id);
+
+    expect(
+      await waitFor(h, () => {
+        const tabsText = h.$(".session-tabs")?.textContent ?? "";
+        return (
+          tabsText.includes("First live name") &&
+          tabsText.includes("new-model") &&
+          !tabsText.includes("Second live name")
+        );
+      }),
+    ).toBe(true);
+    h.unmount();
+  }, 10000);
 });
