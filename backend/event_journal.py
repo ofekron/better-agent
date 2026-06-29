@@ -1180,6 +1180,7 @@ class EventJournalWriter:
 @dataclass
 class _MessageCacheEntry:
     events: list[dict]
+    frontend_events: Optional[list[dict]]
     byte_start: int
     byte_end: int
     seq_end: int
@@ -1288,6 +1289,7 @@ class EventJournalReader:
                 ))
                 cached.byte_end = byte_end
                 cached.seq_end = seq_end
+                cached.frontend_events = None
             elif not grow_only:
                 # Cold, shrunk, start moved earlier, or a new resolution
                 # landed (which can reassign a mid-span row) — full
@@ -1299,6 +1301,7 @@ class EventJournalReader:
                 )
                 cached = _MessageCacheEntry(
                     events=events,
+                    frontend_events=None,
                     byte_start=byte_start,
                     byte_end=byte_end,
                     seq_end=seq_end,
@@ -1309,6 +1312,38 @@ class EventJournalReader:
             while len(self._message_cache) > self._message_cache_size:
                 self._message_cache.popitem(last=False)
             return list(cached.events[:limit])
+
+    def read_message_frontend_events(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        fork_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        delegate_id: Optional[str] = None,
+    ) -> list[dict]:
+        self.read_message_events(
+            session_id,
+            message_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
+        context_id = self._context_id(
+            session_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
+        key = (session_id, context_id, message_id)
+        with self._message_cache_lock:
+            cached = self._message_cache.get(key)
+            if cached is None:
+                return []
+            if cached.frontend_events is None:
+                cached.frontend_events = self._to_frontend_events(cached.events)
+            self._message_cache.move_to_end(key)
+            return list(cached.frontend_events)
 
     def _read_owned_range(
         self,
@@ -1541,14 +1576,13 @@ class EventJournalReader:
             delegate_id=delegate_id,
         )
         if message_id:
-            rows = self.read_message_events(
+            return self.read_message_frontend_events(
                 session_id,
                 message_id,
                 fork_id=fork_id,
                 worker_id=worker_id,
                 delegate_id=delegate_id,
             )
-            return self._to_frontend_events(rows)
         return self.read_ws_events(session_id, sid_filter=context_id)
 
     def read_events(
