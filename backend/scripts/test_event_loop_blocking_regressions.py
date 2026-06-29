@@ -87,6 +87,24 @@ def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     assert "session_manager.get(" not in helper_source
 
 
+def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
+    source = (ROOT / "ui_selection.py").read_text(encoding="utf-8")
+    assert "_PATH = bc_home() / \"ui_selection.json\"" in source
+    path_start = source.index("def _path():")
+    path_end = source.index("def _load()", path_start)
+    assert "bc_home()" not in source[path_start:path_end]
+    selected_start = source.index("def set_selected_project(")
+    selected_end = source.index("def _remembered_sessions_from(", selected_start)
+    selected_source = source[selected_start:selected_end]
+    assert "return _snapshot(data)" in selected_source
+    remembered_start = source.index("def set_remembered_session(")
+    remembered_end = source.index("def _snapshot(", remembered_start)
+    remembered_source = source[remembered_start:remembered_end]
+    assert "return _snapshot(data)" in remembered_source
+    assert "return get_all()" not in selected_source
+    assert "return get_all()" not in remembered_source
+
+
 def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     file_start = source.index("class _FileTailFollower:")
@@ -2646,6 +2664,7 @@ if __name__ == "__main__":
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
     test_event_ingester_file_ref_context_uses_summary_projection()
+    test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()

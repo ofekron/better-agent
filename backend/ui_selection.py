@@ -25,15 +25,16 @@ map, not the machine axis — the machine axis is the backend instance itself.
 import logging
 
 from json_store import read_json, write_json
-from paths import ba_home
+from paths import bc_home
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_NODE_ID = "primary"
+_PATH = bc_home() / "ui_selection.json"
 
 
 def _path():
-    return ba_home() / "ui_selection.json"
+    return _PATH
 
 
 def _load() -> dict:
@@ -56,14 +57,18 @@ def _require_nonempty_str(value, field: str) -> str:
     return value
 
 
-def get_selected_project() -> dict | None:
-    sel = _load().get("selected_project")
+def _selected_project_from(data: dict) -> dict | None:
+    sel = data.get("selected_project")
     if not isinstance(sel, dict):
         return None
     path = sel.get("path")
     if not isinstance(path, str) or not path.strip():
         return None
     return {"path": path, "node_id": _clean_node_id(sel.get("node_id"))}
+
+
+def get_selected_project() -> dict | None:
+    return _selected_project_from(_load())
 
 
 def set_selected_project(path: str, node_id: str = DEFAULT_NODE_ID) -> dict:
@@ -75,11 +80,11 @@ def set_selected_project(path: str, node_id: str = DEFAULT_NODE_ID) -> dict:
     else:
         data["selected_project"] = None
     _save(data)
-    return get_all()
+    return _snapshot(data)
 
 
-def get_remembered_sessions() -> dict:
-    raw = _load().get("remembered_session_by_project")
+def _remembered_sessions_from(data: dict) -> dict:
+    raw = data.get("remembered_session_by_project")
     if not isinstance(raw, dict):
         return {}
     out: dict[str, dict[str, str]] = {}
@@ -94,6 +99,10 @@ def get_remembered_sessions() -> dict:
         if clean:
             out[path] = clean
     return out
+
+
+def get_remembered_sessions() -> dict:
+    return _remembered_sessions_from(_load())
 
 
 def set_remembered_session(path: str, node_id: str, session_id: str) -> dict:
@@ -112,11 +121,15 @@ def set_remembered_session(path: str, node_id: str, session_id: str) -> dict:
     by_project[path] = by_node
     data["remembered_session_by_project"] = by_project
     _save(data)
-    return get_all()
+    return _snapshot(data)
+
+
+def _snapshot(data: dict) -> dict:
+    return {
+        "selected_project": _selected_project_from(data),
+        "remembered_session_by_project": _remembered_sessions_from(data),
+    }
 
 
 def get_all() -> dict:
-    return {
-        "selected_project": get_selected_project(),
-        "remembered_session_by_project": get_remembered_sessions(),
-    }
+    return _snapshot(_load())
