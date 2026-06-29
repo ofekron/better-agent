@@ -1565,6 +1565,8 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
 def test_project_update_total_is_maintained_projection() -> None:
     source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
     assert "_total_unseen_count = 0" in source
+    assert "_counts_version = 0" in source
+    assert "def version_token(" in source
     assert "def warm_counts(" in source
     load_start = source.index("def _ensure_counts_locked(")
     load_end = source.index("def _set_count_locked(", load_start)
@@ -1582,8 +1584,14 @@ def test_project_update_total_is_maintained_projection() -> None:
     mark_end = source.index("def list_all(", mark_start)
     mark_source = source[mark_start:mark_end]
     assert "_total_unseen_count = total" in load_source
+    assert "_read_entries_path_locked(path)" in load_source
+    assert "_read_entries_locked(path.stem)" not in load_source
+    assert "def _project_path(project_id: str, *, create_dir: bool = True)" in source
+    assert "_project_path(project_id, create_dir=False)" in source
+    assert "if count == previous:\n        return" in set_source
     assert "_total_unseen_count += count - previous" in set_source
     assert "_total_unseen_count -= previous" in set_source
+    assert "_counts_version += 1" in set_source
     assert "_set_count_locked(project_id, _unseen_counts.get(project_id, 0) + 1)" in append_source
     assert "_set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)" in mark_source
     assert "return _total_unseen_count" in total_source
