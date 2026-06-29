@@ -155,36 +155,81 @@ def test_script_runner():
     check(res.exit_code == 3 and not res.ok, "exit code 3 propagated, ok=False")
 
 
-def test_assessor():
+class _StubJudge:
+    def __init__(self, result, exc=None):
+        self._result = result
+        self._exc = exc
+        self.calls = []
+
+    async def run_headless(self, *, prompt, cwd=None, timeout=None, no_tools=False):
+        self.calls.append(prompt)
+        if self._exc:
+            raise self._exc
+        return self._result
+
+
+async def test_assessor():
     print("T12 assessment none → skipped")
-    v, _, k = task_assessor.assess(
+    v, _, k = await task_assessor.assess(
         {"cwd": "/tmp", "scripts": {"pre": [], "post": []},
          "assessment": {"kind": "none", "config": {}}}, "s")
     check(v == "skipped" and k == "none", "none assessment → skipped")
 
     print("T13 script assessment exit 0 → pass, non-zero → fail")
-    v, _, _ = task_assessor.assess(
+    v, _, _ = await task_assessor.assess(
         {"cwd": "/tmp", "scripts": {"pre": [], "post": []},
          "assessment": {"kind": "script", "config": {"command": ["true"]}}}, "s")
     check(v == "pass", "exit 0 → pass")
-    v, _, _ = task_assessor.assess(
+    v, _, _ = await task_assessor.assess(
         {"cwd": "/tmp", "scripts": {"pre": [], "post": []},
          "assessment": {"kind": "script", "config": {"command": ["false"]}}}, "s")
     check(v == "fail", "exit 1 → fail")
 
     print("T14 script assessment JSON {pass:false} → fail even with exit 0")
-    v, r, _ = task_assessor.assess(
+    v, r, _ = await task_assessor.assess(
         {"cwd": "/tmp", "scripts": {"pre": [], "post": []},
          "assessment": {"kind": "script",
            "config": {"command": ["python3", "-c", "print('{\"pass\": false, \"reason\": \"nope\"}')"]}}}, "s")
     check(v == "fail" and "nope" in r, "JSON verdict overrides exit code, reason carried")
 
-    print("T15 llm_judge assessment → error (no one-shot LLM primitive yet)")
-    v, r, k = task_assessor.assess(
-        {"cwd": "/tmp", "scripts": {"pre": [], "post": []},
-         "assessment": {"kind": "llm_judge", "config": {"criteria": "be good"}}}, "s")
-    check(v == "error" and k == "llm_judge", "llm_judge → error verdict")
-    check("not yet wired" in r, "llm_judge reason explains the missing primitive")
+    print("T15 llm_judge: pass verdict parsed from model reply")
+    judge = _StubJudge({"result": '{"pass": true, "reason": "all criteria met"}', "is_error": False})
+    orig_judge = task_assessor._resolve_judge_provider
+    orig_text = task_assessor._extract_run_text
+    task_assessor._resolve_judge_provider = lambda cfg: judge
+    task_assessor._extract_run_text = lambda sid: "the agent did the thing"
+    try:
+        v, r, k = await task_assessor.assess(
+            {"cwd": "/tmp", "goal": "do thing", "scripts": {"pre": [], "post": []},
+             "assessment": {"kind": "llm_judge", "config": {"criteria": "thing done"}}}, "s")
+        check(v == "pass" and k == "llm_judge" and "criteria met" in r, "llm_judge → pass with reason")
+        check(len(judge.calls) == 1 and "GOAL" in judge.calls[0], "judge prompt built from goal+criteria+output")
+
+        print("T16 llm_judge: fail verdict")
+        judge2 = _StubJudge({"result": '{"pass": false, "reason": "missing X"}', "is_error": False})
+        task_assessor._resolve_judge_provider = lambda cfg: judge2
+        v, r, _ = await task_assessor.assess(
+            {"cwd": "/tmp", "goal": "g", "scripts": {"pre": [], "post": []},
+             "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
+        check(v == "fail" and "missing X" in r, "llm_judge → fail with reason")
+
+        print("T17 llm_judge: unparseable reply → error (fail closed)")
+        judge3 = _StubJudge({"result": "I think it mostly worked", "is_error": False})
+        task_assessor._resolve_judge_provider = lambda cfg: judge3
+        v, r, _ = await task_assessor.assess(
+            {"cwd": "/tmp", "goal": "g", "scripts": {"pre": [], "post": []},
+             "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
+        check(v == "error" and "unparseable" in r, "llm_judge unparseable → error (never silently pass)")
+
+        print("T18 llm_judge: no run output captured → error")
+        task_assessor._extract_run_text = lambda sid: ""
+        v, r, _ = await task_assessor.assess(
+            {"cwd": "/tmp", "goal": "g", "scripts": {"pre": [], "post": []},
+             "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
+        check(v == "error" and "no assistant output" in r, "llm_judge with empty output → error")
+    finally:
+        task_assessor._resolve_judge_provider = orig_judge
+        task_assessor._extract_run_text = orig_text
 
 
 class _StubCoord:
@@ -196,7 +241,7 @@ class _StubCoord:
 
 
 def test_scheduler_trigger_dispatch(monkeypatch_launch):
-    print("T16 detector exit 0 launches task; non-zero skips; both advance")
+    print("T19 detector exit 0 launches task; non-zero skips; both advance")
     task = {
         "id": "task-det", "cwd": "/tmp/p", "node_id": "primary",
         "trigger": {"kind": "script",
@@ -219,7 +264,7 @@ def test_scheduler_trigger_dispatch(monkeypatch_launch):
     # After firing, the poll window advanced → no longer due immediately.
     check(len(task_trigger_store.due(datetime.now())) == 0, "poll window advanced after fire")
 
-    print("T17 non-firing detector does not launch but advances (backoff)")
+    print("T20 non-firing detector does not launch but advances (backoff)")
     monkeypatch_launch["calls"] = []
     task2 = {
         "id": "task-det2", "cwd": "/tmp/p", "node_id": "primary",
@@ -244,7 +289,7 @@ def main() -> int:
     test_store_model()
     test_trigger_store()
     test_script_runner()
-    test_assessor()
+    asyncio.run(test_assessor())
 
     launch_state = {"calls": []}
 
