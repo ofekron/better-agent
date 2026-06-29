@@ -35,6 +35,24 @@ def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
     assert "cursor = event_journal_reader.cursor(" not in source
 
 
+def test_hot_path_warning_logs_are_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "def _warning_off_loop(" in source
+
+    monitor_start = source.index("async def _event_loop_lag_monitor()")
+    monitor_end = source.index("asyncio.create_task(", monitor_start)
+    monitor_source = source[monitor_start:monitor_end]
+    assert '_warning_off_loop("event loop lag %.3fs", lag)' in monitor_source
+    assert 'logger.warning("event loop lag %.3fs", lag)' not in monitor_source
+
+    ws_start = source.index("async def ws_callback(event_dict):")
+    ws_end = source.index("# Per-connection token", ws_start)
+    ws_source = source[ws_start:ws_end]
+    assert "_warning_off_loop(" in ws_source
+    assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in ws_source
+
+
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source

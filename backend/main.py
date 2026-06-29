@@ -1027,6 +1027,7 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-write")
 _project_match_executor: ProcessPoolExecutor | None = None
 _project_match_ready = False
 _project_match_warm_task: asyncio.Task | None = None
@@ -1042,6 +1043,11 @@ if not frontend_logger.handlers:
     _frontend_handler = logging.FileHandler(_log_dir / "frontend.log", encoding="utf-8")
     _frontend_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s %(message)s"))
     frontend_logger.addHandler(_frontend_handler)
+
+
+def _warning_off_loop(message: str, *args: Any) -> None:
+    _LOG_WRITE_EXECUTOR.submit(logger.warning, message, *args)
+
 
 def create_api_app() -> FastAPI:
     """Create the FastAPI API app before frontend static files are mounted.
@@ -9059,7 +9065,7 @@ async def on_startup():
             now = time.monotonic()
             lag = now - expected
             if lag > warn_after:
-                logger.warning("event loop lag %.3fs", lag)
+                _warning_off_loop("event loop lag %.3fs", lag)
             # Heartbeat for the lag watchdog thread: proves the loop is
             # alive. A sync blocker starves this coroutine, the heartbeat
             # goes stale, and the watchdog dumps the blocker mid-flight.
@@ -13473,7 +13479,7 @@ async def websocket_chat(websocket: WebSocket):
         elapsed_ms = (time.perf_counter() - send_t) * 1000.0
         perf.record("ws.send_json", elapsed_ms)
         if elapsed_ms > 250.0:
-            logger.warning(
+            _warning_off_loop(
                 "slow WebSocket send type=%s elapsed_ms=%.1f",
                 event_dict.get("type") if isinstance(event_dict, dict) else None,
                 elapsed_ms,
