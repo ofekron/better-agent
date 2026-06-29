@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import tempfile
 import sys
 from unittest import mock
@@ -382,6 +384,41 @@ def test_jsonl_line_count_uses_fingerprint_cache() -> None:
     assert first == 2
     assert second == 2
     assert third == 3
+    assert open_calls == 1
+
+
+def test_jsonl_line_count_singleflights_concurrent_cold_reads() -> None:
+    import orchs.jsonl_helpers as helpers
+
+    original_open = Path.open
+    open_calls = 0
+    entered = threading.Event()
+    release = threading.Event()
+
+    def counting_open(self, *args, **kwargs):
+        nonlocal open_calls
+        open_calls += 1
+        entered.set()
+        release.wait(timeout=5)
+        return original_open(self, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "session.jsonl"
+        path.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
+        helpers._JSONL_LINE_COUNT_CACHE.clear()  # type: ignore[attr-defined]
+        helpers._JSONL_LINE_COUNT_INFLIGHT.clear()  # type: ignore[attr-defined]
+
+        def run() -> int:
+            return helpers.count_jsonl_lines(path)
+
+        with mock.patch.object(Path, "open", counting_open):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(run) for _ in range(8)]
+                assert entered.wait(timeout=5)
+                release.set()
+                results = [future.result(timeout=5) for future in futures]
+
+    assert results == [2] * 8
     assert open_calls == 1
 
 
