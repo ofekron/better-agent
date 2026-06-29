@@ -70,4 +70,16 @@ describe("applyQueuedEdit — preserves the envelope when editing a tagged queue
     ]);
     expect(splitPreview(next).userText).toBe("fix the bug");
   });
+
+  it("parses comment-only inline tags and preserves the remaining user text", () => {
+    const preview = "<inline-tags><comment>Verify card rendering on desktop</comment><comment>Confirm comment cards stay visible and summarized</comment></inline-tags> Remaining user text after the comment tags.";
+
+    const parsed = splitPreview(preview);
+
+    expect(parsed.comments.map((comment) => comment.comment)).toEqual([
+      "Verify card rendering on desktop",
+      "Confirm comment cards stay visible and summarized",
+    ]);
+    expect(parsed.userText).toBe("Remaining user text after the comment tags.");
+  });
 });
