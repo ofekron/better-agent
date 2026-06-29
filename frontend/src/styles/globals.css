@@ -2458,6 +2458,33 @@ body {
   transition: opacity 0.1s ease, background 0.1s ease;
 }
 
+.session-tab-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-inline-end: 2px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.45;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+
+.session-tab-pin:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.session-tab-pin.pinned {
+  color: var(--accent);
+  opacity: 1;
+}
+
 .session-tab-close:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -2480,6 +2507,10 @@ body {
     width: 20px;
     height: 20px;
     font-size: calc(14px * var(--app-font-scale));
+  }
+  .session-tab-pin {
+    width: 20px;
+    height: 20px;
   }
 }
 

@@ -4,6 +4,7 @@ import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
+import Icon from "./Icon";
 
 interface Props {
   sessions: Session[];
@@ -13,6 +14,7 @@ interface Props {
   sortField: string;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  onToggleTopbarPin: (id: string, pinned: boolean) => void;
   onMeasuredCapacityChange?: (capacity: number) => void;
 }
 
@@ -23,6 +25,7 @@ export function SessionTabs({
   sortField,
   onSelect,
   onClose,
+  onToggleTopbarPin,
   onMeasuredCapacityChange,
 }: Props) {
   const { t } = useTranslation();
@@ -102,12 +105,13 @@ export function SessionTabs({
           ?? s.provider_id
           ?? "";
         const providerModel = [providerName, s.model].filter(Boolean).join(" / ");
+        const topbarPinned = Boolean(s.topbar_pinned);
         
         return (
           <div
             key={s.id}
             data-tab-movement-key={s.id}
-            className={`session-tab-wrapper${isActive ? " active" : ""}`}
+            className={`session-tab-wrapper${isActive ? " active" : ""}${topbarPinned ? " topbar-pinned" : ""}`}
           >
             <button
               ref={isActive ? activeRef : undefined}
@@ -138,15 +142,29 @@ export function SessionTabs({
             </button>
             <button
               type="button"
-              className="session-tab-close"
+              className={`session-tab-pin${topbarPinned ? " pinned" : ""}`}
               onClick={(e) => {
                 e.stopPropagation();
-                onClose(s.id);
+                onToggleTopbarPin(s.id, !topbarPinned);
               }}
-              title="Close tab"
+              title={topbarPinned ? t("session.unpinTopbarTitle") : t("session.pinTopbarTitle")}
+              aria-label={topbarPinned ? t("session.unpinTopbarTitle") : t("session.pinTopbarTitle")}
             >
-              ×
+              <Icon name="pin" size={13} />
             </button>
+            {!topbarPinned && (
+              <button
+                type="button"
+                className="session-tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose(s.id);
+                }}
+                title="Close tab"
+              >
+                ×
+              </button>
+            )}
           </div>
         );
       })}

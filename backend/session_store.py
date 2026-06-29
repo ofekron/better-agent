@@ -379,6 +379,8 @@ def _build_summary_for_root(
         "requirement_tags": requirement_tags,
         "markers": markers,
         "pinned": bool(root.get("pinned", False)),
+        "topbar_pinned": bool(root.get("topbar_pinned", False)),
+        "topbar_pinned_at": root.get("topbar_pinned_at"),
         "archived": bool(root.get("archived", False)),
         "worker_eligible": bool(root.get("worker_eligible", False)),
     }
@@ -2853,6 +2855,8 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("browser_harness_headless", True)
     session.setdefault("bare_config", False)
     session.setdefault("pinned", False)
+    session.setdefault("topbar_pinned", False)
+    session.setdefault("topbar_pinned_at", None)
     session.setdefault("archived", False)
     # node_id: which machine in topology.yaml hosts this session's
     # workers by default. Defaults to "primary" so single-machine
@@ -3112,6 +3116,8 @@ def create_session(
         "bare_config": bool(bare_config),
         "worker_eligible": False,
         "pinned": True,
+        "topbar_pinned": False,
+        "topbar_pinned_at": None,
         "archived": False,
         "supervisor_enabled": False,
         "supervisor_custom_prompt": "",
@@ -3817,6 +3823,8 @@ def create_sub_session(
         "continuation_chain": [],
         "worker_eligible": False,
         "pinned": False,
+        "topbar_pinned": False,
+        "topbar_pinned_at": None,
         "archived": False,
         "supervisor_enabled": False,
         "supervisor_custom_prompt": "",

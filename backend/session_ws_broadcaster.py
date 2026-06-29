@@ -46,6 +46,7 @@ _METADATA_KINDS = {
     "pending_supervisor_verdict_set",
     "pending_supervisor_verdict_cleared",
     "pinned_set",
+    "topbar_pinned_set",
     "archived_set",
     "worker_eligible_set",
     "worker_creation_policy_set",
@@ -439,6 +440,11 @@ class SessionWSBroadcaster:
             }
         elif kind == "pinned_set":
             patch = {"pinned": bool(change.get("value"))}
+        elif kind == "topbar_pinned_set":
+            patch = {
+                "topbar_pinned": bool(change.get("value")),
+                "topbar_pinned_at": change.get("topbar_pinned_at"),
+            }
         elif kind == "archived_set":
             patch = {"archived": bool(change.get("value"))}
         elif kind == "worker_eligible_set":

@@ -1676,7 +1676,8 @@ def test_sessions_route_uses_cached_remote_node_sessions() -> None:
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
     assert "_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0" in source
-    assert "def _remote_sessions_cache_get(node_id: str)" in source
+    assert "def _remote_sessions_cache_get(\n    node_id: str," in source
+    assert "limit: int | None = None" in source
     assert "def _schedule_remote_sessions_refresh(node_id: str)" in source
     assert "async def _fetch_remote_sessions_live(node_id: str)" in source
     assert "sessions.list.remote_cache.hit" in helper_source
@@ -1705,7 +1706,8 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert "_schedule_remote_sessions_refresh(node_id)" in remote_helper_source
     assert "asyncio.to_thread(\n            virtual_session_store.list_recent," in virtual_helper_source
     assert "sessions.list.virtual.cached_first_page" in route_source
-    assert "_remote_sessions_for_sidebar_cached(nid)" in route_source
+    assert "_remote_sessions_for_sidebar_cached(\n                        nid," in route_source
+    assert "limit=max(offset + limit, 1)" in route_source
     assert "deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions" in route_source
     assert "projected_first_page_sessions" in route_source
     assert "sessions.list.projected_first_page_merge" in route_source

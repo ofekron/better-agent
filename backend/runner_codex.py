@@ -40,11 +40,15 @@ from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    normalize_ask_mode,
+)
 import extension_store
 from runs_dir import atomic_write_json
 from env_compat import get_env
 from orchestration_tool_descriptions import (
-    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -238,6 +242,9 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         "target_worker_id": {"type": "string"},
         "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
     },
     "required": ["message"],
     "additionalProperties": False,
@@ -286,9 +293,19 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
+        "mode": {
+            "type": "string",
+            "enum": [
+                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+            ],
+        },
         "worker_description": {"type": "string"},
         "worker_registry_cwd": {"type": "string"},
         "ephemeral": {"type": "boolean"},
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "reasoning_effort": {"type": "string"},
     },
     "required": ["message"],
     "additionalProperties": False,
@@ -297,7 +314,6 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -614,6 +630,9 @@ def _build_mssg_tool_handler(
                     "target_worker_id": target_worker_id,
                     "target_worker_pool": target_worker_pool,
                     "message": message,
+                    "provider_id": str(args.get("provider_id") or "").strip() or None,
+                    "model": str(args.get("model") or "").strip(),
+                    "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -657,6 +676,9 @@ def _build_async_tool_handler(
                     "target_worker_id": target_worker_id,
                     "target_worker_pool": target_worker_pool,
                     "message": message,
+                    "provider_id": str(args.get("provider_id") or "").strip() or None,
+                    "model": str(args.get("model") or "").strip(),
+                    "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -854,7 +876,9 @@ def _build_ask_tool_handler(
                 "instructions": message,
                 "worker_session_id": target_session_id,
                 "worker_description": worker_description,
-                "model": model,
+                "provider_id": str(args.get("provider_id") or "").strip() or None,
+                "model": str(args.get("model") or "").strip() or model,
+                "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
@@ -871,6 +895,9 @@ def _build_ask_tool_handler(
                 "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": ask_id,
+                "provider_id": str(args.get("provider_id") or "").strip() or None,
+                "model": str(args.get("model") or "").strip(),
+                "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             }
             url_path = "/api/internal/ask"
 

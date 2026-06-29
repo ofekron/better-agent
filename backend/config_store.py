@@ -588,6 +588,10 @@ INTERNAL_LLM_TASKS = (
     "session_search_worker",
     "project_structure_edit",
     "assistant",
+    "delegation_task",
+    "delegation_message",
+    "delegation_ask",
+    "delegation_session_bridge",
 )
 _INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort")
 

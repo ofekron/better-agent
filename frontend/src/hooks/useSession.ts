@@ -59,6 +59,8 @@ export type SessionMetadataPatch = {
   supervisor_enabled?: boolean;
   supervisor_custom_prompt?: string;
   pinned?: boolean;
+  topbar_pinned?: boolean;
+  topbar_pinned_at?: string | null;
   archived?: boolean;
   worker_eligible?: boolean;
   working_mode?: Session["working_mode"];
@@ -1800,9 +1802,8 @@ export function useSession(authStatus?: string) {
           prev.map((s) => (s.id === sessionId ? { ...s, pinned: nextPinned } : s)),
         )
       );
-      void fetchSessions();
     },
-    [fetchSessions]
+    [sortForList]
   );
 
   const unpinOtherSessions = useCallback(
@@ -1825,9 +1826,8 @@ export function useSession(authStatus?: string) {
           prev.map((s) => (unpinnedIds.has(s.id) ? { ...s, pinned: false } : s)),
         )
       );
-      void fetchSessions();
     },
-    [fetchSessions]
+    [sortForList]
   );
 
   const archiveSession = useCallback(
@@ -1965,6 +1965,8 @@ export function useSession(authStatus?: string) {
         if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
         if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
         if (patch.pinned !== undefined) next.pinned = patch.pinned;
+        if (patch.topbar_pinned !== undefined) next.topbar_pinned = patch.topbar_pinned;
+        if (patch.topbar_pinned_at !== undefined) next.topbar_pinned_at = patch.topbar_pinned_at;
         if (patch.archived !== undefined) next.archived = patch.archived;
         if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
         if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;

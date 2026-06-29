@@ -69,6 +69,16 @@ def run() -> None:
         "assistant" in config_store.INTERNAL_LLM_TASKS,
         "assistant is a registered internal-LLM task",
     )
+    for task in (
+        "delegation_task",
+        "delegation_message",
+        "delegation_ask",
+        "delegation_session_bridge",
+    ):
+        check(
+            task in config_store.INTERNAL_LLM_TASKS,
+            f"{task} is a registered internal-LLM task",
+        )
     assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
         bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),

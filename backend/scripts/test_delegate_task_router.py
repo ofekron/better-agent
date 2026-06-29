@@ -66,6 +66,35 @@ def test_target_bypass_dispatches_directly_no_create():
     assert submit_calls[0]["params"]["app_session_id"] == target["id"]
 
 
+def test_target_bypass_uses_delegation_task_model_preference():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, submit_calls = _make_coord(
+        model="caller-model",
+        provider_id=provider_id,
+    )
+    config_store.set_delegate_task_policy("auto")
+    original = config_store.get_internal_llm_assignments()
+    config_store.set_internal_llm_assignments({
+        **original,
+        "delegation_task": {"provider_id": provider_id, "model": "task-model"},
+    })
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="tangent",
+            target_session_id=target["id"],
+            cwd="/repo",
+        ))
+    finally:
+        config_store.set_internal_llm_assignments(original)
+
+    assert res["success"] is True
+    assert submit_calls[0]["params"]["provider_id"] == provider_id
+    assert submit_calls[0]["params"]["model"] == "task-model"
+    assert submit_calls[0]["params"]["allow_model_override"] is True
+
+
 def test_target_bypass_fork_mode_dispatches_to_internal_fork():
     coord, sender, join_calls, submit_calls = _make_coord()
     config_store.set_delegate_task_policy("auto")

@@ -429,7 +429,6 @@ interface Props {
   sessionTabsSort?: string;
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
-  onToggleTopbarPin?: (id: string, pinned: boolean) => void;
   onSelectTab?: (id: string) => void;
   onTabCapacityChange?: (capacity: number) => void;
   /** Optional node rendered at the TOP of the message scroll area,
@@ -535,7 +534,6 @@ export function Chat({
   sessionTabsSort = "last_opened_at",
   providers = [],
   onCloseTab,
-  onToggleTopbarPin,
   onSelectTab,
   onTabCapacityChange,
   headerNode,
@@ -1150,7 +1148,6 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
-          onToggleTopbarPin={onToggleTopbarPin ?? (() => {})}
           onMeasuredCapacityChange={onTabCapacityChange}
         />
       )}
