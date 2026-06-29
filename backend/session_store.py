@@ -195,12 +195,25 @@ _summary_projection_repair_running = False
 _summary_build_lock = threading.Lock()
 
 
-def wait_for_summary_index(timeout_seconds: float) -> bool:
+def wait_for_summary_index(
+    timeout_seconds: float,
+    *,
+    min_published: int | None = None,
+) -> bool:
     if _summary_index_loaded:
         return True
     _ensure_summary_index(blocking=False)
     if _summary_index_loaded:
         return True
+    if min_published is not None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        target = max(1, int(min_published))
+        while time.monotonic() < deadline:
+            with _summary_index_lock:
+                if len(_summary_index) >= target:
+                    return False
+            time.sleep(0.005)
+        return False
     acquired = _summary_build_lock.acquire(timeout=max(0.0, timeout_seconds))
     if not acquired:
         return False

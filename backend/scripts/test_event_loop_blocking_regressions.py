@@ -792,7 +792,7 @@ def test_session_list_waits_briefly_for_summary_warm() -> None:
     local_source = main_source[local_start:local_end]
     assert "sessions.list.local.summary_warm_wait" in local_source
     assert (
-        "session_store.wait_for_summary_index(_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS)"
+        "min_published=_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED"
         in local_source
     )
 
@@ -801,6 +801,8 @@ def test_session_list_waits_briefly_for_summary_warm() -> None:
     wait_end = store_source.index("def _replace_summary_projection_field(", wait_start)
     wait_source = store_source[wait_start:wait_end]
     assert "_ensure_summary_index(blocking=False)" in wait_source
+    assert "min_published: int | None = None" in wait_source
+    assert "len(_summary_index) >= target" in wait_source
     assert "_summary_build_lock.acquire(timeout=max(0.0, timeout_seconds))" in wait_source
     assert "_do_build_summary_index_unsafe()" not in wait_source
 
