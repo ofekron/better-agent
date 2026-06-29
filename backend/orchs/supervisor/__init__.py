@@ -89,7 +89,10 @@ async def replay_pending_verdict(
     ``maybe_run_verdict_loop`` so the pending feedback reaches the
     primary before the supervisor evaluates the new turn.
     """
-    session = session_manager.get(app_session_id)
+    session = session_manager.get_fields(
+        app_session_id,
+        ("pending_supervisor_verdict", "supervisor_enabled"),
+    )
     pending = (session or {}).get("pending_supervisor_verdict") if session else None
     if not pending:
         return
