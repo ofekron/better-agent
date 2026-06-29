@@ -312,6 +312,17 @@ def test_team_message_context_uses_lite_session_read() -> None:
     assert "session_manager.get(target_session_id)" not in context_source
 
 
+def test_team_message_validation_uses_lite_session_read() -> None:
+    source = (ROOT / "team_messaging.py").read_text(encoding="utf-8")
+    start = source.index("def validate_message_route(")
+    end = source.index("def build_message_metadata(", start)
+    validation_source = source[start:end]
+    assert "session_manager.get_lite(sender_session_id)" in validation_source
+    assert "session_manager.get_lite(target_session_id)" in validation_source
+    assert "session_manager.exists(" not in validation_source
+    assert "session_manager.get(" not in validation_source
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -1908,6 +1919,7 @@ if __name__ == "__main__":
     test_delegation_status_writes_run_off_loop()
     test_team_ask_status_writes_run_off_loop()
     test_team_message_context_uses_lite_session_read()
+    test_team_message_validation_uses_lite_session_read()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
