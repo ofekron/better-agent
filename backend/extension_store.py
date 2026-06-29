@@ -4659,6 +4659,10 @@ def _ext_settings_path() -> Path:
     return ba_home() / "extensions" / "extension-settings.json"
 
 
+def extension_settings_fingerprint() -> tuple[int, int]:
+    return _file_fingerprint(_ext_settings_path())
+
+
 def _blank_ext_settings() -> dict[str, Any]:
     return {"schema_version": _EXT_SETTINGS_SCHEMA_VERSION, "extensions": {}}
 
