@@ -120,7 +120,10 @@ def test_sessions_filter_sort_stays_off_loop() -> None:
     assert "await asyncio.to_thread(\n            _filter_sort_sessions_for_list" in route_source
     assert "_filter_sort_sessions_for_list(" in helper_source
     assert "_local_session_summaries_for_sidebar()" in helper_source
-    assert "_decorate_local_sidebar_sessions(out[offset:end])" in helper_source
+    assert "_decorate_local_sidebar_sessions(out[offset:end], state_snapshot)" in helper_source
+    assert "await asyncio.to_thread(_sidebar_state_snapshot)" in route_source
+    assert "state_snapshot=state_snapshot" in route_source
+    assert "_decorate_local_sidebar_sessions,\n            out[offset:end],\n            state_snapshot" in route_source
     assert "out.sort(" not in route_source
 
 
