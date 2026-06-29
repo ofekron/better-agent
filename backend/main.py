@@ -13851,23 +13851,20 @@ async def websocket_chat(websocket: WebSocket):
         event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
         send_t = time.perf_counter()
         try:
-            if event_type == "messages_replay":
-                serialize_t = time.perf_counter()
-                text = await asyncio.to_thread(
-                    json.dumps,
-                    event_dict,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
-                perf.record(
-                    "ws.send_json.serialize_off_loop",
-                    (time.perf_counter() - serialize_t) * 1000.0,
-                )
-                wire_t = time.perf_counter()
-                await websocket.send_text(text)
-                perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
-            else:
-                await websocket.send_json(event_dict)
+            serialize_t = time.perf_counter()
+            text = await asyncio.to_thread(
+                json.dumps,
+                event_dict,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            perf.record(
+                "ws.send_json.serialize_off_loop",
+                (time.perf_counter() - serialize_t) * 1000.0,
+            )
+            wire_t = time.perf_counter()
+            await websocket.send_text(text)
+            perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
         except Exception as exc:
             logger.debug(
                 "WebSocket send failed type=%s error=%s",

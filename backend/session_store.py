@@ -4740,7 +4740,11 @@ def _metadata_candidate_ids(query_lower: str, metadata_fields: tuple[str, ...]) 
     grams = _metadata_query_grams(query_lower)
     if not grams:
         return None
-    _version, index = _metadata_search_index_for_current_version()
+    with _summary_index_lock:
+        if _metadata_trigram_index_version != _summary_metadata_version:
+            _start_metadata_search_index_warm()
+            return None
+        index = _metadata_trigram_index
     candidates: set[str] | None = None
     for field in metadata_fields:
         field_index = index.get(field) or {}

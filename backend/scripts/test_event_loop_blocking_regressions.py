@@ -65,15 +65,16 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     assert "frontend_logger.log(log_level, line)" not in frontend_source
 
 
-def test_messages_replay_json_serializes_off_loop() -> None:
+def test_websocket_json_serializes_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     ws_start = source.index("async def ws_callback(event_dict):")
     ws_end = source.index("# Per-connection token", ws_start)
     ws_source = source[ws_start:ws_end]
-    assert 'if event_type == "messages_replay":' in ws_source
-    assert "text = await asyncio.to_thread(\n                    json.dumps" in ws_source
+    assert "text = await asyncio.to_thread(" in ws_source
+    assert "json.dumps," in ws_source
     assert "await websocket.send_text(text)" in ws_source
     assert "ws.send_json.serialize_off_loop" in ws_source
+    assert "await websocket.send_json(event_dict)" not in ws_source
 
 
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
@@ -1670,6 +1671,9 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     candidate_end = source.index("def _metadata_search_scores(", candidate_start)
     candidate_source = source[candidate_start:candidate_end]
     assert "grams = _metadata_query_grams(query_lower)" in candidate_source
+    assert "_start_metadata_search_index_warm()" in candidate_source
+    assert "return None" in candidate_source
+    assert "_metadata_search_index_for_current_version()" not in candidate_source
     assert "_metadata_trigrams(query_lower)" not in candidate_source
 
 
@@ -3069,6 +3073,8 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
 
 if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
+    test_hot_path_warning_logs_are_off_loop()
+    test_websocket_json_serializes_off_loop()
     test_ownership_projection_uses_dedicated_executor()
     test_wire_tailer_gap_fill_reads_journal_off_loop()
     test_jsonl_dispatch_reads_session_lite_off_loop()

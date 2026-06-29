@@ -632,7 +632,7 @@ def test_search_index_cache_invalidates_on_write() -> bool:
     return ok
 
 
-def test_metadata_search_uses_trigram_candidates() -> bool:
+def test_metadata_search_warms_trigram_candidates_off_path() -> bool:
     _reset_home()
     _write(_record_with(
         "match-title",
@@ -675,14 +675,20 @@ def test_metadata_search_uses_trigram_candidates() -> bool:
         second = session_store.grep_session_scores("unique needle")
     finally:
         session_store._metadata_search_rows = original_rows
+    deadline = time.monotonic() + 1.0
+    while (
+        session_store._metadata_trigram_index_version != session_store.search_metadata_version()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
 
     ok = (
         set(first) == {"match-title", "match-first-prompt"}
         and second == first
-        and row_calls == 2
+        and row_calls >= 1
         and session_store._metadata_trigram_index_version == session_store.search_metadata_version()
     )
-    print(f"{PASS if ok else FAIL} metadata search uses trigram candidates")
+    print(f"{PASS if ok else FAIL} metadata search warms trigram candidates off path")
     return ok
 
 
@@ -1014,7 +1020,7 @@ def main_run() -> int:
         ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
-        ok = test_metadata_search_uses_trigram_candidates() and ok
+        ok = test_metadata_search_warms_trigram_candidates_off_path() and ok
         ok = test_metadata_trigram_search_preserves_substring_behavior() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
