@@ -303,6 +303,15 @@ def test_team_ask_status_writes_run_off_loop() -> None:
     assert "ask_status_store.write_status(" not in ask_source
 
 
+def test_team_message_context_uses_lite_session_read() -> None:
+    source = (ROOT / "team_messaging.py").read_text(encoding="utf-8")
+    start = source.index("def _target_team_context(")
+    end = source.index("def format_team_message_prompt(", start)
+    context_source = source[start:end]
+    assert "session_manager.get_lite(target_session_id)" in context_source
+    assert "session_manager.get(target_session_id)" not in context_source
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -1876,6 +1885,7 @@ if __name__ == "__main__":
     test_connected_session_list_skips_full_sort_without_remote_merge()
     test_delegation_status_writes_run_off_loop()
     test_team_ask_status_writes_run_off_loop()
+    test_team_message_context_uses_lite_session_read()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
