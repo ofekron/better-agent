@@ -35,6 +35,7 @@ from runs_dir import (
     atomic_write_json as _atomic_write_json,
     iter_run_dirs,
     pid_alive as _pid_alive,
+    prune_old_completed_runs,
     reap_run_dir as _reap_run_dir,
     runs_root as _runs_root,
 )
@@ -849,24 +850,7 @@ class GeminiProvider(Provider):
     # prune_old_runs
     # ------------------------------------------------------------------
     def prune_old_runs(self, max_age_days: int = 7) -> int:
-        if not _runs_root().exists():
-            return 0
-        cutoff = datetime.now() - timedelta(days=max_age_days)
-        removed = 0
-        for child in _runs_root().iterdir():
-            if not child.is_dir():
-                continue
-            complete_path = child / "complete.json"
-            if not complete_path.exists():
-                continue
-            try:
-                mtime = datetime.fromtimestamp(complete_path.stat().st_mtime)
-            except OSError:
-                continue
-            if mtime < cutoff:
-                if _reap_run_dir(child):
-                    removed += 1
-        return removed
+        return prune_old_completed_runs(max_age_days)
 
     # ------------------------------------------------------------------
     # run_headless — one-shot `gemini -p -o json`

@@ -62,7 +62,7 @@ from paths import ba_home
 # Re-exports for back-compat with run_recovery + any out-of-tree
 # code that imported these from provider_claude. New code should
 # import from `runs_dir` directly.
-from runs_dir import iter_run_dirs, runs_root as _runs_root
+from runs_dir import iter_run_dirs, prune_old_completed_runs, runs_root as _runs_root
 from runs_dir import reap_run_dir as _reap_run_dir
 import perf
 from runs_dir import atomic_write_json as _atomic_write_json
@@ -1095,23 +1095,7 @@ class ClaudeProvider(Provider):
     # prune_old_runs — delete complete-and-old run dirs
     # ------------------------------------------------------------------
     def prune_old_runs(self, max_age_days: int = 7) -> int:
-        if not _runs_root().exists():
-            return 0
-        cutoff = datetime.now() - timedelta(days=max_age_days)
-        removed = 0
-        for child in _runs_root().iterdir():
-            if not child.is_dir():
-                continue
-            complete_path = child / "complete.json"
-            if not complete_path.exists():
-                continue
-            try:
-                mtime = datetime.fromtimestamp(complete_path.stat().st_mtime)
-            except OSError:
-                continue
-            if mtime < cutoff:
-                if _reap_run_dir(child):
-                    removed += 1
+        removed = prune_old_completed_runs(max_age_days)
         if removed:
             logger.info("pruned %d old run dirs", removed)
         return removed
