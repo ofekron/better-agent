@@ -430,6 +430,7 @@ interface Props {
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
   onSelectTab?: (id: string) => void;
+  onToggleTopbarPin?: (id: string, pinned: boolean) => void;
   onTabCapacityChange?: (capacity: number) => void;
   /** Optional node rendered at the TOP of the message scroll area,
    * above the first group. Used by the Ask view for its greeting box. */
@@ -535,6 +536,7 @@ export function Chat({
   providers = [],
   onCloseTab,
   onSelectTab,
+  onToggleTopbarPin,
   onTabCapacityChange,
   headerNode,
   composerHeaderNode,
@@ -1140,7 +1142,7 @@ export function Chat({
       data-testid="chat-container"
       data-session-running={sessionRunning ? "true" : "false"}
     >
-      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && (
+      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && onToggleTopbarPin && (
         <SessionTabs
           sessions={openSessions}
           providers={providers ?? []}
@@ -1148,6 +1150,7 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onToggleTopbarPin={onToggleTopbarPin}
           onMeasuredCapacityChange={onTabCapacityChange}
         />
       )}
