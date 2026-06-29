@@ -82,6 +82,8 @@ class NodeConnection:
 _state: dict[str, str] = {}
 _conns: dict[str, NodeConnection] = {}
 _state_version = 0
+_snapshot_static_cache_key: tuple[Any, ...] | None = None
+_snapshot_static_cache: dict[str, NodeSpec] | None = None
 # Subscribers fire on every transition. List of async callables.
 _listeners: list[Callable[[str, str], Awaitable[None]]] = []
 
@@ -473,39 +475,36 @@ def state(node_id: str) -> str:
     return _state.get(node_id, "unknown")
 
 
-def snapshot() -> list[dict]:
-    """REST projection: every KNOWN node + its live state. Used by
-    `GET /api/nodes`. Sources, in priority order:
-      1. topology.yaml (static nodes + the primary), if present.
-      2. node_registry_store (dynamic nodes approved via the popup).
-      3. any node we've seen a live/closed connection for but that is
-         in neither source (defensive — shouldn't normally happen).
-    Tolerates a missing topology.yaml so dynamic-only deployments still
-    surface their nodes."""
-    specs: dict[str, NodeSpec] = {}
+def _node_registry_fingerprint() -> tuple[int, int, int]:
     try:
-        for node_id, spec in load_topology().all_nodes().items():
-            specs[node_id] = spec
+        import node_registry_store
+        return node_registry_store.version_token()
     except Exception:
-        pass
+        return (0, 0, 0)
 
-    # Always represent the local/primary host. In a dynamic-only deploy
-    # (no topology.yaml) the block above raised and left `specs` with no
-    # primary, so /api/nodes omitted the host — the "run on" picker then
-    # offered only remote workers while its default `node_id="primary"`
-    # matched no <option> (a controlled <select> silently rendering the
-    # first worker), so sessions landed on "primary" regardless of the
-    # visible choice, and no machine ever showed the "(host)" badge. The
-    # id matches what /api/local_node_id returns, so the frontend's
-    # `m.id === localNodeId` host badge lights up across the picker,
-    # machine-node UI, and DirPicker. Skip when a primary already exists
-    # (topology-present deploy) to avoid duplicating the host.
+
+def _snapshot_static_specs() -> dict[str, NodeSpec]:
+    global _snapshot_static_cache_key, _snapshot_static_cache
+    topology_key: tuple[str, int] | tuple[str, None]
+    try:
+        topology = load_topology()
+        topology_key = ("topology", id(topology))
+    except Exception:
+        topology = None
+        topology_key = ("topology", None)
+    registry_key = _node_registry_fingerprint()
+    local_id = _local_node_id_or_primary()
+    cache_key = (topology_key, registry_key, local_id)
+    if _snapshot_static_cache_key == cache_key and _snapshot_static_cache is not None:
+        return dict(_snapshot_static_cache)
+
+    specs: dict[str, NodeSpec] = {}
+    if topology is not None:
+        specs.update(topology.all_nodes())
     if not any(s.role == "primary" for s in specs.values()):
-        local_id = _local_node_id_or_primary()
         specs[local_id] = NodeSpec(
             id=local_id, role="primary", address="local", cwd_roots=(),
         )
-
     try:
         import node_registry_store
         for rec in node_registry_store.list_all():
@@ -519,6 +518,22 @@ def snapshot() -> list[dict]:
                 )
     except Exception:
         logger.exception("node_store.snapshot: registry merge failed")
+
+    _snapshot_static_cache_key = cache_key
+    _snapshot_static_cache = dict(specs)
+    return dict(specs)
+
+
+def snapshot() -> list[dict]:
+    """REST projection: every KNOWN node + its live state. Used by
+    `GET /api/nodes`. Sources, in priority order:
+      1. topology.yaml (static nodes + the primary), if present.
+      2. node_registry_store (dynamic nodes approved via the popup).
+      3. any node we've seen a live/closed connection for but that is
+         in neither source (defensive — shouldn't normally happen).
+    Tolerates a missing topology.yaml so dynamic-only deployments still
+    surface their nodes."""
+    specs = _snapshot_static_specs()
 
     for nid in set(_state) | set(_conns):
         if nid in specs:
@@ -570,7 +585,7 @@ def reset_for_tests() -> None:
     deterministic stop should await `stop_offset_flush_loop` instead.
     Callers expecting a fully fresh process should also nuke
     `ba_home()/node_store/` if BETTER_CLAUDE_HOME is shared."""
-    global _flush_task, _state_version
+    global _flush_task, _state_version, _snapshot_static_cache_key, _snapshot_static_cache
     if _flush_task is not None and not _flush_task.done():
         _flush_task.cancel()
     _flush_task = None
@@ -580,3 +595,5 @@ def reset_for_tests() -> None:
     _listeners.clear()
     _dirty_nodes.clear()
     _flush_locks.clear()
+    _snapshot_static_cache_key = None
+    _snapshot_static_cache = None

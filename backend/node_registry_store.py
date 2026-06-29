@@ -69,6 +69,25 @@ def _path(node_id: str) -> Path:
     return _dir() / f"{node_id}.json"
 
 
+def version_token() -> tuple[int, int, int]:
+    try:
+        entries = list(_dir().glob("*.json")) if _dir().exists() else []
+    except OSError:
+        return (0, 0, 0)
+    newest = 0
+    total_size = 0
+    count = 0
+    for path in entries:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        count += 1
+        newest = max(newest, st.st_mtime_ns)
+        total_size += st.st_size
+    return (count, newest, total_size)
+
+
 def hash_secret(secret: str) -> str:
     """argon2 hash of a node secret. Exposed so the registration flow
     can hash once (at request time) and reuse the hash on approve."""
