@@ -18,7 +18,15 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from session_miner import SessionMiner, SessionVisit, sessions_dir  # noqa: E402
+from session_miner import (  # noqa: E402
+    SessionConsumer,
+    SessionMiner,
+    SessionVisit,
+    clear_consumers,
+    mine_registered,
+    register_consumer,
+    sessions_dir,
+)
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -84,35 +92,72 @@ def test_summary_and_unparseable_skipped() -> None:
     print(f"{PASS} .summary.json and unparseable sessions are skipped cleanly")
 
 
-def test_mine_fans_out_one_pass_to_many_consumers() -> None:
+class _RecordingConsumer(SessionConsumer):
+    name = "rec"
+    all_visited: list[str] = []
+
+    def begin(self) -> None:
+        self.began = True
+        self.committed = False
+        self.visited = []
+
+    def visit(self, visit: SessionVisit) -> None:
+        self.visited.append(visit.sid)
+
+    def commit(self) -> int:
+        self.committed = True
+        type(self).all_visited.extend(self.visited)
+        return len(self.visited)
+
+
+class _ConsumerA(_RecordingConsumer):
+    name = "a"
+
+
+class _ConsumerB(_RecordingConsumer):
+    name = "b"
+
+
+def test_mine_drives_consumer_lifecycle_one_pass() -> None:
     state: dict = {}
     _write_session("sess-c1", cwd="/tmp/c", messages=[{"role": "user", "content": "one"}])
     _write_session("sess-c2", cwd="/tmp/c", messages=[{"role": "user", "content": "two"}])
 
-    seen_a: list[str] = []
-    seen_b: list[str] = []
+    a = _ConsumerA()
+    b = _ConsumerB()
+    counts = SessionMiner(state).mine([a, b])
 
-    def consumer_a(visit: SessionVisit) -> None:
-        seen_a.append(visit.sid)
+    assert counts["a"] == counts["b"] == len(a.visited)
+    assert a.began and a.committed and b.began and b.committed
+    assert {"sess-c1", "sess-c2"} <= set(a.visited)
+    assert a.visited == b.visited  # one pass fanned identically to every consumer
+    print(f"{PASS} mine() drives begin/visit/commit and fans out to N consumers")
 
-    def consumer_b(visit: SessionVisit) -> None:
-        seen_b.append(visit.sid)
 
-    miner = SessionMiner(state)
-    scanned = miner.mine(consumer_a, consumer_b)
+def test_mine_registered_runs_all_registered_consumers() -> None:
+    clear_consumers()
+    _ConsumerA.all_visited = []
+    _ConsumerB.all_visited = []
+    state: dict = {}
+    _write_session("sess-d1", cwd="/tmp/d", messages=[{"role": "user", "content": "x"}])
 
-    assert scanned == miner.scanned_count
-    assert "sess-c1" in seen_a and "sess-c1" in seen_b
-    assert "sess-c2" in seen_a and "sess-c2" in seen_b
-    assert seen_a == seen_b  # one pass fanned identically to every consumer
-    print(f"{PASS} mine() fans one pass out to N consumers")
+    register_consumer(_ConsumerA)
+    register_consumer(_ConsumerB)
+    counts = mine_registered(state)
+
+    assert counts["a"] == counts["b"]
+    assert "sess-d1" in _ConsumerA.all_visited
+    assert "sess-d1" in _ConsumerB.all_visited
+    clear_consumers()
+    print(f"{PASS} mine_registered() runs every registered consumer in one pass")
 
 
 def main() -> int:
     test_changed_session_yields_visit()
     test_unchanged_session_is_delta_skipped()
     test_summary_and_unparseable_skipped()
-    test_mine_fans_out_one_pass_to_many_consumers()
+    test_mine_drives_consumer_lifecycle_one_pass()
+    test_mine_registered_runs_all_registered_consumers()
     print("\nOK: session_miner base behaves correctly")
     return 0
 
