@@ -359,6 +359,51 @@ def test_search_avoids_full_sidebar_list(client: TestClient) -> bool:
     return ok
 
 
+def test_simple_search_skips_generic_filter_sort(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "older-hit",
+        "2026-06-18T00:00:00+00:00",
+        name="needle title needle",
+    ))
+    _write(_record_with(
+        "newer-hit",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    _write(_record("miss", "2026-06-21T00:00:00+00:00"))
+
+    original = main._filter_sort_page_for_list
+    original_prefs = main._session_list_user_prefs
+
+    def fail_filter_sort(*_args, **_kwargs):
+        raise AssertionError("simple search should page ranked score results directly")
+
+    main._filter_sort_page_for_list = fail_filter_sort
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    try:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=title&offset=1&limit=1",
+            headers=HEADERS,
+        )
+    finally:
+        main._filter_sort_page_for_list = original
+        main._session_list_user_prefs = original_prefs
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions simple search page status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = (
+        ids == ["newer-hit"]
+        and body.get("total") == 2
+        and body.get("has_more") is False
+        and body.get("sessions", [{}])[0].get("search_score") == 1
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions simple search skips filter sort")
+    return ok
+
+
 def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool:
     _reset_home()
     _write(_record_with(
@@ -838,6 +883,7 @@ def main_run() -> int:
         ok = test_file_edit_mode_filters_before_pagination(client) and ok
         ok = test_search_content_filters_before_pagination(client) and ok
         ok = test_search_avoids_full_sidebar_list(client) and ok
+        ok = test_simple_search_skips_generic_filter_sort(client) and ok
         ok = test_repeated_session_search_uses_response_cache(client) and ok
         ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok

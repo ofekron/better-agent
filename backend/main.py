@@ -4521,6 +4521,71 @@ def _session_filters_may_include_virtual(
     return True
 
 
+def _can_page_local_search_scores(
+    *,
+    project_path: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    folder_view: bool,
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    sort_by: str,
+    status_sort: bool,
+    connected: tuple[str, ...],
+) -> bool:
+    return (
+        project_path is None
+        and not show_archived
+        and file_edit_mode is None
+        and not folder_ids
+        and not tag_ids
+        and not provider_ids
+        and not model_ids
+        and not modes
+        and not sources
+        and sort_by in {"updated_at", "last_user_prompt_at"}
+        and not status_sort
+        and not connected
+    )
+
+
+def _build_local_search_page_for_sidebar(
+    *,
+    offset: int,
+    limit: int,
+    search_query: str,
+    search_fields: str | None,
+    sort_by: str,
+    folder_view: bool,
+) -> tuple[list[dict], int, dict[str, int]]:
+    selected_search_fields = _split_session_search_fields(search_fields)
+    content_max_wait_seconds = (
+        _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
+        if session_store.SEARCH_FIELD_CONTENT in selected_search_fields
+        else None
+    )
+    with perf.timed("sessions.list.search_score_page"):
+        score_page, total = session_store.grep_session_score_page(
+            search_query,
+            selected_search_fields,
+            offset=offset,
+            limit=limit,
+            sort_by=sort_by,
+            folder_view=folder_view,
+            content_limit=_session_search_candidate_limit(offset, limit),
+            content_max_wait_seconds=content_max_wait_seconds,
+        )
+    scores = dict(score_page)
+    page_source = _local_session_summaries_by_ids_for_sidebar(
+        [sid for sid, _score in score_page]
+    )
+    return page_source, total, scores
+
+
 def _build_local_sessions_page_for_list(
     *,
     offset: int,
@@ -4610,6 +4675,37 @@ def _build_local_sessions_page_for_list(
                 page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
             return page, total
     if search_query:
+        if _can_page_local_search_scores(
+            project_path=project_path,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            folder_view=folder_view,
+            tag_ids=tag_ids,
+            provider_ids=provider_ids,
+            model_ids=model_ids,
+            modes=modes,
+            sources=sources,
+            sort_by=sort_by,
+            status_sort=status_sort,
+            connected=(),
+        ):
+            page_source, total, content_scores = _build_local_search_page_for_sidebar(
+                offset=offset,
+                limit=limit,
+                search_query=search_query,
+                search_fields=search_fields,
+                sort_by=sort_by,
+                folder_view=folder_view,
+            )
+            with perf.timed("sessions.list.page_decorate"):
+                page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
+            if content_scores:
+                page = [
+                    {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
+                    for session in page
+                ]
+            return page, total
         selected_search_fields = _split_session_search_fields(search_fields)
         content_max_wait_seconds = (
             _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
