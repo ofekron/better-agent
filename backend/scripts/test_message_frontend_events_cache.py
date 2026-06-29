@@ -80,10 +80,47 @@ def test_message_frontend_events_cache() -> bool:
     return True
 
 
+def test_current_message_cache_skips_summary_recompute() -> bool:
+    root = "root-message-summary-fast-hit"
+    sid = root
+    msg_id = "msg-message-summary-fast-hit"
+    reader = EventJournalReader()
+    event_ingester.ingest(
+        root,
+        sid=sid,
+        event_type="agent_message",
+        data=_data("summary-u1", "one"),
+        source="test",
+        msg_id=msg_id,
+    )
+
+    first = reader.read_frontend_events(root, message_id=msg_id)
+    original = reader.message_event_summaries
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    reader.message_event_summaries = counted  # type: ignore[method-assign]
+    second = reader.read_frontend_events(root, message_id=msg_id)
+    if calls != 0:
+        print(f"summary recompute calls on current cache hit: {calls}")
+        return False
+    if second != first:
+        print(f"current cache hit changed events: first={first!r} second={second!r}")
+        return False
+    return True
+
+
 def main() -> int:
     try:
         ok = test_message_frontend_events_cache()
         print(f"{PASS if ok else FAIL} message frontend events cache")
+        fast_ok = test_current_message_cache_skips_summary_recompute()
+        print(f"{PASS if fast_ok else FAIL} current message cache skips summary recompute")
+        ok = ok and fast_ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
