@@ -758,6 +758,12 @@ def test_session_event_meta_uses_combined_ingester_read() -> None:
 
     ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
     assert "def session_event_meta(self, root_id: str)" in ingester_source
+    scan_start = ingester_source.index("def _scan_max_seq(")
+    scan_end = ingester_source.index("def close(", scan_start)
+    scan_source = ingester_source[scan_start:scan_end]
+    assert "summaries: dict[str, dict] = {}" in scan_source
+    assert "self._update_summary_line(" in scan_source
+    assert "self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)" in scan_source
 
 
 def test_event_summary_scan_reuses_full_scan_cache() -> None:

@@ -243,6 +243,87 @@ def _run_session_event_meta_ignores_stale_sidecar() -> bool:
     return ok
 
 
+def _run_message_summaries_uses_valid_sidecar() -> bool:
+    root = "root-message-summary-sidecar-test"
+    sid = "sid-message-summary-sidecar-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-message-summary-sidecar"},
+        source="prior-run", msg_id="msg-1",
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    sidecar_path = ba_home() / "sessions" / root / "event_summaries.json"
+    expected_summary = {
+        "sid": sid,
+        "event_count": 123,
+        "last_events": [{"seq": 9, "type": "agent_message", "data": {"ok": True}}],
+        "seq_start": 9,
+        "seq_end": 9,
+        "byte_start": 1,
+        "byte_end": 2,
+    }
+    sidecar_path.write_text(
+        json.dumps({
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "tail": 25,
+            "summaries": {"msg-1": expected_summary},
+            "resolutions": {"9": "msg-1"},
+        }),
+        encoding="utf-8",
+    )
+
+    fresh = EventIngester()
+    summaries = fresh.message_event_summaries(root, tail=25)
+    ok = summaries == {"msg-1": expected_summary}
+    print(
+        f"  {PASS if ok else FAIL} message_event_summaries uses valid sidecar"
+        f"{'' if ok else f' — summaries={summaries}'}"
+    )
+    return ok
+
+
+def _run_message_summaries_ignores_stale_sidecar() -> bool:
+    root = "root-message-summary-stale-sidecar-test"
+    sid = "sid-message-summary-stale-sidecar-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-message-summary-stale-sidecar-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    sidecar_path = ba_home() / "sessions" / root / "event_summaries.json"
+    sidecar_path.write_text(
+        json.dumps({
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "tail": 25,
+            "summaries": {"msg-1": {"sid": sid, "event_count": 99}},
+            "resolutions": {},
+        }),
+        encoding="utf-8",
+    )
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-message-summary-stale-sidecar-2"},
+        source="prior-run", msg_id="msg-1",
+    )
+
+    fresh = EventIngester()
+    summaries = fresh.message_event_summaries(root, tail=25)
+    summary = summaries.get("msg-1") or {}
+    ok = summary.get("event_count") == 2
+    print(
+        f"  {PASS if ok else FAIL} message_event_summaries ignores stale sidecar"
+        f"{'' if ok else f' — summary={summary}'}"
+    )
+    return ok
+
+
 def main() -> int:
     try:
         ok = _run()
@@ -250,6 +331,8 @@ def main() -> int:
         ok = _run_session_event_meta_seeds_cursor() and ok
         ok = _run_session_event_meta_uses_valid_sidecar() and ok
         ok = _run_session_event_meta_ignores_stale_sidecar() and ok
+        ok = _run_message_summaries_uses_valid_sidecar() and ok
+        ok = _run_message_summaries_ignores_stale_sidecar() and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
