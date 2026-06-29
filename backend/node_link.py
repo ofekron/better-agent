@@ -30,6 +30,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+import time
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -64,13 +65,25 @@ _node_approval_waiters: dict[str, asyncio.Future] = {}
 # to every open browser WS without importing the coordinator (avoids a
 # circular import). Signature: async (event_type: str, payload: dict).
 _registration_listener: Optional[Callable[[str, dict], Awaitable[None]]] = None
+_MACHINE_NODES_READY_CACHE_TTL_S = 2.0
+_machine_nodes_ready_cache: tuple[float, Optional[str]] = (0.0, None)
+_machine_nodes_ready_lock = threading.Lock()
 
 
 def _machine_nodes_not_ready_reason() -> Optional[str]:
+    global _machine_nodes_ready_cache
+    now = time.monotonic()
+    with _machine_nodes_ready_lock:
+        checked_at, cached = _machine_nodes_ready_cache
+        if now - checked_at < _MACHINE_NODES_READY_CACHE_TTL_S:
+            return cached
     import extension_store
-    return extension_store.runtime_not_ready_message(
+    reason = extension_store.runtime_not_ready_message(
         extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
     )
+    with _machine_nodes_ready_lock:
+        _machine_nodes_ready_cache = (now, reason)
+    return reason
 
 
 def set_registration_listener(cb: Callable[[str, dict], Awaitable[None]]) -> None:
