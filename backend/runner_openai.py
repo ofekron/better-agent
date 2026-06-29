@@ -89,6 +89,46 @@ _TOOL_ENV_DENY_EXACT = {
 }
 _TOOL_ENV_DENY_PREFIXES = ("anthropic", "openai")
 
+_TOOL_NAME_MAP = {
+    "bash": "Bash",
+    "execute_command": "Bash",
+    "run_command": "Bash",
+}
+
+_TOOL_INPUT_KEY_MAP = {
+    "Bash": {
+        "cmd": "command",
+        "shell_command": "command",
+        "CommandLine": "command",
+    },
+}
+
+
+def _canonical_tool_name(name: str) -> str:
+    return _TOOL_NAME_MAP.get(name, name)
+
+
+def _canonical_tool_input(tool_name: str, raw_input: Any) -> dict:
+    if not isinstance(raw_input, dict):
+        return {"value": raw_input}
+    canonical_name = _canonical_tool_name(tool_name)
+    key_map = _TOOL_INPUT_KEY_MAP.get(canonical_name, {})
+    canonical: dict = {}
+    for key, value in raw_input.items():
+        mapped = key_map.get(key, key)
+        if mapped in canonical and key != mapped:
+            continue
+        canonical[mapped] = value
+    return canonical
+
+
+def _canonical_tool_arguments(tool_name: str, raw_arguments: str) -> str:
+    try:
+        parsed = json.loads(raw_arguments or "{}")
+    except json.JSONDecodeError:
+        return raw_arguments
+    return json.dumps(_canonical_tool_input(tool_name, parsed), ensure_ascii=False)
+
 # Detached runners can outlive backend restarts/token rotations. Prefer the
 # spawn-time token for normal requests, but on a 403 retry once with the current
 # disk token. mtime caching keeps steady-state loopback calls cheap.
@@ -387,6 +427,7 @@ class EventEmitter:
             tc["name"] = tc["name"] or name
         if args_delta:
             tc["args"] += args_delta
+        canonical_name = _canonical_tool_name(tc["name"])
         # emit current accumulated tool_use (id/name may still be partial until
         # the chunk that carries them, but the final delta is authoritative).
         try:
@@ -394,8 +435,8 @@ class EventEmitter:
         except json.JSONDecodeError:
             parsed = {}
         self._assistant(
-            [{"type": "tool_use", "id": tc["id"], "name": tc["name"],
-              "input": parsed}],
+            [{"type": "tool_use", "id": tc["id"], "name": canonical_name,
+              "input": _canonical_tool_input(canonical_name, parsed)}],
             uuid_str=tc["uuid"],
         )
 
@@ -423,8 +464,11 @@ class EventEmitter:
         for idx in sorted(self._tool_calls):
             tc = self._tool_calls[idx]
             last_uuid = tc["uuid"]
-            calls.append({"id": tc["id"], "name": tc["name"],
-                          "arguments": tc["args"]})
+            canonical_name = _canonical_tool_name(tc["name"])
+            calls.append({"id": tc["id"], "name": canonical_name,
+                          "arguments": _canonical_tool_arguments(
+                              canonical_name, tc["args"],
+                          )})
         if calls:
             self._parent = last_uuid
         self._tool_calls = {}
@@ -1973,12 +2017,13 @@ async def _dispatch_tool(
     emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
     lock_registry: LockRegistry, enforce_file_locks: bool,
 ) -> str:
-    name = call["name"]
+    name = _canonical_tool_name(call["name"])
     try:
-        args = json.loads(call.get("arguments") or "{}")
+        raw_args = json.loads(call.get("arguments") or "{}")
     except json.JSONDecodeError as e:
         emitter.emit_tool_result(call["id"], f"Error: bad arguments json: {e}")
         return f"Error: bad arguments json: {e}"
+    args = _canonical_tool_input(name, raw_args)
 
     # Capability management tools — no filesystem side effects, no permission
     # gate. They POST to the core capabilities endpoint over the loopback.
