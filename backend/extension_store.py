@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import os
 import json
 import sys
@@ -54,6 +55,8 @@ _PRIVATE_LOCAL_RUNTIME_MODE_ENV = "BETTER_AGENT_PRIVATE_EXTENSION_RUNTIME"
 _PRIVATE_LOCAL_RUNTIME_SOURCE = "source"
 _PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
+_ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
+_ENABLED_CACHE_LOCK = threading.Lock()
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
     "canvas",
@@ -3118,6 +3121,21 @@ def _active_records() -> list[dict[str, Any]]:
 def get_extension(extension_id: str) -> dict[str, Any] | None:
     data = _load()
     return data["extensions"].get(extension_id)
+
+
+def is_extension_enabled_cached(extension_id: str | None) -> bool:
+    if not extension_id:
+        return False
+    fingerprint = store_fingerprint()
+    with _ENABLED_CACHE_LOCK:
+        cached = _ENABLED_CACHE.get(extension_id)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+    record = get_extension(extension_id)
+    enabled = bool(record and record.get("enabled") is True)
+    with _ENABLED_CACHE_LOCK:
+        _ENABLED_CACHE[extension_id] = (fingerprint, enabled)
+    return enabled
 
 
 def _stored_capability_entrypoints(record: dict[str, Any]) -> list[dict[str, Any]]:

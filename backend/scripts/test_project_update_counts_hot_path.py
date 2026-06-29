@@ -14,6 +14,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import project_update_store  # noqa: E402
+import extension_store  # noqa: E402
 
 
 def test_counts_are_cached_after_warmup() -> bool:
@@ -46,10 +47,45 @@ def test_mark_seen_updates_cached_count() -> bool:
     return marked == 1 and project_update_store.unseen_count("proj-c") == 0
 
 
+def test_builtin_enabled_state_is_fingerprint_cached() -> bool:
+    extension_store._ENABLED_CACHE.clear()
+    calls = 0
+    fingerprint = (1, 1)
+    original_fingerprint = extension_store.store_fingerprint
+    original_get = extension_store.get_extension
+
+    def fake_fingerprint():
+        return fingerprint
+
+    def fake_get(extension_id: str):
+        nonlocal calls
+        calls += 1
+        return {"enabled": True}
+
+    extension_store.store_fingerprint = fake_fingerprint
+    extension_store.get_extension = fake_get
+    try:
+        if not extension_store.is_extension_enabled_cached("ext-a"):
+            return False
+        if not extension_store.is_extension_enabled_cached("ext-a"):
+            return False
+        if calls != 1:
+            return False
+        fingerprint = (2, 1)
+        if not extension_store.is_extension_enabled_cached("ext-a"):
+            return False
+        return calls == 2
+    finally:
+        extension_store.store_fingerprint = original_fingerprint
+        extension_store.get_extension = original_get
+        extension_store._ENABLED_CACHE.clear()
+
+
 def run() -> int:
     tests = [
         ("counts are cached after warmup", test_counts_are_cached_after_warmup),
         ("mark_seen updates cached count", test_mark_seen_updates_cached_count),
+        ("builtin enabled state is fingerprint cached", test_builtin_enabled_state_is_fingerprint_cached),
     ]
     failures: list[str] = []
     try:
