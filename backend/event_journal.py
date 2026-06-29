@@ -13,6 +13,7 @@ import asyncio
 import concurrent.futures
 import json
 import threading
+import time
 import uuid
 from bisect import bisect_right
 from collections import OrderedDict
@@ -1351,9 +1352,21 @@ class EventJournalReader:
         )
         if cached is None:
             return []
+        lock_start = time.perf_counter()
+        with self._message_cache_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            perf.record("event_journal.message_frontend.lock_wait", lock_wait_ms)
+            if cached.frontend_events is None:
+                source_events = list(cached.events)
+            else:
+                return list(cached.frontend_events)
+        convert_start = time.perf_counter()
+        frontend_events = self._to_frontend_events(source_events)
+        convert_ms = (time.perf_counter() - convert_start) * 1000
+        perf.record("event_journal.message_frontend.convert", convert_ms)
         with self._message_cache_lock:
             if cached.frontend_events is None:
-                cached.frontend_events = self._to_frontend_events(cached.events)
+                cached.frontend_events = frontend_events
             return list(cached.frontend_events)
 
     def _read_owned_range(

@@ -1518,6 +1518,7 @@ function AppMain({
         client_id: steerClientId,
       });
       offlineDispatchedRef.current.delete(steerClientId);
+      ackedClientIdsRef.current.add(steerClientId);
       removeAckedOfflineAction(_sessionId, steerClientId);
       removePendingByClientId(steerClientId);
     },
@@ -4436,7 +4437,6 @@ function AppMain({
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action);
     if (!sent) return;
-    if (action === "steer") return;
     setQueuedForSession(currentSession.id, (prev) => prev.slice(1), "promote");
   }, [currentSession, sendPromoteQueued, setQueuedForSession]);
 
