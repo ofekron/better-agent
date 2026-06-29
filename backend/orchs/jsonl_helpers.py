@@ -31,6 +31,7 @@ _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_RECENT_INDEX: tuple[str, float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]] | None = None
 _JSONL_LINE_COUNT_LOCK = threading.Lock()
 _JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
+_JSONL_LINE_COUNT_INFLIGHT: dict[str, threading.Lock] = {}
 _MISSING_JSONL_WARNING_TTL_S = 60.0
 _MISSING_JSONL_WARNED_AT: dict[tuple[str, str, str], float] = {}
 
@@ -364,14 +365,31 @@ def count_jsonl_lines(path: Path) -> int:
         cached = _JSONL_LINE_COUNT_CACHE.get(key)
         if cached is not None and cached[0] == fingerprint:
             return cached[1]
-    try:
-        with path.open("rb") as f:
-            count = sum(1 for _ in f)
-    except OSError:
-        return 0
-    with _JSONL_LINE_COUNT_LOCK:
-        _JSONL_LINE_COUNT_CACHE[key] = (fingerprint, count)
-    return count
+        path_lock = _JSONL_LINE_COUNT_INFLIGHT.get(key)
+        if path_lock is None:
+            path_lock = threading.Lock()
+            _JSONL_LINE_COUNT_INFLIGHT[key] = path_lock
+    with path_lock:
+        with _JSONL_LINE_COUNT_LOCK:
+            cached = _JSONL_LINE_COUNT_CACHE.get(key)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+        try:
+            with path.open("rb") as f:
+                count = sum(1 for _ in f)
+        except OSError:
+            return 0
+        with _JSONL_LINE_COUNT_LOCK:
+            _JSONL_LINE_COUNT_CACHE[key] = (fingerprint, count)
+            if len(_JSONL_LINE_COUNT_INFLIGHT) > 512:
+                active = {
+                    cache_key
+                    for cache_key in _JSONL_LINE_COUNT_CACHE
+                }
+                for lock_key in list(_JSONL_LINE_COUNT_INFLIGHT):
+                    if lock_key not in active:
+                        _JSONL_LINE_COUNT_INFLIGHT.pop(lock_key, None)
+        return count
 
 
 def jsonl_byte_size(path: Optional[Path]) -> int:
