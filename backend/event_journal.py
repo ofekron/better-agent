@@ -1325,8 +1325,14 @@ class EventJournalReader:
             perf.record("event_journal.message_cache.summary_provided", 1.0)
         if not summary:
             return None
+        seq_start = int(summary.get("seq_start") or 0)
+        seq_end = int(summary.get("seq_end") or 0)
         resolutions_start = time.perf_counter()
-        resolutions = event_ingester.ownership_resolutions(session_id)
+        resolutions = event_ingester.ownership_resolutions_range(
+            session_id,
+            seq_start=seq_start,
+            seq_end=seq_end,
+        )
         perf.record(
             "event_journal.message_cache.resolutions",
             (time.perf_counter() - resolutions_start) * 1000,
@@ -1338,7 +1344,6 @@ class EventJournalReader:
         # effective-owner filter reconstructs the message — no full scan.
         byte_start = int(summary.get("byte_start") or 0)
         byte_end = int(summary.get("byte_end") or byte_start)
-        seq_end = int(summary.get("seq_end") or 0)
         with self._message_cache_lock:
             cached = self._message_cache.get(key)
             grow_only = (
