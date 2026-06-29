@@ -44,6 +44,11 @@ def _reset_home() -> None:
     session_store._index_loaded = False
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
+    session_store._metadata_search_cache.clear()
+    session_store._metadata_text_cache = ()
+    session_store._metadata_text_cache_version = -1
+    session_store._metadata_trigram_index = {}
+    session_store._metadata_trigram_index_version = -1
     main._sessions_list_response_cache.clear()
     main._session_summaries_response_cache.clear()
     main._remote_sessions_cache.clear()
@@ -613,6 +618,79 @@ def test_search_index_cache_invalidates_on_write() -> bool:
     return ok
 
 
+def test_metadata_search_uses_trigram_candidates() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "match-title",
+        "2026-06-20T00:00:00+00:00",
+        name="alpha unique needle",
+    ))
+    _write(_record_with(
+        "match-first-prompt",
+        "2026-06-19T00:00:00+00:00",
+        messages=[{
+            "id": "u1",
+            "role": "user",
+            "content": "first prompt has unique needle",
+            "timestamp": "2026-06-19T00:00:00+00:00",
+        }],
+    ))
+    _write(_record_with(
+        "miss",
+        "2026-06-18T00:00:00+00:00",
+        name="totally unrelated",
+        messages=[{
+            "id": "u1",
+            "role": "user",
+            "content": "nothing relevant",
+            "timestamp": "2026-06-18T00:00:00+00:00",
+        }],
+    ))
+
+    original_rows = session_store._metadata_search_rows
+    row_calls = 0
+
+    def counted_rows():
+        nonlocal row_calls
+        row_calls += 1
+        return original_rows()
+
+    session_store._metadata_search_rows = counted_rows
+    try:
+        first = session_store.grep_session_scores("unique needle")
+        second = session_store.grep_session_scores("unique needle")
+    finally:
+        session_store._metadata_search_rows = original_rows
+
+    ok = (
+        set(first) == {"match-title", "match-first-prompt"}
+        and second == first
+        and row_calls == 2
+        and session_store._metadata_trigram_index_version == session_store.search_metadata_version()
+    )
+    print(f"{PASS if ok else FAIL} metadata search uses trigram candidates")
+    return ok
+
+
+def test_metadata_trigram_search_preserves_substring_behavior() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "substring",
+        "2026-06-20T00:00:00+00:00",
+        name="prefixabcsuffix",
+    ))
+    _write(_record_with(
+        "spaced",
+        "2026-06-19T00:00:00+00:00",
+        name="prefix abc suffix",
+    ))
+
+    scores = session_store.grep_session_scores("xabcs", {session_store.SEARCH_FIELD_TITLE})
+    ok = scores == {"substring": 1}
+    print(f"{PASS if ok else FAIL} metadata trigram search preserves substring behavior")
+    return ok
+
+
 def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
     _reset_home()
     _write(_record_with(
@@ -922,6 +1000,8 @@ def main_run() -> int:
         ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
+        ok = test_metadata_search_uses_trigram_candidates() and ok
+        ok = test_metadata_trigram_search_preserves_substring_behavior() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok

@@ -208,6 +208,10 @@ _markers_by_session: dict[str, dict[str, dict]] = {}
 _markers_lock = threading.Lock()
 _summary_projection_repair_lock = threading.Lock()
 _summary_projection_repair_running = False
+_metadata_trigram_index_version = -1
+_metadata_trigram_index: dict[str, dict[str, set[str]]] = {}
+_metadata_trigram_index_warm_running = False
+_metadata_trigram_index_warm_lock = threading.Lock()
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
@@ -1373,6 +1377,7 @@ def _do_build_summary_index_unsafe() -> None:
             _summary_metadata_version += 1
             _summary_index_loaded = True
         _start_summary_projection_repair()
+        _start_metadata_search_index_warm()
         return
 
     # Trees migrated in Pass 2 that need a persist — written AFTER the
@@ -1488,6 +1493,7 @@ def _do_build_summary_index_unsafe() -> None:
         _summary_index_loaded = True
 
     _start_summary_projection_repair()
+    _start_metadata_search_index_warm()
 
     # Phase 3: persist migrated trees outside both locks (write_session_full
     # → _upsert_summary takes _summary_index_lock cleanly here). Best-effort.
@@ -4359,6 +4365,7 @@ _METADATA_SEARCH_CACHE_MAX = 128
 _metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
 _metadata_text_cache_version = -1
 _metadata_text_cache: tuple[tuple[str, str, str], ...] = ()
+_METADATA_TRIGRAM_MIN_QUERY = 3
 
 
 def _normalize_search_fields(fields: Iterable[str] | None) -> set[str]:
@@ -4427,6 +4434,102 @@ def _metadata_search_rows() -> tuple[tuple[str, str, str], ...]:
         return rows
 
 
+def _metadata_trigrams(value: str) -> set[str]:
+    if len(value) < _METADATA_TRIGRAM_MIN_QUERY:
+        return set()
+    return {
+        value[index:index + _METADATA_TRIGRAM_MIN_QUERY]
+        for index in range(len(value) - _METADATA_TRIGRAM_MIN_QUERY + 1)
+    }
+
+
+def _build_metadata_trigram_index(
+    rows: tuple[tuple[str, str, str], ...],
+) -> dict[str, dict[str, set[str]]]:
+    index = {
+        SEARCH_FIELD_TITLE: {},
+        SEARCH_FIELD_FIRST_PROMPT: {},
+    }
+    for sid, title, first_prompt in rows:
+        for trigram in _metadata_trigrams(title):
+            index[SEARCH_FIELD_TITLE].setdefault(trigram, set()).add(sid)
+        for trigram in _metadata_trigrams(first_prompt):
+            index[SEARCH_FIELD_FIRST_PROMPT].setdefault(trigram, set()).add(sid)
+    return index
+
+
+def _start_metadata_search_index_warm() -> None:
+    global _metadata_trigram_index_warm_running
+    if not _summary_index_loaded:
+        return
+    with _metadata_trigram_index_warm_lock:
+        if _metadata_trigram_index_warm_running:
+            return
+        _metadata_trigram_index_warm_running = True
+
+    def _warm() -> None:
+        global _metadata_trigram_index_warm_running
+        try:
+            _metadata_search_index_for_current_version()
+        finally:
+            with _metadata_trigram_index_warm_lock:
+                _metadata_trigram_index_warm_running = False
+
+    threading.Thread(
+        target=_warm,
+        name="metadata-search-index-warm",
+        daemon=True,
+    ).start()
+
+
+def _metadata_search_index_for_current_version() -> tuple[int, dict[str, dict[str, set[str]]]]:
+    global _metadata_trigram_index_version, _metadata_trigram_index
+    while True:
+        with _summary_index_lock:
+            version = _summary_metadata_version
+            if _metadata_trigram_index_version == version:
+                return version, _metadata_trigram_index
+        rows = _metadata_search_rows()
+        built = _build_metadata_trigram_index(rows)
+        with _summary_index_lock:
+            if _summary_metadata_version != version:
+                continue
+            if _metadata_trigram_index_version == version:
+                return version, _metadata_trigram_index
+            _metadata_trigram_index = built
+            _metadata_trigram_index_version = version
+            return version, _metadata_trigram_index
+
+
+def _metadata_candidate_ids(query_lower: str, metadata_fields: tuple[str, ...]) -> set[str] | None:
+    trigrams = _metadata_trigrams(query_lower)
+    if not trigrams:
+        return None
+    _version, index = _metadata_search_index_for_current_version()
+    candidates: set[str] | None = None
+    for field in metadata_fields:
+        field_index = index.get(field) or {}
+        field_candidates: set[str] | None = None
+        for trigram in trigrams:
+            ids = field_index.get(trigram)
+            if not ids:
+                field_candidates = set()
+                break
+            if field_candidates is None:
+                field_candidates = set(ids)
+            else:
+                field_candidates.intersection_update(ids)
+            if not field_candidates:
+                break
+        if not field_candidates:
+            continue
+        if candidates is None:
+            candidates = field_candidates
+        else:
+            candidates.update(field_candidates)
+    return candidates or set()
+
+
 def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
     query_lower = query.lower()
     metadata_fields = tuple(
@@ -4441,10 +4544,13 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
         if cached is not None:
             return dict(cached)
     rows = _metadata_search_rows()
+    candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)
     scores: dict[str, int] = {}
     search_title = SEARCH_FIELD_TITLE in metadata_fields
     search_first_prompt = SEARCH_FIELD_FIRST_PROMPT in metadata_fields
     for sid, title, first_prompt in rows:
+        if candidate_ids is not None and sid not in candidate_ids:
+            continue
         if search_title:
             score = title.count(query_lower)
             if score > 0:
