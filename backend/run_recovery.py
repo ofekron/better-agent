@@ -1039,7 +1039,8 @@ async def _integrate_one(
                         run_id[:8], pid, exc_info=True,
                     )
             coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
-            coordinator.turn_manager.run_state_add(
+            await asyncio.to_thread(
+                coordinator.turn_manager.run_state_add,
                 app_sid,
                 run_id=run_id,
                 kind=mode,
@@ -1887,7 +1888,8 @@ async def _retry_recovered_run(
     coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(new_run_id)
     provider_rs = provider._runs.get(new_run_id)
     pid = provider_rs.popen.pid if provider_rs and provider_rs.popen else None
-    coordinator.turn_manager.run_state_add(
+    await asyncio.to_thread(
+        coordinator.turn_manager.run_state_add,
         app_sid,
         run_id=new_run_id,
         kind=mode,

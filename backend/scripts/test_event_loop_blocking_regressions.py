@@ -2820,8 +2820,18 @@ def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     finalize_start = source.index("async def _finalize_when_done(")
     finalize_end = source.index("# ============================================================================", finalize_start)
     finalize_source = source[finalize_start:finalize_end]
+    integrate_start = source.index("async def _integrate_one(")
+    integrate_end = source.index("async def _retry_recovered_run(", integrate_start)
+    integrate_source = source[integrate_start:integrate_end]
+    retry_start = source.index("async def _retry_recovered_run(")
+    retry_end = source.index("def _cleanup_active_run_id(", retry_start)
+    retry_source = source[retry_start:retry_end]
     assert "await asyncio.to_thread(\n            _recovery_target_snapshot" in finalize_source
     assert "await asyncio.to_thread(\n                    session_manager.set_msg_recovering" in finalize_source
+    assert "await asyncio.to_thread(\n                coordinator.turn_manager.run_state_add" in integrate_source
+    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in retry_source
+    assert "\n            coordinator.turn_manager.run_state_add(" not in integrate_source
+    assert "\n    coordinator.turn_manager.run_state_add(" not in retry_source
     assert "session_manager.get(persist_sid)" not in finalize_source
     assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
 
