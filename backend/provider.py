@@ -847,7 +847,7 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
     every provider.
     """
     import json
-    from ingestion_versions import marker_matches_current
+    from ingestion_versions import marker_data_matches_current
     from runs_dir import runs_root as _runs_root
     runs_root = _runs_root()
     if not runs_root.exists():
@@ -862,8 +862,8 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
         if marker_path.exists():
             try:
                 marker = json.loads(marker_path.read_text(encoding="utf-8"))
-                if marker_matches_current(
-                    marker_path,
+                if marker_data_matches_current(
+                    marker,
                     str(marker.get("provider_kind") or ""),
                 ):
                     continue

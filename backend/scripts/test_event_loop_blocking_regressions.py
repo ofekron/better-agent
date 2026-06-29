@@ -269,7 +269,8 @@ def test_recovery_dispatch_skips_reconciled_runs_before_owner_read() -> None:
     marker_idx = recover_source.index('marker_path = child / "reconciled.marker"')
     backend_state_idx = recover_source.index('bs_path = child / "backend_state.json"')
     assert marker_idx < backend_state_idx
-    assert "marker_matches_current(" in recover_source[marker_idx:backend_state_idx]
+    assert "marker_data_matches_current(" in recover_source[marker_idx:backend_state_idx]
+    assert "marker_matches_current(" not in recover_source[marker_idx:backend_state_idx]
 
 
 def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
