@@ -141,8 +141,12 @@ _SIDEBAR_DECORATED_CACHE_MAX = 1024
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 _HOT_PATH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
+    max_workers=8,
     thread_name_prefix="hot-path",
+)
+_SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="session-detail",
 )
 
 
@@ -158,6 +162,24 @@ async def _run_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _HOT_PATH_EXECUTOR,
+            _call,
+        )
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
+    queued_at = time.perf_counter()
+    ctx = contextvars.copy_context()
+
+    def _call():
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, *args, **kwargs)
+
+    start = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _SESSION_DETAIL_EXECUTOR,
             _call,
         )
     finally:
@@ -6216,7 +6238,7 @@ async def get_session(
     perf.record("sessions.detail.response_cache.miss", 1.0)
 
     worker_start = time.perf_counter()
-    tree = await _run_hot_path(
+    tree = await _run_session_detail_hot_path(
         "sessions.detail.worker",
         _session_detail_snapshot_sync,
         session_id,
