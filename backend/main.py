@@ -9187,6 +9187,15 @@ async def on_startup():
     )
 
     asyncio.create_task(
+        run_task(
+            "virtual_session_summaries_warm",
+            "startup_tasks.virtual_session_summaries_warm",
+            virtual_session_store.list_all,
+        ),
+        name="startup-virtual-session-summaries-warm",
+    )
+
+    asyncio.create_task(
         _delayed_startup_task(
             _SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS,
             lambda: run_task(

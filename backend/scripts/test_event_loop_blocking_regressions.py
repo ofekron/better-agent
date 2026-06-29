@@ -2101,6 +2101,17 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     assert "_sessions_list_cache_get(cache_key) if cache_response else None" in route_source
 
 
+def test_startup_warms_virtual_session_summaries_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert '"virtual_session_summaries_warm"' in startup_source
+    assert '"startup_tasks.virtual_session_summaries_warm"' in startup_source
+    assert "virtual_session_store.list_all" in startup_source
+    assert 'name="startup-virtual-session-summaries-warm"' in startup_source
+
+
 def test_session_organization_refresh_is_coalesced_background_work() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("async def _broadcast_session_organization_changed(")
