@@ -341,6 +341,33 @@ def test_list_all_summary_cache_skips_full_payload_copy() -> bool:
     return any(session.get("id") == sid for session in cached)
 
 
+def test_list_all_hot_cache_skips_store_load() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:hot-cache"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Hot cache",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before hot-cache test")
+        return False
+    original = virtual_session_store._load_shared_locked
+
+    def fail_load():
+        raise AssertionError("hot cached list_all touched virtual session store")
+
+    virtual_session_store._load_shared_locked = fail_load
+    try:
+        cached = virtual_session_store.list_all()
+    finally:
+        virtual_session_store._load_shared_locked = original
+    return any(session.get("id") == sid for session in cached)
+
+
 def test_list_all_returns_cached_projection_when_store_lock_busy() -> bool:
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     sid = f"virtual:{ext}:busy-lock"
@@ -460,6 +487,7 @@ TESTS = [
     ("concurrent appends are not lost", test_concurrent_appends_are_not_lost),
     ("list_all cache is isolated + invalidated", test_list_all_cache_isolated_and_invalidated),
     ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
+    ("list_all hot cache skips store load", test_list_all_hot_cache_skips_store_load),
     ("list_all returns cached projection when store lock busy", test_list_all_returns_cached_projection_when_store_lock_busy),
     ("SDK namespaces short virtual ids for all methods", test_sdk_namespaces_short_virtual_ids_for_all_methods),
     ("internal API rejects extension without session_state", test_internal_api_rejects_extension_without_session_state),
