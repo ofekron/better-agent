@@ -1701,14 +1701,16 @@ class SessionManager:
             return out
 
     def exists(self, sid: str) -> bool:
-        rid = self._root_id_for(sid)
+        rid = self._node_root_id.get(sid)
+        if rid is not None:
+            root = self._roots.get(rid)
+            if root is not None:
+                return session_store._find_in_tree(root, sid) is not None
+        rid = session_store._resolve_root_id(sid)
         if rid is None:
             return False
-        with self._lock_for_root(rid):
-            root = self._load_root(sid, hydrate_events=False)
-            if root is None:
-                return False
-            return session_store._find_in_tree(root, sid) is not None
+        self._node_root_id[sid] = rid
+        return True
 
     def get_field(self, sid: str, field: str) -> Any:
         """Read a single session-level field without deepcopy. Returns
