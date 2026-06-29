@@ -12426,6 +12426,46 @@ pre .inline-tag-highlight {
   min-height: 0;
   overflow-x: auto;
 }
+.fork-split-grid-focused {
+  overflow-x: hidden;
+}
+.fork-focus-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.fork-focus-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fork-focus-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: calc(12px * var(--app-font-scale));
+}
+.fork-focus-back:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
 .fork-pane {
   display: flex;
   flex-direction: column;
@@ -12461,6 +12501,29 @@ pre .inline-tag-highlight {
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+.fork-pane-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.fork-pane-view-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+}
+.fork-pane-view-button:hover {
+  color: var(--text, #eee);
+  background: var(--bg-hover);
 }
 .fork-pane-focus-radio {
   background: transparent;

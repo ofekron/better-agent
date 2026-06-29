@@ -1,4 +1,4 @@
-import { useMemo, useRef, useCallback, useEffect } from "react";
+import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type {
@@ -85,6 +85,7 @@ export function ForkSplitView({
   onAdvSyncClick,
 }: Props) {
   const { t } = useTranslation();
+  const [focusedViewSessionId, setFocusedViewSessionId] = useState<string | null>(null);
 
   // Flatten the tree depth-first so root → its forks → their forks ...
   // become an ordered list of panes. We render each as a column.
@@ -176,12 +177,29 @@ export function ForkSplitView({
   const viewport = useViewport();
   const isMobile = viewport.mode !== "desktop";
 
+  const paneLabel = useCallback(
+    (pane: Session, index: number) =>
+      pane.id === tree.id ? t("fork.original") : pane.name || `${t("fork.fork")} ${index}`,
+    [t, tree.id],
+  );
+
   // Index of the focused pane; used by both the tab strip (active
   // marker) and the mobile swipe handler (prev/next neighbour).
   const focusedIdx = useMemo(() => {
     const i = panes.findIndex(({ pane }) => pane.id === focusedSessionId);
     return i < 0 ? 0 : i;
   }, [panes, focusedSessionId]);
+
+  const focusedViewPane = useMemo(() => {
+    if (!focusedViewSessionId) return null;
+    return panes.find(({ pane }) => pane.id === focusedViewSessionId) ?? null;
+  }, [focusedViewSessionId, panes]);
+
+  useEffect(() => {
+    if (focusedViewSessionId && !focusedViewPane) {
+      setFocusedViewSessionId(null);
+    }
+  }, [focusedViewPane, focusedViewSessionId]);
 
   // Axis-locked horizontal swipe on the tab strip — switches the
   // focused pane to the previous / next neighbour. The swipe handler
@@ -240,7 +258,12 @@ export function ForkSplitView({
   // when focused id is stale (e.g. focused fork was deleted) — this
   // mirrors App.tsx's existing `setFocusedForkId(null)` fallback to
   // root.
-  const renderedPanes = isMobile ? [panes[focusedIdx]].filter(Boolean) : panes;
+  const focusedViewActive = !isMobile && !!focusedViewPane;
+  const renderedPanes = isMobile
+    ? [panes[focusedIdx]].filter(Boolean)
+    : focusedViewPane
+      ? [focusedViewPane]
+      : panes;
 
   return (
     <div className="fork-split">
@@ -283,7 +306,7 @@ export function ForkSplitView({
           {panes.map(({ pane }, i) => {
             const active = i === focusedIdx;
             const closed = !!pane.fork_closed;
-            const label = pane.id === tree.id ? "root" : pane.name || `fork ${i}`;
+            const label = paneLabel(pane, i);
             return (
               <button
                 key={pane.id}
@@ -303,10 +326,29 @@ export function ForkSplitView({
           })}
         </div>
       )}
+      {focusedViewActive && focusedViewPane && (
+        <div className="fork-focus-toolbar" data-testid="fork-focus-toolbar">
+          <button
+            type="button"
+            className="fork-focus-back"
+            onClick={() => setFocusedViewSessionId(null)}
+            title={t("fork.backToSplitTitle")}
+            data-testid="fork-back-to-split"
+          >
+            <Icon name="chevron-left" size={14} />
+            {t("fork.backToSplit")}
+          </button>
+          <span className="fork-focus-title">
+            {t("fork.focusedViewLabel", {
+              name: paneLabel(focusedViewPane.pane, focusedIdx),
+            })}
+          </span>
+        </div>
+      )}
       <div
-        className="fork-split-grid"
+        className={"fork-split-grid" + (focusedViewActive ? " fork-split-grid-focused" : "")}
         style={
-          isMobile
+          isMobile || focusedViewActive
             ? { gridTemplateColumns: "1fr" }
             : {
                 gridTemplateColumns: `repeat(${panes.length}, minmax(220px, 1fr))`,
@@ -332,6 +374,10 @@ export function ForkSplitView({
               isClosed={isClosed}
               isRoot={isRoot}
               onSetFocus={() => onSetFocus(pane.id)}
+              onOpenFocusedView={() => {
+                if (!isClosed) onSetFocus(pane.id);
+                setFocusedViewSessionId(pane.id);
+              }}
               onClose={() => onCloseFork(pane.id)}
               onReopen={() => onReopenFork(pane.id)}
               onDelete={onDeleteFork ? () => onDeleteFork(pane.id) : undefined}
@@ -370,6 +416,7 @@ interface PaneProps {
   isClosed: boolean;
   isRoot: boolean;
   onSetFocus: () => void;
+  onOpenFocusedView: () => void;
   onClose: () => void;
   onReopen: () => void;
   onDelete?: () => void;
@@ -393,6 +440,7 @@ function ForkPane({
   isClosed,
   isRoot,
   onSetFocus,
+  onOpenFocusedView,
   onClose,
   onReopen,
   onDelete,
@@ -442,17 +490,28 @@ function ForkPane({
           {isRoot ? t("fork.original") : pane.name || t("fork.fork")}
         </span>
         {!isClosed && (
-          <button
-            type="button"
-            className="fork-pane-focus-radio"
-            onClick={onSetFocus}
-            aria-label={isFocused ? t("fork.focusedAria") : t("fork.focusTitle")}
-            title={isFocused ? t("fork.focusedTitle") : t("fork.focusTitle")}
-            role="radio"
-            aria-checked={isFocused}
-          >
-            {isFocused ? "●" : "◯"}
-          </button>
+          <div className="fork-pane-actions">
+            <button
+              type="button"
+              className="fork-pane-view-button"
+              onClick={onOpenFocusedView}
+              aria-label={t("fork.openFocusedAria")}
+              title={t("fork.openFocusedTitle")}
+            >
+              <Icon name="expand" size={14} />
+            </button>
+            <button
+              type="button"
+              className="fork-pane-focus-radio"
+              onClick={onSetFocus}
+              aria-label={isFocused ? t("fork.focusedAria") : t("fork.focusTitle")}
+              title={isFocused ? t("fork.focusedTitle") : t("fork.focusTitle")}
+              role="radio"
+              aria-checked={isFocused}
+            >
+              {isFocused ? "●" : "◯"}
+            </button>
+          </div>
         )}
         {isClosed && !isRoot && (
           <>
