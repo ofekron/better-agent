@@ -2273,6 +2273,9 @@ def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
     build_start = source.index("def _build_stubbed_tree(")
     build_end = source.index("def _compute_messages_snapshot(", build_start)
     build_source = source[build_start:build_end]
+    assert "_tree_stub_attached_cache" in source
+    assert "root_events_version = self._root_events_version_for_tree(rid)" in build_source
+    assert "_tree_stub_attached_cache.get(attached_cache_key)" in build_source
     assert "self._attach_root_events_to_stubbed_tree(tree, rid)" in build_source
     assert build_source.index("tree = _copy_jsonish(cached)") < build_source.index(
         "self._attach_root_events_to_stubbed_tree(tree, rid)"
@@ -2280,6 +2283,15 @@ def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
     assert build_source.index("self._tree_stub_cache[cache_key] = _copy_jsonish(tree)") < build_source.rindex(
         "self._attach_root_events_to_stubbed_tree(tree, rid)"
     )
+    assert "self._cache_attached_stubbed_tree(attached_cache_key, tree)" in build_source
+
+    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    version_start = ingester_source.index("def root_events_version(")
+    version_end = ingester_source.index("def _read_all_events_locked(", version_start)
+    version_source = ingester_source[version_start:version_end]
+    assert "self._scan_max_seq(root_id)" in version_source
+    assert "_build_root_events_projection" not in version_source
+    assert "_read_all_events_locked" not in version_source
 
 
 def test_startup_recovery_defers_cold_runs() -> None:

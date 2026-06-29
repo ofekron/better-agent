@@ -17,6 +17,7 @@ def main() -> int:
     original_read_events = event_journal.event_journal_reader.read_events
     original_summaries = event_journal.event_journal_reader.message_event_summaries
     original_read_all = event_ingester._read_all_events_locked
+    original_root_events = event_ingester.root_events_by_sid
     try:
         root = session_manager.create(
             name="root-events-once",
@@ -44,6 +45,7 @@ def main() -> int:
         read_calls = 0
         summary_calls = 0
         root_event_full_reads = 0
+        root_events_calls = 0
 
         def counted_read_events(*args, **kwargs):
             nonlocal read_calls
@@ -60,9 +62,21 @@ def main() -> int:
             root_event_full_reads += 1
             return original_read_all(*args, **kwargs)
 
+        def counted_root_events(*args, **kwargs):
+            nonlocal root_events_calls
+            root_events_calls += 1
+            return original_root_events(*args, **kwargs)
+
         event_journal.event_journal_reader.read_events = counted_read_events
         event_journal.event_journal_reader.message_event_summaries = counted_summaries
         event_ingester._read_all_events_locked = counted_read_all
+        event_ingester.root_events_by_sid = counted_root_events
+        tree = session_manager.get_root_tree_stubbed(
+            sid,
+            msg_limit=10,
+            exchange_count=None,
+        )
+        assert tree is not None
         tree = session_manager.get_root_tree_stubbed(
             sid,
             msg_limit=10,
@@ -72,12 +86,14 @@ def main() -> int:
         assert read_calls == 0, read_calls
         assert summary_calls <= 2, summary_calls
         assert root_event_full_reads == 0, root_event_full_reads
+        assert root_events_calls == 1, root_events_calls
         print("PASS: stubbed tree uses cached root-event projection")
         return 0
     finally:
         event_journal.event_journal_reader.read_events = original_read_events
         event_journal.event_journal_reader.message_event_summaries = original_summaries
         event_ingester._read_all_events_locked = original_read_all
+        event_ingester.root_events_by_sid = original_root_events
         shutil.rmtree(os.environ["BETTER_CLAUDE_HOME"], ignore_errors=True)
 
 

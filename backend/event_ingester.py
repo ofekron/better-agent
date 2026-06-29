@@ -1337,6 +1337,18 @@ class EventIngester:
             self._root_events_cache[root_id] = (version, projection)
             return copy.deepcopy(projection)
 
+    def root_events_version(self, root_id: str) -> int:
+        path = self._events_path(root_id)
+        if not path.exists():
+            return 0
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            version = self._root_events_version.get(root_id)
+            if version is None:
+                self._scan_max_seq(root_id)
+                version = self._root_events_version.get(root_id, 0)
+            return int(version or 0)
+
     def _read_all_events_locked(
         self, path: Path, root_id: str, file_size: int,
     ) -> list[dict]:

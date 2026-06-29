@@ -290,6 +290,10 @@ class SessionManager:
             tuple[str, int, Optional[int], tuple, int],
             dict,
         ] = collections.OrderedDict()
+        self._tree_stub_attached_cache: collections.OrderedDict[
+            tuple[tuple[str, int, Optional[int], tuple, int], int],
+            dict,
+        ] = collections.OrderedDict()
         self._tree_stub_cache_max = 256
         self._todo_projection_cache: collections.OrderedDict[
             str,
@@ -1040,6 +1044,7 @@ class SessionManager:
         self._roots.pop(rid, None)
         self._event_hydrated_roots.discard(rid)
         self._since_cache.pop(rid, None)
+        self._drop_tree_stub_attached_cache_for_root(rid)
         for node in session_store._walk_forks(cached_root):
             node_sid = node.get("id")
             if node_sid:
@@ -1327,6 +1332,7 @@ class SessionManager:
         self._event_hydrated_roots.discard(rid)
         self._node_root_id.pop(rid, None)
         self._since_cache.pop(rid, None)
+        self._drop_tree_stub_attached_cache_for_root(rid)
         try:
             ds = self._draft_store_or_none()
         except Exception:
@@ -2322,6 +2328,12 @@ class SessionManager:
             tuple(node_keys) + (recovering_key,),
         )
 
+    def _drop_tree_stub_attached_cache_for_root(self, rid: str) -> None:
+        for key in list(self._tree_stub_attached_cache):
+            tree_key = key[0]
+            if tree_key and tree_key[0] == rid:
+                self._tree_stub_attached_cache.pop(key, None)
+
     def _build_stubbed_tree(
         self,
         root: dict,
@@ -2336,12 +2348,22 @@ class SessionManager:
         cache_key = self._tree_stub_cache_key(
             root, rid, msg_limit, exchange_count,
         )
+        root_events_version = self._root_events_version_for_tree(rid)
+        attached_cache_key = (cache_key, root_events_version)
+        attached_cached = self._tree_stub_attached_cache.get(attached_cache_key)
+        if attached_cached is not None:
+            perf.record("session.stubbed_tree_attached_cache.hit", 1.0)
+            self._tree_stub_attached_cache.move_to_end(attached_cache_key)
+            tree = _copy_jsonish(attached_cached)
+            return (tree, cache_key) if return_cache_key else tree
+        perf.record("session.stubbed_tree_attached_cache.miss", 1.0)
         cached = self._tree_stub_cache.get(cache_key)
         if cached is not None:
             perf.record("session.stubbed_tree_cache.hit", 1.0)
             self._tree_stub_cache.move_to_end(cache_key)
             tree = _copy_jsonish(cached)
             self._attach_root_events_to_stubbed_tree(tree, rid)
+            self._cache_attached_stubbed_tree(attached_cache_key, tree)
             return (tree, cache_key) if return_cache_key else tree
         perf.record("session.stubbed_tree_cache.miss", 1.0)
 
@@ -2404,7 +2426,18 @@ class SessionManager:
         if len(self._tree_stub_cache) > self._tree_stub_cache_max:
             self._tree_stub_cache.popitem(last=False)
         self._attach_root_events_to_stubbed_tree(tree, rid)
+        self._cache_attached_stubbed_tree(attached_cache_key, tree)
         return (tree, cache_key) if return_cache_key else tree
+
+    def _root_events_version_for_tree(self, rid: str) -> int:
+        from event_ingester import event_ingester
+
+        return event_ingester.root_events_version(rid)
+
+    def _cache_attached_stubbed_tree(self, key: tuple, tree: dict) -> None:
+        self._tree_stub_attached_cache[key] = _copy_jsonish(tree)
+        if len(self._tree_stub_attached_cache) > self._tree_stub_cache_max:
+            self._tree_stub_attached_cache.popitem(last=False)
 
     def _attach_root_events_to_stubbed_tree(self, tree: dict, rid: str) -> None:
         from event_ingester import event_ingester
