@@ -121,6 +121,20 @@ def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
     assert "ba_home()" not in path_source
 
 
+def test_session_opened_avoids_full_session_copy() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("async def mark_session_opened(")
+    route_end = main_source.index("@app.", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "return_session=False" in route_source
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    method_start = manager_source.index("def set_last_opened_at(")
+    method_end = manager_source.index("def set_archived(", method_start)
+    method_source = manager_source[method_start:method_end]
+    assert "return_session: bool = True" in method_source
+    assert '{"id": sid, "last_opened_at": at}' in method_source
+
+
 def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     file_start = source.index("class _FileTailFollower:")
@@ -2682,6 +2696,7 @@ if __name__ == "__main__":
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_user_prefs_uses_cached_path_for_hot_reads()
+    test_session_opened_avoids_full_session_copy()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()

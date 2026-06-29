@@ -5766,7 +5766,13 @@ class SessionManager:
         for sid in session_store.markers_for_extension_purge(extension_id):
             self._fire(sid, {"kind": "marker_cleared", "extension_id": extension_id})
 
-    def set_last_opened_at(self, sid: str, at: str) -> Optional[dict]:
+    def set_last_opened_at(
+        self,
+        sid: str,
+        at: str,
+        *,
+        return_session: bool = True,
+    ) -> Optional[dict]:
         """Stamp when the user last opened/selected this session on a
         client. Does NOT bump `updated_at` — opening is not a content
         change; it only feeds the "last opened" sort."""
@@ -5778,13 +5784,13 @@ class SessionManager:
             if sess is None:
                 return None
             if sess.get("last_opened_at") == at:
-                return _copy_jsonish(sess)
+                return _copy_jsonish(sess) if return_session else {"id": sid, "last_opened_at": at}
             sess["last_opened_at"] = at
             session_store.write_last_opened(rid, sid, at)
             if sid == rid:
                 session_store.update_last_opened_projection(sid, at)
             self._fire(sid, {"kind": "last_opened_set", "at": at})
-            return _copy_jsonish(sess)
+            return _copy_jsonish(sess) if return_session else {"id": sid, "last_opened_at": at}
 
     def set_archived(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:
