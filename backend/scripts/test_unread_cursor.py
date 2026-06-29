@@ -225,6 +225,43 @@ def test_mark_seen_uses_journal_latest_uid() -> None:
     print(f"{PASS} mark_seen_uses_journal_latest_uid")
 
 
+def test_mark_seen_uses_cached_latest_uid() -> None:
+    sid, msg = _mk_session("native")
+    import event_ingester as event_ingester_module
+    event_ingester_module.event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={
+            "uuid": "cached-head",
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "cached"}]},
+        },
+        source="test",
+        msg_id=msg["id"],
+    )
+
+    original_summaries = event_ingester_module.event_ingester.message_event_summaries
+    original_event_uuid = session_manager_module._event_uuid_safe
+
+    def guarded_summaries(*_args, **_kwargs):
+        raise AssertionError("mark_seen walked message summaries")
+
+    def guarded_event_uuid(_event):
+        raise AssertionError("mark_seen scanned live message events")
+
+    event_ingester_module.event_ingester.message_event_summaries = guarded_summaries
+    session_manager_module._event_uuid_safe = guarded_event_uuid
+    try:
+        result = session_manager.mark_seen(sid, None)
+    finally:
+        event_ingester_module.event_ingester.message_event_summaries = original_summaries
+        session_manager_module._event_uuid_safe = original_event_uuid
+    assert result == {"last_seen_event_uid": "cached-head"}, result
+    assert session_manager.get_unread_count(sid) == 0
+    print(f"{PASS} mark_seen_uses_cached_latest_uid")
+
+
 def test_mark_seen_avoids_full_tree_write() -> None:
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -376,6 +413,7 @@ def main() -> int:
         test_mark_seen_zeros()
         test_mark_seen_does_not_copy_session_tree()
         test_mark_seen_uses_journal_latest_uid()
+        test_mark_seen_uses_cached_latest_uid()
         test_mark_seen_avoids_full_tree_write()
         test_seen_cursor_write_is_idempotent()
         test_mark_unread_clears_seen_sidecar()

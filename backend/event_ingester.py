@@ -143,6 +143,7 @@ class EventIngester:
         self._root_events_cache: dict[str, tuple[int, dict[str, list[dict]]]] = {}
         self._root_events_version: dict[str, int] = {}
         self._root_events_candidate_version: dict[str, int] = {}
+        self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
         return ba_home() / "sessions" / root_id
@@ -668,6 +669,12 @@ class EventIngester:
             render_cache = self._render_seq_by_sid.setdefault(root_id, {})
             if seq > render_cache.get(sid, 0):
                 render_cache[sid] = seq
+            uid = self._extract_uuid(entry.get("data") or {})
+            if uid:
+                latest_cache = self._latest_render_uid_by_sid.setdefault(root_id, {})
+                latest = latest_cache.get(sid)
+                if latest is None or seq >= latest[0]:
+                    latest_cache[sid] = (seq, uid)
         if self._affects_root_events_projection(entry):
             self._root_events_version[root_id] = (
                 self._root_events_version.get(root_id, 0) + 1
@@ -1676,6 +1683,11 @@ class EventIngester:
         *,
         sid_filter: Optional[str] = None,
     ) -> Optional[str]:
+        if sid_filter:
+            latest_by_sid = self._latest_render_uid_by_sid.get(root_id)
+            latest = latest_by_sid.get(sid_filter) if latest_by_sid else None
+            if latest is not None:
+                return latest[1]
         latest: Optional[tuple[int, str]] = None
         for summary in self.message_event_summaries(
             root_id, sid_filter=sid_filter, tail=25,
@@ -1691,6 +1703,8 @@ class EventIngester:
                     if latest is None or seq > latest[0]:
                         latest = (seq, uid)
                     break
+        if latest and sid_filter:
+            self._latest_render_uid_by_sid.setdefault(root_id, {})[sid_filter] = latest
         return latest[1] if latest else None
 
     def ownership_resolutions(self, root_id: str) -> dict[int, str]:
@@ -2021,6 +2035,7 @@ class EventIngester:
                 self._root_events_cache.pop(root_id, None)
                 self._root_events_version.pop(root_id, None)
                 self._root_events_candidate_version.pop(root_id, None)
+                self._latest_render_uid_by_sid.pop(root_id, None)
 
     def close_all(self) -> None:
         # Drain pending background durability before closing handles so

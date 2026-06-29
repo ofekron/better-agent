@@ -42,6 +42,7 @@ _PER_ROOT_STATE_DICTS = [
     "_seq", "_locks", "_seen_uuids", "_seen_uids_only",
     "_max_seq_by_sid", "_seq_offsets", "_next_offset",
     "_summaries_cache", "_full_scan_cache",
+    "_latest_render_uid_by_sid",
 ]
 _PER_ROOT_DICTS = ["_handles", *_PER_ROOT_STATE_DICTS]
 
