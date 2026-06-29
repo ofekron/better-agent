@@ -3662,6 +3662,60 @@ def test_list_extensions_reports_builtin_reconciliation_once() -> None:
         shutil.rmtree(temp_home, ignore_errors=True)
 
 
+def test_list_extensions_reuses_reconciled_store_until_fingerprint_changes() -> None:
+    old_agent_home = os.environ.get("BETTER_AGENT_HOME")
+    old_claude_home = os.environ.get("BETTER_CLAUDE_HOME")
+    temp_home = tempfile.mkdtemp(prefix="ba-ext-reconcile-cache-")
+    original_load_with_changes = extension_store._load_with_changes  # type: ignore[attr-defined]
+    calls = 0
+    try:
+        os.environ["BETTER_AGENT_HOME"] = temp_home
+        os.environ["BETTER_CLAUDE_HOME"] = temp_home
+
+        def counted_load_with_changes():
+            nonlocal calls
+            calls += 1
+            return original_load_with_changes()
+
+        extension_store._load_with_changes = counted_load_with_changes  # type: ignore[attr-defined]
+        extension_store._save(extension_store._blank_store())  # type: ignore[attr-defined]
+
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
+        if calls != 1:
+            raise AssertionError(f"unchanged reconciled store loaded with changes {calls} times")
+
+        data = extension_store._load()  # type: ignore[attr-defined]
+        data["extensions"]["test.cache.invalidate"] = {
+            "manifest": {
+                "id": "test.cache.invalidate",
+                "name": "Cache Invalidate",
+                "version": "1.0.0",
+                "description": "",
+            },
+            "enabled": False,
+            "installed_at": "now",
+            "updated_at": "now",
+            "source": {"type": "local", "install_path": temp_home},
+            "entitlement": {"status": "not_required"},
+        }
+        extension_store._save(data)  # type: ignore[attr-defined]
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
+        if calls != 2:
+            raise AssertionError("store write did not invalidate reconciliation cache")
+    finally:
+        extension_store._load_with_changes = original_load_with_changes  # type: ignore[attr-defined]
+        if old_agent_home is None:
+            os.environ.pop("BETTER_AGENT_HOME", None)
+        else:
+            os.environ["BETTER_AGENT_HOME"] = old_agent_home
+        if old_claude_home is None:
+            os.environ.pop("BETTER_CLAUDE_HOME", None)
+        else:
+            os.environ["BETTER_CLAUDE_HOME"] = old_claude_home
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
 def test_required_marketplace_extension_auto_installs_from_private_repo() -> None:
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     if record is None:
@@ -4341,6 +4395,7 @@ if __name__ == "__main__":
         test_marketplace_extension_can_use_builtin_id_after_uninstall()
         test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record()
         test_list_extensions_reports_builtin_reconciliation_once()
+        test_list_extensions_reuses_reconciled_store_until_fingerprint_changes()
         test_required_marketplace_extension_auto_installs_from_private_repo()
         test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
