@@ -1700,6 +1700,23 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert "_sessions_list_response(\n                    json.dumps(" in route_source
 
 
+def test_session_search_uses_bounded_candidate_window() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _session_search_candidate_limit(")
+    helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "_SESSION_LIST_SEARCH_MIN_CANDIDATES = 200" in source
+    assert "max(offset + limit, _SESSION_LIST_SEARCH_MIN_CANDIDATES)" in helper_source
+
+    route_start = source.index("@app.get(\"/api/sessions\")")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "content_limit=_session_search_candidate_limit(offset, limit)" in route_source
+    assert "content_limit=max(offset + limit, 1)" not in route_source
+    assert "cache_response = not search_query" in route_source
+    assert "_sessions_list_cache_get(cache_key) if cache_response else None" in route_source
+
+
 def test_session_organization_refresh_is_coalesced_background_work() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("async def _broadcast_session_organization_changed(")
