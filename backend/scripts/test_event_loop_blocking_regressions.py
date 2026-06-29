@@ -3694,6 +3694,16 @@ def test_render_hydrate_worker_fingerprint_is_batched() -> None:
     assert "pre_worker_fingerprint is not None" in worker_source
 
 
+def test_render_hydrate_worker_fingerprint_is_batched() -> None:
+    source = (ROOT / "render_tree_hydrate.py").read_text(encoding="utf-8")
+    start = source.index("            pre_worker_fingerprint = (")
+    end = source.index("            for raw in orphan_rows:", start)
+    worker_source = source[start:end]
+    assert "before_worker" not in worker_source
+    assert worker_source.count("_message_timeline_fingerprint(m)") == 2
+    assert "pre_worker_fingerprint is not None" in worker_source
+
+
 def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
