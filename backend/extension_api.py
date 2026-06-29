@@ -19,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 _PROJECTION_RESPONSE_CACHE_TTL_SECONDS = 5.0
 _projection_response_cache: dict[tuple[str, tuple[Any, ...]], tuple[float, bytes]] = {}
+_local_node_id_cache: str | None = None
+
+
+def _local_node_id_or_primary_cached() -> str:
+    global _local_node_id_cache
+    cached = _local_node_id_cache
+    if cached is not None:
+        return cached
+    try:
+        from topology import local_node_id
+        node_id = local_node_id()
+    except Exception:
+        node_id = "primary"
+    _local_node_id_cache = node_id
+    return node_id
 
 
 class InstallExtensionRequest(BaseModel):
@@ -284,15 +299,8 @@ async def _dispatch_machine_nodes_core_backend(
                 "pending_nodes": pending,
             })
     if request.method == "GET" and path == "local_node_id":
-        def _local_node_id_or_primary() -> str:
-            try:
-                from topology import local_node_id
-                return local_node_id()
-            except Exception:
-                return "primary"
-
         with perf.timed("extension.machine_nodes.local_node_id"):
-            node_id = await asyncio.to_thread(_local_node_id_or_primary)
+            node_id = _local_node_id_or_primary_cached()
             return JSONResponse({"node_id": node_id})
     if request.method == "POST" and path.startswith("pending_nodes/"):
         parts = path.split("/")
