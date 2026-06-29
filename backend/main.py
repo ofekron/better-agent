@@ -1,6 +1,7 @@
 """Better Agent — FastAPI backend with WebSocket streaming and REST APIs."""
 
 import asyncio
+import collections
 import copy
 from concurrent.futures import ProcessPoolExecutor
 import faulthandler
@@ -96,7 +97,12 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes],
 ] = {}
+_session_detail_response_cache: collections.OrderedDict[tuple, tuple[float, bytes]] = (
+    collections.OrderedDict()
+)
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
+_SESSION_DETAIL_RESPONSE_TTL_SECONDS = 2.0
+_SESSION_DETAIL_RESPONSE_CACHE_MAX = 16
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.15
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
@@ -271,6 +277,30 @@ def _json_bytes_response(value: dict) -> Response:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
+    return Response(content=content, media_type="application/json")
+
+
+def _session_detail_cache_get(key: tuple) -> Response | None:
+    cached = _session_detail_response_cache.get(key)
+    if cached is None:
+        return None
+    if time.monotonic() - cached[0] > _SESSION_DETAIL_RESPONSE_TTL_SECONDS:
+        _session_detail_response_cache.pop(key, None)
+        return None
+    _session_detail_response_cache.move_to_end(key)
+    return Response(content=cached[1], media_type="application/json")
+
+
+def _session_detail_cache_put(key: tuple, value: dict) -> Response:
+    while len(_session_detail_response_cache) >= _SESSION_DETAIL_RESPONSE_CACHE_MAX:
+        _session_detail_response_cache.popitem(last=False)
+    content = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _session_detail_response_cache[key] = (time.monotonic(), content)
     return Response(content=content, media_type="application/json")
 
 
@@ -4856,6 +4886,33 @@ def _session_detail_snapshot_sync(
     return tree
 
 
+def _session_detail_response_cache_key_sync(
+    session_id: str,
+    *,
+    msg_limit: int,
+    exchange_count: Optional[int],
+) -> tuple | None:
+    root_id = session_manager._root_id_for(session_id)
+    if not isinstance(root_id, str):
+        return None
+    has_events, barrier_seq, max_context = _session_event_meta(root_id)
+    tree_key = session_manager.root_tree_stub_cache_key(
+        session_id,
+        msg_limit=msg_limit,
+        exchange_count=exchange_count,
+    )
+    if tree_key is None:
+        return None
+    return (
+        session_id,
+        tree_key,
+        _session_event_file_fingerprint(root_id),
+        has_events,
+        barrier_seq,
+        tuple(sorted(max_context.items())),
+    )
+
+
 def _floor_events_from_seq(
     app_session_id: str,
     requested_from_seq: int,
@@ -4903,6 +4960,22 @@ async def get_session(
     if virtual:
         return virtual
 
+    cache_key = await asyncio.to_thread(
+        _session_detail_response_cache_key_sync,
+        session_id,
+        msg_limit=msg_limit,
+        exchange_count=exchange_count,
+    )
+    if cache_key is not None:
+        cached = _session_detail_cache_get(cache_key)
+        if cached is not None:
+            root_id = cache_key[1][0]
+            if cache_key[3] and isinstance(root_id, str):
+                await asyncio.to_thread(_session_reconcile_snapshot_and_schedule, root_id)
+            perf.record("sessions.detail.response_cache.hit", 1.0)
+            return cached
+    perf.record("sessions.detail.response_cache.miss", 1.0)
+
     worker_start = time.perf_counter()
     tree = await asyncio.to_thread(
         _session_detail_snapshot_sync,
@@ -4913,6 +4986,8 @@ async def get_session(
     perf.record("sessions.detail.worker", (time.perf_counter() - worker_start) * 1000)
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    if cache_key is not None:
+        return _session_detail_cache_put(cache_key, tree)
     return _json_bytes_response(tree)
 
 

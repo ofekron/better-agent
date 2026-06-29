@@ -1936,6 +1936,24 @@ class SessionManager:
             exchange_count=exchange_count, tree=True,
         )
 
+    def root_tree_stub_cache_key(
+        self,
+        sid: str,
+        *,
+        msg_limit: int = 50,
+        exchange_count: Optional[int] = None,
+    ) -> Optional[tuple]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            root = self._load_root(sid, hydrate_events=False)
+            if root is None:
+                return None
+            return self._tree_stub_cache_key(
+                root, rid, msg_limit, exchange_count,
+            )
+
     def get_message_full(
         self, node_sid: str, msg_id: str,
     ) -> Optional[dict]:
