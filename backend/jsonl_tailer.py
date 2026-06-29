@@ -330,7 +330,7 @@ class _FileTailFollower:
         try:
             while not self._stop.is_set():
                 try:
-                    size = self._path.stat().st_size
+                    size = await self._stat_size()
                 except OSError:
                     await self._wait_tick()
                     continue
@@ -338,10 +338,7 @@ class _FileTailFollower:
                     pos, skip = 0, self._skip
                 if size > pos:
                     try:
-                        with open(self._path, "rb") as f:
-                            f.seek(pos)
-                            data = f.read()
-                            pos = f.tell()
+                        data, pos = await self._read_from(pos)
                     except OSError:
                         await self._wait_tick()
                         continue
@@ -358,6 +355,31 @@ class _FileTailFollower:
                 await self._wait_tick()
         finally:
             self.stdout.feed_eof()
+            self.returncode = 0
+
+    async def _stat_size(self) -> int:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _CURSOR_EXECUTOR,
+            self._stat_size_sync,
+        )
+
+    def _stat_size_sync(self) -> int:
+        return self._path.stat().st_size
+
+    async def _read_from(self, pos: int) -> tuple[bytes, int]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _CURSOR_EXECUTOR,
+            self._read_from_sync,
+            pos,
+        )
+
+    def _read_from_sync(self, pos: int) -> tuple[bytes, int]:
+        with open(self._path, "rb") as f:
+            f.seek(pos)
+            data = f.read()
+            return data, f.tell()
 
     async def _wait_tick(self) -> None:
         try:
@@ -404,7 +426,7 @@ class _AppendOnlyByteFollower:
         try:
             while not self._stop.is_set():
                 try:
-                    st = self._path.stat()
+                    st = await self._stat()
                 except OSError:
                     await self._wait_tick()
                     continue
@@ -420,10 +442,7 @@ class _AppendOnlyByteFollower:
                     return
                 if st.st_size > pos:
                     try:
-                        with open(self._path, "rb") as f:
-                            f.seek(pos)
-                            data = f.read()
-                            pos = f.tell()
+                        data, pos = await self._read_from(pos)
                     except OSError:
                         await self._wait_tick()
                         continue
@@ -433,6 +452,27 @@ class _AppendOnlyByteFollower:
         finally:
             self.stdout.feed_eof()
             self.returncode = 0
+
+    async def _stat(self) -> os.stat_result:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _CURSOR_EXECUTOR,
+            self._path.stat,
+        )
+
+    async def _read_from(self, pos: int) -> tuple[bytes, int]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _CURSOR_EXECUTOR,
+            self._read_from_sync,
+            pos,
+        )
+
+    def _read_from_sync(self, pos: int) -> tuple[bytes, int]:
+        with open(self._path, "rb") as f:
+            f.seek(pos)
+            data = f.read()
+            return data, f.tell()
 
     async def _wait_tick(self) -> None:
         try:
