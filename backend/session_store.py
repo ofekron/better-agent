@@ -167,6 +167,8 @@ _index_build_lock = threading.Lock()
 _negative_root_resolve_cache: dict[str, tuple[int, int, int]] = {}
 _negative_root_resolve_until: dict[str, float] = {}
 _negative_root_resolve_global_until = 0.0
+_index_refresh_attempt_until: dict[tuple[int, int, int], float] = {}
+_index_refresh_global_attempt_until = 0.0
 _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 _DIR_FINGERPRINT_CACHE_TTL_SECONDS = 0.10
 _dir_fingerprint_cache: tuple[float, tuple[int, int, int]] | None = None
@@ -210,10 +212,12 @@ _MIGRATED_ROOT_CACHE_MAX = 32
 
 
 def _clear_negative_root_resolve_cache() -> None:
-    global _negative_root_resolve_global_until
+    global _negative_root_resolve_global_until, _index_refresh_global_attempt_until
     _negative_root_resolve_cache.clear()
     _negative_root_resolve_until.clear()
+    _index_refresh_attempt_until.clear()
     _negative_root_resolve_global_until = 0.0
+    _index_refresh_global_attempt_until = 0.0
 
 
 def _copy_jsonish(value):
@@ -2011,6 +2015,7 @@ def _refresh_index(
     run-recovery integrating runs whose sessions were deleted) would
     otherwise re-parse the whole multi-hundred-MB sessions dir once
     per miss."""
+    global _index_refresh_global_attempt_until
     _ensure_dir()
     if live_fp is None:
         live_fp = _dir_fingerprint()
@@ -2020,6 +2025,10 @@ def _refresh_index(
     with _index_build_lock:
         with _index_lock:
             if _index_fingerprint is not None and live_fp == _index_fingerprint:
+                return live_fp
+            if _index_refresh_global_attempt_until > time.monotonic():
+                return live_fp
+            if _index_refresh_attempt_until.get(live_fp, 0.0) > time.monotonic():
                 return live_fp
         for _ in range(2):
             with perf.timed("store.session.index.refresh.build"):
@@ -2032,8 +2041,14 @@ def _refresh_index(
                 if _index_fingerprint is not None and _index_fingerprint == fp:
                     return fp
                 _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
+                _index_refresh_attempt_until.pop(fp, None)
+                _index_refresh_global_attempt_until = 0.0
             _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
             return fp
+        with _index_lock:
+            until = time.monotonic() + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
+            _index_refresh_attempt_until[live_fp] = until
+            _index_refresh_global_attempt_until = until
     return live_fp
 
 
