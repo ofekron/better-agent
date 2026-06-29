@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import _test_home
@@ -340,6 +341,35 @@ def test_list_all_summary_cache_skips_full_payload_copy() -> bool:
     return any(session.get("id") == sid for session in cached)
 
 
+def test_list_all_returns_cached_projection_when_store_lock_busy() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:busy-lock"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Busy lock",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    if not any(session.get("id") == sid for session in virtual_session_store.list_all()):
+        print("  virtual session missing before busy-lock test")
+        return False
+    if not virtual_session_store._lock.acquire(blocking=False):
+        print("  virtual store lock unexpectedly busy before test")
+        return False
+    try:
+        started = time.perf_counter()
+        cached = virtual_session_store.list_all()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+    finally:
+        virtual_session_store._lock.release()
+    if elapsed_ms > 50.0:
+        print(f"  cached list waited behind busy lock: {elapsed_ms:.2f}ms")
+        return False
+    return any(session.get("id") == sid for session in cached)
+
+
 def test_sdk_namespaces_short_virtual_ids_for_all_methods() -> bool:
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     client = SdkClient(extension_id=ext, internal_token="token")
@@ -430,6 +460,7 @@ TESTS = [
     ("concurrent appends are not lost", test_concurrent_appends_are_not_lost),
     ("list_all cache is isolated + invalidated", test_list_all_cache_isolated_and_invalidated),
     ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
+    ("list_all returns cached projection when store lock busy", test_list_all_returns_cached_projection_when_store_lock_busy),
     ("SDK namespaces short virtual ids for all methods", test_sdk_namespaces_short_virtual_ids_for_all_methods),
     ("internal API rejects extension without session_state", test_internal_api_rejects_extension_without_session_state),
     ("synthetic injection queues normal turn", test_synthetic_injection_queues_normal_turn),
