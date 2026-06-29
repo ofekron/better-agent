@@ -2316,6 +2316,13 @@ def test_project_update_total_is_maintained_projection() -> None:
     assert '"project_update_counts_warm"' in startup_source
     assert "project_update_store.warm_counts" in startup_source
     assert 'name="startup-project-update-counts-warm"' in startup_source
+    helper_start = startup_source.index("def _warm_pending_node_projection()")
+    helper_end = startup_source.index("asyncio.create_task(", helper_start)
+    helper_source = startup_source[helper_start:helper_end]
+    assert "node_link.public_pending_nodes()" in helper_source
+    assert '"pending_node_projection_warm"' in startup_source
+    assert '"startup_tasks.pending_node_projection_warm"' in startup_source
+    assert 'name="startup-pending-node-projection-warm"' in startup_source
 
 
 def test_builtin_feature_enabled_has_cached_projection() -> None:
