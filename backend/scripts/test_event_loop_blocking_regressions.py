@@ -164,6 +164,25 @@ def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
     assert "with session_manager.batch(persist_to):" not in callback_source
 
 
+def test_provider_context_runtime_discovery_runs_off_loop() -> None:
+    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    start = source.index("        runtime_capability_contexts = await asyncio.to_thread(")
+    end = source.index("        transient_attempt = 0", start)
+    initial_source = source[start:end]
+    refresh_start = source.index("        async def _refresh_provider_context()")
+    refresh_end = source.index("        def _start_selector_change_continuation(", refresh_start)
+    refresh_source = source[refresh_start:refresh_end]
+    loop_start = source.index("        while True:", refresh_end)
+    loop_end = source.index("            if cancel_event.is_set():", loop_start)
+    loop_source = source[loop_start:loop_end]
+    for block in (initial_source, refresh_source):
+        assert "runtime_capability_contexts = await asyncio.to_thread(" in block
+        assert "runtime_skill_contexts," in block
+        assert "dynamic_capability_contexts = await asyncio.to_thread(" in block
+        assert "extension_audit_context," in block
+    assert "await _refresh_provider_context()" in loop_source
+
+
 def test_worker_panel_mutations_skip_cold_event_hydration() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     run_start = source.index("    def _run(")
@@ -2933,6 +2952,7 @@ if __name__ == "__main__":
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
+    test_provider_context_runtime_discovery_runs_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_user_prefs_uses_cached_path_for_hot_reads()

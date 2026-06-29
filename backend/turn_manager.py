@@ -1703,11 +1703,13 @@ class TurnManager:
         session_capability_contexts = (
             _session_rec or {}
         ).get("capability_contexts") or []
-        runtime_capability_contexts = runtime_skill_contexts(
+        runtime_capability_contexts = await asyncio.to_thread(
+            runtime_skill_contexts,
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
-        dynamic_capability_contexts = extension_audit_context(
+        dynamic_capability_contexts = await asyncio.to_thread(
+            extension_audit_context,
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
@@ -1809,7 +1811,7 @@ class TurnManager:
                 return True
             return False
 
-        def _refresh_provider_context() -> None:
+        async def _refresh_provider_context() -> None:
             nonlocal _session_rec, reasoning_effort, provider, provider_kind
             nonlocal _session_rec_chain, provider_run_config
             nonlocal session_capability_contexts, runtime_capability_contexts
@@ -1824,11 +1826,13 @@ class TurnManager:
             _session_rec_chain = _session_rec.get("continuation_chain") or []
             provider_run_config = _session_rec.get("provider_run_config") or None
             session_capability_contexts = _session_rec.get("capability_contexts") or []
-            runtime_capability_contexts = runtime_skill_contexts(
+            runtime_capability_contexts = await asyncio.to_thread(
+                runtime_skill_contexts,
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
-            dynamic_capability_contexts = extension_audit_context(
+            dynamic_capability_contexts = await asyncio.to_thread(
+                extension_audit_context,
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
@@ -1867,7 +1871,7 @@ class TurnManager:
             return continuation.chain_depth
 
         while True:
-            _refresh_provider_context()
+            await _refresh_provider_context()
             if cancel_event.is_set():
                 # Displaced before spawn (pending-cancel consumed by
                 # run_turn, or cancel landed between retries) — don't
