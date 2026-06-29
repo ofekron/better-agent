@@ -2154,7 +2154,7 @@ class SessionManager:
         rid: str,
         msg_limit: int,
         exchange_count: Optional[int],
-    ) -> tuple[str, int, Optional[int], tuple, int]:
+    ) -> tuple[str, int, Optional[int], tuple]:
         from event_ingester import event_ingester
 
         node_keys = []
@@ -2183,17 +2183,12 @@ class SessionManager:
                     _visit(child)
 
         _visit(root)
-        root_events_version = int(
-            getattr(event_ingester, "_root_events_version", {}).get(rid, 0)
-            or 0
-        )
         recovering_key = tuple(sorted(self._recovering_msg_ids))
         return (
             rid,
             msg_limit,
             exchange_count,
             tuple(node_keys) + (recovering_key,),
-            root_events_version,
         )
 
     def _build_stubbed_tree(
@@ -2215,6 +2210,7 @@ class SessionManager:
             perf.record("session.stubbed_tree_cache.hit", 1.0)
             self._tree_stub_cache.move_to_end(cache_key)
             tree = _copy_jsonish(cached)
+            self._attach_root_events_to_stubbed_tree(tree, rid)
             return (tree, cache_key) if return_cache_key else tree
         perf.record("session.stubbed_tree_cache.miss", 1.0)
 
@@ -2226,10 +2222,6 @@ class SessionManager:
             ]
             return out
         tree = _copy_node(root)
-        from event_ingester import event_ingester
-        root_events_start = time.perf_counter()
-        root_events_by_sid = event_ingester.root_events_by_sid(rid)
-        root_events_ms = (time.perf_counter() - root_events_start) * 1000
         attached = 0
 
         def _attach(node_src: dict, node_dst: dict) -> None:
@@ -2270,9 +2262,6 @@ class SessionManager:
                         "has_older": has_older,
                     }
                     node_dst["next_seq"] = snapshot["next_seq"]
-                root_events = root_events_by_sid.get(node_sid) or []
-                if root_events:
-                    node_dst["root_events"] = root_events
             for f_src, f_dst in zip(
                 node_src.get("forks") or [],
                 node_dst.get("forks") or [],
@@ -2280,15 +2269,40 @@ class SessionManager:
                 _attach(f_src, f_dst)
         _attach(root, tree)
         self._stamp_recovering_tree(tree)
-        if root_events_ms >= 20:
-            logger.info(
-                "stubbed_tree %s: nodes=%d root_events_sids=%d root_events=%.1fms",
-                rid[:8], attached, len(root_events_by_sid), root_events_ms,
-            )
         self._tree_stub_cache[cache_key] = _copy_jsonish(tree)
         if len(self._tree_stub_cache) > self._tree_stub_cache_max:
             self._tree_stub_cache.popitem(last=False)
+        self._attach_root_events_to_stubbed_tree(tree, rid)
         return (tree, cache_key) if return_cache_key else tree
+
+    def _attach_root_events_to_stubbed_tree(self, tree: dict, rid: str) -> None:
+        from event_ingester import event_ingester
+
+        root_events_start = time.perf_counter()
+        root_events_by_sid = event_ingester.root_events_by_sid(rid)
+        root_events_ms = (time.perf_counter() - root_events_start) * 1000
+        attached = 0
+
+        def _visit(node: dict) -> None:
+            nonlocal attached
+            node_sid = node.get("id")
+            if isinstance(node_sid, str):
+                root_events = root_events_by_sid.get(node_sid) or []
+                if root_events:
+                    node["root_events"] = root_events
+                    attached += 1
+                else:
+                    node.pop("root_events", None)
+            for child in node.get("forks") or []:
+                if isinstance(child, dict):
+                    _visit(child)
+
+        _visit(tree)
+        if root_events_ms >= 20:
+            logger.info(
+                "stubbed_tree %s: root_events_sids=%d attached=%d root_events=%.1fms",
+                rid[:8], len(root_events_by_sid), attached, root_events_ms,
+            )
 
     def _compute_messages_snapshot(
         self, node_sid: str, rid: str, node: dict,
