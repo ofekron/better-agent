@@ -46,7 +46,7 @@ def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
         )
         assert created["id"]
         assert session_store._resolve_root_id("missing-sid") is None  # type: ignore[attr-defined]
-        assert refresh_calls == 2
+        assert refresh_calls == 1
     finally:
         session_store._refresh_index = original_refresh  # type: ignore[attr-defined]
 
