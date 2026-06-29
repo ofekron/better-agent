@@ -6123,7 +6123,19 @@ def _session_detail_snapshot_sync(
         perf.record("sessions.detail.file_path", (time.perf_counter() - file_path_start) * 1000)
     if detail_cache_key is not None:
         cache_marker_start = time.perf_counter()
-        tree["_detail_response_cache_key_parts"] = detail_cache_key
+        tree["_detail_response_cache_key_parts"] = (
+            detail_cache_key[0],
+            detail_cache_key[1],
+            _session_event_file_fingerprint(root_id),
+            has_events,
+            barrier_seq,
+            tuple(sorted(_session_detail_watermarks(
+                root_id,
+                has_events,
+                barrier_seq,
+                max_context,
+            ).items())),
+        )
         perf.record("sessions.detail.cache_marker", (time.perf_counter() - cache_marker_start) * 1000)
     return tree
 
@@ -6321,24 +6333,8 @@ async def get_session(
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     if cache_key is None:
         cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)
-        root_id = tree.get("id")
-        if (
-            isinstance(cache_key_parts, tuple)
-            and len(cache_key_parts) == 2
-            and isinstance(root_id, str)
-        ):
-            has_events, barrier_seq, max_context = _session_event_meta(root_id)
-            watermarks = _session_detail_watermarks(
-                root_id, has_events, barrier_seq, max_context,
-            )
-            cache_key = (
-                cache_key_parts[0],
-                cache_key_parts[1],
-                _session_event_file_fingerprint(root_id),
-                has_events,
-                barrier_seq,
-                tuple(sorted(watermarks.items())),
-            )
+        if isinstance(cache_key_parts, tuple) and len(cache_key_parts) == 6:
+            cache_key = cache_key_parts
     else:
         tree.pop("_detail_response_cache_key_parts", None)
     if cache_key is not None:

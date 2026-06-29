@@ -1711,6 +1711,13 @@ def test_session_detail_has_split_perf_timers() -> None:
     assert "await _run_hot_path(\n        \"sessions.detail.worker\"" not in route_source
     assert "session_manager.get_root_tree_stubbed" not in route_source
     assert 'perf.record("sessions.detail.worker"' not in route_source
+    miss_cache_start = route_source.index(
+        'cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)'
+    )
+    miss_cache_end = route_source.index("    else:", miss_cache_start)
+    miss_cache_source = route_source[miss_cache_start:miss_cache_end]
+    assert "_session_event_meta(" not in miss_cache_source
+    assert "_session_event_file_fingerprint(" not in miss_cache_source
     assert "return _json_bytes_response(tree)" in route_source
     json_response_start = source.index("def _json_bytes_response(")
     json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
