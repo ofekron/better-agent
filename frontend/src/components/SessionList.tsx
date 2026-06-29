@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as Re
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
-import type { OrchestrationMode, Provider, RequirementTag, Session, SessionFolder, SessionTag } from "../types";
+import type { OrchestrationMode, Provider, RequirementTag, Session, SessionFolder, SessionTag, WorkerCreationPolicy, WorkerInfo } from "../types";
 import {
   API,
   createSessionFolder,
@@ -54,6 +54,8 @@ interface Props {
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  teamWorkersBySession?: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   /** Opens the session-level Details panel (monitoring state, provenance,
    * process tree). */
   onDetails: (id: string) => void;
@@ -224,6 +226,8 @@ interface NodeProps {
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  teamWorkersBySession: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
   onResumeEng?: (parentSessionId: string) => void;
   folders: SessionFolder[];
@@ -264,6 +268,8 @@ function SessionNode({
   onContextMenuOpen,
   onArchive,
   onWorkerEligible,
+  teamWorkersBySession,
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   folders,
@@ -284,10 +290,12 @@ function SessionNode({
   const { show: showSheet } = useMobileActionSheet();
   const mode = session.orchestration_mode ?? "team";
   const isManager = mode === "team";
+  const teamWorkers = isManager ? (teamWorkersBySession[session.id] ?? []) : [];
   const msgs = session.message_count ?? session.messages?.length ?? 0;
   const kids = childrenByParent.get(session.id) ?? [];
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(session.name);
+  const [teamWorkersOpen, setTeamWorkersOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   // Drop highlight when another session is dragged onto this row. A row
   // only accepts drops while in folder view and when it belongs to a
@@ -689,9 +697,65 @@ function SessionNode({
         </div>
         <div className="session-item-meta">
           {orchestrationLabel(t, mode)}
-          {isManager && ` | ${session.worker_count ?? 0} ${t("session.workers")}`}
+          {isManager && ` | ${teamWorkers.length} ${t("session.workers")}`}
           {session.rearranger_enabled && " | rearranger"}
         </div>
+        {isManager && (
+          <div className="session-team-summary" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="session-team-toggle"
+              aria-expanded={teamWorkersOpen}
+              aria-label={teamWorkersOpen ? t("session.collapseTeamWorkers") : t("session.expandTeamWorkers")}
+              onClick={() => setTeamWorkersOpen((value) => !value)}
+            >
+              <Icon name={teamWorkersOpen ? "chevron-down" : "chevron-right"} size={12} />
+              <span>{t("session.teamWorkers")}</span>
+              <span className="session-team-count">{teamWorkers.length}</span>
+            </button>
+            {teamWorkersOpen && (
+              <div className="session-team-details">
+                <label className="session-team-policy">
+                  <span>{t("session.workerCreationPolicy")}</span>
+                  <select
+                    value={session.worker_creation_policy ?? "ask"}
+                    onChange={(event) =>
+                      onWorkerCreationPolicyChange?.(
+                        session.id,
+                        event.target.value as WorkerCreationPolicy,
+                      )
+                    }
+                    disabled={!onWorkerCreationPolicyChange}
+                  >
+                    <option value="ask">{t("session.workerPolicyAsk")}</option>
+                    <option value="approve">{t("session.workerPolicyApprove")}</option>
+                    <option value="deny">{t("session.workerPolicyDeny")}</option>
+                  </select>
+                </label>
+                {teamWorkers.length ? (
+                  <div className="session-team-workers">
+                    {teamWorkers.map((worker) => (
+                      <div
+                        key={worker.agent_session_id}
+                        className="session-team-worker-row"
+                      >
+                        <span className="session-team-worker-name">{worker.name}</span>
+                        {worker.team_role && (
+                          <span className="session-team-worker-role">{worker.team_role}</span>
+                        )}
+                        <span className={`worker-mode-badge worker-mode-${worker.orchestration_mode}`}>
+                          {worker.orchestration_mode}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="session-team-workers-empty">{t("session.noTeamWorkers")}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {requirementTags.length > 0 && (
           <div
             className="session-requirement-tags"
@@ -922,6 +986,8 @@ function SessionNode({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -962,6 +1028,8 @@ interface FolderSectionProps {
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  teamWorkersBySession: Record<string, WorkerInfo[]>;
+  onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
   onResumeEng?: (parentSessionId: string) => void;
   folders: SessionFolder[];
@@ -1000,6 +1068,8 @@ function FolderSection({
   onContextMenuOpen,
   onArchive,
   onWorkerEligible,
+  teamWorkersBySession,
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   folders,
@@ -1073,6 +1143,8 @@ function FolderSection({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -1111,6 +1183,8 @@ function FolderSection({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          teamWorkersBySession={teamWorkersBySession}
+          onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
           onResumeEng={onResumeEng}
           folders={folders}
@@ -1147,6 +1221,8 @@ export function SessionList({
   onPin,
   onArchive,
   onWorkerEligible,
+  teamWorkersBySession = {},
+  onWorkerCreationPolicyChange,
   onDetails,
   onResumeEng,
   onAiSearch,
@@ -2096,6 +2172,8 @@ export function SessionList({
       onContextMenuOpen={openSessionContextMenu}
       onArchive={onArchive}
       onWorkerEligible={onWorkerEligible}
+      teamWorkersBySession={teamWorkersBySession}
+      onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
       onDetails={onDetails}
       onResumeEng={onResumeEng}
       folders={folders}
@@ -2693,6 +2771,8 @@ export function SessionList({
             onContextMenuOpen={openSessionContextMenu}
             onArchive={onArchive}
             onWorkerEligible={onWorkerEligible}
+            teamWorkersBySession={teamWorkersBySession}
+            onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
             onDetails={onDetails}
             onResumeEng={onResumeEng}
             folders={folders}

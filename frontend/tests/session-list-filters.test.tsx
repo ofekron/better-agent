@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "../src/components/SessionList";
 import type { Provider, Session } from "../src/types";
-import { makeSession } from "./fixtures";
+import { makeSession, makeWorker } from "./fixtures";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -138,6 +138,42 @@ describe("SessionList advanced filters", () => {
     fireEvent.click(screen.getByRole("button", { name: "session.unpinTitle" }));
 
     expect(onPin).toHaveBeenCalledWith("pinned", false);
+  });
+
+  it("embeds bound workers and policy controls inside team session rows", () => {
+    const onWorkerCreationPolicyChange = vi.fn();
+    renderList(
+      [
+        makeSession({
+          id: "team-session",
+          name: "Team session",
+          orchestration_mode: "team",
+          worker_creation_policy: "ask",
+        }),
+      ],
+      {
+        teamWorkersBySession: {
+          "team-session": [
+            makeWorker({
+              agent_session_id: "worker-1",
+              name: "Reviewer",
+              orchestration_mode: "native",
+              team_role: "reviewer",
+            }),
+          ],
+        },
+        onWorkerCreationPolicyChange,
+      },
+    );
+
+    const row = rowBySessionId("team-session");
+    expect(row.textContent).toContain("1 session.workers");
+    fireEvent.click(within(row).getByRole("button", { name: "session.expandTeamWorkers" }));
+
+    expect(row.textContent).toContain("Reviewer");
+    expect(row.textContent).toContain("reviewer");
+    fireEvent.change(within(row).getByRole("combobox"), { target: { value: "deny" } });
+    expect(onWorkerCreationPolicyChange).toHaveBeenCalledWith("team-session", "deny");
   });
 
   it("splits advanced search filters into global and project sections", async () => {

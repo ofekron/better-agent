@@ -124,44 +124,29 @@ describe("workers panel actions", () => {
     expect(row.textContent).toContain("delegations");
   });
 
-  it("workers panel groups tagged workers into collapsible pools", async () => {
+  it("workers panel renders every worker in one flat list", async () => {
     const h = renderPanel([
       makeWorker({ agent_session_id: "w1", name: "Reviewer A", tags: ["review"] }),
       makeWorker({ agent_session_id: "w2", name: "Reviewer B", tags: ["review"] }),
       makeWorker({ agent_session_id: "w3", name: "Builder", tags: ["build"] }),
-    ]);
-    await settle();
-
-    expect(h.container.textContent).toContain("Pool: review");
-    expect(h.container.textContent).toContain("Pool: build");
-    const reviewHeader = Array.from(h.container.querySelectorAll(".worker-group-header")).find(
-      (el) => el.textContent?.includes("Pool: review"),
-    ) as HTMLElement;
-    fireEvent.click(reviewHeader);
-    expect(h.container.textContent).toContain("Reviewer A");
-    expect(h.container.textContent).toContain("Reviewer B");
-  });
-
-  it("team groups label bound workers separately from available workers", async () => {
-    const bound = makeWorker({ agent_session_id: "w1", name: "Bound reviewer" });
-    const available = makeWorker({ agent_session_id: "w2", name: "Shared builder" });
-    const h = renderPanel([bound, available], {
+    ], {
       teams: [{
         id: "team-1",
         name: "UI team",
         workers: [
-          { ...bound, team_binding: "bound", team_role: "reviewer" },
-          { ...available, team_binding: "available" },
+          makeWorker({ agent_session_id: "w1", name: "Reviewer A", team_binding: "bound" }),
+          makeWorker({ agent_session_id: "w3", name: "Builder", team_binding: "available" }),
         ],
       }],
     });
     await settle();
 
-    const teamHeader = Array.from(h.container.querySelectorAll(".worker-group-header")).find(
-      (el) => el.textContent?.includes("Team: UI team"),
-    ) as HTMLElement;
-    fireEvent.click(teamHeader);
-    expect(h.container.textContent).toContain("bound");
-    expect(h.container.textContent).toContain("available");
+    expect(h.container.querySelectorAll(".worker-row")).toHaveLength(3);
+    expect(h.container.querySelector(".worker-group-header")).toBeNull();
+    expect(h.container.textContent).not.toContain("Pool:");
+    expect(h.container.textContent).not.toContain("Team:");
+    expect(h.container.textContent).toContain("Reviewer A");
+    expect(h.container.textContent).toContain("Reviewer B");
+    expect(h.container.textContent).toContain("Builder");
   });
 });

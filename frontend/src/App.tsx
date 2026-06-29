@@ -102,7 +102,7 @@ import {
 } from "./lib/voiceActivation";
 import { useRoute, sessionPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, statusRankForRow, useSessionMeta } from "./lib/sessionRegistry";
-import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session } from "./types";
+import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
@@ -1576,6 +1576,11 @@ function AppMain({
   const handleProjectsChanged = useCallback(() => {
     refreshProjectsRef.current();
   }, []);
+  const refreshTeamWorkersRef = useRef<() => void>(() => {});
+  const handleWorkersChanged = useCallback(() => {
+    refreshSessions();
+    refreshTeamWorkersRef.current();
+  }, [refreshSessions]);
 
   const [projectUpdatesCounts, setProjectUpdatesCounts] = useState<Record<string, number>>({});
   const setProjectUpdatesCount = useCallback((projectId: string, count: number) => {
@@ -1687,7 +1692,7 @@ function AppMain({
     onProjectUpdatesChanged: (data) => {
       setProjectUpdatesCount(data.project_id, data.unseen_count);
     },
-    onWorkersChanged: refreshSessions,
+    onWorkersChanged: handleWorkersChanged,
     onSessionOrganizationChanged: refreshSessions,
     onProjectMappingsChanged: () => {
       window.dispatchEvent(new CustomEvent("project_mappings_changed"));
@@ -2107,6 +2112,65 @@ function AppMain({
   const [selectedProjectNodeId, setSelectedProjectNodeId] = useState(() => {
     return localStorage.getItem("better-agent-selected-project-node") || "primary";
   });
+  const [teamWorkersBySession, setTeamWorkersBySession] = useState<Record<string, WorkerInfo[]>>({});
+  const refreshTeamWorkers = useCallback(async () => {
+    const targetCwd = currentSession?.cwd || selectedProjectPath || cwd || "";
+    if (!targetCwd) {
+      setTeamWorkersBySession({});
+      return;
+    }
+    try {
+      const response = await fetch(
+        `${extBackendBase("team")}/workers?cwd=${encodeURIComponent(targetCwd)}`,
+        { credentials: "include" },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { teams?: Array<{ root_session_id?: unknown; workers?: unknown }> };
+      const next: Record<string, WorkerInfo[]> = {};
+      for (const team of data.teams ?? []) {
+        if (typeof team.root_session_id !== "string") continue;
+        if (!Array.isArray(team.workers)) continue;
+        const boundWorkers = team.workers.filter((worker): worker is WorkerInfo => {
+          return Boolean(
+            worker &&
+            typeof worker === "object" &&
+            "agent_session_id" in worker &&
+            (worker as WorkerInfo).team_binding === "bound",
+          );
+        });
+        next[team.root_session_id] = boundWorkers;
+      }
+      setTeamWorkersBySession(next);
+    } catch {
+      setTeamWorkersBySession({});
+    }
+  }, [currentSession?.cwd, selectedProjectPath, cwd]);
+  useEffect(() => {
+    refreshTeamWorkersRef.current = () => {
+      void refreshTeamWorkers();
+    };
+    return () => {
+      refreshTeamWorkersRef.current = () => {};
+    };
+  }, [refreshTeamWorkers]);
+  useEffect(() => {
+    void refreshTeamWorkers();
+  }, [refreshTeamWorkers]);
+  const updateWorkerCreationPolicy = useCallback(async (
+    sessionId: string,
+    policy: WorkerCreationPolicy,
+  ) => {
+    const response = await fetch(
+      `${API}/api/sessions/${encodeURIComponent(sessionId)}/worker_creation_policy`,
+      {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ worker_creation_policy: policy }),
+      },
+    );
+    if (response.ok) refreshSessions();
+  }, [refreshSessions]);
   const [queuedBySession, setQueuedBySession] = useState<
     Record<string, QueuedBannerState[] | null>
   >({});
@@ -5918,6 +5982,8 @@ function AppMain({
               onUnpinOthers={unpinOtherSessions}
               onArchive={archiveSession}
               onWorkerEligible={toggleWorkerEligible}
+              teamWorkersBySession={teamWorkersBySession}
+              onWorkerCreationPolicyChange={updateWorkerCreationPolicy}
               onDetails={setDetailsSessionId}
               onResumeEng={handleResumeEng}
               onAiSearch={searchSessions}
