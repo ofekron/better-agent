@@ -89,6 +89,16 @@ def _run() -> bool:
         if timer not in upsert_source:
             raise AssertionError(f"missing summary write timer {timer}")
     manager_source = open(session_manager_module.__file__, "r", encoding="utf-8").read()
+    if "threading.Timer" in manager_source:
+        raise AssertionError("persist debounce must not create per-write Timer threads")
+    for expected in (
+        "_persist_deadlines",
+        "_persist_deadline_heap",
+        "def _persist_scheduler_loop(",
+        'name="session-persist-scheduler"',
+    ):
+        if expected not in manager_source:
+            raise AssertionError(f"missing persist scheduler guard {expected}")
     persist_start = manager_source.index("def _persist_root(")
     persist_end = manager_source.index("    def _tail_persist(", persist_start)
     persist_source = manager_source[persist_start:persist_end]

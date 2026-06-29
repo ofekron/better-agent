@@ -27,7 +27,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 def _create_then_mutate() -> None:
     """Create a root, then drive TWO back-to-back `_run`-based mutations.
     The first is the leading edge (arms the window); the second lands
-    inside it — so with a real debounce it queues a deferred Timer."""
+    inside it — so with a real debounce it queues deferred persist work."""
     sess = session_manager.create(
         name="t", model="sonnet", cwd="/tmp/debounce0",
         orchestration_mode="native", source="cli",
@@ -50,12 +50,12 @@ def _reset() -> None:
     session_manager._root_locks.clear()
     session_manager._batches.clear()
     with sm_mod._persist_state_lock:
-        for t in sm_mod._persist_timer.values():
-            t.cancel()
-        sm_mod._persist_timer.clear()
+        sm_mod._persist_deadlines.clear()
+        sm_mod._persist_deadline_heap.clear()
         sm_mod._persist_pending.clear()
         sm_mod._persist_last_at.clear()
         sm_mod._persist_inflight.clear()
+        sm_mod._persist_state_changed.notify_all()
 
 
 def _wait_for_persist_drain(timeout: float = 2.0) -> bool:
@@ -63,7 +63,7 @@ def _wait_for_persist_drain(timeout: float = 2.0) -> bool:
     while time.monotonic() < deadline:
         with sm_mod._persist_state_lock:
             drained = (
-                not sm_mod._persist_timer
+                not sm_mod._persist_deadlines
                 and not sm_mod._persist_pending
                 and not sm_mod._persist_inflight
             )
@@ -72,7 +72,7 @@ def _wait_for_persist_drain(timeout: float = 2.0) -> bool:
         time.sleep(0.005)
     with sm_mod._persist_state_lock:
         return (
-            not sm_mod._persist_timer
+            not sm_mod._persist_deadlines
             and not sm_mod._persist_pending
             and not sm_mod._persist_inflight
         )
@@ -89,7 +89,7 @@ def _run() -> bool:
         _create_then_mutate()
         with sm_mod._persist_state_lock:
             queued = bool(
-                sm_mod._persist_timer
+                sm_mod._persist_deadlines
                 or sm_mod._persist_pending
                 or sm_mod._persist_inflight
             )
@@ -126,7 +126,7 @@ def _run() -> bool:
         results.append((
             "debounce=0 drains async persist work before teardown",
             drained_zero,
-            f"timer={list(sm_mod._persist_timer)} pending={list(sm_mod._persist_pending)} "
+            f"deadlines={list(sm_mod._persist_deadlines)} pending={list(sm_mod._persist_pending)} "
             f"inflight={list(sm_mod._persist_inflight)}",
         ))
         results.append((

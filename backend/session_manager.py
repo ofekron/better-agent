@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import copy
+import heapq
 import logging
 import threading
 import time
@@ -50,8 +51,8 @@ logger = logging.getLogger(__name__)
 # ── Per-root write_full debounce ──────────────────────────────────────
 # Leading-edge debounce around `session_store.write_session_full` for
 # the hot `_persist_root` path. First write of a burst fires
-# immediately; subsequent writes within the window queue + arm a Timer
-# that tail-flushes the latest in-memory state once the window expires.
+# immediately; subsequent writes within the window queue a scheduler
+# deadline that tail-flushes the latest in-memory state once the window expires.
 # Coalesces 10-50 writes/sec/session (token streaming) into ~20 writes/
 # sec at most.
 #
@@ -77,21 +78,61 @@ PERSIST_DEBOUNCE_S = 0.050
 EXTERNAL_RELOAD_POLL_INTERVAL_S = 1.0
 
 _persist_pending: dict[str, dict] = {}
-_persist_timer: dict[str, threading.Timer] = {}
+_persist_deadlines: dict[str, float] = {}
+_persist_deadline_heap: list[tuple[float, str]] = []
 _persist_last_at: dict[str, float] = {}
 _persist_inflight: set[str] = set()
 _persist_state_lock = threading.Lock()
 _persist_state_changed = threading.Condition(_persist_state_lock)
+_persist_scheduler_started = False
 
 
-def _arm_persist_timer_unlocked(root_id: str, delay: float) -> None:
-    old_t = _persist_timer.pop(root_id, None)
-    if old_t is not None:
-        old_t.cancel()
-    t = threading.Timer(max(0.0, delay), manager._tail_persist, args=(root_id,))
-    t.daemon = True
-    _persist_timer[root_id] = t
-    t.start()
+def _arm_persist_deadline_unlocked(root_id: str, delay: float) -> None:
+    global _persist_scheduler_started
+    deadline = time.monotonic() + max(0.0, delay)
+    _persist_deadlines[root_id] = deadline
+    heapq.heappush(_persist_deadline_heap, (deadline, root_id))
+    if not _persist_scheduler_started:
+        _persist_scheduler_started = True
+        t = threading.Thread(
+            target=_persist_scheduler_loop,
+            name="session-persist-scheduler",
+            daemon=True,
+        )
+        t.start()
+    _persist_state_changed.notify_all()
+
+
+def _cancel_persist_deadline_unlocked(root_id: str) -> None:
+    _persist_deadlines.pop(root_id, None)
+    _persist_state_changed.notify_all()
+
+
+def _persist_scheduler_loop() -> None:
+    while True:
+        due: list[str] = []
+        with _persist_state_changed:
+            while True:
+                now = time.monotonic()
+                while _persist_deadline_heap:
+                    deadline, root_id = _persist_deadline_heap[0]
+                    if _persist_deadlines.get(root_id) == deadline:
+                        break
+                    heapq.heappop(_persist_deadline_heap)
+                if not _persist_deadline_heap:
+                    _persist_state_changed.wait()
+                    continue
+                deadline, root_id = _persist_deadline_heap[0]
+                wait_s = deadline - now
+                if wait_s > 0:
+                    _persist_state_changed.wait(timeout=wait_s)
+                    continue
+                heapq.heappop(_persist_deadline_heap)
+                if _persist_deadlines.pop(root_id, None) == deadline:
+                    due.append(root_id)
+                break
+        for root_id in due:
+            manager._tail_persist(root_id)
 
 
 Listener = Callable[[str, dict], None]
@@ -1032,9 +1073,7 @@ class SessionManager:
         # what the user has acked.
         with _persist_state_lock:
             pending = _persist_pending.pop(rid, None)
-            t = _persist_timer.pop(rid, None)
-            if t is not None:
-                t.cancel()
+            _cancel_persist_deadline_unlocked(rid)
         drain_failed = False
         if pending is not None:
             try:
@@ -2475,9 +2514,7 @@ class SessionManager:
             cached = self._roots.pop(root_id, None)
             with _persist_state_lock:
                 _persist_pending.pop(root_id, None)
-                t = _persist_timer.pop(root_id, None)
-            if t is not None:
-                t.cancel()
+                _cancel_persist_deadline_unlocked(root_id)
             if cached is not None:
                 self._drop_cached_root_for_reload(root_id, cached)
             self._root_file_checked_at[root_id] = 0.0
@@ -2559,22 +2596,22 @@ class SessionManager:
             if root_id in _persist_inflight:
                 return
             last = _persist_last_at.get(root_id, 0.0)
-            if root_id in _persist_timer:
+            if root_id in _persist_deadlines:
                 delay = max(0.0, PERSIST_DEBOUNCE_S - (now - last))
-                _arm_persist_timer_unlocked(root_id, delay)
+                _arm_persist_deadline_unlocked(root_id, delay)
                 return
             if now - last >= PERSIST_DEBOUNCE_S:
-                # Leading edge: arm a zero-delay timer that re-acquires
+                # Leading edge: queue a zero-delay scheduler dispatch that re-acquires
                 # the root lock before writing. The caller's lock is
                 # still held → the timer thread blocks on
                 # _lock_for_root until the caller returns, then writes
                 # the latest state. This avoids running json.dump on
                 # the event loop for large (13MB+) session trees.
-                _arm_persist_timer_unlocked(root_id, 0.0)
+                _arm_persist_deadline_unlocked(root_id, 0.0)
             else:
-                # Inside window: queue the live ref + (re)arm tail timer.
+                # Inside window: queue the live ref + (re)arm tail deadline.
                 delay = PERSIST_DEBOUNCE_S - (now - last)
-                _arm_persist_timer_unlocked(root_id, delay)
+                _arm_persist_deadline_unlocked(root_id, delay)
         # Drafts no longer live in the tree, so a tree persist does NOT
         # capture them. Flush the small draft sidecar synchronously when
         # this root has a pending draft (any mutator's persist also
@@ -2612,7 +2649,7 @@ class SessionManager:
                     )
 
     def _tail_persist(self, root_id: str) -> None:
-        """Timer callback. Copies the root under its lock, then writes
+        """Scheduler callback. Copies the root under its lock, then writes
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
         sess = None
@@ -2623,7 +2660,7 @@ class SessionManager:
                         if root_id in _persist_inflight:
                             return
                         pending = _persist_pending.pop(root_id, None)
-                        _persist_timer.pop(root_id, None)
+                        _cancel_persist_deadline_unlocked(root_id)
                         if pending is None:
                             return
                         _persist_inflight.add(root_id)
@@ -2643,10 +2680,10 @@ class SessionManager:
         finally:
             with _persist_state_changed:
                 _persist_inflight.discard(root_id)
-                if root_id in _persist_pending and root_id not in _persist_timer:
+                if root_id in _persist_pending and root_id not in _persist_deadlines:
                     last = _persist_last_at.get(root_id, 0.0)
                     delay = max(0.0, PERSIST_DEBOUNCE_S - (time.monotonic() - last))
-                    _arm_persist_timer_unlocked(root_id, delay)
+                    _arm_persist_deadline_unlocked(root_id, delay)
                 _persist_state_changed.notify_all()
 
     def _drop_pending_persist(self, root_id: str) -> None:
@@ -2654,9 +2691,8 @@ class SessionManager:
         `root_id`. Caller MUST hold `_lock_for_root(root_id)`.
 
         After this returns:
-          - `_persist_pending[rid]` is gone, so even a Timer callback
-            that already started executing (cancel() is a no-op once
-            it's left the waiting stage) will find `sess is None`
+          - `_persist_pending[rid]` is gone, so even a scheduler dispatch
+            that already started executing will find `sess is None`
             inside its inner check and return without writing.
           - Even if a queued callback is blocked on `_lock_for_root`
             waiting for the caller to release, it sees the popped
@@ -2665,9 +2701,7 @@ class SessionManager:
         from resurrecting the just-deleted session."""
         with _persist_state_lock:
             _persist_pending.pop(root_id, None)
-            t = _persist_timer.pop(root_id, None)
-            if t is not None:
-                t.cancel()
+            _cancel_persist_deadline_unlocked(root_id)
             _persist_last_at.pop(root_id, None)
 
     def flush_pending_persists(self) -> None:
@@ -2690,9 +2724,7 @@ class SessionManager:
                         while rid in _persist_inflight:
                             _persist_state_changed.wait(timeout=1.0)
                         sess = _persist_pending.pop(rid, None)
-                        t = _persist_timer.pop(rid, None)
-                        if t is not None:
-                            t.cancel()
+                        _cancel_persist_deadline_unlocked(rid)
                         if sess is None:
                             break
                         _persist_last_at[rid] = time.monotonic()
@@ -3023,8 +3055,8 @@ class SessionManager:
             return False
         with self._lock_for_root(rid):
             # Cancel any queued tail-flush for this root BEFORE the
-            # delete lands. Otherwise the Timer would fire after the
-            # file is unlinked and `write_session_full` would
+            # delete lands. Otherwise the scheduler could flush after
+            # the file is unlinked and `write_session_full` would
             # `os.replace` a new file at the deleted path, resurrecting
             # the session. Safe under the per-root lock — a callback
             # already mid-execution will block on this lock then find

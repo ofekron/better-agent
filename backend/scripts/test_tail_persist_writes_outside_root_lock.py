@@ -27,7 +27,7 @@ def main() -> int:
     original_write = session_store.write_session_full
     try:
         session_manager_module._persist_pending[root_id] = root
-        session_manager_module._persist_timer[root_id] = None
+        session_manager_module._persist_deadlines[root_id] = 0.0
 
         def assert_unlocked(_sess, *, bump_updated_at=True):
             lock = manager._lock_for_root(root_id)
@@ -42,7 +42,7 @@ def main() -> int:
     finally:
         session_store.write_session_full = original_write
         session_manager_module._persist_pending.pop(root_id, None)
-        session_manager_module._persist_timer.pop(root_id, None)
+        session_manager_module._persist_deadlines.pop(root_id, None)
         shutil.rmtree(os.environ["BETTER_CLAUDE_HOME"], ignore_errors=True)
 
 
