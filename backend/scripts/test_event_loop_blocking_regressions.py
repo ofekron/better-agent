@@ -943,6 +943,16 @@ def test_project_match_rebuild_skips_unchanged_session_state() -> None:
     assert '{"rebuilt": False, "fingerprint": fingerprint}' in worker_source
 
 
+def test_stubbed_tree_cache_key_does_not_scan_message_events() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    key_start = source.index("def _tree_stub_cache_key(")
+    key_end = source.index("def _build_stubbed_tree(", key_start)
+    key_source = source[key_start:key_end]
+    assert "render_seq_by_sid = event_ingester.render_seq_by_sid(rid)" in key_source
+    assert 'msg.get("events")' not in key_source
+    assert "event_shape" not in key_source
+
+
 def test_startup_recovery_defers_cold_runs() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     recover_start = source.index("async def _recover_in_flight_task()")
@@ -1216,6 +1226,7 @@ if __name__ == "__main__":
     test_summary_index_skips_empty_projection_scan()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_project_match_rebuild_skips_unchanged_session_state()
+    test_stubbed_tree_cache_key_does_not_scan_message_events()
     test_startup_recovery_defers_cold_runs()
     test_startup_recovery_gate_opens_before_live_integration()
     test_recovery_dispatch_skips_reconciled_runs_before_owner_read()
