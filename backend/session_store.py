@@ -226,6 +226,11 @@ _index_sidecar_write_queue: queue.Queue[
 ] = queue.Queue(maxsize=1)
 _index_sidecar_write_started = False
 _index_sidecar_write_lock = threading.Lock()
+_summary_sidecar_write_queue: queue.Queue[
+    tuple[str, dict, int | None] | None
+] = queue.Queue(maxsize=256)
+_summary_sidecar_write_started = False
+_summary_sidecar_write_lock = threading.Lock()
 
 
 def _clear_negative_root_resolve_cache() -> None:
@@ -834,12 +839,11 @@ def _upsert_summary(
                     root_mtime_ns=root_mtime_ns,
                 )
         if summary_changed or not sidecar_current:
-            with perf.timed("store.session.summary.sidecar_write"):
-                _write_summary_file(
-                    root["id"],
-                    summary,
-                    root_mtime_ns=root_mtime_ns,
-                )
+            _schedule_summary_sidecar_write(
+                root["id"],
+                summary,
+                root_mtime_ns=root_mtime_ns,
+            )
     except Exception:
         # Summary file write failure is non-fatal — in-memory index is
         # authoritative. Next write will overwrite.
@@ -1140,6 +1144,63 @@ def _write_summary_file(
         except OSError:
             pass
         raise
+
+
+def _ensure_summary_sidecar_writer() -> None:
+    global _summary_sidecar_write_started
+    if _summary_sidecar_write_started:
+        return
+    with _summary_sidecar_write_lock:
+        if _summary_sidecar_write_started:
+            return
+        threading.Thread(
+            target=_summary_sidecar_writer_loop,
+            name="summary-sidecar-writer",
+            daemon=True,
+        ).start()
+        _summary_sidecar_write_started = True
+
+
+def _summary_sidecar_writer_loop() -> None:
+    while True:
+        item = _summary_sidecar_write_queue.get()
+        if item is None:
+            _summary_sidecar_write_queue.task_done()
+            return
+        root_id, summary, root_mtime_ns = item
+        try:
+            with perf.timed("store.session.summary.sidecar_write"):
+                _write_summary_file(
+                    root_id,
+                    summary,
+                    root_mtime_ns=root_mtime_ns,
+                )
+        except Exception:
+            logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
+        finally:
+            _summary_sidecar_write_queue.task_done()
+
+
+def _schedule_summary_sidecar_write(
+    root_id: str,
+    summary: dict,
+    *,
+    root_mtime_ns: int | None = None,
+) -> None:
+    _ensure_summary_sidecar_writer()
+    item = (root_id, _copy_jsonish(summary), root_mtime_ns)
+    try:
+        _summary_sidecar_write_queue.put_nowait(item)
+    except queue.Full:
+        try:
+            _summary_sidecar_write_queue.get_nowait()
+            _summary_sidecar_write_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            _summary_sidecar_write_queue.put_nowait(item)
+        except queue.Full:
+            pass
 
 
 def _summary_index_cache_path() -> Path:
