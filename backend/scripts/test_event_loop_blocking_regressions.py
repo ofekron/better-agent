@@ -1154,6 +1154,8 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_sidebar_payload_cache" in source
     assert "_SIDEBAR_PAYLOAD_CACHE_MAX" in source
+    assert "_sidebar_decorated_cache" in source
+    assert "_SIDEBAR_DECORATED_CACHE_MAX" in source
     start = source.index("def _sidebar_session_payload(")
     end = source.index("def _sidebar_state_snapshot(", start)
     helper_source = source[start:end]
@@ -1161,6 +1163,14 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
     assert "_sidebar_payload_cache.get(cache_key)" in helper_source
     assert "return cached[1]" in helper_source
     assert "_sidebar_payload_cache[cache_key] = (sid, payload)" in helper_source
+    decorate_start = source.index("def _decorate_local_sidebar_sessions(")
+    decorate_end = source.index("def _local_sessions_for_sidebar(", decorate_start)
+    decorate_source = source[decorate_start:decorate_end]
+    assert "decorated_cache_key = (" in decorate_source
+    assert "id(s)," in decorate_source
+    assert "pending_user_input_count," in decorate_source
+    assert "_sidebar_decorated_cache.get(decorated_cache_key)" in decorate_source
+    assert "_sidebar_decorated_cache[decorated_cache_key] = decorated" in decorate_source
 
 
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
