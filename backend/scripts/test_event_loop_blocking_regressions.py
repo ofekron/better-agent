@@ -287,6 +287,22 @@ def test_team_ask_status_writes_run_off_loop() -> None:
     assert "ask_status_store.write_status(" not in ask_source
 
 
+def test_session_detail_reuses_migrated_root_cache() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_migrated_root_cache" in source
+    assert "def _cached_migrated_root(" in source
+    helper_start = source.index("def _cached_migrated_root(")
+    helper_end = source.index("def read_node_kind_record(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "cache_key = (root_id, file_signature)" in helper_source
+    assert "return copy.deepcopy(cached)" in helper_source
+    detail_start = source.index("def get_root_tree(")
+    detail_end = source.index("def _strip_volatile_from_tree(", detail_start)
+    detail_source = source[detail_start:detail_end]
+    assert "_cached_migrated_root(root_id, file_signature, root)" in detail_source
+    assert detail_source.index("_cached_migrated_root(") < detail_source.index("_overlay_drafts(")
+
+
 def test_extension_plain_load_is_read_only() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
     load_start = source.index("def _load()")
@@ -1843,6 +1859,7 @@ if __name__ == "__main__":
     test_publish_event_default_path_skips_temp_ack_subscribers()
     test_delegation_status_writes_run_off_loop()
     test_team_ask_status_writes_run_off_loop()
+    test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
     test_event_ingester_indexes_search_outside_root_lock()

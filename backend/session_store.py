@@ -190,6 +190,9 @@ _markers_by_session: dict[str, dict[str, dict]] = {}
 _markers_lock = threading.Lock()
 _summary_projection_repair_lock = threading.Lock()
 _summary_projection_repair_running = False
+_migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
+_migrated_root_cache_lock = threading.Lock()
+_MIGRATED_ROOT_CACHE_MAX = 32
 _SUMMARY_INDEX_CACHE_VERSION = 1
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
@@ -3171,6 +3174,21 @@ def get_session(session_id: str) -> Optional[dict]:
     return _find_in_tree(root, session_id)
 
 
+def _cached_migrated_root(root_id: str, file_signature: tuple[int, int], root: dict) -> dict:
+    cache_key = (root_id, file_signature)
+    with _migrated_root_cache_lock:
+        cached = _migrated_root_cache.get(cache_key)
+    if cached is not None:
+        with perf.timed("store.session.get_root_tree.migrate.cache_hit"):
+            return copy.deepcopy(cached)
+    migrated = _migrate_and_persist(root)
+    with _migrated_root_cache_lock:
+        if len(_migrated_root_cache) >= _MIGRATED_ROOT_CACHE_MAX:
+            _migrated_root_cache.pop(next(iter(_migrated_root_cache)), None)
+        _migrated_root_cache[cache_key] = copy.deepcopy(migrated)
+    return migrated
+
+
 def read_node_kind_record(root_id: str, sid: str) -> Optional[dict]:
     """Pure, side-effect-free read of just `{"kind": ...}` for node `sid`
     in root `root_id`. NO migration, NO draft overlay, NO disk write —
@@ -3206,7 +3224,7 @@ def get_root_tree(session_id: str) -> Optional[dict]:
         file_signature = _session_file_signature(path)
         root = json.loads(path.read_text(encoding="utf-8"))
     with perf.timed("store.session.get_root_tree.migrate"):
-        root = _migrate_and_persist(root)
+        root = _cached_migrated_root(root_id, file_signature, root)
     with perf.timed("store.session.get_root_tree.index_tree"):
         if session_id != root_id:
             _index_tree(root, file_signature=file_signature)
