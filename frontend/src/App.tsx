@@ -18,6 +18,7 @@ import { useVisualViewport } from "./hooks/useVisualViewport";
 import { useMachines } from "./hooks/useMachines";
 import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { Chat } from "./components/Chat";
+import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
@@ -5976,24 +5977,38 @@ function AppMain({
                   ? t("dirPicker.thisMachine")
                   : selectedProjectNodeId
                 : null;
+            const tabsNode = sessionTabsVisible && sortedOpenSessions.length > 0 ? (
+              <SessionTabs
+                sessions={sortedOpenSessions}
+                providers={providers}
+                sortField={sessionTabsSort}
+                onSelect={handleSelectTab}
+                onClose={handleCloseTab}
+                onCloseOthers={handleCloseOtherTabs}
+                onToggleTopbarPin={handleToggleTopbarPin}
+              />
+            ) : null;
             return (
-              <div className="empty-project">
-                <div className="empty-project-card">
-                  <div className="empty-project-project">{projectLabel}</div>
-                  {machineLabel && (
-                    <div className="empty-project-machine">{machineLabel}</div>
-                  )}
-                  <div className="empty-project-body">
-                    {t("emptyProject.body")}
+              <>
+                {tabsNode}
+                <div className="empty-project">
+                  <div className="empty-project-card">
+                    <div className="empty-project-project">{projectLabel}</div>
+                    {machineLabel && (
+                      <div className="empty-project-machine">{machineLabel}</div>
+                    )}
+                    <div className="empty-project-body">
+                      {t("emptyProject.body")}
+                    </div>
+                    <button
+                      className="empty-project-new-btn"
+                      onClick={() => setNewSessionModalOpen(true)}
+                    >
+                      {t("session.newButton")}
+                    </button>
                   </div>
-                  <button
-                    className="empty-project-new-btn"
-                    onClick={() => setNewSessionModalOpen(true)}
-                  >
-                    {t("session.newButton")}
-                  </button>
                 </div>
-              </div>
+              </>
             );
           }
           const streamBelongsToCurrentSession =
