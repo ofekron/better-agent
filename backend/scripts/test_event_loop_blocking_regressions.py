@@ -1113,8 +1113,10 @@ def test_summary_index_indexes_seen_sidecars_once() -> None:
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
-    assert "seen_cursor_ids = {" in build_source
-    assert "for p in _sessions_dir().glob(\"*.seen.json\")" in build_source
+    assert "seen_cursor_ids: set[str] = set()" in build_source
+    assert "for p in _sessions_dir().iterdir():" in build_source
+    assert ".glob(\"*.summary.json\")" not in build_source
+    assert ".glob(\"*.seen.json\")" not in build_source
     assert "read_seen_cursors(sid) if sid in seen_cursor_ids else {}" in build_source
 
 
