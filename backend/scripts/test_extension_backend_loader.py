@@ -25,6 +25,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 import extension_api  # noqa: E402
 import extension_backend_loader  # noqa: E402
 import extension_store  # noqa: E402
+import project_update_store  # noqa: E402
+from paths import encode_cwd  # noqa: E402
 
 
 def check(condition: bool, message: str) -> None:
@@ -499,6 +501,17 @@ def main() -> int:
         response = client.get(f"/api/extensions/{extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID}/backend/pending_nodes")
         check(response.status_code == 200, "core built-in backend compatibility route returns")
         check(response.json() == {"pending_nodes": []}, "machine-node pending fallback returns empty snapshot")
+        _seed_core_builtin_without_backend(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+        project_id = encode_cwd(str(TMP_HOME))
+        project_update_store.append(project_id, "changed")
+        response = client.post(
+            f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/counts-batch",
+            json={"cwds": [str(TMP_HOME)]},
+        )
+        check(
+            response.status_code == 200 and response.json().get(project_id) == 1,
+            "project-structure core counts-batch route returns unseen count",
+        )
         extension_store.set_enabled(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID, False)
         response = client.get(f"/api/extensions/{extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID}/backend/pending_nodes")
         check(response.status_code == 404, "disabled core built-in compatibility route fails closed")
