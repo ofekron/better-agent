@@ -323,6 +323,16 @@ def test_team_message_validation_uses_lite_session_read() -> None:
     assert "session_manager.get(" not in validation_source
 
 
+def test_session_exists_uses_index_without_cold_root_load() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("    def exists(self, sid: str) -> bool:")
+    end = source.index("    def get_field(", start)
+    exists_source = source[start:end]
+    assert "session_store._resolve_root_id(sid)" in exists_source
+    assert "self._load_root(" not in exists_source
+    assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -1925,6 +1935,7 @@ if __name__ == "__main__":
     test_team_ask_status_writes_run_off_loop()
     test_team_message_context_uses_lite_session_read()
     test_team_message_validation_uses_lite_session_read()
+    test_session_exists_uses_index_without_cold_root_load()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
