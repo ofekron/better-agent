@@ -157,6 +157,10 @@ _SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-detail",
 )
+_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="session-list",
+)
 _REQUIREMENTS_QUERY_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="requirements-query",
@@ -193,6 +197,24 @@ async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _SESSION_DETAIL_EXECUTOR,
+            _call,
+        )
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def _run_session_list_hot_path(name: str, fn, /, *args, **kwargs):
+    queued_at = time.perf_counter()
+    ctx = contextvars.copy_context()
+
+    def _call():
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, *args, **kwargs)
+
+    start = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _SESSION_LIST_EXECUTOR,
             _call,
         )
     finally:
@@ -5075,7 +5097,7 @@ async def get_sessions(
         status_sort=effective_status_sort,
         connected=(),
     ):
-        page_source, total, content_scores = await _run_hot_path(
+        page_source, total, content_scores = await _run_session_list_hot_path(
             "sessions.list.search_local_page.worker",
             _build_local_search_page_for_sidebar,
             offset=offset,
@@ -5087,7 +5109,7 @@ async def get_sessions(
         )
         state_snapshot = None
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_hot_path(
+            page = await _run_session_list_hot_path(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 page_source,
@@ -5113,7 +5135,7 @@ async def get_sessions(
             cache_response=cache_response,
         )
     if not connected:
-        page, total = await _run_hot_path(
+        page, total = await _run_session_list_hot_path(
             "sessions.list.local_page_thread",
             _build_local_sessions_page_for_list,
             **filters,
@@ -5186,7 +5208,7 @@ async def get_sessions(
     else:
         if can_page_remote_local_order:
             with perf.timed("sessions.list.remote.local_order_candidates"):
-                out, local_total = await _run_hot_path(
+                out, local_total = await _run_session_list_hot_path(
                     "sessions.list.remote.local_order_candidates.worker",
                     _local_session_page_for_sidebar_preserving_order,
                     sort_by=effective_sort_by,
@@ -5207,7 +5229,7 @@ async def get_sessions(
                 local_page_candidates = out
         else:
             with perf.timed("sessions.list.local"):
-                out = await _run_hot_path(
+                out = await _run_session_list_hot_path(
                     "sessions.list.local.worker",
                     _local_session_summaries_for_sidebar,
                 )
@@ -5262,7 +5284,7 @@ async def get_sessions(
             if deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions:
                 end = offset + limit
                 with perf.timed("sessions.list.page_decorate"):
-                    page = await _run_hot_path(
+                    page = await _run_session_list_hot_path(
                         "sessions.list.page_decorate.worker",
                         _decorate_local_sidebar_sessions,
                         out[offset:end],
@@ -5365,7 +5387,7 @@ async def get_sessions(
                 limit=limit,
             )
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_hot_path(
+            page = await _run_session_list_hot_path(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 page_source,
@@ -5390,7 +5412,7 @@ async def get_sessions(
     ):
         end = offset + limit
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_hot_path(
+            page = await _run_session_list_hot_path(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 out[offset:end],
@@ -5488,7 +5510,7 @@ async def get_sessions(
     if page_source is None:
         page_source = out[offset:end]
     with perf.timed("sessions.list.page_decorate"):
-        page = await _run_hot_path(
+        page = await _run_session_list_hot_path(
             "sessions.list.page_decorate.worker",
             _decorate_local_sidebar_sessions,
             page_source,
@@ -9804,6 +9826,7 @@ async def on_shutdown():
     except Exception:
         logger.exception("provider poll executor shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
     # before hitting disk — without this drain a clean shutdown would

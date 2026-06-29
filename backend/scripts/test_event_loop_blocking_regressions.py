@@ -2119,18 +2119,24 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
     assert "thread_name_prefix=\"session-detail\"" in source
     assert "async def _run_session_detail_hot_path(" in helper_source
     assert "run_in_executor(\n            _SESSION_DETAIL_EXECUTOR" in helper_source
+    assert "_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"session-list\"" in source
+    assert "async def _run_session_list_hot_path(" in helper_source
+    assert "run_in_executor(\n            _SESSION_LIST_EXECUTOR" in helper_source
     assert 'perf.record(f"{name}.queue_wait"' in helper_source
     assert "perf.record(name," in helper_source
 
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
-    assert "await _run_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
+    assert "await _run_session_list_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
     assert "await asyncio.to_thread(_build_local_sessions_page_for_list" not in route_source
-    assert "await _run_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
+    assert "await _run_session_list_hot_path(\n            \"sessions.list.search_local_page.worker\"" in route_source
+    assert "await _run_session_list_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
     assert "\"sessions.list.page_decorate.worker\"" in route_source
     assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
     assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
+    assert "await _run_hot_path(\n            \"sessions.list." not in route_source
 
 
 def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
