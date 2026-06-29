@@ -140,7 +140,7 @@ describe("ForkSplitView (isolated)", () => {
     h.unmount();
   });
 
-  it("opens one pane in focused view and returns to split view", async () => {
+  it("animates into focused view and returns to split view", async () => {
     const sharedUser = makeUserMsg({ id: "u1", content: "shared", seq: 0 });
     const root: Session = {
       ...makeSession({ id: "root", name: "main" }),
@@ -171,16 +171,22 @@ describe("ForkSplitView (isolated)", () => {
     await act(async () => openButton.click());
 
     expect(focusCalls).toEqual([fork1.id]);
-    expect(h.container.querySelectorAll('[data-testid="fork-pane"]').length).toBe(1);
+    const focusedPanes = h.container.querySelectorAll('[data-testid="fork-pane"]');
+    expect(focusedPanes.length).toBe(3);
     expect(
       h.container.querySelector(`[data-testid="fork-pane"][data-session-id="${fork1.id}"]`),
     ).not.toBeNull();
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(2);
+    expect(
+      (h.container.querySelector('[data-testid="fork-grid"]') as HTMLElement).style.gridTemplateColumns,
+    ).toContain("0fr");
     expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).not.toBeNull();
 
     const back = h.container.querySelector('[data-testid="fork-back-to-split"]') as HTMLButtonElement;
     await act(async () => back.click());
 
     expect(h.container.querySelectorAll('[data-testid="fork-pane"]').length).toBe(3);
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(0);
     expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).toBeNull();
     h.unmount();
   });

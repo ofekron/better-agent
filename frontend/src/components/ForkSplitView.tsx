@@ -259,11 +259,10 @@ export function ForkSplitView({
   // mirrors App.tsx's existing `setFocusedForkId(null)` fallback to
   // root.
   const focusedViewActive = !isMobile && !!focusedViewPane;
+  const focusedViewPaneId = focusedViewPane?.pane.id ?? null;
   const renderedPanes = isMobile
     ? [panes[focusedIdx]].filter(Boolean)
-    : focusedViewPane
-      ? [focusedViewPane]
-      : panes;
+    : panes;
 
   return (
     <div className="fork-split">
@@ -348,8 +347,18 @@ export function ForkSplitView({
       <div
         className={"fork-split-grid" + (focusedViewActive ? " fork-split-grid-focused" : "")}
         style={
-          isMobile || focusedViewActive
+          isMobile
             ? { gridTemplateColumns: "1fr" }
+            : focusedViewActive
+              ? {
+                  gridTemplateColumns: panes
+                    .map(({ pane }) =>
+                      pane.id === focusedViewPaneId
+                        ? "minmax(220px, 1fr)"
+                        : "minmax(0, 0fr)"
+                    )
+                    .join(" "),
+                }
             : {
                 gridTemplateColumns: `repeat(${panes.length}, minmax(220px, 1fr))`,
               }
@@ -360,6 +369,7 @@ export function ForkSplitView({
       >
         {renderedPanes.map(({ pane, msgs, pending, runs }) => {
           const isFocused = pane.id === focusedSessionId;
+          const isFocusedViewHidden = focusedViewActive && pane.id !== focusedViewPaneId;
           const isClosed = !!pane.fork_closed;
           const isRoot = pane.id === tree.id;
           return (
@@ -371,6 +381,7 @@ export function ForkSplitView({
               runs={runs}
               threadColorMap={threadColorMap}
               isFocused={isFocused}
+              isFocusedViewHidden={isFocusedViewHidden}
               isClosed={isClosed}
               isRoot={isRoot}
               onSetFocus={() => onSetFocus(pane.id)}
@@ -413,6 +424,7 @@ interface PaneProps {
   runs: RunInfo[];
   threadColorMap: Map<string, string>;
   isFocused: boolean;
+  isFocusedViewHidden: boolean;
   isClosed: boolean;
   isRoot: boolean;
   onSetFocus: () => void;
@@ -437,6 +449,7 @@ function ForkPane({
   runs,
   threadColorMap,
   isFocused,
+  isFocusedViewHidden,
   isClosed,
   isRoot,
   onSetFocus,
@@ -478,13 +491,20 @@ function ForkPane({
   const className = [
     "fork-pane",
     isFocused ? "fork-pane-focused" : "",
+    isFocusedViewHidden ? "fork-pane-focus-hidden" : "",
     isClosed ? "fork-pane-closed" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <div className={className} data-testid="fork-pane" data-session-id={pane.id}>
+    <div
+      className={className}
+      data-testid="fork-pane"
+      data-session-id={pane.id}
+      aria-hidden={isFocusedViewHidden}
+      inert={isFocusedViewHidden ? true : undefined}
+    >
       <div className="fork-pane-header">
         <span className="fork-pane-label" title={pane.name}>
           {isRoot ? t("fork.original") : pane.name || t("fork.fork")}
