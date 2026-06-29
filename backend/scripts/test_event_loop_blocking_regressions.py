@@ -49,6 +49,19 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
 
 
+def test_delegation_locked_reuses_worker_session_snapshot() -> None:
+    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    locked_start = source.index("async def run_delegation_locked(")
+    locked_end = source.index("    if machine_completion:", locked_start)
+    locked_source = source[locked_start:locked_end]
+    assert "worker_session: dict" in locked_source
+    assert "worker_session_for_path = session_manager.get(worker_agent_session_id)" not in locked_source
+    assert "session_manager.get(worker_agent_session_id)" not in locked_source
+    assert "provider_run_config = worker_session.get(\"provider_run_config\")" in locked_source
+    assert "capability_contexts = worker_session.get(\"capability_contexts\")" in locked_source
+    assert "reasoning_effort = worker_session.get(\"reasoning_effort\")" in locked_source
+
+
 def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
     start = source.index("def prepare_provider_event_for_journal(")
@@ -876,6 +889,7 @@ if __name__ == "__main__":
     test_wire_tailer_gap_fill_reads_journal_off_loop()
     test_jsonl_dispatch_reads_session_lite_off_loop()
     test_jsonl_fallback_followers_poll_files_off_loop()
+    test_delegation_locked_reuses_worker_session_snapshot()
     test_jsonl_dispatch_ingests_orphans_off_loop()
     test_wire_tailer_subscribe_resolves_root_off_loop()
     test_native_demand_publish_does_not_leak_coroutine_without_loop()

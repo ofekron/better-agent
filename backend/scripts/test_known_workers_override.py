@@ -446,6 +446,7 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         instructions="do work",
         instructions_preview="do work",
         worker_agent_session_id="worker-session",
+        worker_session=session_manager.get("worker-session") or {},
         worker_description="worker",
         worker_orchestration_mode="native",
         worker_parent_claude_sid="worker-agent",
