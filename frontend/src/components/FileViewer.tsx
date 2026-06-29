@@ -142,6 +142,7 @@ export function FileViewer({
   const [dirty, setDirty] = useState(false);
   const [loadedIdentity, setLoadedIdentity] = useState<FileIdentity | null>(null);
   const [currentIdentity, setCurrentIdentity] = useState<FileIdentity | null>(null);
+  const [rawVersion, setRawVersion] = useState(0);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
   const { inflight: saving } = useOpProgress(saveOpId);
@@ -285,6 +286,30 @@ export function FileViewer({
 
   const saveRef = useRef(save);
   useEffect(() => { saveRef.current = save; }, [save]);
+
+  const loadLatestFromDisk = useCallback(async () => {
+    if (!filePath || dirtyRef.current || isDiffMode) return;
+    const currentKind = categorize(filePath, language);
+    if (currentKind === "pdf" || currentKind === "video") {
+      const identity = await fetchFileIdentity(filePath, nodeId);
+      setLoadedIdentity(identity);
+      setCurrentIdentity(identity);
+      setRawVersion((v) => v + 1);
+      return;
+    }
+    const response = await trackedFetch(
+      loadOpId,
+      `${API}/api/file?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
+    );
+    const data = await response.json();
+    setContent(data.content || "");
+    setLanguage(data.language || "plaintext");
+    setDirty(false);
+    const identity = identityFromPayload(data);
+    setLoadedIdentity(identity);
+    setCurrentIdentity(identity);
+    setMdEditing(false);
+  }, [filePath, isDiffMode, language, loadOpId, nodeId]);
 
   const returnToFormattedView = useCallback(async () => {
     if (saveDebounceRef.current) {
@@ -648,6 +673,7 @@ export function FileViewer({
   const fileName = filePath.split("/").pop() || filePath;
   // Diff mode always stays in Monaco — side-by-side diff is only meaningful for source.
   const showMonaco = isDiffMode || kind === "code" || kind === "json";
+  const rawUrl = `${API}/api/file/raw?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}&_v=${rawVersion}`;
 
   return (
     <div className="file-viewer">
@@ -665,31 +691,44 @@ export function FileViewer({
           )}
           {isDiffMode && <span className="file-viewer-diff-badge">{t("fileViewer.beforeAfter")}</span>}
         </div>
-        {!isDiffMode && showMonaco && (
-          <ProgressButton
-            opId={saveOpId}
-            className="btn-small"
-            onClick={save}
-            extraDisabled={!dirty}
-            loadingChildren={t("fileViewer.saving")}
-            title="Save (Cmd+S)"
-          >
-            {t("fileViewer.save")}
-          </ProgressButton>
-        )}
-        {!isDiffMode && kind === "markdown" && mdEditing && (
-          <button
-            type="button"
-            className="btn-small"
-            onClick={() => void returnToFormattedView()}
-            data-testid="file-viewer-md-view"
-          >
-            View
+        <div className="file-viewer-actions">
+          {stale && !dirty && !isDiffMode && (
+            <ProgressButton
+              opId={loadOpId}
+              className="btn-small"
+              onClick={() => void loadLatestFromDisk()}
+              loadingChildren={t("fileViewer.loadingLatest")}
+              title={t("fileViewer.updateToLatestTitle")}
+            >
+              {t("fileViewer.updateToLatest")}
+            </ProgressButton>
+          )}
+          {!isDiffMode && showMonaco && (
+            <ProgressButton
+              opId={saveOpId}
+              className="btn-small"
+              onClick={save}
+              extraDisabled={!dirty}
+              loadingChildren={t("fileViewer.saving")}
+              title="Save (Cmd+S)"
+            >
+              {t("fileViewer.save")}
+            </ProgressButton>
+          )}
+          {!isDiffMode && kind === "markdown" && mdEditing && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => void returnToFormattedView()}
+              data-testid="file-viewer-md-view"
+            >
+              View
+            </button>
+          )}
+          <button className="btn-small" onClick={onClose}>
+            {t("fileViewer.close")}
           </button>
-        )}
-        <button className="btn-small" onClick={onClose}>
-          {t("fileViewer.close")}
-        </button>
+        </div>
       </div>
 
       {isDiffMode ? (
@@ -773,7 +812,7 @@ export function FileViewer({
       ) : kind === "pdf" ? (
         <div className="file-viewer-pdf">
           <iframe
-            src={`${API}/api/file/raw?path=${encodeURIComponent(filePath!)}&node_id=${encodeURIComponent(nodeId)}`}
+            src={rawUrl}
             title={fileName}
             className="file-viewer-pdf-iframe"
           />
@@ -781,7 +820,7 @@ export function FileViewer({
       ) : kind === "video" ? (
         <div className="file-viewer-video">
           <video
-            src={`${API}/api/file/raw?path=${encodeURIComponent(filePath!)}&node_id=${encodeURIComponent(nodeId)}`}
+            src={rawUrl}
             controls
             preload="metadata"
             className="file-viewer-video-player"

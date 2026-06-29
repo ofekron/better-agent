@@ -84,4 +84,45 @@ describe("FileViewer title", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("Changed")).toBeTruthy();
   });
+
+  it("updates a changed file panel to the latest disk content", async () => {
+    let fileReadCount = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const text = String(url);
+      if (text.includes("/api/file/metadata")) {
+        return {
+          ok: true,
+          json: async () => ({ path: "/tmp/project/notes.md", mtime_ns: 2, size: 4 }),
+        } as Response;
+      }
+      fileReadCount += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          content: fileReadCount === 1 ? "one" : "two",
+          language: "markdown",
+          path: "/tmp/project/notes.md",
+          mtime_ns: fileReadCount === 1 ? 1 : 2,
+          size: fileReadCount === 1 ? 3 : 4,
+        }),
+      } as Response;
+    });
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/notes.md"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("one")).toBeTruthy();
+    await screen.findByText("Changed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+
+    expect(await screen.findByText("two")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Changed")).toBeNull());
+    expect(fileReadCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalled();
+  });
 });

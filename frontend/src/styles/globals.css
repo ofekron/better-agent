@@ -6609,10 +6609,20 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   font-size: calc(13px * var(--app-font-scale));
+}
+
+.file-viewer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
 }
 
 .file-viewer-path {
