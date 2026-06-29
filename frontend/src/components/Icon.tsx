@@ -129,7 +129,32 @@ const PATHS: Record<IconName, string> = {
 export const ICON_NAMES: readonly string[] = Object.keys(PATHS);
 
 export default function Icon({ name, size = 16, className, style }: IconProps) {
-  const gradientId = `assistant-start-${useId().replace(/:/g, "")}`;
+  const safeId = useId().replace(/:/g, "");
+  const gradientId = `assistant-start-${safeId}`;
+  const starGradientId = `star-${safeId}`;
+
+  if (name === "star") {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        className={className}
+        style={style}
+        aria-hidden
+      >
+        <defs>
+          <linearGradient id={starGradientId} x1="4" y1="2" x2="20" y2="20" gradientUnits="userSpaceOnUse">
+            <stop stopColor="var(--purple-80)" />
+            <stop offset="0.55" stopColor="var(--accent)" />
+            <stop offset="1" stopColor="var(--agent)" />
+          </linearGradient>
+        </defs>
+        <path d={PATHS.star} fill={`url(#${starGradientId})`} />
+      </svg>
+    );
+  }
 
   if (name === "assistant-start") {
     return (
