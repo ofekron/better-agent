@@ -11229,10 +11229,8 @@ async def internal_list_pending_approvals(
     delegation no one is waiting on, spawning a worker for nothing.
     """
     active_dids = set(coordinator.approval_waiters.keys())
-    out = [
-        rec for rec in pending_approvals.list_pending(cwd=cwd)
-        if rec.get("delegation_id") in active_dids
-    ]
+    pending = await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)
+    out = [rec for rec in pending if rec.get("delegation_id") in active_dids]
     return {"approvals": out}
 
 
