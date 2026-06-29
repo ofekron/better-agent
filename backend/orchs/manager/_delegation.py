@@ -225,7 +225,7 @@ async def run_delegation(
     # server-minted id when called without one (legacy callers).
     delegation_id = client_delegation_id or f"del_{uuid.uuid4().hex[:10]}"
     instructions_preview = instructions[:2000]
-    delegation_status_store.write_status(
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="resolving",
         app_session_id=app_session_id,
@@ -516,7 +516,7 @@ async def run_delegation(
     # to render a per-panel "running" badge.
     in_flight_aid = coordinator.turn_manager.current_assistant_msgs.get(app_session_id)
     worker_run_id = f"worker-{delegation_id}"
-    delegation_status_store.write_status(
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="queued",
         worker_session_id=worker_session_id,
@@ -779,7 +779,7 @@ async def run_delegation_locked(
     # consumers can verify liveness.
     provider_rs = provider._runs.get(run_id)
     if provider_rs and provider_rs.popen.pid:
-        delegation_status_store.write_status(
+        await delegation_status_store.write_status_async(
             delegation_id,
             status="running",
             worker_run_id=worker_run_id,
@@ -920,7 +920,7 @@ async def run_delegation_locked(
                                     jp_now = await _compute_jsonl_read_path_off_loop(
                                         cwd, disc, fork_bc
                                     )
-                                    delegation_status_store.write_status(
+                                    await delegation_status_store.write_status_async(
                                         delegation_id,
                                         status="running",
                                         fork_agent_sid=disc,
@@ -972,7 +972,7 @@ async def run_delegation_locked(
                                     jp_now = await _compute_jsonl_read_path_off_loop(
                                         cwd, disc, fork_bc
                                     )
-                                    delegation_status_store.write_status(
+                                    await delegation_status_store.write_status_async(
                                         delegation_id,
                                         status="running",
                                         fork_agent_sid=disc,
@@ -1089,7 +1089,7 @@ async def run_delegation_locked(
     }
     if include_events:
         result_payload["events"] = collected
-    delegation_status_store.write_status(
+    await delegation_status_store.write_status_async(
         delegation_id,
         status="complete",
         result=result_payload,
