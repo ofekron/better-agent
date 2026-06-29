@@ -1854,6 +1854,7 @@ class SessionManager:
             # invariant matters more than the minor walk cost.
             popped: list[tuple[dict, list]] = []
             popped_idx: list[tuple[dict, dict]] = []
+            popped_anchor_cache: list[tuple[dict, dict]] = []
             stack = [s]
             while stack:
                 node = stack.pop()
@@ -1865,6 +1866,9 @@ class SessionManager:
                     idx = m.pop("_uid_idx", None)
                     if isinstance(idx, dict):
                         popped_idx.append((m, idx))
+                    anchor_cache = m.pop("_panel_anchor_cache", None)
+                    if isinstance(anchor_cache, dict):
+                        popped_anchor_cache.append((m, anchor_cache))
                     for w in m.get("workers") or []:
                         if not isinstance(w, dict):
                             continue
@@ -1884,6 +1888,8 @@ class SessionManager:
                     owner["events"] = ev
                 for owner, idx in popped_idx:
                     owner["_uid_idx"] = idx
+                for owner, anchor_cache in popped_anchor_cache:
+                    owner["_panel_anchor_cache"] = anchor_cache
             self._stamp_recovering_tree(out)
             return out
 
@@ -3926,6 +3932,8 @@ class SessionManager:
                 if u and u not in uid_idx:
                     uid_idx[u] = len(evs)
             evs.append(event)
+            from render_stub import invalidate_panel_anchor_cache
+            invalidate_panel_anchor_cache(m)
         return self._run(
             sid, _do,
             {"kind": "native_event_appended", "msg_id": msg_id, "event": event},
@@ -3945,6 +3953,8 @@ class SessionManager:
             uid_idx = m.get("_uid_idx")
             if isinstance(uid_idx, dict) and uuid in uid_idx:
                 evs[uid_idx[uuid]] = event
+                from render_stub import invalidate_panel_anchor_cache
+                invalidate_panel_anchor_cache(m)
                 return
             for i, existing in enumerate(evs):
                 existing_uuid = (
@@ -3954,6 +3964,8 @@ class SessionManager:
                 )
                 if existing_uuid == uuid:
                     evs[i] = event
+                    from render_stub import invalidate_panel_anchor_cache
+                    invalidate_panel_anchor_cache(m)
                     return
             # Not found — append, maintain uid_idx.
             if isinstance(uid_idx, dict):
@@ -3961,6 +3973,8 @@ class SessionManager:
                 if u and u not in uid_idx:
                     uid_idx[u] = len(evs)
             evs.append(event)
+            from render_stub import invalidate_panel_anchor_cache
+            invalidate_panel_anchor_cache(m)
         return self._run(
             sid, _do,
             {"kind": "native_event_replaced", "msg_id": msg_id, "event": event, "uuid": uuid},

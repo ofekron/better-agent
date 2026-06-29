@@ -423,4 +423,7 @@ def _merge_render_rows(strategy, msg: dict, rows: list[dict]) -> bool:
         elif evs[existing_idx] != normalized:
             evs[existing_idx] = normalized
             changed = True
+    if changed:
+        from render_stub import invalidate_panel_anchor_cache
+        invalidate_panel_anchor_cache(msg)
     return changed

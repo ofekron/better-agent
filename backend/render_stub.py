@@ -32,6 +32,7 @@ _NON_RENDER_TYPES = frozenset({
 })
 
 STUB_TAIL = 25
+_PANEL_ANCHOR_CACHE = "_panel_anchor_cache"
 
 
 def primary_events(msg: dict) -> list:
@@ -128,6 +129,36 @@ def _derive_panel_anchors(manager_events: list, workers: list) -> dict:
     return anchors
 
 
+def _panel_anchor_cache_key(manager_events: list, workers: list) -> tuple:
+    return (
+        len(manager_events),
+        tuple(
+            (
+                worker.get("delegation_id"),
+                worker.get("panel_kind"),
+                worker.get("run_mode"),
+            )
+            for worker, _index in workers
+        ),
+    )
+
+
+def invalidate_panel_anchor_cache(msg: dict) -> None:
+    msg.pop(_PANEL_ANCHOR_CACHE, None)
+
+
+def _panel_anchors(msg: dict, manager_events: list, workers: list) -> dict:
+    key = _panel_anchor_cache_key(manager_events, workers)
+    cached = msg.get(_PANEL_ANCHOR_CACHE)
+    if isinstance(cached, dict) and cached.get("key") == key:
+        anchors = cached.get("anchors")
+        if isinstance(anchors, dict):
+            return anchors
+    anchors = _derive_panel_anchors(manager_events, workers)
+    msg[_PANEL_ANCHOR_CACHE] = {"key": key, "anchors": anchors}
+    return anchors
+
+
 def timeline_events(msg: dict) -> list:
     manager_events = primary_events(msg)
     workers = []
@@ -143,7 +174,7 @@ def timeline_events(msg: dict) -> list:
     if not workers:
         return _renderable(manager_events)
 
-    anchors = _derive_panel_anchors(manager_events, workers)
+    anchors = _panel_anchors(msg, manager_events, workers)
 
     def _anchor_of(worker: dict):
         derived = anchors.get(worker.get("delegation_id"))
@@ -225,6 +256,7 @@ def _empty_event_lists(msg: dict) -> None:
     if isinstance(msg.get("events"), list):
         msg["events"] = []
     msg.pop("_uid_idx", None)
+    invalidate_panel_anchor_cache(msg)
     for w in msg.get("workers") or []:
         if isinstance(w, dict):
             if isinstance(w.get("events"), list):
