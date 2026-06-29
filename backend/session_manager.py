@@ -2559,6 +2559,7 @@ class SessionManager:
                         rid,
                         fork_id=node_sid if node_sid != rid else None,
                         message_id=msg_id,
+                        summary=summary,
                     )
                     m["event_ref"] = self._event_ref(
                         rid, node_sid, msg_id, summary,
@@ -2684,6 +2685,7 @@ class SessionManager:
                     rid,
                     fork_id=node_sid if node_sid != rid else None,
                     message_id=msg_id,
+                    summary=summary,
                 )
                 m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
                 if not m.get("isStreaming"):

@@ -626,9 +626,25 @@ def test_message_cache_hydration_has_substep_perf_metrics() -> None:
     end = source.index("def read_message_frontend_events(", start)
     cache_source = source[start:end]
     assert "event_journal.message_cache.summaries" in cache_source
+    assert "summary: Optional[dict] = None" in cache_source
+    assert "msg_ids={message_id}" in cache_source
+    assert "event_journal.message_cache.summary_provided" in cache_source
     assert "event_journal.message_cache.resolutions" in cache_source
     assert "event_journal.message_cache.read_full" in cache_source
     assert "event_journal.message_cache.read_grow" in cache_source
+
+
+def test_session_snapshot_hydration_reuses_existing_message_summary() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("def _compute_messages_snapshot(")
+    end = source.index("def _compute_messages_window(", start)
+    snapshot_source = source[start:end]
+    assert "summary = summaries.get(msg_id, {})" in snapshot_source
+    assert "message_id=msg_id,\n                        summary=summary," in snapshot_source
+    window_start = source.index("def _compute_messages_window(")
+    window_end = source.index("def get_messages_before(", window_start)
+    window_source = source[window_start:window_end]
+    assert "message_id=msg_id,\n                    summary=summary," in window_source
 
 
 def test_written_journal_projection_avoids_full_event_list_copy() -> None:
@@ -2892,6 +2908,8 @@ if __name__ == "__main__":
     test_session_opened_avoids_full_session_copy()
     test_message_delta_replay_skips_full_snapshot_rebuild()
     test_message_summary_reader_filters_requested_message_ids()
+    test_message_cache_hydration_has_substep_perf_metrics()
+    test_session_snapshot_hydration_reuses_existing_message_summary()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
