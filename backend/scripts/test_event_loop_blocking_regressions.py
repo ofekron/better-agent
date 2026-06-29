@@ -551,6 +551,28 @@ def test_models_catalog_uses_fingerprinted_in_process_cache() -> None:
     assert "_read_cache(" not in after_helper
 
 
+def test_projection_preserving_summary_reuses_existing_projection() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _build_summary_for_root_preserving_projections(")
+    helper_end = source.index("def _tag_filter_ids(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "projection_snapshot=(" in helper_source
+    assert "organization_projection=(" in helper_source
+    assert "existing.get(\"requirement_tags\")" in helper_source
+    assert "existing.get(\"markers\")" in helper_source
+    assert "existing.get(\"session_tags\")" in helper_source
+    assert "_requirement_tags_for_session(" not in helper_source
+    assert "_markers_for_session(" not in helper_source
+    assert "enrich_session_summary(summary)" not in helper_source
+
+    upsert_start = source.index("def _upsert_summary(")
+    upsert_end = source.index("def _drafts_path(", upsert_start)
+    upsert_source = source[upsert_start:upsert_end]
+    assert "if preserve_projection_fields:" in upsert_source
+    assert "_build_summary_for_root_preserving_projections(root, existing)" in upsert_source
+    assert "for field in _SUMMARY_PROJECTION_FIELDS:" in upsert_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")

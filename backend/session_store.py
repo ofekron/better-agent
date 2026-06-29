@@ -327,6 +327,17 @@ def _projection_snapshot() -> tuple[dict[str, list[dict]], dict[str, dict[str, d
     return requirement_tags, markers
 
 
+_SUMMARY_PROJECTION_FIELDS = (
+    "pending_eng_session_id",
+    "current_todos",
+    "current_tasks",
+    "requirement_tags",
+    "markers",
+    "folder_id",
+    "session_tags",
+)
+
+
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
@@ -422,6 +433,42 @@ def _build_summary_for_root(
     summary["tag_filter_ids"] = _tag_filter_ids(
         summary.get("session_tags") or [],
         requirement_tags,
+    )
+    return summary
+
+
+def _build_summary_for_root_preserving_projections(root: dict, existing: dict) -> dict:
+    requirement_tags = existing.get("requirement_tags") or []
+    summary = _build_summary_for_root(
+        root,
+        projection_snapshot=(
+            {root["id"]: requirement_tags},
+            {root["id"]: existing.get("markers") or {}},
+        ),
+        organization_projection=(
+            {
+                root["id"]: {
+                    "folder_id": existing.get("folder_id"),
+                    "tag_ids": [
+                        tag.get("id")
+                        for tag in existing.get("session_tags") or []
+                        if isinstance(tag, dict) and isinstance(tag.get("id"), str)
+                    ],
+                }
+            },
+            {
+                tag.get("id"): tag
+                for tag in existing.get("session_tags") or []
+                if isinstance(tag, dict)
+            },
+        ),
+    )
+    for field in _SUMMARY_PROJECTION_FIELDS:
+        if field in existing:
+            summary[field] = existing[field]
+    summary["tag_filter_ids"] = _tag_filter_ids(
+        summary.get("session_tags") or [],
+        summary.get("requirement_tags") or [],
     )
     return summary
 
@@ -684,20 +731,28 @@ def _upsert_summary(root: dict, *, preserve_projection_fields: bool = False) -> 
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    existing = None
+    if preserve_projection_fields:
+        with _summary_index_lock:
+            existing = _summary_index.get(root["id"])
     with perf.timed("store.session.summary.build"):
-        summary = _build_summary_for_root(root)
-    # Preserve pending_eng_session_id from the existing index entry —
-    # _build_summary_for_root can't compute it (it requires cross-session
-    # lookup) and it must survive across writes to the parent session.
+        if existing:
+            summary = _build_summary_for_root_preserving_projections(root, existing)
+        else:
+            summary = _build_summary_for_root(root)
     with perf.timed("store.session.summary.index"):
         with _summary_index_lock:
             existing = _summary_index.get(root["id"])
-            if existing and existing.get("pending_eng_session_id"):
-                summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
             if preserve_projection_fields and existing:
-                for projection_field in ("current_todos", "current_tasks"):
-                    if projection_field in existing:
-                        summary[projection_field] = existing[projection_field]
+                for field in _SUMMARY_PROJECTION_FIELDS:
+                    if field in existing:
+                        summary[field] = existing[field]
+                summary["tag_filter_ids"] = _tag_filter_ids(
+                    summary.get("session_tags") or [],
+                    summary.get("requirement_tags") or [],
+                )
+            elif existing and existing.get("pending_eng_session_id"):
+                summary["pending_eng_session_id"] = existing["pending_eng_session_id"]
             if existing == summary:
                 summary_changed = False
             else:
