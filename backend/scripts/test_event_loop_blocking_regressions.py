@@ -934,7 +934,6 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshot()" in source
     assert "def _has_projection_snapshot()" in source
-    assert "def _summary_has_projection(" in source
     assert "def _start_summary_projection_repair(" in source
     assert "_summary_projection_repair_lock = threading.Lock()" in source
     assert "_summary_projection_repair_running = False" in source
@@ -953,12 +952,12 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     build_start = source.index("def _do_build_summary_index_unsafe()")
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
-    assert "summary_projection_present = False" in build_source
     assert "projection_snapshot = _projection_snapshot()" in build_source
     assert "_build_summary_for_root(data, projection_snapshot)" in build_source
-    assert "if _summary_has_projection(summary):" in build_source
-    assert "if _has_projection_snapshot() or summary_projection_present:" in build_source
     assert "_start_summary_projection_repair()" in build_source
+    assert "_summary_has_projection(" not in build_source
+    assert "summary_projection_present" not in build_source
+    assert "if _has_projection_snapshot()" not in build_source
     assert "summary_items = list(_summary_index.items())" not in build_source
 
 

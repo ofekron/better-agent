@@ -372,15 +372,6 @@ def _tag_filter_ids(session_tags: list[dict], requirement_tags: list[dict]) -> l
     return sorted(ids)
 
 
-def _summary_has_projection(summary: dict) -> bool:
-    if summary.get("requirement_tags") or summary.get("markers"):
-        return True
-    return any(
-        isinstance(tag_id, str) and tag_id.startswith("req:")
-        for tag_id in (summary.get("tag_filter_ids") or [])
-    )
-
-
 def set_requirement_tags_projection(tags_by_session: dict[str, list[dict]]) -> None:
     global _summary_index_version
     clean: dict[str, list[dict]] = {}
@@ -1004,7 +995,6 @@ def _do_build_summary_index_unsafe() -> None:
     # locks release so the next start hits the Pass-1 fast path.
     dirty_trees: list[dict] = []
     stale_summaries: list[tuple[str, dict]] = []
-    summary_projection_present = False
     eng_by_parent: dict[str, str] = {}
 
     # Pass 1: load from summary files where available + fresh
@@ -1023,8 +1013,6 @@ def _do_build_summary_index_unsafe() -> None:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
                         summary, cleaned = _sanitize_summary(summary)
-                        if _summary_has_projection(summary):
-                            summary_projection_present = True
                         seen_cursors = read_seen_cursors(sid)
                         if sid in seen_cursors:
                             summary = {
@@ -1084,9 +1072,6 @@ def _do_build_summary_index_unsafe() -> None:
             if pid:
                 eng_by_parent[pid] = data["id"]
 
-    if _has_projection_snapshot() or summary_projection_present:
-        _start_summary_projection_repair()
-
     # Final unified pass for eng pointers across the WHOLE index
     # (Pass 1 + Pass 2). Keep only the mutation phase under the index
     # lock so `/api/sessions` does not wait behind per-summary projection
@@ -1100,6 +1085,8 @@ def _do_build_summary_index_unsafe() -> None:
                 }
                 _summary_index_version += 1
         _summary_index_loaded = True
+
+    _start_summary_projection_repair()
 
     # Phase 3: persist migrated trees outside both locks (write_session_full
     # → _upsert_summary takes _summary_index_lock cleanly here). Best-effort.
