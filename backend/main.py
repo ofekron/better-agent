@@ -107,12 +107,17 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes, tuple[str, ...], tuple],
 ] = {}
+_remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
+_remote_sessions_cache_lock = threading.Lock()
+_remote_sessions_refresh_tasks: set[str] = set()
+_remote_sessions_cache_version = 0
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
 _session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0
+_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0
 _SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
@@ -540,6 +545,83 @@ def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> 
             content_generation = session_search_index.generation()
         return (session_store.search_metadata_version(), content_generation)
     return (session_store.summary_version(), virtual_session_store.version_token())
+
+
+def _remote_sessions_cache_version_snapshot() -> int:
+    with _remote_sessions_cache_lock:
+        return _remote_sessions_cache_version
+
+
+def _copy_remote_sessions(sessions: list[dict]) -> list[dict]:
+    return [dict(session) for session in sessions if isinstance(session, dict)]
+
+
+def _remote_sessions_cache_get(node_id: str) -> tuple[list[dict] | None, bool]:
+    with _remote_sessions_cache_lock:
+        cached = _remote_sessions_cache.get(node_id)
+    if cached is None:
+        return None, False
+    age = time.monotonic() - cached[0]
+    return _copy_remote_sessions(cached[1]), age <= _REMOTE_SESSIONS_CACHE_TTL_SECONDS
+
+
+def _remote_sessions_cache_put(node_id: str, sessions: list[dict]) -> None:
+    global _remote_sessions_cache_version
+    clean = _copy_remote_sessions(sessions)
+    with _remote_sessions_cache_lock:
+        existing = _remote_sessions_cache.get(node_id)
+        if existing is not None and existing[1] == clean:
+            _remote_sessions_cache[node_id] = (time.monotonic(), clean)
+            return
+        _remote_sessions_cache[node_id] = (time.monotonic(), clean)
+        _remote_sessions_cache_version += 1
+
+
+async def _fetch_remote_sessions_live(node_id: str) -> list[dict]:
+    import node_link as _nl
+
+    resp = await _nl.rpc_call(
+        node_id,
+        "list_sessions",
+        {},
+        timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS,
+    )
+    sessions = (resp or {}).get("sessions", [])
+    return _copy_remote_sessions(sessions if isinstance(sessions, list) else [])
+
+
+def _schedule_remote_sessions_refresh(node_id: str) -> None:
+    with _remote_sessions_cache_lock:
+        if node_id in _remote_sessions_refresh_tasks:
+            return
+        _remote_sessions_refresh_tasks.add(node_id)
+
+    async def _refresh() -> None:
+        try:
+            sessions = await _fetch_remote_sessions_live(node_id)
+            _remote_sessions_cache_put(node_id, sessions)
+        except Exception:
+            logger.debug("get_sessions: cached remote refresh from %s failed", node_id, exc_info=True)
+        finally:
+            with _remote_sessions_cache_lock:
+                _remote_sessions_refresh_tasks.discard(node_id)
+
+    asyncio.create_task(_refresh())
+
+
+async def _remote_sessions_for_sidebar(node_id: str) -> list[dict]:
+    cached, fresh = _remote_sessions_cache_get(node_id)
+    if cached is not None:
+        if fresh:
+            perf.record("sessions.list.remote_cache.hit", 1.0)
+        else:
+            perf.record("sessions.list.remote_cache.stale", 1.0)
+            _schedule_remote_sessions_refresh(node_id)
+        return cached
+    perf.record("sessions.list.remote_cache.miss", 1.0)
+    sessions = await _fetch_remote_sessions_live(node_id)
+    _remote_sessions_cache_put(node_id, sessions)
+    return sessions
 
 
 def _session_list_user_prefs() -> tuple[bool, str, bool]:
@@ -4027,6 +4109,7 @@ async def get_sessions(
         effective_status_sort,
         connected_version,
         connected,
+        _remote_sessions_cache_version_snapshot() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
     cached_response = _sessions_list_cache_get(cache_key)
@@ -4086,39 +4169,22 @@ async def get_sessions(
             perf.record("sessions.list.virtual.skipped", 1.0)
 
     try:
-        import node_link as _nl
-
-        async def _fetch(nid: str):
-            try:
-                resp = await _nl.rpc_call(
-                    nid,
-                    "list_sessions",
-                    {},
-                    timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS,
-                )
-                return nid, (resp or {}).get("sessions", [])
-            except Exception:
-                logger.debug(
-                    "get_sessions: list_sessions from %s failed",
-                    nid, exc_info=True,
-                )
-                return nid, []
-
-        remote_results = await asyncio.gather(
-            *(
-                asyncio.wait_for(
-                    _fetch(nid),
-                    timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS + 0.05,
-                )
-                for nid in connected
-            ),
-            return_exceptions=True,
-        )
-        for result in remote_results:
+        with perf.timed("sessions.list.remote"):
+            remote_results = await asyncio.gather(
+                *(
+                    asyncio.wait_for(
+                        _remote_sessions_for_sidebar(nid),
+                        timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS + 0.05,
+                    )
+                    for nid in connected
+                ),
+                return_exceptions=True,
+            )
+        for nid, result in zip(connected, remote_results):
             if isinstance(result, Exception):
                 logger.warning("get_sessions: remote node merge timed out")
                 continue
-            nid, remote = result
+            remote = result
             for rs in remote:
                 rs["node_id"] = nid
                 rs.setdefault("is_running", False)

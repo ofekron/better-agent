@@ -1410,6 +1410,27 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     assert "_builtin_extension_runtime_ready(" not in route_source
 
 
+def test_sessions_route_uses_cached_remote_node_sessions() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("async def _remote_sessions_for_sidebar(")
+    helper_end = source.index("def _session_list_user_prefs(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    route_start = source.index('@app.get("/api/sessions")')
+    route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
+    route_source = source[route_start:route_end]
+    assert "_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0" in source
+    assert "def _remote_sessions_cache_get(node_id: str)" in source
+    assert "def _schedule_remote_sessions_refresh(node_id: str)" in source
+    assert "async def _fetch_remote_sessions_live(node_id: str)" in source
+    assert "sessions.list.remote_cache.hit" in helper_source
+    assert "sessions.list.remote_cache.stale" in helper_source
+    assert "sessions.list.remote_cache.miss" in helper_source
+    assert "_remote_sessions_cache_version_snapshot() if connected else 0" in route_source
+    assert "with perf.timed(\"sessions.list.remote\")" in route_source
+    assert "_remote_sessions_for_sidebar(nid)" in route_source
+    assert "rs[\"node_id\"] = nid" in route_source
+
+
 def test_session_organization_refresh_is_coalesced_background_work() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("async def _broadcast_session_organization_changed(")
@@ -1684,6 +1705,7 @@ if __name__ == "__main__":
     test_requirement_tag_refresh_is_off_startup_loop()
     test_machine_nodes_readiness_check_is_off_startup_loop()
     test_sessions_route_does_not_runtime_check_machine_nodes()
+    test_sessions_route_uses_cached_remote_node_sessions()
     test_session_organization_refresh_is_coalesced_background_work()
     test_get_session_strips_synthetic_events_off_loop()
     test_session_detail_response_bytes_are_cached()
