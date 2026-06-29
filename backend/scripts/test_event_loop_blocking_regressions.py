@@ -104,7 +104,9 @@ def test_session_first_prompt_search_uses_summary_index() -> None:
     search_end = source.index("def grep_session_scores(", search_start)
     search_source = source[search_start:search_end]
     assert '"first_prompt": _first_user_prompt(root)' in summary_source
-    assert 'score = _match_count(summary.get("first_prompt"), query_lower)' in search_source
+    assert "rows = _metadata_search_rows()" in search_source
+    assert "for sid, _title, first_prompt in rows:" in search_source
+    assert "score = first_prompt.count(query_lower)" in search_source
     assert "json.loads(path.read_text" not in search_source
     assert "_migrate_session(" not in search_source
 
@@ -272,7 +274,9 @@ def test_private_extension_reconcile_skips_current_smoked_install() -> None:
     assert 'not source.get("error")' in private_source
     assert "_record_has_required_runtime_paths(record)" in private_source
     assert "_record_runtime_ready(record)" not in private_source
-    assert "continue\n        installed = _install_private_package_snapshot" in private_source
+    skip_pos = private_source.index("continue", private_source.index("_record_has_required_runtime_paths(record)"))
+    install_pos = private_source.index("installed = _install_private_package_snapshot", skip_pos)
+    assert skip_pos < install_pos
 
 
 def test_frontend_entrypoints_do_not_run_smoke_subprocesses() -> None:
