@@ -1068,6 +1068,10 @@ def _do_build_summary_index_unsafe() -> None:
     for p in _sessions_dir().glob("*.summary.json"):
         sid = p.name.removesuffix(".summary.json")
         summary_files[sid] = p
+    seen_cursor_ids = {
+        p.name.removesuffix(".seen.json")
+        for p in _sessions_dir().glob("*.seen.json")
+    }
 
     # Trees migrated in Pass 2 that need a persist — written AFTER the
     # locks release so the next start hits the Pass-1 fast path.
@@ -1093,7 +1097,7 @@ def _do_build_summary_index_unsafe() -> None:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
                         summary, cleaned = _sanitize_summary(summary)
-                        seen_cursors = read_seen_cursors(sid)
+                        seen_cursors = read_seen_cursors(sid) if sid in seen_cursor_ids else {}
                         if sid in seen_cursors:
                             summary = {
                                 **summary,
