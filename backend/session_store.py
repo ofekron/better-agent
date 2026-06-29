@@ -1058,20 +1058,17 @@ def _do_build_summary_index_unsafe() -> None:
     """
     global _summary_index_loaded, _summary_index_version, _summary_metadata_version
     _ensure_dir()
-    # {session_id}.json → path
     full_files: dict[str, Path] = {}
-    for p in _sessions_dir().glob("*.json"):
-        if not _is_sidecar_json(p.name):
-            full_files[p.stem] = p
-    # {session_id}.summary.json → path
     summary_files: dict[str, Path] = {}
-    for p in _sessions_dir().glob("*.summary.json"):
-        sid = p.name.removesuffix(".summary.json")
-        summary_files[sid] = p
-    seen_cursor_ids = {
-        p.name.removesuffix(".seen.json")
-        for p in _sessions_dir().glob("*.seen.json")
-    }
+    seen_cursor_ids: set[str] = set()
+    for p in _sessions_dir().iterdir():
+        name = p.name
+        if name.endswith(".summary.json"):
+            summary_files[name.removesuffix(".summary.json")] = p
+        elif name.endswith(".seen.json"):
+            seen_cursor_ids.add(name.removesuffix(".seen.json"))
+        elif name.endswith(".json") and not _is_sidecar_json(name):
+            full_files[p.stem] = p
 
     # Trees migrated in Pass 2 that need a persist — written AFTER the
     # locks release so the next start hits the Pass-1 fast path.
