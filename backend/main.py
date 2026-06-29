@@ -239,7 +239,7 @@ def _session_event_meta_roots_for_page(page: list[dict]) -> list[str]:
         root_id = session.get("id")
         if not isinstance(root_id, str) or not root_id or root_id in seen:
             continue
-        if int(session.get("message_count") or 0) <= 0 and _session_event_file_fingerprint(root_id) == (0, 0):
+        if int(session.get("message_count") or 0) <= 0:
             continue
         seen.add(root_id)
         root_ids.append(root_id)
@@ -259,8 +259,6 @@ def _session_detail_projection_roots_for_page(page: list[dict]) -> list[str]:
         root_id = session.get("id")
         if not isinstance(root_id, str) or not root_id or root_id in seen:
             continue
-        if _session_event_file_fingerprint(root_id) == (0, 0):
-            continue
         seen.add(root_id)
         root_ids.append(root_id)
     return root_ids
@@ -270,8 +268,6 @@ async def _warm_session_event_meta_roots(root_ids: list[str]) -> None:
     pending: list[str] = []
     for root_id in root_ids:
         if root_id in _session_event_meta_warm_inflight:
-            continue
-        if _session_event_meta_cache_fresh(root_id):
             continue
         _session_event_meta_warm_inflight.add(root_id)
         pending.append(root_id)

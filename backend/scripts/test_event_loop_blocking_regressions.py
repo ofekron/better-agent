@@ -1100,6 +1100,16 @@ def test_session_list_warms_event_meta_off_path() -> None:
     warm_source = source[warm_start:warm_end]
     assert "_session_detail_projection_roots_for_page(page)" in warm_source
     assert "_warm_session_detail_projection_roots(projection_root_ids)" in warm_source
+    assert "_session_event_file_fingerprint(" not in warm_source
+    assert "_session_event_meta_cache_fresh(" not in warm_source
+    roots_start = source.index("def _session_event_meta_roots_for_page(")
+    roots_end = source.index("def _session_detail_projection_roots_for_page(", roots_start)
+    roots_source = source[roots_start:roots_end]
+    assert "_session_event_file_fingerprint(" not in roots_source
+    detail_roots_start = roots_end
+    detail_roots_end = source.index("async def _warm_session_event_meta_roots(", detail_roots_start)
+    detail_roots_source = source[detail_roots_start:detail_roots_end]
+    assert "_session_event_file_fingerprint(" not in detail_roots_source
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
