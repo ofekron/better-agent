@@ -11889,85 +11889,9 @@ async def desktop_update_file(rel_path: str):
 # ============================================================================
 
 def _internal_list_workers_for_cwd_sync(cwd: str) -> dict:
-    """Globally registered workers, with their Better Agent session names + status.
+    import team_orchestration_read
 
-    `diverged` true if EITHER the worker BC's agent_sid has rotated
-    since registration (rewind), OR any per-pair fork's recorded
-    parent_line_count_at_fork is stale relative to the current parent
-    jsonl (user typed in the worker BC between delegations). Both
-    conditions trigger a re-fork on the next delegation, but surfacing
-    them lets the user proactively reset stale forks.
-    """
-    from stores import worker_store as _ws
-    from orchs.jsonl_helpers import compute_jsonl_path, count_jsonl_lines
-    raw = _ws._read()
-    workers = sorted(
-        raw.get("workers", []),
-        key=lambda w: w.get("last_active", ""),
-        reverse=True,
-    )
-    forks = raw.get("forks", {}) or {}
-    out: list[dict] = []
-    for w in workers:
-        bc_sid = w.get("agent_session_id")
-        bc = session_manager.get_lite(bc_sid) if bc_sid else None
-        if not bc:
-            continue
-        mode = w.get("orchestration_mode") or bc.get("orchestration_mode") or "native"
-        worker_cwd = w.get("cwd") or bc.get("cwd") or cwd
-        live_parent_sid = bc.get("agent_session_id")
-        sid_rotated = bool(
-            live_parent_sid
-            and w.get("agent_sid")
-            and live_parent_sid != w.get("agent_sid")
-        )
-        # Per-pair stale-fork detection: any fork pointing at this
-        # worker whose parent_line_count_at_fork is below the live
-        # count means the Better Agent session has grown beyond the fork point.
-        live_parent_lines = 0
-        if live_parent_sid:
-            p = compute_jsonl_path(worker_cwd, live_parent_sid)
-            if p:
-                try:
-                    live_parent_lines = count_jsonl_lines(p)
-                except Exception:
-                    live_parent_lines = 0
-        any_pair_stale = False
-        if not sid_rotated and live_parent_sid:
-            for caller_sid, by_worker in forks.items():
-                rec = by_worker.get(bc_sid)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("parent_agent_sid") != live_parent_sid:
-                    any_pair_stale = True
-                    break
-                if int(rec.get("parent_line_count_at_fork", 0)) < live_parent_lines:
-                    any_pair_stale = True
-                    break
-        diverged = sid_rotated or any_pair_stale
-        out.append({
-            "agent_session_id": bc_sid,
-            "name": w.get("name") or bc.get("name") or t("session.untitled_worker"),
-            "display_name": bc.get("name") or t("session.untitled_worker"),
-            "role_key": w.get("role_key"),
-            "cwd": worker_cwd,
-            "registry_cwd": worker_cwd,
-            "orchestration_mode": mode,
-            "agent_sid": w.get("agent_sid"),
-            "live_parent_agent_sid": live_parent_sid,
-            "initialized": bool(live_parent_sid),
-            "diverged": diverged,
-            "created_at": w.get("created_at"),
-            "last_active": w.get("last_active"),
-            "delegation_count": w.get("delegation_count", 0),
-            "token_usage": w.get("token_usage"),
-            "tags": _ws.normalize_tags(w.get("tags")),
-        })
-    return {
-        "workers": out,
-        "pools": _worker_pool_projection(out, raw.get("pool_queues") or {}),
-        "teams": _worker_team_projection(out),
-    }
+    return team_orchestration_read.list_workers_for_cwd(cwd)
 
 
 @app.post("/api/internal/workers/list")
@@ -11978,55 +11902,6 @@ async def internal_list_workers_for_cwd(
     _require_team_orchestration_internal(x_internal_token)
     cwd = str((body or {}).get("cwd") or "")
     return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)
-
-
-def _worker_pool_projection(workers: list[dict], pool_queues: dict) -> list[dict]:
-    by_tag: dict[str, list[dict]] = {}
-    for worker in workers:
-        for tag in worker.get("tags") or []:
-            by_tag.setdefault(str(tag), []).append(worker)
-    pools = []
-    for tag, tagged_workers in sorted(by_tag.items()):
-        queue = pool_queues.get(tag)
-        pools.append({
-            "tag": tag,
-            "workers": tagged_workers,
-            "queued_count": len(queue) if isinstance(queue, list) else 0,
-        })
-    return pools
-
-
-def _worker_team_projection(workers: list[dict]) -> list[dict]:
-    import team_store
-
-    workers_by_id = {worker.get("agent_session_id"): worker for worker in workers}
-    teams = []
-    for team in team_store.list_all():
-        members = team_store.ordered_members(team)
-        bound_ids = {
-            member.get("agent_session_id")
-            for member in members
-            if member.get("type") == "worker" and member.get("agent_session_id")
-        }
-        worker_rows = []
-        for member in members:
-            if member.get("type") != "worker":
-                continue
-            sid = member.get("agent_session_id")
-            worker = workers_by_id.get(sid)
-            if worker:
-                worker_rows.append({**worker, "team_binding": "bound", "team_role": member.get("role")})
-        for worker in workers:
-            if worker.get("agent_session_id") in bound_ids:
-                continue
-            worker_rows.append({**worker, "team_binding": "available", "team_role": ""})
-        teams.append({
-            "id": team.get("id"),
-            "name": team.get("definition_ref") or team.get("profile") or team.get("id"),
-            "root_session_id": team.get("root_session_id"),
-            "workers": worker_rows,
-        })
-    return teams
 
 
 @app.post("/api/internal/workers/create")
