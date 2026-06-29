@@ -83,6 +83,7 @@ _worker_count_cache_until = 0.0
 _WORKER_COUNT_HOT_TTL_SECONDS = 1.0
 _registry_cache_signature: tuple[int, int] | None = None
 _registry_cache: dict | None = None
+_workers_dir_cache: Path | None = None
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -90,7 +91,12 @@ def _lock_for(_cwd: str = "") -> threading.Lock:
 
 
 def _workers_dir() -> Path:
-    return ba_home() / "workers"
+    global _workers_dir_cache
+    cached = _workers_dir_cache
+    if cached is None:
+        cached = ba_home() / "workers"
+        _workers_dir_cache = cached
+    return cached
 
 
 SCHEMA_VERSION = 8

@@ -157,6 +157,27 @@ def test_worker_count_hot_cache_skips_fingerprint() -> None:
         worker_store.remove_worker("/repo/a", "worker-hot-count")
 
 
+def test_worker_registry_path_is_cached() -> None:
+    worker_store._workers_dir_cache = None
+    calls = 0
+    original_ba_home = worker_store.ba_home
+
+    def counted_ba_home():
+        nonlocal calls
+        calls += 1
+        return original_ba_home()
+
+    worker_store.ba_home = counted_ba_home
+    try:
+        first = worker_store._path()
+        second = worker_store._path()
+        check(first == second, "worker registry path changed")
+        check(calls == 1, f"worker registry path resolved repeatedly: {calls}")
+    finally:
+        worker_store.ba_home = original_ba_home
+        worker_store._workers_dir_cache = None
+
+
 def test_worker_registry_read_cache_is_fingerprinted_and_isolated() -> None:
     worker_store.upsert_worker("/repo/a", "worker-read-cache", "native", "agent-read-cache")
     original_read_text = worker_store.Path.read_text
