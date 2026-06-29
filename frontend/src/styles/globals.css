@@ -1616,6 +1616,98 @@ body {
   line-height: 1.4;
 }
 
+.session-team-summary {
+  margin-top: 4px;
+  padding-inline-end: 48px;
+}
+
+.session-team-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--app-font-scale));
+  cursor: pointer;
+}
+
+.session-team-toggle:hover {
+  background: var(--bg-hover, rgba(255,255,255,0.05));
+}
+
+.session-team-count {
+  color: var(--text-muted);
+}
+
+.session-team-details {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 5px;
+  padding-inline-start: 17px;
+}
+
+.session-team-policy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.session-team-policy select {
+  height: 24px;
+  min-width: 88px;
+  max-width: 120px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.session-team-workers {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.session-team-worker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 22px;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.session-team-worker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-team-worker-role {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: calc(10px * var(--app-font-scale));
+}
+
+.session-team-workers-empty {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 /* The meta line that carries the todo + content-score badges: single
    line, badges never shrink/wrap, the leading text ellipsizes when the
    row is too narrow. Keeps the session row height fixed regardless of
@@ -11206,22 +11298,6 @@ pre .inline-tag-highlight {
   gap: 4px;
   margin: 4px 0;
 }
-.workers-panel-policy {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-secondary, #aaa);
-  font-size: calc(11px * var(--app-font-scale));
-}
-.workers-panel-policy select {
-  height: 22px;
-  max-width: 96px;
-  font-size: calc(11px * var(--app-font-scale));
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  color: var(--text);
-}
 .workers-panel-actions button {
   font-size: calc(11px * var(--app-font-scale));
   padding: 2px 6px;
@@ -11255,48 +11331,6 @@ pre .inline-tag-highlight {
 .workers-panel-list {
   list-style: none;
   margin: 0;
-  padding: 0;
-}
-.worker-group-row {
-  list-style: none;
-  margin: 2px 0 4px;
-}
-.worker-group-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 26px;
-  padding: 4px 6px;
-  border-radius: 3px;
-  color: var(--text-secondary, #aaa);
-  cursor: pointer;
-  user-select: none;
-}
-.worker-group-header:hover {
-  background: var(--bg-hover, rgba(255,255,255,0.04));
-}
-.worker-group-header .caret {
-  width: 10px;
-  font-size: calc(10px * var(--app-font-scale));
-  opacity: 0.7;
-  flex-shrink: 0;
-}
-.worker-group-name {
-  min-width: 0;
-  flex: 1;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.worker-group-meta {
-  color: var(--text-muted, #777);
-  font-size: calc(10px * var(--app-font-scale));
-  white-space: nowrap;
-}
-.worker-group-list {
-  list-style: none;
-  margin: 0 0 0 12px;
   padding: 0;
 }
 .worker-row {
@@ -11350,21 +11384,6 @@ pre .inline-tag-highlight {
   color: #ff8888;
   font-weight: 600;
   text-transform: uppercase;
-}
-.worker-binding-badge {
-  font-size: calc(9px * var(--app-font-scale));
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-.worker-binding-bound {
-  background: rgba(82, 196, 126, 0.18);
-  color: #82d99b;
-}
-.worker-binding-available {
-  background: rgba(120, 130, 150, 0.18);
-  color: var(--text-muted, #999);
 }
 .worker-needs-init-badge {
   font-size: calc(9px * var(--app-font-scale));
