@@ -134,10 +134,36 @@ def _run_max_seq_seeds_cursor() -> bool:
     return ok
 
 
+def _run_session_event_meta_seeds_cursor() -> bool:
+    root = "root-session-meta-cursor-test"
+    sid = "sid-session-meta-cursor-test"
+    EventIngester().ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-session-meta-cursor-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    EventIngester().ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-session-meta-cursor-2"},
+        source="prior-run", msg_id="msg-2",
+    )
+
+    ing = EventIngester()
+    has_events, cursor, render_by_sid = ing.session_event_meta(root)
+    seq_after_scan = ing._seq.get(root)
+    ok = has_events and cursor == 2 and seq_after_scan == 2 and render_by_sid.get(sid) == 2
+    print(
+        f"  {PASS if ok else FAIL} session_event_meta seeds cursor and render watermarks"
+        f"{'' if ok else f' — has={has_events} cursor={cursor} _seq={seq_after_scan} render={render_by_sid}'}"
+    )
+    return ok
+
+
 def main() -> int:
     try:
         ok = _run()
         ok = _run_max_seq_seeds_cursor() and ok
+        ok = _run_session_event_meta_seeds_cursor() and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

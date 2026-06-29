@@ -250,7 +250,24 @@ def _walk_forks(node: dict) -> Iterator[dict]:
 # ── Summary index helpers ────────────────────────────────────────────
 
 
-def _build_summary_for_root(root: dict) -> dict:
+def _projection_snapshot() -> tuple[dict[str, list[dict]], dict[str, dict[str, dict]]]:
+    with _requirement_tags_lock:
+        requirement_tags = {
+            sid: list(tags)
+            for sid, tags in _requirement_tags_by_session.items()
+        }
+    with _markers_lock:
+        markers = {
+            sid: {k: dict(v) for k, v in per.items()}
+            for sid, per in _markers_by_session.items()
+        }
+    return requirement_tags, markers
+
+
+def _build_summary_for_root(
+    root: dict,
+    projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
+) -> dict:
     """Extract sidebar-visible summary fields from a root session dict.
     Mirrors the per-root block in the old `_build_session_list`."""
     cwd = root.get("cwd", "")
@@ -268,7 +285,16 @@ def _build_summary_for_root(root: dict) -> dict:
         _newer_timestamp(_stored_updated, _last_msg_ts)
         if _last_msg_ts else _stored_updated
     )
-    requirement_tags = _requirement_tags_for_session(root["id"])
+    if projection_snapshot is None:
+        requirement_tags = _requirement_tags_for_session(root["id"])
+        markers = _markers_for_session(root["id"])
+    else:
+        tags_by_session, markers_by_session = projection_snapshot
+        requirement_tags = list(tags_by_session.get(root["id"], []))
+        markers = {
+            k: dict(v)
+            for k, v in markers_by_session.get(root["id"], {}).items()
+        }
     summary = {
         "id": root["id"],
         "name": root.get("name") or t("session.untitled"),
@@ -315,7 +341,7 @@ def _build_summary_for_root(root: dict) -> dict:
         "pending_eng_session_id": None,
         "worker_count": _worker_summary_count(),
         "requirement_tags": requirement_tags,
-        "markers": _markers_for_session(root["id"]),
+        "markers": markers,
         "pinned": bool(root.get("pinned", False)),
         "archived": bool(root.get("archived", False)),
         "worker_eligible": bool(root.get("worker_eligible", False)),
@@ -437,14 +463,19 @@ def _start_summary_projection_repair() -> None:
         global _summary_index_version, _summary_projection_repair_running
         try:
             while True:
+                projection_snapshot = _projection_snapshot()
+                tags_by_session, markers_by_session = projection_snapshot
                 with _summary_index_lock:
                     pending = list(_summary_index.items())
                 originals = dict(pending)
                 updates: dict[str, dict] = {}
                 retry = False
                 for sid, summary in pending:
-                    tags = _requirement_tags_for_session(sid)
-                    marker = _markers_for_session(sid)
+                    tags = list(tags_by_session.get(sid, []))
+                    marker = {
+                        k: dict(v)
+                        for k, v in markers_by_session.get(sid, {}).items()
+                    }
                     tag_filter_ids = _tag_filter_ids(summary.get("session_tags") or [], tags)
                     if (
                         summary.get("requirement_tags") == tags
@@ -980,6 +1011,7 @@ def _do_build_summary_index_unsafe() -> None:
     # (summary mtime must be >= session file mtime — a crash between
     # write_session_full and summary file write leaves a stale summary).
     missing_ids: list[str] = []
+    projection_snapshot = _projection_snapshot()
     for sid in full_files:
         sp = summary_files.get(sid)
         published = False
@@ -1034,7 +1066,7 @@ def _do_build_summary_index_unsafe() -> None:
             data = _migrate_session(json.loads(fpath.read_text(encoding="utf-8")), ctx)
             _overlay_seen_cursors(data, data["id"])
             _overlay_last_opened(data, data["id"])
-            summary = _build_summary_for_root(data)
+            summary = _build_summary_for_root(data, projection_snapshot)
             with _summary_index_lock:
                 existing = _summary_index.get(data["id"])
                 _summary_index[data["id"]] = summary
