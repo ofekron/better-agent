@@ -206,6 +206,7 @@ class TurnManager:
         # endpoints never call os.kill(pid,0) on the event loop.
         self._cached_running: set[str] = set()
         self._cached_monitoring: dict[str, str] = {}
+        self._cached_state_version = 0
         self._cache_lock = threading.Lock()
         self._bg_tick_started = False
 
@@ -745,6 +746,11 @@ class TurnManager:
             except Exception:
                 pass
         with self._cache_lock:
+            if (
+                self._cached_running != running
+                or self._cached_monitoring != monitoring
+            ):
+                self._cached_state_version += 1
             self._cached_running = running
             self._cached_monitoring = monitoring
 
@@ -765,6 +771,10 @@ class TurnManager:
     def cached_state_snapshot(self) -> tuple[set[str], dict[str, str]]:
         with self._cache_lock:
             return set(self._cached_running), dict(self._cached_monitoring)
+
+    def cached_state_version(self) -> int:
+        with self._cache_lock:
+            return self._cached_state_version
 
     def _run_state_touch(self, app_session_id: str) -> None:
         runs = self._run_state.get(app_session_id)

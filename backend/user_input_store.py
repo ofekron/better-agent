@@ -14,6 +14,7 @@ _LOCK = threading.RLock()
 _SCHEMA_VERSION = 1
 _COUNTS_LOADED_PATH: Path | None = None
 _PENDING_COUNTS_BY_SESSION: dict[str, int] = {}
+_PENDING_COUNTS_VERSION = 0
 _PATH_CACHE_HOME: Path | None = None
 _PATH_CACHE_VALUE: Path | None = None
 
@@ -49,7 +50,8 @@ def _read_locked() -> dict[str, Any]:
 
 
 def _rebuild_counts_locked(data: dict[str, Any], path: Path | None = None) -> None:
-    global _COUNTS_LOADED_PATH
+    global _COUNTS_LOADED_PATH, _PENDING_COUNTS_VERSION
+    previous = dict(_PENDING_COUNTS_BY_SESSION)
     _PENDING_COUNTS_BY_SESSION.clear()
     for req in data.get("requests", {}).values():
         if not isinstance(req, dict) or req.get("status") != "pending":
@@ -58,6 +60,8 @@ def _rebuild_counts_locked(data: dict[str, Any], path: Path | None = None) -> No
         if sid:
             _PENDING_COUNTS_BY_SESSION[sid] = _PENDING_COUNTS_BY_SESSION.get(sid, 0) + 1
     _COUNTS_LOADED_PATH = path or _path()
+    if _PENDING_COUNTS_BY_SESSION != previous:
+        _PENDING_COUNTS_VERSION += 1
 
 
 def _ensure_counts_locked() -> None:
@@ -68,14 +72,19 @@ def _ensure_counts_locked() -> None:
 
 
 def _adjust_pending_count_locked(app_session_id: Any, delta: int) -> None:
+    global _PENDING_COUNTS_VERSION
     sid = str(app_session_id or "")
     if not sid:
         return
+    previous = _PENDING_COUNTS_BY_SESSION.get(sid, 0)
     next_count = _PENDING_COUNTS_BY_SESSION.get(sid, 0) + delta
     if next_count > 0:
         _PENDING_COUNTS_BY_SESSION[sid] = next_count
-        return
-    _PENDING_COUNTS_BY_SESSION.pop(sid, None)
+    else:
+        _PENDING_COUNTS_BY_SESSION.pop(sid, None)
+        next_count = 0
+    if next_count != previous:
+        _PENDING_COUNTS_VERSION += 1
 
 
 def _write_locked(data: dict[str, Any]) -> None:
@@ -144,6 +153,12 @@ def pending_counts_by_session() -> dict[str, int]:
     with _LOCK:
         _ensure_counts_locked()
         return dict(_PENDING_COUNTS_BY_SESSION)
+
+
+def pending_counts_version() -> int:
+    with _LOCK:
+        _ensure_counts_locked()
+        return _PENDING_COUNTS_VERSION
 
 
 def get_request(request_id: str) -> dict[str, Any] | None:
