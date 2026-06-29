@@ -85,7 +85,7 @@ export function ForkSplitView({
   onAdvSyncClick,
 }: Props) {
   const { t } = useTranslation();
-  const [focusedViewEnabled, setFocusedViewEnabled] = useState(false);
+  const [focusedViewEnabled, setFocusedViewEnabled] = useState(true);
 
   // Flatten the tree depth-first so root → its forks → their forks ...
   // become an ordered list of panes. We render each as a column.
