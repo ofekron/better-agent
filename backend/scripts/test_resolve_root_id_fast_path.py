@@ -82,6 +82,8 @@ def _write_summary(
             "fork_count": fork_count,
             "fork_ids": fork_ids if fork_ids is not None else [],
             "last_seen_event_uid": None,
+            "current_todos": [],
+            "current_tasks": [],
         }),
         encoding="utf-8",
     )
@@ -284,6 +286,40 @@ def test_fork_index_sidecar_builds_index_without_root_or_summary_parse() -> bool
     return ok
 
 
+def test_index_sidecar_write_happens_outside_index_lock() -> bool:
+    _reset_home()
+    fork = {
+        **_record("child-fork"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+    }
+    _write(_record("target-root", forks=[fork]))
+    _write_summary("target-root", 1, fork_ids=["child-fork"])
+
+    original_write = session_store._write_index_sidecar
+    lock_states: list[bool] = []
+
+    def tracking_write(*args, **kwargs):
+        acquired = session_store._index_lock.acquire(blocking=False)
+        lock_states.append(not acquired)
+        if acquired:
+            session_store._index_lock.release()
+        return original_write(*args, **kwargs)
+
+    session_store._write_index_sidecar = tracking_write
+    try:
+        resolved = session_store._resolve_root_id("child-fork")
+    finally:
+        session_store._write_index_sidecar = original_write
+
+    ok = resolved == "target-root" and lock_states and not any(lock_states)
+    print(
+        f"{PASS if ok else FAIL} fork-index sidecar writes outside index lock"
+        f"{'' if ok else ' lock_states=' + repr(lock_states)}"
+    )
+    return ok
+
+
 def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -464,6 +500,7 @@ def main() -> int:
             test_fresh_zero_fork_summaries_skip_full_parse(),
             test_fresh_fork_summary_builds_index_without_root_parse(),
             test_fork_index_sidecar_builds_index_without_root_or_summary_parse(),
+            test_index_sidecar_write_happens_outside_index_lock(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),
