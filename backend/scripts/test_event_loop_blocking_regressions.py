@@ -159,6 +159,12 @@ def test_ws_gap_fill_paginates_until_target_seq() -> None:
     assert "if not has_more:" in fill_source
     assert "break" in fill_source
 
+    frontend_start = source.index("async def frontend_log(")
+    frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
+    frontend_source = source[frontend_start:frontend_end]
+    assert "_frontend_log_off_loop(log_level, line)" in frontend_source
+    assert "frontend_logger.log(log_level, line)" not in frontend_source
+
 
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
