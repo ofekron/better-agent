@@ -1093,6 +1093,25 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
     assert "session_search_index.has_indexed_rows()" in startup_source
+
+
+def test_missing_event_meta_sidecars_warm_in_background() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _missing_session_event_meta_roots(" in source
+    assert "async def _warm_missing_session_event_meta_sidecars()" in source
+    assert "await asyncio.to_thread(\n        _missing_session_event_meta_roots" in source
+    warm_start = source.index("async def _warm_missing_session_event_meta_sidecars()")
+    warm_end = source.index("def _schedule_session_event_meta_warm(", warm_start)
+    warm_source = source[warm_start:warm_end]
+    assert "_SESSION_EVENT_META_GLOBAL_WARM_BATCH" in warm_source
+    assert "await _warm_session_event_meta_roots(batch)" in warm_source
+    assert "await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)" in warm_source
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "startup-session-event-meta-sidecar-warm" in startup_source
+    assert "session_event_meta_sidecar_warm" in startup_source
+    assert "_SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS" in startup_source
     assert "_rebuild_session_search_index_if_empty" in startup_source
 
 
