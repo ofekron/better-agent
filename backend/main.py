@@ -107,11 +107,13 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes],
 ] = {}
+_session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
 _session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
+_SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 16
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.15
@@ -494,6 +496,11 @@ def _sessions_list_cache_version(search_query: str) -> int:
 
 
 def _session_list_user_prefs() -> tuple[bool, str, bool]:
+    global _session_list_user_prefs_cache
+    now = time.monotonic()
+    cached = _session_list_user_prefs_cache
+    if cached is not None and now - cached[0] <= _SESSION_LIST_USER_PREFS_TTL_SECONDS:
+        return cached[1]
     prefs = user_prefs.get_all()
     folder_view_enabled = prefs.get(
         "folder_view_enabled",
@@ -506,11 +513,18 @@ def _session_list_user_prefs() -> tuple[bool, str, bool]:
         "session_status_sort",
         user_prefs.DEFAULT_SESSION_STATUS_SORT,
     )
-    return (
+    resolved = (
         bool(folder_view_enabled),
         session_sort,
         bool(session_status_sort),
     )
+    _session_list_user_prefs_cache = (now, resolved)
+    return resolved
+
+
+def _invalidate_session_list_user_prefs_cache() -> None:
+    global _session_list_user_prefs_cache
+    _session_list_user_prefs_cache = None
 
 
 _GIT_STATUS_TTL_SECONDS = 60.0
@@ -1953,6 +1967,7 @@ async def patch_user_prefs(body: dict = Body(...)):
         prefs = await asyncio.to_thread(_patch_user_prefs_sync)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _invalidate_session_list_user_prefs_cache()
     await coordinator.broadcast_global("user_prefs_changed", prefs)
     return prefs
 
@@ -3914,7 +3929,7 @@ async def get_sessions(
             default_folder_view,
             default_sort_by,
             effective_status_sort,
-        ) = await asyncio.to_thread(_session_list_user_prefs)
+        ) = _session_list_user_prefs()
         effective_folder_view = (
             folder_view if folder_view is not None else default_folder_view
         )
