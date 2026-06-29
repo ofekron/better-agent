@@ -3902,6 +3902,26 @@ def copy_persistable_tree(root: dict) -> dict:
         _restore_volatile_to_tree(popped)
 
 
+def _overlay_queue_projection(root: dict) -> None:
+    import session_queue_projection
+
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        sid = node.get("id")
+        if isinstance(sid, str) and sid:
+            record = session_queue_projection.get(sid)
+            if isinstance(record, dict) and "queued_prompts" in record:
+                node["queued_prompts"] = [
+                    copy.deepcopy(prompt)
+                    for prompt in record.get("queued_prompts") or []
+                    if isinstance(prompt, dict)
+                ]
+        for fork in node.get("forks") or []:
+            if isinstance(fork, dict):
+                stack.append(fork)
+
+
 @perf.timed_fn("store.session.write_full")
 def write_session_full(
     root: dict,
@@ -3933,6 +3953,9 @@ def write_session_full(
     if bump_updated_at:
         with perf.timed("store.session.write_full.updated_at"):
             root["updated_at"] = datetime.now().isoformat()
+    if preserve_projection_fields:
+        with perf.timed("store.session.write_full.queue_projection"):
+            _overlay_queue_projection(root)
     with perf.timed("store.session.write_full.index_tree"):
         fork_topology_changed = _index_tree(root)
     with perf.timed("store.session.write_full.path"):

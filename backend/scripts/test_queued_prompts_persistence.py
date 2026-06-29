@@ -25,6 +25,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_store  # noqa: E402
+import session_queue_projection  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -116,6 +117,39 @@ def _run() -> bool:
         "queued prompt cleared",
         raw.get("queued_prompts") == [],
         f"queued={raw.get('queued_prompts')}",
+    ))
+
+    session_manager.add_queued_prompt(sid, prompt)
+    user_msg = {
+        "id": "user-1",
+        "role": "user",
+        "content": prompt["content"],
+        "client_id": prompt["client_id"],
+        "lifecycle_msg_id": prompt["lifecycle_msg_id"],
+    }
+    session_manager.append_user_msg(sid, user_msg)
+    stale = session_store.copy_persistable_tree(session_manager.get(sid))
+    clean_projection = dict(stale)
+    clean_projection["queued_prompts"] = []
+    session_queue_projection.upsert_from_session(clean_projection)
+    session_store.write_session_full(
+        stale,
+        bump_updated_at=False,
+        preserve_projection_fields=True,
+    )
+    raw = _read_raw(sid)
+    queued = raw.get("queued_prompts")
+    results.append((
+        "stale full-session write preserves cleaned queue projection",
+        queued == [],
+        f"queued={queued}",
+    ))
+
+    projected = session_queue_projection.project_session(stale) or {}
+    results.append((
+        "queue projection ignores prompts already persisted as user messages",
+        projected.get("queued_prompts") == [],
+        f"projected={projected.get('queued_prompts')}",
     ))
 
     passed = sum(1 for _, ok, _ in results if ok)

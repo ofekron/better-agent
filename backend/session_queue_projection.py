@@ -91,16 +91,37 @@ def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
     }
 
 
+def _queued_prompt_is_pending(
+    prompt: dict[str, Any],
+    user_client_ids: set[str],
+    user_lifecycle_ids: set[str],
+) -> bool:
+    client_id = prompt.get("client_id")
+    if isinstance(client_id, str) and client_id and client_id in user_client_ids:
+        return False
+    lifecycle_id = prompt.get("lifecycle_msg_id")
+    if (
+        isinstance(lifecycle_id, str)
+        and lifecycle_id
+        and lifecycle_id in user_lifecycle_ids
+    ):
+        return False
+    return True
+
+
 def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
     sid = session.get("id")
     if not isinstance(sid, str) or not sid:
         return None
+    user_projection = _user_message_projection(session.get("messages") or [])
+    user_client_ids = set(user_projection["user_client_ids"])
+    user_lifecycle_ids = set(user_projection["user_lifecycle_msg_ids"])
     queued = [
         copy.deepcopy(prompt)
         for prompt in (session.get("queued_prompts") or [])
         if isinstance(prompt, dict)
+        and _queued_prompt_is_pending(prompt, user_client_ids, user_lifecycle_ids)
     ]
-    user_projection = _user_message_projection(session.get("messages") or [])
     return {
         "id": sid,
         "model": session.get("model"),
