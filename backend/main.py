@@ -13857,12 +13857,16 @@ async def websocket_chat(websocket: WebSocket):
         send_t = time.perf_counter()
         try:
             serialize_t = time.perf_counter()
-            text = await asyncio.to_thread(
-                json.dumps,
-                event_dict,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
+            serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
+            if serialized_task is not None:
+                text = await serialized_task
+            else:
+                text = await asyncio.to_thread(
+                    json.dumps,
+                    event_dict,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
             perf.record(
                 "ws.send_json.serialize_off_loop",
                 (time.perf_counter() - serialize_t) * 1000.0,
