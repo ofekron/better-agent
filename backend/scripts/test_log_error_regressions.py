@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import _test_home
@@ -290,6 +292,67 @@ def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
         shutil.rmtree(claude_home, ignore_errors=True)
 
 
+def test_jsonl_path_coalesces_concurrent_provider_index(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-concurrent-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    old_glob = helpers.Path.glob
+    calls = {"glob": 0}
+    calls_lock = threading.Lock()
+
+    def counted_glob(self: Path, pattern: str):
+        with calls_lock:
+            calls["glob"] += 1
+        time.sleep(0.05)
+        return old_glob(self, pattern)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        helpers.Path.glob = counted_glob  # type: ignore[method-assign]
+
+        results: list[Path | None] = []
+        threads = [
+            threading.Thread(
+                target=lambda sid=sid: results.append(
+                    helpers.compute_jsonl_path("/tmp", sid)
+                )
+            )
+            for sid in ("missing-a", "missing-b", "missing-c", "missing-d")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        check(
+            results == [None, None, None, None],
+            "jsonl helper returns concurrent misses consistently",
+            failures,
+        )
+        check(
+            calls["glob"] == 1,
+            "jsonl helper coalesces concurrent provider index builds",
+            failures,
+        )
+    finally:
+        helpers.Path.glob = old_glob  # type: ignore[method-assign]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
 def test_jsonl_path_targets_run_state_by_sid(failures: list[str]) -> None:
     import orchs.jsonl_helpers as helpers
     from paths import ba_home
@@ -398,6 +461,7 @@ def main() -> int:
         test_jsonl_read_path_uses_session_provider_config(failures)
         test_jsonl_path_negative_cache(failures)
         test_jsonl_path_indexes_multiple_misses(failures)
+        test_jsonl_path_coalesces_concurrent_provider_index(failures)
         test_jsonl_path_targets_run_state_by_sid(failures)
         test_jsonl_path_reuses_recent_run_state_index(failures)
     finally:
