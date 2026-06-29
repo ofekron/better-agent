@@ -797,6 +797,16 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     assert "_builtin_extension_runtime_ready(" not in route_source
 
 
+def test_get_session_strips_synthetic_events_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = source.index("async def get_session(")
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "await asyncio.to_thread(_strip_synthetic_events_from_tree, tree)" in route_source
+    assert "_strip_synthetic_events_from_tree(tree)" not in route_source
+    assert "strip_ms" in route_source
+
+
 def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     finalize_start = source.index("async def _finalize_when_done(")
