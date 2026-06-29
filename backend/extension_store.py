@@ -57,6 +57,8 @@ _PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
+_BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
+_BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
 _RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
 _RESERVED_MCP_SERVER_NAMES = {
@@ -2678,6 +2680,20 @@ def is_builtin_feature_enabled(extension_id: str) -> bool:
     if not record:
         return False
     return _record_active(record)
+
+
+def is_builtin_feature_enabled_cached(extension_id: str | None) -> bool:
+    if not extension_id:
+        return False
+    fingerprint = store_fingerprint()
+    with _BUILTIN_FEATURE_CACHE_LOCK:
+        cached = _BUILTIN_FEATURE_CACHE.get(extension_id)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+    enabled = is_builtin_feature_enabled(extension_id)
+    with _BUILTIN_FEATURE_CACHE_LOCK:
+        _BUILTIN_FEATURE_CACHE[extension_id] = (fingerprint, enabled)
+    return enabled
 
 
 def is_extension_runtime_ready(extension_id: str) -> bool:

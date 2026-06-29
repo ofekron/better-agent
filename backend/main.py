@@ -2442,7 +2442,10 @@ def _require_project_structure_internal(x_internal_token: str) -> None:
     principal = coordinator.resolve_principal(x_internal_token)
     if principal is None:
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_extension(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+    if not extension_store.is_builtin_feature_enabled_cached(
+        extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ):
+        raise HTTPException(status_code=404, detail="Extension is not installed")
     if (
         principal[0] != "extension"
         or principal[1] != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
@@ -2451,7 +2454,7 @@ def _require_project_structure_internal(x_internal_token: str) -> None:
 
 
 async def _require_project_structure_internal_async(x_internal_token: str) -> None:
-    await asyncio.to_thread(_require_project_structure_internal, x_internal_token)
+    _require_project_structure_internal(x_internal_token)
 
 
 def _require_capabilities_internal(x_internal_token: str) -> None:
