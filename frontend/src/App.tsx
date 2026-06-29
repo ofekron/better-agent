@@ -145,6 +145,8 @@ import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
+type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "board";
+
 const rearrangerApi = () => extBackendBase("rearranger");
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
 const supervisorApi = () => extBackendBase("supervisor");
@@ -2351,9 +2353,7 @@ function AppMain({
     return () => window.removeEventListener("shortcut_responses_changed", handler);
   }, []);
   const [viewingFile, setViewingFile] = useState<ViewingFile | null>(null);
-  const [rightPanelTab, setRightPanelTab] = useState<
-    "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "board"
-  >("files");
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("files");
   useEffect(() => {
     if (!builtinExtensions.canvas && rightPanelTab === "canvas") {
       setRightPanelTab("files");
@@ -3358,7 +3358,7 @@ function AppMain({
     ? SIDEBAR_MINIMIZED_WIDTH
     : sidebar.size;
   const rightPanel = useResizable({
-    storageKey: "better-agent-right-panel-width",
+    storageKey: `better-agent-right-panel-width:${rightPanelTab}`,
     defaultSize: 450,
     min: 280,
     max: Math.max(280, viewport.width - sidebarWidthForSizing - 360),

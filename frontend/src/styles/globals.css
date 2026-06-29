@@ -13983,10 +13983,15 @@ button.progress-inflight {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 }
 .right-panel-tab {
-  flex: 1;
-  padding: 7px 4px;
+  flex: 0 0 auto;
+  min-width: max-content;
+  padding: 7px 12px;
   background: transparent;
   border: none;
   color: var(--text-secondary);
@@ -13997,8 +14002,6 @@ button.progress-inflight {
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   text-align: center;
 }
 .right-panel-tab:hover {
@@ -14666,6 +14669,9 @@ button.progress-inflight {
 
   .right-panel-tabs {
     padding-inline-end: 100px;
+  }
+  .right-panel-tab {
+    min-width: max-content;
   }
 
   .selection-popup-action-btn,

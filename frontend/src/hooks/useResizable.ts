@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react";
 
 type Axis = "x" | "y";
 /**
@@ -23,6 +23,28 @@ interface Options {
   enabled?: boolean;
 }
 
+function clampSize(size: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, size));
+}
+
+function readStoredSize(
+  storageKey: string,
+  defaultSize: number,
+  min: number,
+  max: number,
+): number {
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored != null) {
+      const n = Number(stored);
+      if (Number.isFinite(n)) return clampSize(n, min, max);
+    }
+  } catch {
+    // localStorage unavailable (private mode, SSR) — fall through
+  }
+  return clampSize(defaultSize, min, max);
+}
+
 /**
  * Pointer-drag resizer with localStorage persistence. Returns a `size`
  * (in px) and an `onMouseDown` to attach to a divider element. Reads
@@ -38,27 +60,24 @@ export function useResizable({
   direction = "forward",
   enabled = true,
 }: Options) {
-  const [size, setSize] = useState<number>(() => {
-    try {
-      const stored = localStorage.getItem(storageKey);
-      if (stored != null) {
-        const n = Number(stored);
-        if (Number.isFinite(n)) return Math.max(min, Math.min(max, n));
-      }
-    } catch {
-      // localStorage unavailable (private mode, SSR) — fall through
-    }
-    return defaultSize;
-  });
+  const [size, setSize] = useState<number>(() =>
+    readStoredSize(storageKey, defaultSize, min, max)
+  );
 
   // `size` read via a ref so `onMouseDown` doesn't re-create on every
   // drag tick (which was happening before because `size` was in the deps).
   const sizeRef = useRef(size);
   sizeRef.current = size;
+  const storageKeyRef = useRef(storageKey);
 
-  useEffect(() => {
-    setSize((current) => Math.max(min, Math.min(max, current)));
-  }, [min, max]);
+  useLayoutEffect(() => {
+    if (storageKeyRef.current !== storageKey) {
+      storageKeyRef.current = storageKey;
+      setSize(readStoredSize(storageKey, defaultSize, min, max));
+      return;
+    }
+    setSize((current) => clampSize(current, min, max));
+  }, [defaultSize, min, max, storageKey]);
 
   useEffect(() => {
     try {
@@ -94,10 +113,7 @@ export function useResizable({
           direction === "forward"
             ? pos - startPosRef.current
             : startPosRef.current - pos;
-        const next = Math.max(
-          min,
-          Math.min(max, startSizeRef.current + rawDelta)
-        );
+        const next = clampSize(startSizeRef.current + rawDelta, min, max);
         setSize(next);
       };
       const onUp = () => {
