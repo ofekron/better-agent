@@ -1111,12 +1111,17 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
 
 def test_get_session_strips_synthetic_events_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _tree_has_loaded_events(" in source
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
-    assert "await asyncio.to_thread(_strip_synthetic_events_from_tree, tree)" in route_source
+    helper_start = source.index("def _session_detail_snapshot_sync(")
+    helper_end = source.index("def _floor_events_from_seq(", helper_start)
+    helper_source = source[helper_start:helper_end]
     assert "_strip_synthetic_events_from_tree(tree)" not in route_source
-    assert "strip_ms" in route_source
+    assert "if _tree_has_loaded_events(tree):" in helper_source
+    assert "_strip_synthetic_events_from_tree(tree)" in helper_source
+    assert "strip_ms" in helper_source
 
 
 def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
@@ -1310,6 +1315,7 @@ if __name__ == "__main__":
     test_requirement_tag_refresh_is_off_startup_loop()
     test_machine_nodes_readiness_check_is_off_startup_loop()
     test_sessions_route_does_not_runtime_check_machine_nodes()
+    test_get_session_strips_synthetic_events_off_loop()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
