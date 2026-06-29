@@ -266,6 +266,7 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
     }
     sidecar_path.write_text(
         json.dumps({
+            "summary_version": 2,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,

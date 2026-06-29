@@ -10,6 +10,7 @@ State location: <ba_home>/sessions/<root_id>/ingester_state.json
 """
 
 import hashlib
+import bisect
 import copy
 import json
 import logging
@@ -1301,10 +1302,9 @@ class EventIngester:
             ):
                 return None
             rows: list[dict] = []
-            for index, entry in enumerate(cached[1]):
+            start_index = bisect.bisect_left(offsets, byte_start)
+            for index, entry in enumerate(cached[1][start_index:], start_index):
                 line_start = offsets[index]
-                if line_start < byte_start:
-                    continue
                 if line_start >= byte_end:
                     break
                 rows.append(entry)
@@ -1656,9 +1656,15 @@ class EventIngester:
         lock = self._locks.setdefault(root_id, threading.Lock())
         with lock:
             cached = self._summaries_cache.get(root_id)
-            if cached is not None and cached[0] == file_size:
+            offsets = self._seq_offsets.get(root_id)
+            cached_index_current = (
+                offsets is not None
+                and self._next_offset.get(root_id) == file_size
+                and self._seq.get(root_id) == len(offsets)
+            )
+            if cached is not None and cached[0] == file_size and cached_index_current:
                 _, summaries, resolutions = cached
-            elif cached is not None and cached[0] < file_size:
+            elif cached is not None and cached[0] < file_size and cached_index_current:
                 _, summaries, resolutions = cached
                 self._append_summaries(
                     path, root_id, tail, summaries, resolutions,
@@ -1678,6 +1684,7 @@ class EventIngester:
                 loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
                 if loaded is not None:
                     summaries, resolutions = loaded
+                    self._rebuild_seq_offsets_locked(path, root_id)
                 else:
                     summaries, resolutions = self._scan_summaries(
                         path, root_id, tail,
@@ -1854,6 +1861,26 @@ class EventIngester:
                     entry, line_start, line_end, tail,
                 )
 
+    def _rebuild_seq_offsets_locked(self, path: Path, root_id: str) -> None:
+        seq_offsets: list[int] = []
+        with open(path, "rb") as f:
+            while True:
+                line_start = f.tell()
+                raw = f.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line.strip():
+                    continue
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                seq_offsets.append(line_start)
+        self._seq_offsets[root_id] = seq_offsets
+        self._seq[root_id] = len(seq_offsets)
+        self._next_offset[root_id] = path.stat().st_size
+
     def _scan_summaries(
         self, path: Path, root_id: str, tail: int,
     ) -> tuple[dict[str, dict], dict[int, str]]:
@@ -1870,7 +1897,7 @@ class EventIngester:
             cached is not None
             and cached[0] == file_size
             and offsets is not None
-            and len(offsets) >= len(cached[1])
+            and len(offsets) == len(cached[1])
         ):
             entries = cached[1]
             for index, entry in enumerate(entries):
