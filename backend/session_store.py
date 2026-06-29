@@ -3914,20 +3914,24 @@ def grep_session_scores(
     selected_fields = _normalize_search_fields(fields)
     if not selected_fields:
         return {}
-    scores: dict[str, int] = {}
+    scores = _metadata_search_scores(query, selected_fields)
     if SEARCH_FIELD_CONTENT in selected_fields:
         import session_search_index
-        scores.update({
-            str(item.get("session_id")): int(item.get("score") or 0)
-            for item in session_search_index.search(
-                query,
-                limit=content_limit,
-                max_wait_seconds=content_max_wait_seconds,
-            )
-            if item.get("session_id")
-        })
-    for sid, score in _metadata_search_scores(query, selected_fields).items():
-        scores[sid] = scores.get(sid, 0) + score
+        effective_content_wait = content_max_wait_seconds
+        if (
+            effective_content_wait is not None
+            and len(scores) >= max(content_limit, 1)
+        ):
+            effective_content_wait = 0.0
+        for item in session_search_index.search(
+            query,
+            limit=content_limit,
+            max_wait_seconds=effective_content_wait,
+        ):
+            sid = item.get("session_id")
+            if sid:
+                sid_str = str(sid)
+                scores[sid_str] = scores.get(sid_str, 0) + int(item.get("score") or 0)
     return scores
 
 

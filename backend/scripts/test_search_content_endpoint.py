@@ -218,6 +218,72 @@ def grep_sessions_passes_bounded_limit_test() -> bool:
     return ok
 
 
+def combined_search_skips_content_wait_when_metadata_fills_limit_test() -> bool:
+    import session_store
+
+    original_metadata = session_store._metadata_search_scores
+    original_search = session_search_index.search
+    waits: list[float | None] = []
+
+    def fake_metadata(_query, _fields):
+        return {"sid-a": 1, "sid-b": 1}
+
+    def fake_search(_query: str, limit: int = 50, *, max_wait_seconds=None):
+        waits.append(max_wait_seconds)
+        return []
+
+    session_store._metadata_search_scores = fake_metadata
+    session_search_index.search = fake_search
+    try:
+        scores = session_store.grep_session_scores(
+            "needle",
+            fields=["title", "content"],
+            content_limit=2,
+            content_max_wait_seconds=0.05,
+        )
+    finally:
+        session_store._metadata_search_scores = original_metadata
+        session_search_index.search = original_search
+    ok = scores == {"sid-a": 1, "sid-b": 1} and waits == [0.0]
+    print(
+        f"{PASS if ok else FAIL} combined search skips content wait when metadata fills limit "
+        f"-- waits={waits}",
+    )
+    return ok
+
+
+def zero_wait_search_does_not_start_fill_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    calls = 0
+
+    def fake_connect():
+        nonlocal calls
+        calls += 1
+        raise AssertionError("zero-wait search should not open content index")
+
+    session_search_index._connect_readonly = fake_connect
+    try:
+        started = time.monotonic()
+        rows = session_search_index.search(
+            "zero-wait-query",
+            limit=5,
+            max_wait_seconds=0.0,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._search_cache.clear()
+        session_search_index._search_inflight.clear()
+    ok = rows == [] and calls == 0 and elapsed < 0.01
+    print(
+        f"{PASS if ok else FAIL} zero-wait content search does not start fill "
+        f"-- calls={calls} elapsed={elapsed:.3f}s",
+    )
+    return ok
+
+
 def bounded_search_returns_without_unbounded_background_fill_test() -> bool:
     session_search_index._search_cache.clear()
     session_search_index._search_inflight.clear()
@@ -558,6 +624,8 @@ if __name__ == "__main__":
         ok = index_event_nonblocking_test()
         ok = search_does_not_wait_for_pending_index_test() and ok
         ok = grep_sessions_passes_bounded_limit_test() and ok
+        ok = combined_search_skips_content_wait_when_metadata_fills_limit_test() and ok
+        ok = zero_wait_search_does_not_start_fill_test() and ok
         ok = bounded_search_returns_without_unbounded_background_fill_test() and ok
         ok = repeated_bounded_search_reuses_inflight_without_waiting_test() and ok
         ok = bounded_search_does_not_cache_deadline_miss_test() and ok
