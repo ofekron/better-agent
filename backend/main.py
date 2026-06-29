@@ -2403,9 +2403,12 @@ def _sidebar_session_payload(session: dict) -> dict:
     if isinstance(sid, str):
         cached = _sidebar_payload_cache.get(cache_key)
         if cached is not None and cached[0] == sid:
-            return dict(cached[1])
-    payload = dict(session)
-    payload.pop("first_prompt", None)
+            return cached[1]
+    payload = {
+        key: value
+        for key, value in session.items()
+        if key != "first_prompt"
+    }
     meta = payload.get("working_mode_meta")
     if isinstance(meta, dict):
         payload["working_mode_meta"] = {

@@ -548,7 +548,8 @@ def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     payload_start = main_source.index("def _sidebar_session_payload(")
     payload_end = main_source.index("def _sidebar_state_snapshot(", payload_start)
     payload_source = main_source[payload_start:payload_end]
-    assert 'payload.pop("first_prompt", None)' in payload_source
+    assert 'if key != "first_prompt"' in payload_source
+    assert 'payload.pop("first_prompt", None)' not in payload_source
     start = main_source.index("def _decorate_local_sidebar_sessions(")
     end = main_source.index("def _local_sessions_for_sidebar(", start)
     decorate_source = main_source[start:end]
@@ -948,7 +949,7 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
     helper_source = source[start:end]
     assert "cache_key = id(session)" in helper_source
     assert "_sidebar_payload_cache.get(cache_key)" in helper_source
-    assert "return dict(cached[1])" in helper_source
+    assert "return cached[1]" in helper_source
     assert "_sidebar_payload_cache[cache_key] = (sid, payload)" in helper_source
 
 
