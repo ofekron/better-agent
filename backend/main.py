@@ -3898,6 +3898,78 @@ def _can_preserve_summary_order(
     )
 
 
+def _can_page_default_updated_at_with_virtual(
+    *,
+    search_query: str,
+    project_path: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    folder_view: bool,
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    sort_by: str,
+    status_sort: bool,
+) -> bool:
+    return (
+        not search_query
+        and project_path is None
+        and not show_archived
+        and file_edit_mode is None
+        and not folder_ids
+        and not folder_view
+        and not tag_ids
+        and not provider_ids
+        and not model_ids
+        and not modes
+        and not sources
+        and sort_by == "updated_at"
+        and not status_sort
+    )
+
+
+def _merge_updated_at_page(
+    local_sessions: list[dict],
+    virtual_sessions: list[dict],
+    *,
+    offset: int,
+    limit: int,
+) -> tuple[list[dict], int]:
+    page: list[dict] = []
+    total = 0
+    local_index = 0
+    virtual_index = 0
+    end = offset + limit
+    while local_index < len(local_sessions) or virtual_index < len(virtual_sessions):
+        if local_index >= len(local_sessions):
+            session = virtual_sessions[virtual_index]
+            virtual_index += 1
+        elif virtual_index >= len(virtual_sessions):
+            session = local_sessions[local_index]
+            local_index += 1
+        else:
+            local_session = local_sessions[local_index]
+            virtual_session = virtual_sessions[virtual_index]
+            if (
+                session_store.timestamp_sort_value(local_session.get("updated_at"))
+                >= session_store.timestamp_sort_value(virtual_session.get("updated_at"))
+            ):
+                session = local_session
+                local_index += 1
+            else:
+                session = virtual_session
+                virtual_index += 1
+        if session.get("archived"):
+            continue
+        if offset <= total < end:
+            page.append(session)
+        total += 1
+    return page, total
+
+
 def _session_filters_may_include_virtual(
     *,
     file_edit_mode: bool | None,
@@ -3940,6 +4012,21 @@ def _build_local_sessions_page_for_list(
     state_snapshot = _sidebar_state_snapshot() if status_sort else None
     search_query = (search or "").strip()
     appended_virtual_sessions = False
+    default_virtual_page = _can_page_default_updated_at_with_virtual(
+        search_query=search_query,
+        project_path=project_path,
+        show_archived=show_archived,
+        file_edit_mode=file_edit_mode,
+        folder_ids=folder_ids,
+        folder_view=folder_view,
+        tag_ids=tag_ids,
+        provider_ids=provider_ids,
+        model_ids=model_ids,
+        modes=modes,
+        sources=sources,
+        sort_by=sort_by,
+        status_sort=status_sort,
+    )
     if search_query:
         selected_search_fields = _split_session_search_fields(search_fields)
         content_max_wait_seconds = (
@@ -3967,12 +4054,37 @@ def _build_local_sessions_page_for_list(
             sources=sources,
         ):
             with perf.timed("sessions.list.virtual"):
-                virtual_sessions = virtual_session_store.list_all()
+                if default_virtual_page:
+                    virtual_sessions, virtual_total = virtual_session_store.list_recent(
+                        max(offset + limit, 1),
+                        exclude_id=session_search.ASK_SINGLETON_ID,
+                    )
+                else:
+                    virtual_sessions = virtual_session_store.list_all()
+                    virtual_total = len([
+                        session for session in virtual_sessions
+                        if session.get("id") != session_search.ASK_SINGLETON_ID
+                    ])
             virtual_sidebar_sessions = [
                 session
                 for session in virtual_sessions
                 if session.get("id") != session_search.ASK_SINGLETON_ID
             ]
+            if default_virtual_page:
+                with perf.timed("sessions.list.default_virtual_merge"):
+                    page_source, local_total = _merge_updated_at_page(
+                        out,
+                        virtual_sidebar_sessions,
+                        offset=offset,
+                        limit=limit,
+                    )
+                total = local_total + max(
+                    virtual_total - len(virtual_sidebar_sessions),
+                    0,
+                )
+                with perf.timed("sessions.list.page_decorate"):
+                    page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
+                return page, total
             if virtual_sidebar_sessions:
                 out.extend(virtual_sidebar_sessions)
                 appended_virtual_sessions = True
