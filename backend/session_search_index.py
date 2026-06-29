@@ -203,7 +203,10 @@ def _searchable_event_text(entry: Any) -> str:
     if not isinstance(data, dict):
         return ""
     message = data.get("message")
-    if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+    role = message.get("role") if isinstance(message, dict) else None
+    if role not in ("user", "assistant"):
+        role = data.get("type")
+    if not isinstance(message, dict) or role not in ("user", "assistant"):
         return ""
     return _content_searchable_text(message.get("content"))
 

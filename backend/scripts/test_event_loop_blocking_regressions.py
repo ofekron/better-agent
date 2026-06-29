@@ -1621,6 +1621,13 @@ def test_sidebar_session_search_bounds_content_scoring() -> None:
     assert "content_max_wait_seconds" not in search_route_source
     assert "metadata_max_wait_seconds" not in search_route_source
 
+    index_source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    searchable_start = index_source.index("def _searchable_event_text(")
+    searchable_end = index_source.index("def _content_searchable_text(", searchable_start)
+    searchable_source = index_source[searchable_start:searchable_end]
+    assert 'role = message.get("role") if isinstance(message, dict) else None' in searchable_source
+    assert 'role = data.get("type")' in searchable_source
+
 
 def test_pending_node_polling_uses_public_projection_cache() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
