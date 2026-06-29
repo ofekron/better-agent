@@ -4605,6 +4605,7 @@ function AppMain({
         created_at: now,
         updated_at: now,
         messages: [],
+        pinned: true,
         offline_pending: true,
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
@@ -6341,6 +6342,7 @@ function AppMain({
               onForkAndSend={handleForkAndSend}
               queuedPrompt={queuedPrompt}
               onPromoteQueued={() => handlePromoteQueued("interrupt")}
+              onSteerQueued={() => handlePromoteQueued("steer")}
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
               onReviewLastWork={

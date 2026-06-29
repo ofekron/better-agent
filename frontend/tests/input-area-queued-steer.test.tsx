@@ -23,6 +23,7 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
   const onSteer = vi.fn();
   const onInterrupt = vi.fn();
   const onPromoteQueued = vi.fn();
+  const onSteerQueued = vi.fn();
   const onCancelQueued = vi.fn();
   const result = render(
     <InputArea
@@ -36,11 +37,12 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
       onDraftChange={vi.fn()}
       queuedPrompt={{ id: "q1", preview: "queued work" }}
       onPromoteQueued={onPromoteQueued}
+      onSteerQueued={onSteerQueued}
       onCancelQueued={onCancelQueued}
       {...extra}
     />,
   );
-  return { ...result, onSend, onSteer, onInterrupt, onPromoteQueued, onCancelQueued };
+  return { ...result, onSend, onSteer, onInterrupt, onPromoteQueued, onSteerQueued, onCancelQueued };
 }
 
 describe("InputArea queued prompt promote action", () => {
@@ -134,7 +136,7 @@ describe("InputArea queued prompt promote action", () => {
     expect(onSend).toHaveBeenCalledTimes(0);
   });
 
-  it("uses Steer for desktop Enter while streaming", async () => {
+  it("uses desktop Enter to queue while streaming", async () => {
     setViewportWidth(1280);
     const { onSend, onSteer } = renderInputArea(true, "active work");
     const input = screen.getByTestId("input-textarea");
@@ -143,8 +145,34 @@ describe("InputArea queued prompt promote action", () => {
       fireEvent.keyDown(input, { key: "Enter" });
     });
 
-    expect(onSteer).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledTimes(0);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSteer).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses empty desktop Enter to steer the queued prompt for steerable providers", async () => {
+    setViewportWidth(1280);
+    const { onPromoteQueued, onSteerQueued } = renderInputArea(true);
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onSteerQueued).toHaveBeenCalledTimes(1);
+    expect(onPromoteQueued).toHaveBeenCalledTimes(0);
+  });
+
+  it("uses empty desktop Enter to interrupt the queued prompt when steering is unavailable", async () => {
+    setViewportWidth(1280);
+    const { onPromoteQueued, onSteerQueued } = renderInputArea(false);
+    const input = screen.getByTestId("input-textarea");
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(onPromoteQueued).toHaveBeenCalledTimes(1);
+    expect(onSteerQueued).toHaveBeenCalledTimes(0);
   });
 
   it("uses the explicit Queue button for active Codex queueing", async () => {

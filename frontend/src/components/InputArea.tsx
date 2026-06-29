@@ -86,6 +86,7 @@ interface Props {
   forkTargetLabel?: string;
   queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
   onPromoteQueued: () => void;
+  onSteerQueued?: () => void;
   onCancelQueued?: () => void;
   onQueuedTextEdit?: (text: string) => void;
   onReviewLastWork?: () => void;
@@ -154,6 +155,7 @@ export function InputArea({
   forkTargetLabel,
   queuedPrompt,
   onPromoteQueued,
+  onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
   onReviewLastWork,
@@ -530,10 +532,10 @@ export function InputArea({
       e.preventDefault();
       const trimmed = localDraft.trim();
       if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
-        onPromoteQueued();
+        if (canSteer && onSteerQueued && _isStreaming) onSteerQueued();
+        else onPromoteQueued();
       } else {
-        if (canSteer && onSteer && _isStreaming) handleSteer();
-        else handleSend();
+        handleSend();
       }
     }
   };
