@@ -1647,6 +1647,7 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
     assert "_metadata_text_cache" in source
+    assert "_metadata_text_by_id_cache" in source
     assert "_metadata_trigram_index" in source
     assert "_METADATA_NGRAM_MAX_SIZE = 3" in source
     assert "_start_metadata_search_index_warm()" in source
@@ -1661,6 +1662,11 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "return _metadata_text_cache" in rows_source
     assert "rows = tuple(" in rows_source
     assert "return list(_metadata_text_cache)" not in rows_source
+    map_start = source.index("def _metadata_search_row_map(")
+    map_end = source.index("def _metadata_ngrams(", map_start)
+    map_source = source[map_start:map_end]
+    assert "_metadata_text_by_id_cache_version == version" in map_source
+    assert "row_map = {sid: (title, first_prompt) for sid, title, first_prompt in rows}" in map_source
     start = source.index("def _metadata_search_scores(")
     end = source.index("def grep_session_scores(", start)
     search_source = source[start:end]
@@ -1668,7 +1674,9 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "cached = _metadata_search_cache.get(cache_key)" in search_source
     assert "return dict(cached)" in search_source
     assert "candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)" in search_source
-    assert "if candidate_ids is not None and sid not in candidate_ids:" in search_source
+    assert "row_map = _metadata_search_row_map()" in search_source
+    assert "for sid in candidate_ids" in search_source
+    assert "if candidate_ids is not None and sid not in candidate_ids:" not in search_source
     assert "rows = _metadata_search_rows()" in search_source
     assert "for sid, title, first_prompt in rows:" in search_source
     assert "title.count(query_lower)" in search_source
