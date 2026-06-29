@@ -3,6 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 
 vi.unmock("../src/components/FileViewer");
+vi.doMock("@monaco-editor/react", () => ({
+  default: () => null,
+  Editor: () => null,
+  DiffEditor: ({ original, modified }: { original?: string; modified?: string }) => (
+    <div data-testid="mock-diff-editor">
+      <span data-testid="mock-diff-original">{original}</span>
+      <span data-testid="mock-diff-modified">{modified}</span>
+    </div>
+  ),
+}));
 
 const { FileViewer } = await import("../src/components/FileViewer");
 
@@ -121,6 +131,50 @@ describe("FileViewer title", () => {
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
 
     expect(await screen.findByText("two")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Changed")).toBeNull());
+    expect(fileReadCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("shows latest disk diff before updating a changed file panel", async () => {
+    let fileReadCount = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const text = String(url);
+      if (text.includes("/api/file/metadata")) {
+        return {
+          ok: true,
+          json: async () => ({ path: "/tmp/project/app.ts", mtime_ns: 2, size: 4 }),
+        } as Response;
+      }
+      fileReadCount += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          content: fileReadCount === 1 ? "one" : "two",
+          language: "typescript",
+          path: "/tmp/project/app.ts",
+          mtime_ns: fileReadCount === 1 ? 1 : 2,
+          size: fileReadCount === 1 ? 3 : 4,
+        }),
+      } as Response;
+    });
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/app.ts"
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByText("Changed");
+    fireEvent.click(screen.getByRole("button", { name: "Diff" }));
+
+    expect(await screen.findByTestId("file-viewer-latest-diff")).toBeTruthy();
+    expect(screen.getByTestId("mock-diff-original").textContent).toBe("one");
+    expect(screen.getByTestId("mock-diff-modified").textContent).toBe("two");
+
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+
     await waitFor(() => expect(screen.queryByText("Changed")).toBeNull());
     expect(fileReadCount).toBe(2);
     expect(fetchMock).toHaveBeenCalled();

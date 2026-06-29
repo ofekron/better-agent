@@ -73,6 +73,12 @@ interface Props {
 // File-type category drives which viewer component renders the file.
 type ViewerKind = "markdown" | "csv" | "tsv" | "json" | "pdf" | "video" | "code";
 type FileIdentity = { mtime_ns?: number; size?: number };
+type LoadedTextFile = {
+  path: string;
+  content: string;
+  language: string;
+  identity: FileIdentity | null;
+};
 
 const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "avi", "mkv", "m4v", "ogv", "3gp"]);
 
@@ -122,6 +128,24 @@ async function fetchFileIdentity(
   return identityFromPayload(await response.json());
 }
 
+async function fetchTextFile(
+  path: string,
+  nodeId: string,
+  opId: string,
+): Promise<LoadedTextFile> {
+  const response = await trackedFetch(
+    opId,
+    `${API}/api/file?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+  );
+  const data = await response.json();
+  return {
+    path,
+    content: data.content || "",
+    language: data.language || "plaintext",
+    identity: identityFromPayload(data),
+  };
+}
+
 export function FileViewer({
   filePath,
   diffBefore,
@@ -143,8 +167,10 @@ export function FileViewer({
   const [loadedIdentity, setLoadedIdentity] = useState<FileIdentity | null>(null);
   const [currentIdentity, setCurrentIdentity] = useState<FileIdentity | null>(null);
   const [rawVersion, setRawVersion] = useState(0);
+  const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
+  const latestDiffOpId = filePath ? `file:latest-diff:${filePath}` : "file:latest-diff:none";
   const { inflight: saving } = useOpProgress(saveOpId);
   const isDiffMode = diffBefore !== undefined && diffAfter !== undefined;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -214,6 +240,7 @@ export function FileViewer({
     setDirty(false);
     setLoadedIdentity(null);
     setCurrentIdentity(null);
+    setLatestPreview(null);
     setMdEditing(false);
     // Media files are served via /api/file/raw — no text fetch needed.
     const currentKind = filePath ? categorize(filePath, "plaintext") : "code";
@@ -235,18 +262,13 @@ export function FileViewer({
       };
     }
     let cancelled = false;
-    trackedFetch(
-      loadOpId,
-      `${API}/api/file?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
-    )
-      .then((r) => r.json())
-      .then((d) => {
+    fetchTextFile(filePath, nodeId, loadOpId)
+      .then((loaded) => {
         if (cancelled) return;
-        setContent(d.content || "");
-        setLanguage(d.language || "plaintext");
-        const identity = identityFromPayload(d);
-        setLoadedIdentity(identity);
-        setCurrentIdentity(identity);
+        setContent(loaded.content);
+        setLanguage(loaded.language);
+        setLoadedIdentity(loaded.identity);
+        setCurrentIdentity(loaded.identity);
       })
       .catch(() => {
         if (!cancelled) setContent(t("fileViewer.failedToLoad"));
@@ -287,6 +309,16 @@ export function FileViewer({
   const saveRef = useRef(save);
   useEffect(() => { saveRef.current = save; }, [save]);
 
+  const applyLoadedTextFile = useCallback((loaded: LoadedTextFile) => {
+    setContent(loaded.content);
+    setLanguage(loaded.language);
+    setDirty(false);
+    setLoadedIdentity(loaded.identity);
+    setCurrentIdentity(loaded.identity);
+    setLatestPreview(null);
+    setMdEditing(false);
+  }, []);
+
   const loadLatestFromDisk = useCallback(async () => {
     if (!filePath || dirtyRef.current || isDiffMode) return;
     const currentKind = categorize(filePath, language);
@@ -297,19 +329,19 @@ export function FileViewer({
       setRawVersion((v) => v + 1);
       return;
     }
-    const response = await trackedFetch(
-      loadOpId,
-      `${API}/api/file?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
-    );
-    const data = await response.json();
-    setContent(data.content || "");
-    setLanguage(data.language || "plaintext");
-    setDirty(false);
-    const identity = identityFromPayload(data);
-    setLoadedIdentity(identity);
-    setCurrentIdentity(identity);
-    setMdEditing(false);
-  }, [filePath, isDiffMode, language, loadOpId, nodeId]);
+    if (latestPreview?.path === filePath) {
+      applyLoadedTextFile(latestPreview);
+      return;
+    }
+    applyLoadedTextFile(await fetchTextFile(filePath, nodeId, loadOpId));
+  }, [applyLoadedTextFile, filePath, isDiffMode, language, latestPreview, loadOpId, nodeId]);
+
+  const previewLatestDiff = useCallback(async () => {
+    if (!filePath || dirtyRef.current || isDiffMode) return;
+    const currentKind = categorize(filePath, language);
+    if (currentKind === "pdf" || currentKind === "video") return;
+    setLatestPreview(await fetchTextFile(filePath, nodeId, latestDiffOpId));
+  }, [filePath, isDiffMode, language, latestDiffOpId, nodeId]);
 
   const returnToFormattedView = useCallback(async () => {
     if (saveDebounceRef.current) {
@@ -648,6 +680,8 @@ export function FileViewer({
   );
 
   const stale = identitiesDiffer(loadedIdentity, currentIdentity);
+  const canPreviewLatestDiff = stale && !dirty && !isDiffMode && kind !== "pdf" && kind !== "video";
+  const showLatestDiff = canPreviewLatestDiff && latestPreview !== null;
 
   useEffect(() => {
     if (!filePath || isDiffMode || !loadedIdentity) return;
@@ -690,8 +724,29 @@ export function FileViewer({
             </span>
           )}
           {isDiffMode && <span className="file-viewer-diff-badge">{t("fileViewer.beforeAfter")}</span>}
+          {showLatestDiff && <span className="file-viewer-diff-badge">{t("fileViewer.loadedToLatest")}</span>}
         </div>
         <div className="file-viewer-actions">
+          {showLatestDiff && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => setLatestPreview(null)}
+            >
+              {t("fileViewer.backToFile")}
+            </button>
+          )}
+          {canPreviewLatestDiff && !showLatestDiff && (
+            <ProgressButton
+              opId={latestDiffOpId}
+              className="btn-small"
+              onClick={() => void previewLatestDiff()}
+              loadingChildren={t("fileViewer.loadingLatest")}
+              title={t("fileViewer.viewLatestDiffTitle")}
+            >
+              {t("fileViewer.viewLatestDiff")}
+            </ProgressButton>
+          )}
           {stale && !dirty && !isDiffMode && (
             <ProgressButton
               opId={loadOpId}
@@ -703,7 +758,7 @@ export function FileViewer({
               {t("fileViewer.updateToLatest")}
             </ProgressButton>
           )}
-          {!isDiffMode && showMonaco && (
+          {!isDiffMode && !showLatestDiff && showMonaco && (
             <ProgressButton
               opId={saveOpId}
               className="btn-small"
@@ -731,7 +786,30 @@ export function FileViewer({
         </div>
       </div>
 
-      {isDiffMode ? (
+      {showLatestDiff && latestPreview ? (
+        <div className="file-viewer-latest-diff" data-testid="file-viewer-latest-diff">
+          <DiffEditor
+            height="100%"
+            language={latestPreview.language || language}
+            original={content}
+            modified={latestPreview.content}
+            theme={monacoThemeFor(kind)}
+            onMount={(diffEd) => {
+              const modified = diffEd.getModifiedEditor();
+              editorRef.current = modified;
+              setEditorReady(true);
+            }}
+            options={{
+              readOnly: true,
+              minimap: { enabled: false },
+              fontSize: monacoFontSize,
+              scrollBeyondLastLine: false,
+              wordWrap: "on",
+              renderSideBySide: true,
+            }}
+          />
+        </div>
+      ) : isDiffMode ? (
         <DiffEditor
           height="100%"
           language={language}
