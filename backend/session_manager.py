@@ -347,6 +347,7 @@ class SessionManager:
         self._last_broadcast_monitoring: dict[str, str] = {}
         self._compute_monitoring: Optional[Callable[[str], str]] = None
         self._unread_counts: dict[str, set[str]] = {}
+        self._unread_counts_version = 0
         # Sessions whose `_unread_counts` has been hydrated from disk
         # via `_ensure_unread_loaded`. Lets `bump_unread` skip the
         # expensive walk for an unhydrated session — the first
@@ -1289,6 +1290,7 @@ class SessionManager:
                 logger.exception("draft note_root_dropped failed for %s", rid)
         self._last_broadcast_running.pop(rid, None)
         self._unread_counts.pop(rid, None)
+        self._unread_counts_version += 1
         self._unread_hydrated.discard(rid)
         for f in session_store._walk_forks(cached_root):
             fid = f.get("id")
@@ -1298,6 +1300,7 @@ class SessionManager:
             self._since_cache.pop(fid, None)
             self._last_broadcast_running.pop(fid, None)
             self._unread_counts.pop(fid, None)
+            self._unread_counts_version += 1
             self._unread_hydrated.discard(fid)
         # Reclaim the co-resident event_ingester per-root state (dedup
         # sets / seq offsets / open fd). Local import: event_ingester
@@ -3179,6 +3182,7 @@ class SessionManager:
                 # and every embedded fork — the tree is going away.
                 self._last_broadcast_running.pop(rid, None)
                 self._unread_counts.pop(rid, None)
+                self._unread_counts_version += 1
                 self._unread_hydrated.discard(rid)
                 if cached_root is not None:
                     for f in session_store._walk_forks(cached_root):
@@ -3186,6 +3190,7 @@ class SessionManager:
                         if fid:
                             self._last_broadcast_running.pop(fid, None)
                             self._unread_counts.pop(fid, None)
+                            self._unread_counts_version += 1
                             self._unread_hydrated.discard(fid)
                 ok = session_store.delete_session(sid)
             else:
@@ -3203,6 +3208,7 @@ class SessionManager:
                     # Drop transient state for the spliced-out subtree.
                     self._last_broadcast_running.pop(sid, None)
                     self._unread_counts.pop(sid, None)
+                    self._unread_counts_version += 1
                     self._unread_hydrated.discard(sid)
                     self._index_root(cached_root)
                     session_store.write_session_full(cached_root, bump_updated_at=True)
@@ -4024,9 +4030,11 @@ class SessionManager:
             # so bumps from `apply_event` on a worker fork (which the
             # mutator filters anyway) don't trigger a load attempt.
             self._unread_counts[sid] = set()
+            self._unread_counts_version += 1
             self._unread_hydrated.add(sid)
             return
         self._unread_counts[sid] = self._count_unread_from_disk(sess)
+        self._unread_counts_version += 1
         self._unread_hydrated.add(sid)
 
     def is_running(self, sid: str) -> bool:
@@ -4131,6 +4139,7 @@ class SessionManager:
             if sid in self._unread_hydrated:
                 return True
             self._unread_counts[sid] = set()
+            self._unread_counts_version += 1
             self._unread_hydrated.add(sid)
         return True
 
@@ -4157,6 +4166,7 @@ class SessionManager:
                 # First touch — hydrate; disk already reflects the
                 # newly-appended event so no further increment.
                 self._unread_counts[sid] = self._count_unread_from_disk(sess)
+                self._unread_counts_version += 1
                 self._unread_hydrated.add(sid)
                 self._fire(
                     sid,
@@ -4170,6 +4180,7 @@ class SessionManager:
                 self._unread_counts[sid].add(msg_id)
                 new_count = len(self._unread_counts[sid])
                 if new_count != prev_count:
+                    self._unread_counts_version += 1
                     self._fire(
                         sid,
                         {
@@ -4196,6 +4207,7 @@ class SessionManager:
                 return None
             sess["last_seen_event_uid"] = None
             self._unread_counts[sid] = self._count_unread_from_disk(sess)
+            self._unread_counts_version += 1
             self._unread_hydrated.add(sid)
             session_store.write_seen_cursor(rid, sid, None)
             if sid == rid:
@@ -4248,6 +4260,7 @@ class SessionManager:
                 resolved = latest
             sess["last_seen_event_uid"] = resolved
             self._unread_counts[sid] = set()
+            self._unread_counts_version += 1
             self._unread_hydrated.add(sid)
             session_store.write_seen_cursor(rid, sid, resolved)
             if sid == rid:
@@ -4362,6 +4375,9 @@ class SessionManager:
         sessions never read so far will not appear; the home/sidebar
         path should call `get_unread_count(sid)` to force hydration."""
         return {sid: len(cnts) for sid, cnts in self._unread_counts.items()}
+
+    def unread_counts_version(self) -> int:
+        return self._unread_counts_version
 
     def agent_sid_field_for_mode(self, mode: str) -> str:
         """Expose the session_id field name for a given orchestration

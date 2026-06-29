@@ -112,7 +112,7 @@ _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
 _session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
-_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
+_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 5.0
 _SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
@@ -509,6 +509,14 @@ def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> 
             content_generation = session_search_index.generation()
         return (session_store.search_metadata_version(), content_generation)
     return session_store.summary_version()
+
+
+def _sessions_list_transient_state_version() -> tuple[int, int, int]:
+    return (
+        coordinator.turn_manager.cached_state_version(),
+        session_manager.unread_counts_version(),
+        user_input_store.pending_counts_version(),
+    )
 
 
 def _session_list_user_prefs() -> tuple[bool, str, bool]:
@@ -3995,6 +4003,7 @@ async def get_sessions(
         connected_version,
         connected,
         _sessions_list_cache_version(search_query, effective_search_fields),
+        _sessions_list_transient_state_version(),
     )
     cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:

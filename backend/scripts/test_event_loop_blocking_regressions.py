@@ -849,6 +849,11 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "return _sessions_list_response(cached[1])" in cache_source
     assert "json.dumps(" in cache_source
     assert "copy.deepcopy" not in cache_source
+    assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 5.0" in source
+    assert "def _sessions_list_transient_state_version()" in source
+    assert "coordinator.turn_manager.cached_state_version()" in source
+    assert "session_manager.unread_counts_version()" in source
+    assert "user_input_store.pending_counts_version()" in source
 
 
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
@@ -864,6 +869,7 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = main_source[route_start:route_end]
     assert "_sessions_list_cache_version(search_query, effective_search_fields)" in route_source
+    assert "_sessions_list_transient_state_version()" in route_source
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
