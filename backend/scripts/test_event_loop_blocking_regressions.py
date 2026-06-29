@@ -1174,6 +1174,7 @@ def test_message_hydration_reuses_full_scan_cache() -> None:
     cache_end = ingester_source.index("def root_events_by_sid(", cache_start)
     cache_source = ingester_source[cache_start:cache_end]
     assert "cached = self._full_scan_cache.get(root_id)" in cache_source
+    assert "bisect.bisect_left(offsets, byte_start)" in cache_source
     assert "line_start >= byte_end" in cache_source
     assert "rows.append(entry)" in cache_source
 
