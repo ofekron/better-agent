@@ -2944,6 +2944,8 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
     assert "_BUILTIN_FEATURE_CACHE" in source
     assert "def is_builtin_feature_enabled_cached(" in source
+    assert "_STORE_FINGERPRINT_CACHE" in source
+    assert "_STORE_FINGERPRINT_TTL_SECONDS" in source
     store_path_start = source.index("def _store_path(")
     store_path_end = source.index("def store_fingerprint(", store_path_start)
     store_path_source = source[store_path_start:store_path_end]
@@ -2956,6 +2958,17 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     assert "fingerprint = store_fingerprint()" in helper_source
     assert "_BUILTIN_FEATURE_CACHE.get(extension_id)" in helper_source
     assert "is_builtin_feature_enabled(extension_id)" in helper_source
+    fingerprint_start = source.index("def store_fingerprint(")
+    fingerprint_end = source.index("def _refresh_store_fingerprint_cache(", fingerprint_start)
+    fingerprint_source = source[fingerprint_start:fingerprint_end]
+    assert "_STORE_FINGERPRINT_CACHE_LOCK" in fingerprint_source
+    assert "path.stat()" in fingerprint_source
+    assert "return cached[1]" in fingerprint_source
+    write_start = source.index("def _write_store_unlocked(")
+    write_end = source.index("def _merge_store_for_save(", write_start)
+    write_source = source[write_start:write_end]
+    assert "_refresh_store_fingerprint_cache(path)" in write_source
+    assert write_source.index("os.replace(tmp_name, path)") < write_source.index("_refresh_store_fingerprint_cache(path)")
 
 
 def test_extension_list_reconciliation_is_off_loop() -> None:
