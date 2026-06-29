@@ -2002,7 +2002,7 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "_local_visible_order_cache" in source
-    assert "session_store.summary_version()" in helper_source
+    assert "session_store.summary_order_version()" in helper_source
     assert "sessions.list.local.visible_order_cache.hit" in helper_source
     assert "sessions.list.local.visible_order_build" in helper_source
 
