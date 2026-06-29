@@ -2136,6 +2136,7 @@ def test_event_projections_warm_in_background() -> None:
     assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("event_ingester.message_event_summaries(root_id)")
     assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("_session_detail_snapshot_sync(")
     assert "_session_detail_cache_put(cache_key, tree)" in detail_warm_source
+    assert "known_root_id=root_id" in detail_warm_source
     assert "_SESSION_DETAIL_WARM_EXCHANGE_COUNT" in detail_warm_source
     roots_start = source.index("def _session_event_projection_warm_roots(")
     roots_end = source.index("async def _warm_session_event_projections()", roots_start)
@@ -2159,6 +2160,8 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "session_manager.root_tree_stub_cache_key(" in helper_source
+    assert "session_manager.root_tree_stub_cache_key_for_root(" in helper_source
+    assert "known_root_id: str | None = None" in helper_source
     assert "_session_event_file_fingerprint(root_id)" in helper_source
     assert "_session_event_meta(" not in helper_source
     assert "_session_detail_response_cache_key_sync(" not in helper_source
