@@ -40,6 +40,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -447,6 +448,47 @@ async def test_broadcast_global_allowlist_enforced() -> bool:
     return True
 
 
+async def test_broadcast_global_does_not_wait_for_slow_client() -> bool:
+    coordinator = Coordinator()
+    release_slow = asyncio.Event()
+    slow_started = asyncio.Event()
+    fast_seen: list[dict] = []
+
+    async def slow_cb(event: dict) -> None:
+        slow_started.set()
+        await release_slow.wait()
+
+    async def fast_cb(event: dict) -> None:
+        fast_seen.append(event)
+
+    coordinator.register_global_ws(slow_cb)
+    coordinator.register_global_ws(fast_cb)
+
+    t0 = time.perf_counter()
+    await coordinator.broadcast_global("provider_changed", {"x": 1})
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    if elapsed_ms > 50.0:
+        print(f"  broadcast_global waited {elapsed_ms:.1f}ms for callbacks")
+        release_slow.set()
+        await asyncio.sleep(0)
+        return False
+
+    for _ in range(10):
+        if fast_seen and slow_started.is_set():
+            break
+        await asyncio.sleep(0)
+    release_slow.set()
+    await asyncio.sleep(0)
+
+    if not fast_seen:
+        print("  fast callback did not receive broadcast")
+        return False
+    if fast_seen[-1].get("type") != "provider_changed":
+        print(f"  wrong event: {fast_seen[-1]!r}")
+        return False
+    return True
+
+
 # ─── (g) broadcast_session ingests per-session events ──────────────────
 async def test_broadcast_session_persists_event() -> bool:
     sid = _seed_session()
@@ -502,6 +544,8 @@ TESTS = [
      test_torn_tail_recovery_both_variants),
     ("(f) broadcast_global allowlist enforced",
      test_broadcast_global_allowlist_enforced),
+    ("(f2) broadcast_global does not wait for slow WS clients",
+     test_broadcast_global_does_not_wait_for_slow_client),
     ("(g) broadcast_session persists supervisor/run_state/rewind events",
      test_broadcast_session_persists_event),
 ]

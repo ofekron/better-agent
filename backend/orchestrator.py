@@ -3449,23 +3449,31 @@ class Coordinator:
         snapshot = list(dict.fromkeys(self.global_ws_callbacks))
         outer_t = _time.perf_counter()
         for cb in snapshot:
-            cb_t = _time.perf_counter()
-            try:
-                await cb(event)
-            except Exception:
-                logger.exception(
-                    "broadcast_global failed type=%s",
-                    event_type,
-                )
-            finally:
-                perf.record(
-                    "ws.broadcast_global.cb",
-                    (_time.perf_counter() - cb_t) * 1000.0,
-                )
+            asyncio.create_task(self._broadcast_global_one(cb, event, event_type))
         perf.record(
-            "ws.broadcast_global.total",
+            "ws.broadcast_global.enqueue",
             (_time.perf_counter() - outer_t) * 1000.0,
         )
+
+    async def _broadcast_global_one(
+        self,
+        cb: Callable[[dict], Awaitable[None]],
+        event: dict,
+        event_type: str,
+    ) -> None:
+        cb_t = _time.perf_counter()
+        try:
+            await cb(event)
+        except Exception:
+            logger.exception(
+                "broadcast_global failed type=%s",
+                event_type,
+            )
+        finally:
+            perf.record(
+                "ws.broadcast_global.cb",
+                (_time.perf_counter() - cb_t) * 1000.0,
+            )
 
     async def broadcast_credential_consent_changed(
         self, app_session_id: Optional[str]
