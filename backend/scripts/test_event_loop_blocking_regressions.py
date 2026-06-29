@@ -983,8 +983,12 @@ def test_session_list_warms_event_meta_off_path() -> None:
     detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
     detail_warm_source = source[detail_warm_start:detail_warm_end]
-    assert "def _session_detail_projection_cache_fresh(" in detail_warm_source
-    assert "if _session_detail_projection_cache_fresh(root_id):" in detail_warm_source
+    assert "def _session_detail_warm_cache_present(" in detail_warm_source
+    assert "if _session_detail_warm_cache_present(root_id):" in detail_warm_source
+    warm_present_start = detail_warm_source.index("def _session_detail_warm_cache_present(")
+    warm_present_source = detail_warm_source[warm_present_start:]
+    assert "_session_detail_response_cache_latest.get(simple_key)" in warm_present_source
+    assert "_session_detail_response_cache_key_sync(" not in warm_present_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)" in detail_warm_source
     assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in detail_warm_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)" in detail_warm_source
