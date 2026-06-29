@@ -85,6 +85,26 @@ def _append_candidate_cwd(candidates: list[str], cwd: Optional[str]) -> None:
         candidates.append(resolved)
 
 
+def _clear_stale_worker_records(
+    session_cwd_candidates: list[str],
+    worker_session_id: str,
+) -> list[str]:
+    for candidate_cwd in session_cwd_candidates:
+        worker_store.remove_worker(candidate_cwd, worker_session_id)
+    return session_fork_store.clear_forks_for_session_everywhere(worker_session_id)
+
+
+def _find_worker_record(
+    session_cwd_candidates: list[str],
+    worker_session_id: str,
+) -> Optional[tuple[str, dict]]:
+    for candidate_cwd in session_cwd_candidates:
+        candidate_record = worker_store.get_worker(candidate_cwd, worker_session_id)
+        if candidate_record is not None:
+            return (candidate_record.get("cwd") or candidate_cwd, candidate_record)
+    return None
+
+
 def _session_registry_cwd_candidates(
     coordinator: "Coordinator",
     app_session_id: str,
@@ -249,7 +269,7 @@ async def run_delegation(
     # Step 1: resolve the target Better Agent session (or get approval for a new worker).
     # ------------------------------------------------------
     if worker_session_id is None:
-        caller_session = session_manager.get(app_session_id)
+        caller_session = await asyncio.to_thread(session_manager.get, app_session_id)
         worker_creation_policy = (
             (caller_session or {}).get("worker_creation_policy") or "ask"
         )
@@ -354,15 +374,15 @@ async def run_delegation(
     # ------------------------------------------------------
     # Step 2: load the target Better Agent session + its live parent sid.
     # ------------------------------------------------------
-    worker_session = session_manager.get(worker_session_id)
+    worker_session = await asyncio.to_thread(session_manager.get, worker_session_id)
     if worker_session is None:
         # Stale registry — clean up any candidate records and report.
-        for candidate_cwd in session_cwd_candidates:
-            worker_store.remove_worker(candidate_cwd, worker_session_id)
-        _safe_delete_forks(
-            session_fork_store.clear_forks_for_session_everywhere(worker_session_id),
-            "delete orphan delegate-fork BC %s failed",
+        stale_forks = await asyncio.to_thread(
+            _clear_stale_worker_records,
+            session_cwd_candidates,
+            worker_session_id,
         )
+        _safe_delete_forks(stale_forks, "delete orphan delegate-fork BC %s failed")
         await coordinator.broadcast_workers_changed(None)
         return delegate_error_payload(
             worker_session_id, worker_description,
@@ -376,12 +396,13 @@ async def run_delegation(
         (session_cwd_candidates[0] if session_cwd_candidates else cwd)
     )
     worker_record = None
-    for candidate_cwd in session_cwd_candidates:
-        candidate_record = worker_store.get_worker(candidate_cwd, worker_session_id)
-        if candidate_record is not None:
-            worker_cwd = candidate_record.get("cwd") or candidate_cwd
-            worker_record = candidate_record
-            break
+    worker_record_result = await asyncio.to_thread(
+        _find_worker_record,
+        session_cwd_candidates,
+        worker_session_id,
+    )
+    if worker_record_result is not None:
+        worker_cwd, worker_record = worker_record_result
     worker_record = worker_record or {}
     mode = worker_record.get("orchestration_mode") or worker_session.get(
         "orchestration_mode"
@@ -432,9 +453,15 @@ async def run_delegation(
                     worker_session_id, worker_description,
                     t("delegation.worker_no_claude_session", worker_session_id=worker_session_id, mode=mode),
                 )
-            session_manager.set_agent_sid(worker_session_id, mode, live_parent_sid)
+            await asyncio.to_thread(
+                session_manager.set_agent_sid,
+                worker_session_id,
+                mode,
+                live_parent_sid,
+            )
             if worker_record:
-                worker_store.upsert_worker(
+                await asyncio.to_thread(
+                    worker_store.upsert_worker,
                     cwd=worker_cwd,
                     agent_session_id=worker_session_id,
                     orchestration_mode=mode,
@@ -446,7 +473,8 @@ async def run_delegation(
         # Refresh the worker_store record + invalidate any forks
         # whose recorded parent sid doesn't match the live one.
         # Preserve the worker's node_id binding when refreshing.
-        worker_store.upsert_worker(
+        await asyncio.to_thread(
+            worker_store.upsert_worker,
             cwd=worker_cwd,
             agent_session_id=worker_session_id,
             orchestration_mode=mode,
@@ -645,7 +673,12 @@ async def run_delegation_locked(
         )
         fork_record = (
             None if run_mode == "direct" or ephemeral else
-            session_fork_store.get_fork_record(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.get_fork_record,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
         )
     needs_fork: bool
     resume_sid: Optional[str]
@@ -654,7 +687,7 @@ async def run_delegation_locked(
     if fork_record is not None:
         fork_agent_session_id = fork_record.get("fork_agent_session_id")
         fork_bc = (
-            session_manager.get(fork_agent_session_id)
+            await asyncio.to_thread(session_manager.get, fork_agent_session_id)
             if fork_agent_session_id else None
         )
 
@@ -671,7 +704,12 @@ async def run_delegation_locked(
         needs_fork = True
         resume_sid = worker_parent_claude_sid
         if fork_record is not None:
-            session_fork_store.clear_fork(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.clear_fork,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
     else:
         recorded_parent = fork_bc.get("forked_from_agent_sid")
         recorded_count = int(fork_bc.get("parent_line_count_at_fork") or 0)
@@ -688,10 +726,15 @@ async def run_delegation_locked(
             # the worker_store mapping, and mint a fresh fork off the
             # current head.
             try:
-                session_manager.delete(fork_agent_session_id)
+                await asyncio.to_thread(session_manager.delete, fork_agent_session_id)
             except Exception:
                 logger.exception("invalidating stale fork Better Agent session failed")
-            session_fork_store.clear_fork(cwd, app_session_id, worker_agent_session_id)
+            await asyncio.to_thread(
+                session_fork_store.clear_fork,
+                cwd,
+                app_session_id,
+                worker_agent_session_id,
+            )
             needs_fork = True
             resume_sid = worker_parent_claude_sid
             fork_bc = None
@@ -705,7 +748,8 @@ async def run_delegation_locked(
     # arrives. Empty messages — the fork is a thread, not a chat copy.
     if needs_fork:
         with perf.timed("delegate.create_delegate_fork"):
-            fork_bc = session_manager.create_delegate_fork(
+            fork_bc = await asyncio.to_thread(
+                session_manager.create_delegate_fork,
                 parent_agent_session_id=worker_agent_session_id,
                 caller_agent_session_id=app_session_id,
                 parent_agent_sid_at_fork=worker_parent_claude_sid,
@@ -751,7 +795,7 @@ async def run_delegation_locked(
         worker_prompt = instructions
     else:
         from orchs.manager import bootstrap as manager_bootstrap
-        manager_session = session_manager.get(app_session_id) or {}
+        manager_session = await asyncio.to_thread(session_manager.get, app_session_id) or {}
         worker_prompt = "\n\n".join([
             manager_bootstrap.format_team_context(
                 cwd=cwd,
@@ -886,13 +930,15 @@ async def run_delegation_locked(
                             if run_mode == "direct" and fork_agent_sid is None:
                                 fork_agent_sid = disc
                                 try:
-                                    session_manager.set_agent_sid(
+                                    await asyncio.to_thread(
+                                        session_manager.set_agent_sid,
                                         worker_agent_session_id,
                                         mode=worker_orchestration_mode,
                                         agent_sid=disc,
                                     )
                                     if session_is_registered_worker:
-                                        worker_store.upsert_worker(
+                                        await asyncio.to_thread(
+                                            worker_store.upsert_worker,
                                             cwd=cwd,
                                             agent_session_id=worker_agent_session_id,
                                             orchestration_mode=worker_orchestration_mode,
@@ -916,7 +962,8 @@ async def run_delegation_locked(
                                 # instead, rendered in a collapsible block.
                                 if parent_line_count_now > 0:
                                     try:
-                                        session_manager.advance_processed_lines(
+                                        await asyncio.to_thread(
+                                            session_manager.advance_processed_lines,
                                             fork_agent_session_id, disc,
                                             int(parent_line_count_now),
                                             bump_updated_at=False,
@@ -926,7 +973,8 @@ async def run_delegation_locked(
                                             "advance_processed_lines on fork BC failed"
                                         )
                                 try:
-                                    session_manager.set_agent_sid(
+                                    await asyncio.to_thread(
+                                        session_manager.set_agent_sid,
                                         fork_agent_session_id,
                                         mode=worker_orchestration_mode,
                                         agent_sid=disc,
@@ -962,10 +1010,13 @@ async def run_delegation_locked(
                                 # fork BC record.
                                 if panel.get("jsonl_path"):
                                     try:
+                                        root_id = await asyncio.to_thread(
+                                            session_manager._root_id_for,
+                                            app_session_id,
+                                        )
                                         await bus.publish(BusEvent(
                                             type="native_files.fork_target",
-                                            root_id=session_manager._root_id_for(
-                                                app_session_id) or "",
+                                            root_id=root_id or "",
                                             sid=app_session_id,
                                             payload={
                                                 "parent_app_session_id": app_session_id,
@@ -979,7 +1030,8 @@ async def run_delegation_locked(
                                         logger.exception("fork_target publish failed")
                                 if not ephemeral:
                                     try:
-                                        session_fork_store.set_fork(
+                                        await asyncio.to_thread(
+                                            session_fork_store.set_fork,
                                             cwd=cwd,
                                             caller_agent_session_id=app_session_id,
                                             session_agent_session_id=worker_agent_session_id,
