@@ -917,6 +917,9 @@ class EventIngester:
             cached = self._root_events_cache.get(root_id)
             if cached is not None and cached[0] == version:
                 return copy.deepcopy(cached[1])
+            if version == 0:
+                self._root_events_cache[root_id] = (version, {})
+                return {}
             file_size = path.stat().st_size
             rows = self._read_all_events_locked(path, root_id, file_size)
             projection = self._build_root_events_projection(rows)
