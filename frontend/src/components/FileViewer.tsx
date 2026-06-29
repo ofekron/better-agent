@@ -79,6 +79,11 @@ type LoadedTextFile = {
   language: string;
   identity: FileIdentity | null;
 };
+type LoadedViewFile = LoadedTextFile & {
+  diskContent: string;
+  diskIdentity: FileIdentity | null;
+  hasDraft: boolean;
+};
 
 const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "avi", "mkv", "m4v", "ogv", "3gp"]);
 
@@ -146,6 +151,43 @@ async function fetchTextFile(
   };
 }
 
+async function fetchDraft(path: string, nodeId: string): Promise<{
+  exists: boolean;
+  content?: string;
+  base_identity?: FileIdentity | null;
+}> {
+  const response = await fetch(
+    `${API}/api/file/draft?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+  );
+  return response.json();
+}
+
+async function fetchViewedTextFile(
+  path: string,
+  nodeId: string,
+  opId: string,
+): Promise<LoadedViewFile> {
+  const disk = await fetchTextFile(path, nodeId, opId);
+  const draft = await fetchDraft(path, nodeId);
+  if (!draft.exists || typeof draft.content !== "string") {
+    return {
+      ...disk,
+      diskContent: disk.content,
+      diskIdentity: disk.identity,
+      hasDraft: false,
+    };
+  }
+  return {
+    path,
+    content: draft.content,
+    language: disk.language,
+    identity: identityFromPayload(draft.base_identity) ?? disk.identity,
+    diskContent: disk.content,
+    diskIdentity: disk.identity,
+    hasDraft: true,
+  };
+}
+
 export function FileViewer({
   filePath,
   diffBefore,
@@ -168,6 +210,7 @@ export function FileViewer({
   const [currentIdentity, setCurrentIdentity] = useState<FileIdentity | null>(null);
   const [rawVersion, setRawVersion] = useState(0);
   const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
+  const [hasDraft, setHasDraft] = useState(false);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
   const latestDiffOpId = filePath ? `file:latest-diff:${filePath}` : "file:latest-diff:none";
@@ -201,16 +244,14 @@ export function FileViewer({
   // churn) — clobbering the real file on disk with an empty string.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  const loadedIdentityRef = useRef<FileIdentity | null>(loadedIdentity);
+  loadedIdentityRef.current = loadedIdentity;
 
-  // Save the current `content` state to disk. Reads from contentRef so a
-  // debounced timer firing post-mdEditing-flip still has the right value
-  // (Monaco's value/ref is gone by then). Best-effort; overlapping saves
-  // are tolerated (last-write-wins server-side).
-  const flushSaveAt = useCallback(async (path: string) => {
+  const flushDraftAt = useCallback(async (path: string) => {
     try {
       await trackedFetch(
-        `file:save:${path}`,
-        `${API}/api/file`,
+        `file:draft:${path}`,
+        `${API}/api/file/draft`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -218,14 +259,13 @@ export function FileViewer({
             path,
             content: contentRef.current,
             node_id: nodeId,
+            base_identity: loadedIdentityRef.current,
           }),
         },
         { silent: true },
       );
       setDirty(false);
-      const identity = await fetchFileIdentity(path, nodeId);
-      setLoadedIdentity(identity);
-      setCurrentIdentity(identity);
+      setHasDraft(true);
     } catch {
       // best effort
     }
@@ -241,6 +281,7 @@ export function FileViewer({
     setLoadedIdentity(null);
     setCurrentIdentity(null);
     setLatestPreview(null);
+    setHasDraft(false);
     setMdEditing(false);
     // Media files are served via /api/file/raw — no text fetch needed.
     const currentKind = filePath ? categorize(filePath, "plaintext") : "code";
@@ -262,13 +303,14 @@ export function FileViewer({
       };
     }
     let cancelled = false;
-    fetchTextFile(filePath, nodeId, loadOpId)
+    fetchViewedTextFile(filePath, nodeId, loadOpId)
       .then((loaded) => {
         if (cancelled) return;
         setContent(loaded.content);
         setLanguage(loaded.language);
         setLoadedIdentity(loaded.identity);
-        setCurrentIdentity(loaded.identity);
+        setCurrentIdentity(loaded.diskIdentity);
+        setHasDraft(loaded.hasDraft);
       })
       .catch(() => {
         if (!cancelled) setContent(t("fileViewer.failedToLoad"));
@@ -286,21 +328,25 @@ export function FileViewer({
       // Only persist on teardown when there are actual unsaved edits.
       // A clean / still-loading viewer must NEVER write back (its
       // buffer is "" pre-fetch → would empty the file on disk).
-      if (dirtyRef.current) void flushSaveAt(oldPath);
+      if (dirtyRef.current) void flushDraftAt(oldPath);
     };
-  }, [filePath, nodeId, t, flushSaveAt, loadOpId]);
+  }, [filePath, nodeId, t, flushDraftAt, loadOpId]);
 
   const save = useCallback(async () => {
-    const ed = editorRef.current;
-    if (!ed || !filePath || saving) return;
-    const value = ed.getValue();
+    if (!filePath || saving) return;
+    const value = contentRef.current;
     await trackedFetch(saveOpId, `${API}/api/file`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: filePath, content: value, node_id: nodeId }),
     });
+    await fetch(
+      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
+      { method: "DELETE" },
+    );
     setContent(value);
     setDirty(false);
+    setHasDraft(false);
     const identity = await fetchFileIdentity(filePath, nodeId);
     setLoadedIdentity(identity);
     setCurrentIdentity(identity);
@@ -316,6 +362,7 @@ export function FileViewer({
     setLoadedIdentity(loaded.identity);
     setCurrentIdentity(loaded.identity);
     setLatestPreview(null);
+    setHasDraft(false);
     setMdEditing(false);
   }, []);
 
@@ -326,9 +373,14 @@ export function FileViewer({
       const identity = await fetchFileIdentity(filePath, nodeId);
       setLoadedIdentity(identity);
       setCurrentIdentity(identity);
+      setHasDraft(false);
       setRawVersion((v) => v + 1);
       return;
     }
+    await fetch(
+      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
+      { method: "DELETE" },
+    );
     if (latestPreview?.path === filePath) {
       applyLoadedTextFile(latestPreview);
       return;
@@ -348,9 +400,9 @@ export function FileViewer({
       clearTimeout(saveDebounceRef.current);
       saveDebounceRef.current = null;
     }
-    if (filePath && dirtyRef.current) await flushSaveAt(filePath);
+    if (filePath && dirtyRef.current) await flushDraftAt(filePath);
     setMdEditing(false);
-  }, [filePath, flushSaveAt]);
+  }, [filePath, flushDraftAt]);
 
   // Apply / clear the focus highlight whenever the target range, the loaded
   // content, or the mounted editor changes. Monaco can't decorate lines that
@@ -707,6 +759,9 @@ export function FileViewer({
   const fileName = filePath.split("/").pop() || filePath;
   // Diff mode always stays in Monaco — side-by-side diff is only meaningful for source.
   const showMonaco = isDiffMode || kind === "code" || kind === "json";
+  const canSaveViewedContent = !isDiffMode && !showLatestDiff && (showMonaco || kind === "markdown");
+  const hasUnsavedOriginalChanges = dirty || hasDraft;
+  const synced = !stale && !hasUnsavedOriginalChanges && !showLatestDiff;
   const rawUrl = `${API}/api/file/raw?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}&_v=${rawVersion}`;
 
   return (
@@ -714,10 +769,20 @@ export function FileViewer({
       <div className="file-viewer-header">
         <div className="file-viewer-title">
           <span className="file-viewer-path">
-            {dirty && <span className="file-viewer-dirty" title={t("fileViewer.unsavedChangesTitle")}>●</span>}
+            {hasUnsavedOriginalChanges && <span className="file-viewer-dirty" title={t("fileViewer.unsavedChangesTitle")}>●</span>}
             {filePath}
           </span>
           <span className={`file-viewer-kind kind-${kind}`}>{kind}</span>
+          {synced && (
+            <span className="file-viewer-sync-state state-synced" title={t("fileViewer.syncedTitle")}>
+              {t("fileViewer.synced")}
+            </span>
+          )}
+          {hasUnsavedOriginalChanges && (
+            <span className="file-viewer-sync-state state-draft" title={t("fileViewer.draftSavedTitle")}>
+              {t("fileViewer.draftSaved")}
+            </span>
+          )}
           {stale && (
             <span className="file-viewer-stale" title={t("fileViewer.changedSinceLoadedTitle")}>
               {t("fileViewer.changedSinceLoaded")}
@@ -758,12 +823,12 @@ export function FileViewer({
               {t("fileViewer.updateToLatest")}
             </ProgressButton>
           )}
-          {!isDiffMode && !showLatestDiff && showMonaco && (
+          {canSaveViewedContent && (
             <ProgressButton
               opId={saveOpId}
               className="btn-small"
               onClick={save}
-              extraDisabled={!dirty}
+              extraDisabled={!hasUnsavedOriginalChanges}
               loadingChildren={t("fileViewer.saving")}
               title="Save (Cmd+S)"
             >
@@ -850,7 +915,7 @@ export function FileViewer({
                 if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
                 saveDebounceRef.current = setTimeout(() => {
                   saveDebounceRef.current = null;
-                  if (filePath) void flushSaveAt(filePath);
+                  if (filePath) void flushDraftAt(filePath);
                 }, 1000);
               }}
               options={{
@@ -920,7 +985,16 @@ export function FileViewer({
               () => { void saveRef.current(); },
             );
           }}
-          onChange={(v) => setDirty(v !== content)}
+          onChange={(v) => {
+            const next = v ?? "";
+            setContent(next);
+            setDirty(true);
+            if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+            saveDebounceRef.current = setTimeout(() => {
+              saveDebounceRef.current = null;
+              if (filePath) void flushDraftAt(filePath);
+            }, 1000);
+          }}
           options={{
             readOnly: false,
             minimap: { enabled: false },

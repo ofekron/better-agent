@@ -6464,6 +6464,25 @@ button.run-badge-clickable:focus-visible {
   white-space: nowrap;
 }
 
+.file-viewer-sync-state {
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
+}
+
+.file-viewer-sync-state.state-synced {
+  border: 1px solid rgba(120, 200, 120, 0.4);
+  color: #87d787;
+  background: rgba(120, 200, 120, 0.12);
+}
+
+.file-viewer-sync-state.state-draft {
+  border: 1px solid rgba(90, 160, 255, 0.4);
+  color: #7ab8ff;
+  background: rgba(90, 160, 255, 0.12);
+}
+
 .file-viewer-focus-gutter {
   background: var(--accent);
   width: 3px !important;
