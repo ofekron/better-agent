@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
 MAX_SKILLS = 50
 CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime-skills"
+_DISCOVERY_CACHE_LOCK = threading.Lock()
+_DISCOVERY_CACHE: dict[tuple, tuple[tuple, list[dict]]] = {}
+_DISCOVERY_CACHE_MAX = 32
 
 
 def runtime_skill_contexts(cwd: str, *, bare_config: bool = False) -> list[dict]:
@@ -59,11 +63,18 @@ def materialize_runtime_skills(root: Path, cwd: str, *, bare_config: bool = Fals
 
 def _discover_skills(cwd: str) -> list[dict]:
     roots = _skill_roots(cwd)
+    cache_key = _discovery_cache_key(roots)
+    with _DISCOVERY_CACHE_LOCK:
+        cached = _DISCOVERY_CACHE.get(cache_key)
+        if cached is not None:
+            skill_fingerprint, cached_skills = cached
+            if _skills_fingerprint(cached_skills) == skill_fingerprint:
+                return [dict(skill) for skill in cached_skills]
     seen: set[str] = set()
     skills: list[dict] = []
     for skill in _extension_runtime_skills():
         if len(skills) >= MAX_SKILLS:
-            return skills
+            return _cache_discovered_skills(cache_key, skills)
         name = skill["name"].strip()
         if not name or name in seen:
             continue
@@ -82,7 +93,7 @@ def _discover_skills(cwd: str) -> list[dict]:
             continue
         for skill_dir in sorted(root.iterdir(), key=lambda p: p.name):
             if len(skills) >= MAX_SKILLS:
-                return skills
+                return _cache_discovered_skills(cache_key, skills)
             if not skill_dir.is_dir():
                 continue
             name = skill_dir.name.strip()
@@ -99,7 +110,98 @@ def _discover_skills(cwd: str) -> list[dict]:
                 "path": str(skill_md),
             })
             seen.add(name)
-    return skills
+    return _cache_discovered_skills(cache_key, skills)
+
+
+def _cache_discovered_skills(cache_key: tuple, skills: list[dict]) -> list[dict]:
+    cached = [dict(skill) for skill in skills]
+    with _DISCOVERY_CACHE_LOCK:
+        _DISCOVERY_CACHE[cache_key] = (_skills_fingerprint(cached), cached)
+        if len(_DISCOVERY_CACHE) > _DISCOVERY_CACHE_MAX:
+            _DISCOVERY_CACHE.pop(next(iter(_DISCOVERY_CACHE)))
+    return [dict(skill) for skill in cached]
+
+
+def _discovery_cache_key(roots: list[Path]) -> tuple:
+    return (
+        _extension_runtime_skills_fingerprint(),
+        tuple((str(root), _directory_fingerprint(root)) for root in roots),
+    )
+
+
+def _extension_runtime_skills_fingerprint() -> tuple:
+    try:
+        import extension_store
+    except Exception:
+        return ()
+    try:
+        store_fp = extension_store.store_fingerprint()
+    except Exception:
+        store_fp = ()
+    try:
+        settings_fp = extension_store.extension_settings_fingerprint()
+    except Exception:
+        settings_fp = ()
+    try:
+        runtime_mode = extension_store.private_local_runtime_mode()
+    except Exception:
+        runtime_mode = ""
+    return (store_fp, settings_fp, runtime_mode)
+
+
+def _directory_fingerprint(root: Path) -> tuple[int, int, int]:
+    try:
+        root_stat = root.stat()
+    except OSError:
+        return (0, 0, 0)
+    latest = root_stat.st_mtime_ns
+    count = 1
+    try:
+        for skill_dir in root.iterdir():
+            try:
+                skill_stat = skill_dir.stat()
+            except OSError:
+                continue
+            latest = max(latest, skill_stat.st_mtime_ns)
+            count += 1
+            skill_md = skill_dir / "SKILL.md"
+            try:
+                skill_md_stat = skill_md.stat()
+            except OSError:
+                continue
+            latest = max(latest, skill_md_stat.st_mtime_ns)
+            count += 1
+    except OSError:
+        pass
+    return (root_stat.st_mtime_ns, latest, count)
+
+
+def _skills_fingerprint(skills: list[dict]) -> tuple:
+    return tuple(
+        (
+            str(skill.get("path") or ""),
+            _file_fingerprint(Path(str(skill.get("path") or ""))),
+            str(skill.get("dir") or ""),
+            _path_fingerprint(Path(str(skill.get("dir") or ""))),
+        )
+        for skill in skills
+    )
+
+
+def _file_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _path_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _extension_runtime_skills() -> list[dict[str, str]]:
