@@ -1003,6 +1003,13 @@ def test_session_organization_query_builds_tag_sets_only_for_tag_filter() -> Non
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _sidebar_state_snapshot()" in main_source
+    assert "_sidebar_state_snapshot_cache" in main_source
+    snapshot_start = main_source.index("def _sidebar_state_snapshot()")
+    snapshot_end = main_source.index("def _decorate_local_sidebar_sessions(", snapshot_start)
+    snapshot_source = main_source[snapshot_start:snapshot_end]
+    assert "version = _sessions_list_transient_state_version()" in snapshot_source
+    assert "cached is not None and cached[0] == version" in snapshot_source
+    assert "pending_input_by_sid = user_input_store.pending_counts_by_session()" in snapshot_source
     payload_start = main_source.index("def _sidebar_session_payload(")
     payload_end = main_source.index("def _sidebar_state_snapshot(", payload_start)
     payload_source = main_source[payload_start:payload_end]
