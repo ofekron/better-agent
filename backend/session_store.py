@@ -974,6 +974,7 @@ def _do_build_summary_index_unsafe() -> None:
     dirty_trees: list[dict] = []
     stale_summaries: list[tuple[str, dict]] = []
     summary_projection_present = False
+    eng_by_parent: dict[str, str] = {}
 
     # Pass 1: load from summary files where available + fresh
     # (summary mtime must be >= session file mtime — a crash between
@@ -1026,7 +1027,6 @@ def _do_build_summary_index_unsafe() -> None:
     # Pass 2: build from full files for missing summaries. Each
     # parse+build publishes immediately so `/api/sessions` callers
     # observe the index growing.
-    eng_by_parent: dict[str, str] = {}
     for sid in missing_ids:
         fpath = full_files[sid]
         try:
