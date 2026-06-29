@@ -72,21 +72,25 @@ def test_websocket_json_serializes_off_loop() -> None:
     ws_source = source[ws_start:ws_end]
     assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in ws_source
     assert "text = await serialized_task" in ws_source
-    assert "text = await asyncio.to_thread(" in ws_source
-    assert "json.dumps," in ws_source
+    assert "text = await dumps_ws_json(event_dict)" in ws_source
     assert "ws_send_lock = asyncio.Lock()" in source
     assert "async with ws_send_lock:" in ws_source
     assert "await websocket.send_text(text)" in ws_source
     assert "ws.send_json.lock_wait" in ws_source
     assert "ws.send_json.serialize_off_loop" in ws_source
     assert "await websocket.send_json(event_dict)" not in ws_source
+    ws_json_source = (ROOT / "ws_serialization.py").read_text(encoding="utf-8")
+    assert "ThreadPoolExecutor(" in ws_json_source
+    assert "thread_name_prefix=\"ws-json\"" in ws_json_source
+    assert "async def dumps_ws_json(" in ws_json_source
+    assert "def shutdown_ws_json_executor()" in ws_json_source
     orchestrator_source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
     global_start = orchestrator_source.index("async def broadcast_global(")
     global_end = orchestrator_source.index("async def _broadcast_global_one(", global_start)
     global_source = orchestrator_source[global_start:global_end]
     assert "SerializedGlobalEvent" in orchestrator_source
     assert "_bc_serialized_json_task" in global_source
-    assert "asyncio.to_thread(\n                    json.dumps," in global_source
+    assert "dumps_ws_json(event)" in global_source
 
 
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:

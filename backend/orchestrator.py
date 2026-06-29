@@ -57,6 +57,7 @@ from session_manager import manager as session_manager
 import perf
 import time as _time
 import virtual_session_prompt_handlers
+from ws_serialization import dumps_ws_json
 
 logger = logging.getLogger(__name__)
 
@@ -3516,12 +3517,7 @@ class Coordinator:
         event = SerializedGlobalEvent({"type": event_type, "data": data})
         if snapshot:
             event._bc_serialized_json_task = asyncio.create_task(  # type: ignore[attr-defined]
-                asyncio.to_thread(
-                    json.dumps,
-                    event,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
+                dumps_ws_json(event)
             )
         outer_t = _time.perf_counter()
         for cb in snapshot:
