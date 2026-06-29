@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
+import { setSelectedProject } from "../src/utils/uiSelection";
 
 async function waitFor(
   h: Awaited<ReturnType<typeof renderApp>>,
@@ -15,7 +16,15 @@ async function waitFor(
 
 describe("session tabs with paged sessions", () => {
   afterEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
+    );
+    setSelectedProject("", "primary");
+    vi.unstubAllGlobals();
     localStorage.removeItem("better-agent-open-session-ids");
+    localStorage.removeItem("better-agent-selected-project");
+    localStorage.removeItem("better-agent-selected-project-node");
     window.history.pushState(null, "", "/");
   });
 
@@ -194,6 +203,51 @@ describe("session tabs with paged sessions", () => {
     await h.selectSession(assistant.id);
     expect(h.$(".session-tabs")?.textContent ?? "").toContain("Assistant");
 
+    h.unmount();
+  }, 10000);
+
+  it("reselects inside the selected project when the route is on another project tab", async () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      name: "Project Session",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    const otherProjectTab = makeSession({
+      id: "other-project-tab",
+      name: "Other Project Tab",
+      cwd: "/tmp/project-b",
+      updated_at: "2026-01-03T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", "/s/other-project-tab");
+    localStorage.setItem("better-agent-selected-project", "/tmp/project-a");
+    localStorage.setItem("better-agent-selected-project-node", "primary");
+
+    const h = await renderApp({
+      seed: {
+        sessions: [otherProjectTab, projectSession],
+        projects: [
+          {
+            path: "/tmp/project-a",
+            name: "project-a",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_used: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            path: "/tmp/project-b",
+            name: "project-b",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_used: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+
+    expect(await waitFor(h, () => window.location.pathname === "/s/project-session"))
+      .toBe(true);
+    expect(
+      h.$('[data-session-id="project-session"]')?.getAttribute("data-active"),
+    ).toBe("true");
     h.unmount();
   }, 10000);
 
