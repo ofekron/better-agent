@@ -6005,7 +6005,10 @@ def _session_detail_snapshot_sync(
     exchange_count: Optional[int],
     include_cache_key: bool = False,
 ) -> Optional[dict]:
+    root_id_start = time.perf_counter()
     root_id = session_manager._root_id_for(session_id)
+    root_id_ms = (time.perf_counter() - root_id_start) * 1000
+    perf.record("sessions.detail.root_id", root_id_ms)
     barrier_seq = 0
     get_start = time.perf_counter()
     max_seq_ms = 0.0
@@ -6081,14 +6084,18 @@ def _session_detail_snapshot_sync(
             tree["max_seq_by_sid"] = {}
         total_ms = (time.perf_counter() - get_start) * 1000
         perf.record("sessions.detail.total", total_ms)
-        if total_ms >= 50 or max_context_ms >= 20 or strip_ms >= 20:
+        if total_ms >= 50 or root_id_ms >= 20 or max_context_ms >= 20 or strip_ms >= 20:
             logger.info(
-                "GET session %s timings total=%.1fms max_context=%.1fms strip=%.1fms has_events=%s",
-                root_id[:8], total_ms, max_context_ms, strip_ms, has_events,
+                "GET session %s timings total=%.1fms root_id=%.1fms max_context=%.1fms strip=%.1fms has_events=%s",
+                root_id[:8], total_ms, root_id_ms, max_context_ms, strip_ms, has_events,
             )
+        file_path_start = time.perf_counter()
         tree["file_path"] = str(_session_path(root_id))
+        perf.record("sessions.detail.file_path", (time.perf_counter() - file_path_start) * 1000)
     if detail_cache_key is not None:
+        cache_marker_start = time.perf_counter()
         tree["_detail_response_cache_key_parts"] = detail_cache_key
+        perf.record("sessions.detail.cache_marker", (time.perf_counter() - cache_marker_start) * 1000)
     return tree
 
 

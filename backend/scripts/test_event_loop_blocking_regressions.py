@@ -1694,12 +1694,15 @@ def test_session_detail_has_split_perf_timers() -> None:
     assert "separators=(\",\", \":\")" in json_response_source
     assert "Response(content=content, media_type=\"application/json\")" in json_response_source
     for timer in (
+        "sessions.detail.root_id",
         "sessions.detail.event_meta",
         "sessions.detail.tree",
         "sessions.detail.strip_synthetic",
         "sessions.detail.reconcile_snapshot",
         "sessions.detail.max_context_copy",
         "sessions.detail.total",
+        "sessions.detail.file_path",
+        "sessions.detail.cache_marker",
     ):
         assert f'perf.record("{timer}"' in helper_source
 
