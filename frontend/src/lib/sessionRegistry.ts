@@ -92,6 +92,18 @@ export interface ProjectAggregate {
   unread_session_count: number;
 }
 
+type SessionRegistryRow = {
+  id?: string;
+  is_running?: boolean;
+  unread_count?: number;
+  pending_user_input_count?: number;
+  cwd?: string;
+  node_id?: string;
+  monitoring_state?: string;
+  markers?: Record<string, MarkerInfo>;
+  has_error?: boolean;
+};
+
 // Internal per-session record. `monitoring_state` is the SINGLE source of
 // session state — `is_running` is the derived projection
 // `monitoring_state !== "stopped"`, computed in `getSession`/aggregates, never
@@ -124,6 +136,21 @@ function entryRunning(entry: {
   testape_active?: boolean;
 }): boolean {
   return isRunning(entry.monitoring_state) || !!entry.testape_active;
+}
+
+function entryFromRow(row: SessionRegistryRow): SessionEntry {
+  const monitoringState: MonitoringState = (row.monitoring_state as MonitoringState)
+    || (row.is_running ? "active" : "stopped");
+  return {
+    unread_count: Math.max(0, Number(row.unread_count) || 0),
+    pending_user_input_count: Math.max(0, Number(row.pending_user_input_count) || 0),
+    monitoring_state: monitoringState,
+    cwd: row.cwd ?? "",
+    node_id: row.node_id || "primary",
+    markers: (row.markers && typeof row.markers === "object") ? row.markers : {},
+    testape_active: false,
+    has_error: !!row.has_error,
+  };
 }
 
 const EMPTY_MARKERS: Record<string, MarkerInfo> = {};
@@ -340,35 +367,16 @@ class SessionRegistry {
     }
     const rows = (json && typeof json === "object" && "sessions" in json
       ? (json as { sessions: unknown }).sessions
-      : []) as Array<{
-      id?: string;
-      is_running?: boolean;
-      unread_count?: number;
-      pending_user_input_count?: number;
-      cwd?: string;
-      node_id?: string;
-      monitoring_state?: string;
-      markers?: Record<string, MarkerInfo>;
-      has_error?: boolean;
-    }>;
+      : []) as SessionRegistryRow[];
 
+    this.replaceFromRows(rows);
+  }
+
+  replaceFromRows(rows: SessionRegistryRow[]): void {
     const nextSessions = new Map<string, SessionEntry>();
     for (const s of rows) {
       if (!s?.id) continue;
-      // Prefer the explicit monitoring_state; fall back to the legacy
-      // is_running boolean (active/stopped) if an older backend omits it.
-      const ms: MonitoringState = (s.monitoring_state as MonitoringState)
-        || (s.is_running ? "active" : "stopped");
-      nextSessions.set(s.id, {
-        unread_count: Math.max(0, Number(s.unread_count) || 0),
-        pending_user_input_count: Math.max(0, Number(s.pending_user_input_count) || 0),
-        monitoring_state: ms,
-        cwd: s.cwd ?? "",
-        node_id: s.node_id || "primary",
-        markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
-        testape_active: false,
-        has_error: !!s.has_error,
-      });
+      nextSessions.set(s.id, entryFromRow(s));
     }
     this.sessions = nextSessions;
     this.projects = this.deriveAllProjects(nextSessions);
@@ -806,32 +814,11 @@ class SessionRegistry {
    * status rank AND the running/unread badge. Only FILLS missing sids —
    * never overwrites a live entry, which may be fresher than the page
    * snapshot. */
-  seedFromRows(rows: Array<{
-    id?: string;
-    is_running?: boolean;
-    unread_count?: number;
-    pending_user_input_count?: number;
-    cwd?: string;
-    node_id?: string;
-    monitoring_state?: string;
-    markers?: Record<string, MarkerInfo>;
-    has_error?: boolean;
-  }>): void {
+  seedFromRows(rows: SessionRegistryRow[]): void {
     let changed = false;
     for (const s of rows) {
       if (!s?.id || this.sessions.has(s.id)) continue;
-      const ms: MonitoringState = (s.monitoring_state as MonitoringState)
-        || (s.is_running ? "active" : "stopped");
-      this.sessions.set(s.id, {
-        unread_count: Math.max(0, Number(s.unread_count) || 0),
-        pending_user_input_count: Math.max(0, Number(s.pending_user_input_count) || 0),
-        monitoring_state: ms,
-        cwd: s.cwd ?? "",
-        node_id: s.node_id || "primary",
-        markers: (s.markers && typeof s.markers === "object") ? s.markers : {},
-        testape_active: false,
-        has_error: !!s.has_error,
-      });
+      this.sessions.set(s.id, entryFromRow(s));
       this.recomputeProject(s.cwd ?? "", s.node_id || "primary");
       this.notifySession(s.id);
       changed = true;

@@ -845,10 +845,7 @@ function AppMain({
   // its bus subscriptions once on mount and bootstraps from REST.
   useEffect(() => {
     sessionRegistry.bind();
-    if (authStatus === "authed" || !authStatus) {
-      void sessionRegistry.bootstrap();
-    }
-  }, [authStatus]);
+  }, []);
 
   const focusedForkId: string | null = currentTree
     ? focusedByRoot[currentTree.id] ?? currentTree.id
@@ -1653,7 +1650,7 @@ function AppMain({
         if (!session) return prev;
         return {
           ...prev,
-          [sessionId]: mergeOpenSessionRecord(session, { ...session, ...toApply }),
+          [sessionId]: mergeOpenSessionRecord(session, { ...session, ...toApply } as Session),
         };
       });
       if ("topbar_pinned" in toApply) {
@@ -1773,11 +1770,15 @@ function AppMain({
 
   const refreshSessionInventory = useCallback(() => {
     refreshSessions();
-    void sessionRegistry.bootstrap();
   }, [refreshSessions]);
 
+  const sawInitialConnectionRef = useRef(false);
   useEffect(() => {
     if (!connected) return;
+    if (!sawInitialConnectionRef.current) {
+      sawInitialConnectionRef.current = true;
+      return;
+    }
     refreshSessionInventory();
   }, [connected, refreshSessionInventory]);
 
@@ -3571,31 +3572,41 @@ function AppMain({
     let cancelled = false;
     for (const id of idsToFetch) {
       openSessionRecordFetchesRef.current.add(id);
-      fetch(`${API}/api/sessions/${encodeURIComponent(id)}`, {
-        credentials: "include",
-      })
-        .then((res) => {
-          if (res.status === 404) {
-            setMissingOpenSessionIds((prev) => ({ ...prev, [id]: true }));
-            return null;
-          }
-          if (!res.ok) return null;
-          return res.json();
-        })
-        .then((session: Session | null) => {
-          if (cancelled || !session?.id) return;
+    }
+    const params = new URLSearchParams({ ids: idsToFetch.join(",") });
+    fetch(`${API}/api/sessions/summaries?${params}`, {
+      credentials: "include",
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sessions?: Session[] } | null) => {
+        if (cancelled) return;
+        const returned = new Set<string>();
+        for (const session of data?.sessions ?? []) {
+          if (!session?.id) continue;
+          returned.add(session.id);
           setOpenSessionRecords((prev) => {
             const merged = mergeOpenSessionRecord(prev[session.id], session);
             return merged === prev[session.id]
               ? prev
               : { ...prev, [session.id]: merged };
           });
-        })
-        .catch(() => {})
-        .finally(() => {
-          openSessionRecordFetchesRef.current.delete(id);
+        }
+        setMissingOpenSessionIds((prev) => {
+          let next: Record<string, true> | null = null;
+          for (const id of idsToFetch) {
+            if (returned.has(id)) continue;
+            if (!next) next = { ...prev };
+            next[id] = true;
+          }
+          return next ?? prev;
         });
-    }
+      })
+      .catch(() => {})
+      .finally(() => {
+        for (const id of idsToFetch) {
+          openSessionRecordFetchesRef.current.delete(id);
+        }
+      });
 
     return () => {
       cancelled = true;

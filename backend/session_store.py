@@ -344,8 +344,6 @@ def _build_summary_for_root(
         "last_opened_at": root.get("last_opened_at", ""),
         "message_count": len(_msgs),
         "first_prompt": _first_user_prompt(root),
-        "token_usage_total": root.get("token_usage_total"),
-        "token_usage_last": root.get("token_usage_last"),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
         "unseen_error": root.get("unseen_error"),
         "orchestration_mode": _normalize_orchestration_mode(
@@ -367,7 +365,6 @@ def _build_summary_for_root(
         "rearranger_enabled": root.get("rearranger_enabled", False),
         "supervisor_enabled": root.get("supervisor_enabled", False),
         "supervisor_custom_prompt": root.get("supervisor_custom_prompt", ""),
-        "rearranger_stats": root.get("rearranger_stats"),
         "continuation_chain": root.get("continuation_chain", []),
         "is_prompt_engineering": bool(root.get("working_mode") == "prompt_engineering"),
         "working_mode": root.get("working_mode"),
