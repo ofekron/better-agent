@@ -12215,16 +12215,32 @@ async def _process_worker_pool_queue(tag: str) -> None:
         if not target:
             await asyncio.sleep(1)
             continue
-        await coordinator.submit_team_message(
-            sender_session_id=str(item.get("sender_session_id") or ""),
-            target_session_id=target["agent_session_id"],
-            message=str(item.get("prompt") or ""),
-            detach=True,
-            expect_mssg_response=bool(item.get("expect_mssg_response")),
-            provider_id=str(item.get("provider_id") or ""),
-            model=str(item.get("model") or ""),
-            reasoning_effort=str(item.get("reasoning_effort") or ""),
-        )
+        try:
+            await coordinator.submit_team_message(
+                sender_session_id=str(item.get("sender_session_id") or ""),
+                target_session_id=target["agent_session_id"],
+                message=str(item.get("prompt") or ""),
+                detach=True,
+                expect_mssg_response=bool(item.get("expect_mssg_response")),
+                provider_id=str(item.get("provider_id") or ""),
+                model=str(item.get("model") or ""),
+                reasoning_effort=str(item.get("reasoning_effort") or ""),
+            )
+        except Exception as exc:
+            logger.exception(
+                "worker pool dispatch failed tag=%s item_id=%s target_session_id=%s",
+                tag,
+                item.get("id"),
+                target.get("agent_session_id"),
+            )
+            await asyncio.to_thread(
+                _ws.record_pool_task_failure,
+                tag,
+                str(item.get("id") or ""),
+                str(exc),
+            )
+            await coordinator.broadcast_workers_changed(None)
+            continue
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)
 

@@ -342,7 +342,12 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
     try:
         response = client.post(
             "/api/internal/worker-pools/enqueue",
-            json={"tag": "review", "sender_session_id": sender["id"], "prompt": "review this"},
+            json={
+                "tag": "review",
+                "sender_session_id": sender["id"],
+                "prompt": "review this",
+                "expect_mssg_response": True,
+            },
             headers={"X-Internal-Token": main.coordinator.internal_token},
         )
         assert response.status_code == 200, response.text
@@ -354,6 +359,53 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         assert dispatched[0]["message"] == "review this"
         assert dispatched[0]["detach"] is True
         assert dispatched[0]["expect_mssg_response"] is True
+    finally:
+        main.coordinator.submit_team_message = real_submit
+
+
+def test_worker_pool_dispatch_failure_requeues_without_blocking_later_items():
+    import asyncio
+    from stores import worker_store
+
+    dispatched = []
+    calls = 0
+
+    async def fake_submit_team_message(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("submit failed")
+        dispatched.append(kwargs)
+        return {"success": True, "queued_id": "queued"}
+
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    real_submit = main.coordinator.submit_team_message
+    main.coordinator.submit_team_message = fake_submit_team_message
+    client = _client()
+    sender = main.session_manager.create(
+        name="manager",
+        cwd="/tmp/pool-failure",
+        orchestration_mode="team",
+    )
+    provision = _post_team_ui_provision(client, {
+        "cwd": "/tmp/pool-failure",
+        "workers": [{"role_key": "idle-reviewer", "orchestration_mode": "native", "tags": ["review"]}],
+    })
+    assert provision.status_code == 200, provision.text
+
+    try:
+        for prompt in ("bad head", "later work"):
+            response = client.post(
+                "/api/internal/worker-pools/enqueue",
+                json={"tag": "review", "sender_session_id": sender["id"], "prompt": prompt},
+                headers={"X-Internal-Token": main.coordinator.internal_token},
+            )
+            assert response.status_code == 200, response.text
+
+        asyncio.run(main._process_worker_pool_queue("review"))
+        assert [item["message"] for item in dispatched] == ["later work", "bad head"]
+        assert worker_store.peek_pool_task("review") is None
     finally:
         main.coordinator.submit_team_message = real_submit
 
@@ -743,6 +795,7 @@ if __name__ == "__main__":
     test_pool_workers_receive_peer_context_in_provision_prompt()
     test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
+    test_worker_pool_dispatch_failure_requeues_without_blocking_later_items()
     test_worker_pool_affinity_reuses_bound_worker_even_when_busy()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()
