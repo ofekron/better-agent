@@ -193,6 +193,14 @@ _summary_projection_repair_running = False
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
+
+
+def _copy_jsonish(value):
+    if isinstance(value, dict):
+        return {k: _copy_jsonish(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_jsonish(v) for v in value]
+    return value
 _SUMMARY_INDEX_CACHE_VERSION = 2
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
@@ -3205,12 +3213,12 @@ def _cached_migrated_root(root_id: str, file_signature: tuple[int, int], root: d
         cached = _migrated_root_cache.get(cache_key)
     if cached is not None:
         with perf.timed("store.session.get_root_tree.migrate.cache_hit"):
-            return copy.deepcopy(cached)
+            return _copy_jsonish(cached)
     migrated = _migrate_and_persist(root)
     with _migrated_root_cache_lock:
         if len(_migrated_root_cache) >= _MIGRATED_ROOT_CACHE_MAX:
             _migrated_root_cache.pop(next(iter(_migrated_root_cache)), None)
-        _migrated_root_cache[cache_key] = copy.deepcopy(migrated)
+        _migrated_root_cache[cache_key] = _copy_jsonish(migrated)
     return migrated
 
 
