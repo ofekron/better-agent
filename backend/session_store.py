@@ -127,8 +127,11 @@ def _infer_user_initiated(session: dict) -> bool:
     return True
 
 
+_SESSIONS_DIR = ba_home() / "sessions"
+
+
 def _sessions_dir() -> Path:
-    return ba_home() / "sessions"
+    return _SESSIONS_DIR
 
 
 def _ensure_dir():
@@ -1124,11 +1127,16 @@ def _do_build_summary_index_unsafe() -> None:
     # Pass 2: build from full files for missing summaries. Each
     # parse+build publishes immediately so `/api/sessions` callers
     # observe the index growing.
+    provider_ctx: Optional[dict] = None
     for sid in missing_ids:
         fpath = full_files[sid]
         try:
-            ctx = _provider_backfill_context()
-            data = _migrate_session(json.loads(fpath.read_text(encoding="utf-8")), ctx)
+            raw = json.loads(fpath.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or "id" not in raw:
+                continue
+            if provider_ctx is None:
+                provider_ctx = _provider_backfill_context()
+            data = _migrate_session(raw, provider_ctx)
             _overlay_seen_cursors(data, data["id"])
             _overlay_last_opened(data, data["id"])
             summary = _build_summary_for_root(
@@ -1145,7 +1153,7 @@ def _do_build_summary_index_unsafe() -> None:
             stale_summaries.append((data["id"], summary))
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             continue
-        if ctx["dirty"][0]:
+        if provider_ctx["dirty"][0]:
             dirty_trees.append(data)
         if data.get("working_mode"):
             meta = data.get("working_mode_meta") or {}
