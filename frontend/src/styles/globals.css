@@ -642,6 +642,19 @@ body {
   filter: brightness(1.05);
 }
 
+.empty-file-edit-picker {
+  display: flex;
+  justify-content: flex-start;
+  padding: 14px 0 4px;
+}
+
+.empty-file-edit-picker__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
 /* ======================================= */
 /* App Title                               */
 /* ======================================= */

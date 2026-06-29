@@ -586,6 +586,7 @@
   "fileEditor.discard": "破棄",
   "fileEditor.closing": "閉じる…",
   "fileEditor.done": "完了",
+  "fileEditor.pickFiles": "ファイルを選択",
   "fork.original": "オリジナル",
   "fork.fork": "フォーク（分岐）",
   "fork.focusedAria": "フォーカスされたペイン",

@@ -586,6 +586,7 @@
   "fileEditor.discard": "취소",
   "fileEditor.closing": "닫는 중…",
   "fileEditor.done": "완료",
+  "fileEditor.pickFiles": "파일 선택",
   "fork.original": "원본",
   "fork.fork": "포크",
   "fork.focusedAria": "포커스된 창",

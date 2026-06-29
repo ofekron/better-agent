@@ -1188,6 +1188,10 @@ function AppMain({
     currentSession?.working_mode === "file_editing" &&
     currentSession?.working_mode_meta?.persistent,
   );
+  const emptyFileEditingSession = Boolean(
+    currentSession?.working_mode === "file_editing" &&
+    ((currentSession.working_mode_meta?.file_paths ?? []).length === 0)
+  );
 
   /** Start a file-editor session for a given file path. Idempotent on
    * the backend (resumes an existing one for the same file). After
@@ -3080,6 +3084,7 @@ function AppMain({
   );
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const [fileChooserOpen, setFileChooserOpen] = useState(false);
+  const [fileChooserMode, setFileChooserMode] = useState<"browse" | "fileEdit">("browse");
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -5641,7 +5646,10 @@ function AppMain({
             const filesBtn = cwd && (
               <button
                 className="setup-btn"
-                onClick={() => setFileChooserOpen(true)}
+                onClick={() => {
+                  setFileChooserMode("browse");
+                  setFileChooserOpen(true);
+                }}
                 title={t("sidebar.toolsTitle")}
                 aria-label={t("sidebar.toolsTitle")}
               >
@@ -6050,9 +6058,25 @@ function AppMain({
                 ? <div className="ask-hero-wrap">{askGreetingSlots}</div>
                 : askGreetingSlots
               : undefined;
+          const emptyFileEditPickerNode = emptyFileEditingSession ? (
+            <div className="empty-file-edit-picker">
+              <button
+                type="button"
+                className="btn-primary empty-file-edit-picker__button"
+                data-testid="empty-file-editor-pick-files"
+                onClick={() => {
+                  setFileChooserMode("fileEdit");
+                  setFileChooserOpen(true);
+                }}
+              >
+                <Icon name="folder" size={16} />
+                {t("fileEditor.pickFiles")}
+              </button>
+            </div>
+          ) : undefined;
           // The assistant board renders in the right-panel "Board" tab, not the
           // header (see assistantSummaryModules usage in the right panel).
-          const headerNode = askDescriptionNode || undefined;
+          const headerNode = askDescriptionNode || emptyFileEditPickerNode || undefined;
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
@@ -6991,7 +7015,7 @@ function AppMain({
           open={fileChooserOpen}
           cwd={cwd}
           nodeId={currentSession?.node_id ?? selectedProjectNodeId}
-          onFileClick={handleFileClick}
+          onFileClick={fileChooserMode === "fileEdit" ? startFileEditor : handleFileClick}
           onEngineerFile={startFileEditor}
           onClose={() => setFileChooserOpen(false)}
         />
