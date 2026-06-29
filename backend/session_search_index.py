@@ -316,7 +316,7 @@ def _run_search_cache_fill(
     cache_key: tuple[str, int],
     query: str,
     limit: int,
-    max_wait_seconds: float | None,
+    _max_wait_seconds: float | None,
     event: threading.Event,
 ) -> None:
     try:
@@ -324,12 +324,7 @@ def _run_search_cache_fill(
         if conn is None:
             scores: list[tuple[str, int]] = []
         else:
-            deadline = (
-                time.monotonic() + max(0.0, max_wait_seconds)
-                if max_wait_seconds is not None
-                else None
-            )
-            scores = _candidate_scores(conn, query, limit, deadline=deadline)
+            scores = _candidate_scores(conn, query, limit)
         with _search_cache_lock:
             _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
             if len(_search_cache) > _SEARCH_CACHE_MAX:

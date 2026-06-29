@@ -232,6 +232,8 @@ def bounded_search_returns_while_cache_fills_test() -> bool:
         return FakeConn()
 
     def slow_candidate_scores(_conn, _query, _limit, **_kwargs):
+        if "deadline" in _kwargs:
+            raise AssertionError("background cache fill must not inherit caller deadline")
         time.sleep(0.2)
         return [("sid-bounded", 4)]
 
@@ -264,6 +266,56 @@ def bounded_search_returns_while_cache_fills_test() -> bool:
     print(
         f"{PASS if ok else FAIL} bounded search returns while cache fills "
         f"-- elapsed={elapsed:.3f}s first={first} second={second}",
+    )
+    return ok
+
+
+def bounded_search_does_not_cache_deadline_miss_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def deadline_sensitive_scores(_conn, _query, _limit, **_kwargs):
+        if "deadline" in _kwargs:
+            return []
+        time.sleep(0.12)
+        return [("sid-filled", 9)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = deadline_sensitive_scores
+    try:
+        first = session_search_index.search(
+            "deadline-query",
+            limit=5,
+            max_wait_seconds=0.01,
+        )
+        deadline = time.monotonic() + 1.0
+        second = []
+        while time.monotonic() < deadline:
+            second = session_search_index.search(
+                "deadline-query",
+                limit=5,
+                max_wait_seconds=0.01,
+            )
+            if second:
+                break
+            time.sleep(0.02)
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_inflight.clear()
+    ok = first == [] and second == [{"session_id": "sid-filled", "score": 9}]
+    print(
+        f"{PASS if ok else FAIL} bounded search fills cache after caller timeout "
+        f"-- first={first} second={second}",
     )
     return ok
 
@@ -448,6 +500,7 @@ if __name__ == "__main__":
         ok = search_does_not_wait_for_pending_index_test() and ok
         ok = grep_sessions_passes_bounded_limit_test() and ok
         ok = bounded_search_returns_while_cache_fills_test() and ok
+        ok = bounded_search_does_not_cache_deadline_miss_test() and ok
         ok = identical_searches_coalesce_test() and ok
         ok = smaller_search_coalesces_with_larger_inflight_test() and ok
         ok = content_search_caps_matched_rows_test() and ok
