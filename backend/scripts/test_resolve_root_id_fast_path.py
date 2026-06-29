@@ -352,6 +352,37 @@ def test_fork_index_scan_avoids_path_glob() -> bool:
     return ok
 
 
+def test_missing_sid_refresh_reuses_fingerprint() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+    _write_summary("target-root", 0)
+    for i in range(20):
+        sid = f"other-{i}"
+        _write(_record(sid))
+        _write_summary(sid, 0)
+
+    original_fingerprint = session_store._dir_fingerprint
+    calls = 0
+
+    def tracking_fingerprint():
+        nonlocal calls
+        calls += 1
+        return original_fingerprint()
+
+    session_store._dir_fingerprint = tracking_fingerprint
+    try:
+        resolved = session_store._resolve_root_id("missing-fork")
+    finally:
+        session_store._dir_fingerprint = original_fingerprint
+
+    ok = resolved is None and calls <= 3
+    print(
+        f"{PASS if ok else FAIL} missing sid refresh reuses dir fingerprint"
+        f"{'' if ok else ' calls=' + repr(calls)}"
+    )
+    return ok
+
+
 def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -534,6 +565,7 @@ def main() -> int:
             test_fork_index_sidecar_builds_index_without_root_or_summary_parse(),
             test_index_sidecar_write_happens_outside_index_lock(),
             test_fork_index_scan_avoids_path_glob(),
+            test_missing_sid_refresh_reuses_fingerprint(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),

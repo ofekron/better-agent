@@ -28,10 +28,10 @@ def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
     refresh_calls = 0
     original_refresh = session_store._refresh_index  # type: ignore[attr-defined]
 
-    def counted_refresh() -> None:
+    def counted_refresh(*args, **kwargs) -> tuple[int, int, int]:
         nonlocal refresh_calls
         refresh_calls += 1
-        original_refresh()
+        return original_refresh(*args, **kwargs)
 
     session_store._refresh_index = counted_refresh  # type: ignore[attr-defined]
     try:
