@@ -50,9 +50,11 @@ from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
 
-_PRIMARY_JSONL_CACHE_TTL_S = 5.0
+_PRIMARY_JSONL_CACHE_TTL_S = 1.0
+_PRIMARY_JSONL_POSITIVE_CACHE_TTL_S = 60.0
 _RUN_STATE_LOOKUP_TIMEOUT_S = 1.0
-_RUN_STATE_LOOKUP_CACHE_TTL_S = 5.0
+_RUN_STATE_LOOKUP_CACHE_TTL_S = 1.0
+_RUN_STATE_LOOKUP_POSITIVE_CACHE_TTL_S = 60.0
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
@@ -91,7 +93,12 @@ def _run_state_cache_get(root_key: str, agent_sid: str) -> Optional[Path] | bool
         if cached is None:
             return False
         ts, path = cached
-        if now - ts < _RUN_STATE_LOOKUP_CACHE_TTL_S:
+        ttl = (
+            _RUN_STATE_LOOKUP_POSITIVE_CACHE_TTL_S
+            if path is not None
+            else _RUN_STATE_LOOKUP_CACHE_TTL_S
+        )
+        if now - ts < ttl:
             return path
         _RUN_STATE_LOOKUP_CACHE.pop(key, None)
         return False
@@ -573,9 +580,12 @@ class NativeFilesManager:
             cached = self._primary_jsonl_cache.get(key)
             if cached is not None:
                 ts, path = cached
-                if path is not None and path.exists():
-                    return path
-                if now - ts < _PRIMARY_JSONL_CACHE_TTL_S:
+                ttl = (
+                    _PRIMARY_JSONL_POSITIVE_CACHE_TTL_S
+                    if path is not None
+                    else _PRIMARY_JSONL_CACHE_TTL_S
+                )
+                if now - ts < ttl:
                     return path
                 self._primary_jsonl_cache.pop(key, None)
         path = _resolve_primary_jsonl(sess, agent_sid)
