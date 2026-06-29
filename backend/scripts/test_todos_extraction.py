@@ -1154,40 +1154,55 @@ def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
     return True
 
 
-def test_cli_prompt_open_todos_only() -> bool:
-    """The helper injects only unfinished todos and otherwise no-ops."""
+def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
+    """The helper injects full todo/task state while anything is open."""
     from turn_helpers import _append_todo_reminder
 
     user_text = "do the thing"
 
-    if _append_todo_reminder(user_text, {"current_todos": []}) != user_text:
+    if _append_todo_reminder(user_text, {"current_todos": [], "current_tasks": []}) != user_text:
         print("  empty todo list changed prompt")
         return False
 
-    sess_with = {"current_todos": [
-        {"content": "X <unsafe>", "status": "in_progress"},
-        {"content": "Still pending", "status": "pending"},
-        {"content": "Already done", "status": "completed"},
-    ]}
+    sess_with = {
+        "current_todos": [
+            {"content": "X <unsafe>", "status": "in_progress"},
+            {"content": "Still pending", "status": "pending"},
+            {"content": "Already done", "status": "completed"},
+            {"content": "Duplicate shared", "status": "completed"},
+        ],
+        "current_tasks": [
+            {"content": "TaskCreate work", "status": "pending"},
+            {"content": "Duplicate shared", "status": "in_progress"},
+        ],
+    }
     out = _append_todo_reminder(user_text, sess_with)
     if not out.startswith(user_text):
         print(f"  user text not preserved: {out!r}")
         return False
     if "<bc-todo-reminder>" not in out or "</bc-todo-reminder>" not in out:
-        print(f"  unfinished todo tags missing: {out!r}")
+        print(f"  todo tags missing: {out!r}")
         return False
-    if "X &lt;unsafe&gt;" not in out or "Still pending" not in out:
-        print(f"  unfinished todo content missing or unescaped: {out!r}")
+    if "X &lt;unsafe&gt;" not in out or "Still pending" not in out or "TaskCreate work" not in out:
+        print(f"  open todo/task content missing or unescaped: {out!r}")
         return False
-    if "Already done" in out:
-        print(f"  completed todo leaked into reminder: {out!r}")
+    if "Already done" not in out:
+        print(f"  completed session work missing from reminder: {out!r}")
+        return False
+    if out.count("Duplicate shared") != 1 or "- [in_progress] Duplicate shared" not in out:
+        print(f"  duplicate todo/task content not deduped with open status: {out!r}")
         return False
 
-    all_done = {"current_todos": [
-        {"content": "Already done", "status": "completed"},
-    ]}
+    all_done = {
+        "current_todos": [
+            {"content": "Already done", "status": "completed"},
+        ],
+        "current_tasks": [
+            {"content": "Task already done", "status": "completed"},
+        ],
+    }
     if _append_todo_reminder(user_text, all_done) != user_text:
-        print("  all-completed list changed prompt")
+        print("  all-completed todo/task list changed prompt")
         return False
 
     return True
@@ -1198,6 +1213,9 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
     session_manager.set_current_todos(sid, [
         {"content": "Check project orientation", "status": "in_progress", "activeForm": None},
         {"content": "Draft concise implementation plan", "status": "pending", "activeForm": None},
+    ])
+    session_manager.set_current_tasks(sid, [
+        {"content": "TaskCreate item", "status": "in_progress", "activeForm": None},
     ])
 
     import file_ref_resolver
@@ -1234,10 +1252,15 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
         current_todos=[
             {"content": "Cold-load stale", "status": "in_progress", "activeForm": None},
         ],
-        current_tasks=[],
+        current_tasks=[
+            {"content": "Cold-load task", "status": "pending", "activeForm": None},
+        ],
     )
     if [item.get("status") for item in projected.get("current_todos") or []] != ["completed"]:
         print(f"  cold-load projection did not complete todos: {projected}")
+        return False
+    if [item.get("status") for item in projected.get("current_tasks") or []] != ["completed"]:
+        print(f"  cold-load projection did not complete tasks: {projected}")
         return False
 
     _apply(strategy, sid, msg, done_event, source_is_provider_stream=True)
@@ -1245,6 +1268,10 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
     got = session_manager.get(sid).get("current_todos") or []
     if [item.get("status") for item in got] != ["completed", "completed"]:
         print(f"  expected marker to complete todos, got {got}")
+        return False
+    got_tasks = session_manager.get(sid).get("current_tasks") or []
+    if [item.get("status") for item in got_tasks] != ["completed"]:
+        print(f"  expected marker to complete tasks, got {got_tasks}")
         return False
 
     from turn_helpers import _append_todo_reminder
@@ -2393,7 +2420,7 @@ TESTS = [
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
     ("hydration skips irrelevant rows before projection", test_hydration_skips_irrelevant_rows_before_projection),
     ("hydration reuses todo projection cache when events unchanged", test_hydration_reuses_todo_projection_cache_when_events_unchanged),
-    ("cli_prompt reminder: open todos only", test_cli_prompt_open_todos_only),
+    ("cli_prompt reminder: full open todo/task state", test_cli_prompt_includes_full_open_session_todo_state),
     ("ALL_TASKS__DONE marker completes todos and suppresses reminder", test_all_tasks_done_marker_completes_todos_and_suppresses_reminder),
     ("dispatch supervisor branch passes user_initiated=True", test_dispatch_supervisor_branch_passes_user_initiated),
     ("run_turn actually calls _append_todo_reminder (AST)", test_run_turn_actually_calls_append_todo_reminder),

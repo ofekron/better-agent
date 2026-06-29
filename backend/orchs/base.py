@@ -178,17 +178,23 @@ def _agent_message_text(data: dict) -> str:
     return "\n".join(parts)
 
 
-def _complete_current_todos(session_id: str) -> None:
-    current = session_manager.get_current_todos_snapshot(session_id)
-    if not current:
-        return
-    completed = [
-        {**todo, "status": "completed"}
-        for todo in current
-        if isinstance(todo, dict)
+def _completed_items(current: list) -> list:
+    return [
+        {**item, "status": "completed"}
+        for item in current
+        if isinstance(item, dict)
     ]
+
+
+def _complete_current_work_items(session_id: str) -> None:
+    current = session_manager.get_current_todos_snapshot(session_id)
+    completed = _completed_items(current)
     if completed and completed != current:
         session_manager.set_current_todos(session_id, completed)
+    current_tasks = session_manager.get_current_tasks_snapshot(session_id)
+    completed_tasks = _completed_items(current_tasks)
+    if completed_tasks and completed_tasks != current_tasks:
+        session_manager.set_current_tasks(session_id, completed_tasks)
 
 
 def _unwrap_typed_worker_envelope(event: dict) -> dict:
@@ -1152,7 +1158,7 @@ class OrchestrationStrategy(ABC):
                 if ext_id:
                     session_manager.set_marker(app_session_id, ext_id, marker)
                 if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
-                    _complete_current_todos(app_session_id)
+                    _complete_current_work_items(app_session_id)
 
             import session_event_extensions
             session_event_extensions.apply_event(

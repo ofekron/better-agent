@@ -42,13 +42,13 @@ def _agent_message_text(normalized: dict[str, Any]) -> str:
     )
 
 
-def _all_tasks_done_todos(current_todos: list) -> list | None:
-    if not current_todos:
+def _all_tasks_done_items(items: list) -> list | None:
+    if not items:
         return None
     return [
-        {**todo, "status": "completed"}
-        for todo in current_todos
-        if isinstance(todo, dict)
+        {**item, "status": "completed"}
+        for item in items
+        if isinstance(item, dict)
     ]
 
 
@@ -60,10 +60,14 @@ def project_event_fields(normalized: dict[str, Any], current_todos: list, curren
         if todos is not None:
             fields["current_todos"] = todos
         elif f"<{_ALL_TASKS_DONE_MARKER_TAG}>" in _agent_message_text(normalized):
-            completed = _all_tasks_done_todos(current_todos)
+            completed = _all_tasks_done_items(current_todos)
             if completed is not None:
                 fields["current_todos"] = completed
         tasks = extractor.extract_tasks_from_normalized(normalized, current_tasks)
         if tasks is not None:
             fields["current_tasks"] = tasks
+        elif f"<{_ALL_TASKS_DONE_MARKER_TAG}>" in _agent_message_text(normalized):
+            completed_tasks = _all_tasks_done_items(current_tasks)
+            if completed_tasks is not None:
+                fields["current_tasks"] = completed_tasks
         return fields
