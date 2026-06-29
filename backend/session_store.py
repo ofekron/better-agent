@@ -4201,13 +4201,14 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
             return dict(cached)
     rows = _metadata_search_rows()
     scores: dict[str, int] = {}
-    if SEARCH_FIELD_TITLE in metadata_fields:
-        for sid, title, _first_prompt in rows:
+    search_title = SEARCH_FIELD_TITLE in metadata_fields
+    search_first_prompt = SEARCH_FIELD_FIRST_PROMPT in metadata_fields
+    for sid, title, first_prompt in rows:
+        if search_title:
             score = title.count(query_lower)
             if score > 0:
                 scores[sid] = scores.get(sid, 0) + score
-    if SEARCH_FIELD_FIRST_PROMPT in metadata_fields:
-        for sid, _title, first_prompt in rows:
+        if search_first_prompt:
             score = first_prompt.count(query_lower)
             if score > 0:
                 scores[sid] = scores.get(sid, 0) + score
