@@ -356,6 +356,8 @@ def test_extension_list_uses_projection_cache() -> None:
 def test_extension_projection_routes_cache_json_bytes() -> None:
     source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
     assert "_projection_response_cache" in source
+    assert "def _projection_response_cache_get(" in source
+    assert "def _projection_response_cache_put(" in source
     assert "def _cached_json_projection_response(" in source
     assert "json.dumps(" in source
     assert "Response(content=content, media_type=\"application/json\")" in source
@@ -1214,8 +1216,11 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
     route_start = source.index("async def list_extensions(")
     route_end = source.index("@router.get(\"/builtin-ids\")", route_start)
     route_source = source[route_start:route_end]
+    assert 'cache_key = (extension_store.store_fingerprint(), include_hidden)' in route_source
+    assert '_projection_response_cache_get("list", cache_key)' in route_source
     assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
     assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
+    assert '_projection_response_cache_put("list", cache_key, {"extensions": extensions})' in route_source
 
 
 def test_internal_communication_worker_lookup_is_off_loop() -> None:
