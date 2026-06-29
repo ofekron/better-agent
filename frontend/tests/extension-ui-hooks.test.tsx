@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ExtensionQuickButtons, runHookAction } from "../src/components/ExtensionUiHooks";
+import { ExtensionQuickButtons, runHookAction, useExtensionPageBadges } from "../src/components/ExtensionUiHooks";
+import { eventBus } from "../src/lib/eventBus";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -112,5 +113,55 @@ describe("ExtensionQuickButtons", () => {
     );
     expect(markSessionKnown).toHaveBeenCalledWith("assistant-session");
     expect(navigate).toHaveBeenCalledWith("/s/assistant-session");
+  });
+});
+
+describe("useExtensionPageBadges", () => {
+  it("loads once and refreshes from project update events without hot polling", async () => {
+    const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation(() => 1);
+    vi.spyOn(window, "clearInterval").mockImplementation(() => undefined);
+    let count = 1;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions/ofek.project/backend/project-updates/total")) {
+        return {
+          ok: true,
+          json: async () => ({ count: count++ }),
+        } as Response;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    function Probe() {
+      const badges = useExtensionPageBadges([
+        {
+          extension_id: "ofek.project",
+          extension_name: "Project",
+          id: "updates",
+          label: "Updates",
+          icon: "folder",
+          open: { type: "navigate", path: "/projects" },
+          badge: { endpoint: "/api/extensions/ofek.project/backend/project-updates/total" },
+        },
+      ]);
+      return <div data-testid="badge">{badges["ofek.project:updates"] ?? 0}</div>;
+    }
+
+    const view = render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("badge").textContent).toBe("1"));
+
+    expect(intervalSpy).toHaveBeenCalledWith(expect.any(Function), 120_000);
+    const initialText = screen.getByTestId("badge").textContent;
+    fetchMock.mockClear();
+
+    act(() => {
+      eventBus.publish("project_updates_changed", {
+        project_id: "repo",
+        unseen_count: 2,
+      });
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("badge").textContent).not.toBe(initialText));
+    view.unmount();
   });
 });

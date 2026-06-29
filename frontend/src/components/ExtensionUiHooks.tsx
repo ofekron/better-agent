@@ -186,7 +186,7 @@ export function useExtensionUiHooks(): UiHooks {
   return hooks;
 }
 
-const BADGE_POLL_MS = 20_000;
+const BADGE_POLL_MS = 120_000;
 
 /** Polls each page's badge endpoint (GET → {count}) and returns the latest
  *  number keyed by `${extension_id}:${page_id}`. */
