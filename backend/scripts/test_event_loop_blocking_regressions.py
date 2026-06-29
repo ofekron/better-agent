@@ -1485,6 +1485,18 @@ def test_project_update_total_is_maintained_projection() -> None:
     assert 'name="startup-project-update-counts-warm"' in startup_source
 
 
+def test_builtin_feature_enabled_has_cached_projection() -> None:
+    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
+    assert "_BUILTIN_FEATURE_CACHE" in source
+    assert "def is_builtin_feature_enabled_cached(" in source
+    start = source.index("def is_builtin_feature_enabled_cached(")
+    end = source.index("def is_extension_runtime_ready(", start)
+    helper_source = source[start:end]
+    assert "fingerprint = store_fingerprint()" in helper_source
+    assert "_BUILTIN_FEATURE_CACHE.get(extension_id)" in helper_source
+    assert "is_builtin_feature_enabled(extension_id)" in helper_source
+
+
 def test_extension_list_reconciliation_is_off_loop() -> None:
     source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
     route_start = source.index("async def list_extensions(")

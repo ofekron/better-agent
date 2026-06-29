@@ -198,7 +198,8 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
     project_end = source.index("@app.post(\"/api/internal/provisioned-sessions\")", project_start)
     project_source = source[project_start:project_end]
     assert "async def _require_project_structure_internal_async" in project_source
-    assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" in project_source
+    assert "extension_store.is_builtin_feature_enabled_cached(" in project_source
+    assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" not in project_source
     assert source.count("await _require_project_structure_internal_async(x_internal_token)") >= 9
     for route in (
         "internal_project_update_count",
