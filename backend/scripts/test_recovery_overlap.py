@@ -57,6 +57,8 @@ def _coord() -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c._prompt_queues = {}
     c._queued_ids = {}
+    c._active_prompt_client_ids = {}
+    c._prompt_client_id_by_item = {}
     c._processor_tasks = {}
     c._in_flight_prompts = {}
     c._cancelled_ids = {}
@@ -145,6 +147,23 @@ def test_startup_recovery_failure_fails_closed() -> None:
     check("did not handle prompt after recovery failure", blocked)
 
 
+def test_startup_recovery_gate_has_bounded_default_wait() -> None:
+    print("T1d startup recovery gate default wait is bounded")
+
+    async def _go() -> tuple[bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        task = asyncio.create_task(startup_recovery_gate.wait_for_recovery_ready())
+        await asyncio.sleep(0.2)
+        still_waiting_initially = not task.done()
+        await asyncio.wait_for(task, timeout=3.0)
+        return still_waiting_initially, task.done()
+
+    blocked_briefly, completed = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("blocked briefly while recovery pending", blocked_briefly)
+    check("completed without waiting for recovery forever", completed)
+
+
 def test_interrupt_during_overlap_fans_out_and_displaces() -> None:
     print("T2 interrupt during overlap: fanout + displace queued prompt")
     c = _coord()
@@ -202,6 +221,7 @@ def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
     test_startup_recovery_failure_fails_closed()
+    test_startup_recovery_gate_has_bounded_default_wait()
     test_interrupt_during_overlap_fans_out_and_displaces()
     test_stale_pending_cleared_by_item_finally()
     print()
