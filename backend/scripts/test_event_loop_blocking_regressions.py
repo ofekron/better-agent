@@ -1715,6 +1715,27 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert "_sessions_list_response(\n                    json.dumps(" in route_source
 
 
+def test_default_session_page_uses_visible_order_cache() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _local_visible_order_ids(")
+    helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "_local_visible_order_cache" in source
+    assert "session_store.summary_version()" in helper_source
+    assert "sessions.list.local.visible_order_cache.hit" in helper_source
+    assert "sessions.list.local.visible_order_build" in helper_source
+
+    page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
+    page_end = source.index("def _root_session_file_path(", page_start)
+    page_source = source[page_start:page_end]
+    assert "_can_page_default_local_visible_order(" in page_source
+    assert "sessions.list.local.visible_order_page" in page_source
+    assert "visible_ids[offset:offset + limit]" in page_source
+    assert page_source.index("sessions.list.local.visible_order_page") < page_source.index(
+        "sessions.list.local.ordered_ids"
+    )
+
+
 def test_session_search_uses_bounded_candidate_window() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("def _session_search_candidate_limit(")
@@ -2033,6 +2054,7 @@ if __name__ == "__main__":
     test_sessions_route_does_not_runtime_check_machine_nodes()
     test_sessions_route_uses_cached_remote_node_sessions()
     test_connected_session_list_defers_cold_sidebar_projections()
+    test_default_session_page_uses_visible_order_cache()
     test_session_organization_refresh_is_coalesced_background_work()
     test_get_session_strips_synthetic_events_off_loop()
     test_session_detail_response_bytes_are_cached()
