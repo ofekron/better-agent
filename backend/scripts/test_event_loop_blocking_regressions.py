@@ -974,6 +974,7 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "def _warm_session_detail_projection_roots(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
     assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 0.0" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS" in source
     detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
@@ -1175,7 +1176,9 @@ def test_event_projections_warm_in_background() -> None:
     assert "if not summaries or int(summaries[0].get(\"message_count\") or 0) > 0:" in detail_warm_source
     assert "event_ingester.message_event_summaries(root_id)" in detail_warm_source
     assert "_session_detail_response_cache_key_sync(" in detail_warm_source
+    assert "_session_detail_cache_has(cache_key)" in detail_warm_source
     assert "_session_detail_snapshot_sync(" in detail_warm_source
+    assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("_session_detail_snapshot_sync(")
     assert "_session_detail_cache_put(cache_key, tree)" in detail_warm_source
     assert "_SESSION_DETAIL_WARM_EXCHANGE_COUNT" in detail_warm_source
     roots_start = source.index("def _session_event_projection_warm_roots(")
