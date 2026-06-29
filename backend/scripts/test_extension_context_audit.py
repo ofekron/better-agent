@@ -48,6 +48,25 @@ def t_cache_hit_injects_concise_context() -> None:
     check("Needs user attention" in content, "context includes attention section")
 
 
+def t_not_ready_suppresses_cached_context() -> None:
+    inventory = {"version": 1, "cwd": "/tmp/project", "extensions": [], "runtime_skills": []}
+    audit._write_cache({  # type: ignore[attr-defined]
+        "schema_version": 1,
+        "fingerprint": audit._fingerprint(inventory),  # type: ignore[attr-defined]
+        "result": {"summary": "cached"},
+    })
+    old_build = audit.build_inventory
+    old_ready = audit._is_runtime_ready  # type: ignore[attr-defined]
+    try:
+        audit.build_inventory = lambda _cwd: inventory  # type: ignore[assignment]
+        audit._is_runtime_ready = lambda: False  # type: ignore[attr-defined]
+        contexts = audit.runtime_context("/tmp/project")
+    finally:
+        audit.build_inventory = old_build  # type: ignore[assignment]
+        audit._is_runtime_ready = old_ready  # type: ignore[attr-defined]
+    check(contexts == [], "not-ready task suppresses cached dynamic audit context")
+
+
 def t_stale_cache_triggers_refresh_without_blocking() -> None:
     calls: list[str] = []
     inventory = {"version": 1, "cwd": "/tmp/project", "extensions": [{"id": "x"}], "runtime_skills": []}
@@ -101,6 +120,7 @@ def t_harness_additions_include_instructions_skills_and_mcp() -> None:
 def main() -> None:
     try:
         t_cache_hit_injects_concise_context()
+        t_not_ready_suppresses_cached_context()
         t_stale_cache_triggers_refresh_without_blocking()
         t_audit_result_is_bounded_and_normalized()
         t_harness_additions_include_instructions_skills_and_mcp()

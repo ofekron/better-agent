@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import coordination  # noqa: E402
+from runner_openai import LockRegistry  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -100,10 +101,39 @@ async def test_multi_release_is_atomic() -> None:
     check(not coordination._locks, "multi release removes acquired locks")
 
 
+def test_openai_runner_requires_own_live_file_lock() -> None:
+    registry = LockRegistry()
+    target = Path("/tmp/better-agent-lock-test.txt")
+    check(
+        registry.error_for_write(target) is not None,
+        "openai runner blocks writes without a locally acquired file lock",
+    )
+    registry.record_lock_result({
+        "success": True,
+        "keys": [f"file_edit:{target}"],
+        "holder_token": "token",
+        "expires_in_seconds": 30,
+    })
+    check(
+        registry.error_for_write(target) is None,
+        "openai runner allows writes after its own lock_ops acquire succeeds",
+    )
+    registry.record_lock_result({
+        "success": True,
+        "released": True,
+        "keys": [f"file_edit:{target}"],
+    })
+    check(
+        registry.error_for_write(target) is not None,
+        "openai runner blocks writes after lock release",
+    )
+
+
 async def main() -> int:
     await test_multi_lock_accumulates_until_all_locked()
     await test_multi_lock_timeout_releases_partial_locks()
     await test_multi_release_is_atomic()
+    test_openai_runner_requires_own_live_file_lock()
     if _FAILURES:
         print("\nFAILURES:")
         for failure in _FAILURES:

@@ -830,7 +830,26 @@ _ORCHESTRATION_TOOL_NAMES = frozenset({
     "mssg", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
     "open_file_panel", "request_user_input", "start_file_discussion",
+    "lock_ops",
 })
+
+_LOCK_OPS_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "key": {"type": "string"},
+        "keys": {"type": "array", "items": {"type": "string"}},
+        "release": {"type": "boolean"},
+        "holder_token": {"type": "string"},
+        "timeout_seconds": {"type": "number"},
+    },
+    "additionalProperties": False,
+}
+
+_LOCK_OPS_DESCRIPTION = (
+    "Acquire or release Better Agent coordination locks. Before Write/Edit, "
+    "acquire file locks with keys like file_edit:/absolute/path and keep the "
+    "returned holder_token until release."
+)
 
 # Better Agent runtime-capability management. Available only when the backend
 # loopback channel exists (non-bare, internal sessions); these tools let the
@@ -899,6 +918,7 @@ def _tool_schemas_for_run(
     team_orchestration_enabled: bool,
     open_file_panel_enabled: bool,
     file_editing_mode: bool,
+    coordination_enabled: bool,
 ) -> list[dict]:
     """Build this turn's Chat Completions tool list.
 
@@ -952,6 +972,10 @@ def _tool_schemas_for_run(
                     _START_FILE_DISCUSSION_DESCRIPTION,
                     _START_FILE_DISCUSSION_INPUT_SCHEMA,
                 ))
+        if coordination_enabled:
+            schemas.append(_function_tool_schema(
+                "lock_ops", _LOCK_OPS_DESCRIPTION, _LOCK_OPS_INPUT_SCHEMA,
+            ))
     if capabilities_enabled:
         schemas += _CAPABILITY_TOOL_SCHEMAS
     return schemas
@@ -970,6 +994,57 @@ def _is_bypass(permission: Optional[dict]) -> bool:
 # --------------------------------------------------------------------------
 
 DynamicToolHandler = Callable[[dict], Awaitable[str]]
+
+
+class LockRegistry:
+    def __init__(self) -> None:
+        self._tokens_by_key: dict[str, tuple[str, float]] = {}
+
+    @staticmethod
+    def _normalize_keys(result: dict) -> list[str]:
+        keys = result.get("keys")
+        if isinstance(keys, list):
+            return [str(key) for key in keys if str(key or "").strip()]
+        key = str(result.get("key") or "").strip()
+        return [key] if key else []
+
+    def record_lock_result(self, result: dict) -> None:
+        if result.get("success") is not True:
+            return
+        keys = self._normalize_keys(result)
+        if not keys:
+            return
+        if result.get("released") is True:
+            for key in keys:
+                self._tokens_by_key.pop(key, None)
+            return
+        token = str(result.get("holder_token") or "").strip()
+        if not token:
+            return
+        try:
+            ttl = float(result.get("expires_in_seconds") or 0)
+        except (TypeError, ValueError):
+            ttl = 0
+        expires_at = time.monotonic() + max(0, ttl)
+        for key in keys:
+            self._tokens_by_key[key] = (token, expires_at)
+
+    def error_for_write(self, path: Path) -> str | None:
+        key = f"file_edit:{path}"
+        rec = self._tokens_by_key.get(key)
+        if not rec:
+            return (
+                "Error: Write blocked: acquire a coordination lock first with "
+                f"lock_ops keys=[\"{key}\"] and release it after editing."
+            )
+        _token, expires_at = rec
+        if expires_at <= time.monotonic():
+            self._tokens_by_key.pop(key, None)
+            return (
+                "Error: Write blocked: the coordination lock expired. "
+                f"Reacquire lock_ops keys=[\"{key}\"] before editing."
+            )
+        return None
 
 
 def _dynamic_tool_text_result(text: str, *, success: bool) -> str:
@@ -1040,7 +1115,9 @@ def _args(params: dict) -> dict:
     return params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
 
 
-def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict[str, DynamicToolHandler]:
+def _build_loopback_tool_handlers(
+    inputs: dict, *, cwd: str, model: str, lock_registry: LockRegistry,
+) -> dict[str, DynamicToolHandler]:
     backend_url = inputs.get("backend_url") or ""
     internal_token = inputs.get("internal_token") or ""
     app_session_id = str(inputs.get("app_session_id") or "").strip()
@@ -1418,6 +1495,31 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
+    async def lock_ops(params: dict) -> str:
+        args = _args(params)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "key": str(args.get("key") or ""),
+                    "keys": args.get("keys") if isinstance(args.get("keys"), list) else None,
+                    "release": bool(args.get("release") or False),
+                    "holder_token": str(args.get("holder_token") or ""),
+                    "timeout_seconds": args.get("timeout_seconds"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/coordination/lock-ops",
+                timeout_s=70.0,
+            )
+        except Exception as e:
+            logger.exception("lock_ops dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"lock_ops failed: {e}", success=False)
+        if isinstance(result, dict):
+            lock_registry.record_lock_result(result)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
     try:
         import extension_store
         team_orchestration_ready = extension_store.is_extension_runtime_ready(
@@ -1445,6 +1547,14 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         handlers["request_user_input"] = request_user_input
         if inputs.get("working_mode") == "file_editing":
             handlers["start_file_discussion"] = start_file_discussion
+    try:
+        coordination_ready = extension_store.is_extension_runtime_ready(
+            extension_store.BUILTIN_COORDINATION_EXTENSION_ID
+        )
+    except Exception:
+        coordination_ready = False
+    if coordination_ready:
+        handlers["lock_ops"] = lock_ops
     return handlers
 
 
@@ -1541,8 +1651,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         team_orchestration_enabled = extension_store.is_extension_runtime_ready(
             extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
         )
+        coordination_enabled = extension_store.is_extension_runtime_ready(
+            extension_store.BUILTIN_COORDINATION_EXTENSION_ID
+        )
     except Exception:
         team_orchestration_enabled = False
+        coordination_enabled = False
     open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     tool_schemas = _tool_schemas_for_run(
@@ -1553,8 +1667,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         team_orchestration_enabled=team_orchestration_enabled,
         open_file_panel_enabled=open_file_panel_enabled,
         file_editing_mode=file_editing_mode,
+        coordination_enabled=coordination_enabled,
     )
-    loopback_handlers = _build_loopback_tool_handlers(inputs, cwd=str(cwd), model=model)
+    lock_registry = LockRegistry()
+    loopback_handlers = _build_loopback_tool_handlers(
+        inputs, cwd=str(cwd), model=model, lock_registry=lock_registry,
+    )
     resume_sid = inputs.get("session_id")
 
     capability_context = render_capability_context(inputs.get("capability_contexts") or [])
@@ -1649,7 +1767,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 result = await _dispatch_tool(
                     call, cwd, app_session_id, run_dir, bypass,
                     interactive, backend_url, internal_token, emitter,
-                    loopback_handlers,
+                    loopback_handlers, lock_registry, coordination_enabled,
                 )
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
@@ -1739,6 +1857,7 @@ async def _dispatch_tool(
     call: dict, cwd: Path, app_session_id: str, run_dir: Path,
     bypass: bool, interactive: bool, backend_url: str, internal_token: str,
     emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
+    lock_registry: LockRegistry, enforce_file_locks: bool,
 ) -> str:
     name = call["name"]
     try:
@@ -1775,6 +1894,19 @@ async def _dispatch_tool(
             result = f"Error: {type(e).__name__}: {e}"
         emitter.emit_tool_result(call["id"], result)
         return result
+
+    if enforce_file_locks and name in {"Write", "Edit"}:
+        raw = args.get("file_path") or args.get("path") or ""
+        try:
+            target_path = _confined_path(cwd, raw)
+        except PermissionError as e:
+            result = f"Error: {e}"
+            emitter.emit_tool_result(call["id"], result)
+            return result
+        lock_error = lock_registry.error_for_write(target_path)
+        if lock_error:
+            emitter.emit_tool_result(call["id"], lock_error)
+            return lock_error
 
     # permission gate: non-bypass runs ask the backend before risky tools
     if not bypass and name in {"Bash", "Write", "Edit"}:

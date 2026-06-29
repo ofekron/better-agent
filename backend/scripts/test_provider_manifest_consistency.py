@@ -86,6 +86,40 @@ def test_codex_only_gates():
     assert no_ui == {"codex"}, no_ui
 
 
+def test_runner_choices_are_valid():
+    for kind, spec in pm.SPECS.items():
+        assert spec.runner_choices, kind
+        assert set(spec.runner_choices).issubset({"native", "openai"}), kind
+        if spec.runner_choices == ("openai",):
+            assert pm.runner_module_for(kind) == "runner_openai", kind
+    assert pm.default_runner_for("claude") == "native"
+    assert pm.default_runner_for("openai") == "openai"
+
+
+def test_provider_runner_round_trips():
+    import config_store
+    config_store._keyring_blocked = True
+    openai = config_store.add_provider({
+        "name": "OpenAI-compatible",
+        "kind": "openai",
+        "mode": "api_key",
+        "base_url": "https://example.test/v1",
+        "default_model": "model",
+        "runner": "openai",
+    })
+    assert openai["runner"] == "openai"
+    assert openai["runner_options"] == ["openai"]
+
+    claude = config_store.add_provider({
+        "name": "Claude",
+        "kind": "claude",
+        "mode": "subscription",
+        "runner": "openai",
+    })
+    assert claude["runner"] == "native"
+    assert claude["runner_options"] == ["native"]
+
+
 if __name__ == "__main__":
     test_resolve_class_matches_manifest()
     test_runner_modules_importable()
@@ -93,4 +127,6 @@ if __name__ == "__main__":
     test_installable_matches_installers()
     test_uses_claude_env_matches()
     test_codex_only_gates()
+    test_runner_choices_are_valid()
+    test_provider_runner_round_trips()
     print("ok")

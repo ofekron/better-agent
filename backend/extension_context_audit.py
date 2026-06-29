@@ -61,7 +61,7 @@ AUDIT_SPEC = provisioning.register(ExtensionContextAuditSpec())
 
 
 def runtime_context(cwd: str, *, bare_config: bool = False) -> list[dict[str, str]]:
-    if bare_config:
+    if bare_config or not _is_runtime_ready():
         return []
     inventory = build_inventory(cwd)
     fingerprint = _fingerprint(inventory)
@@ -186,6 +186,12 @@ def _refresh_cache(fingerprint: str, inventory: dict[str, Any]) -> None:
 def _fingerprint(inventory: dict[str, Any]) -> str:
     payload = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _is_runtime_ready() -> bool:
+    import config_store
+    resolved = config_store.resolve_internal_llm(AUDIT_SPEC_KEY)
+    return bool(resolved.get("provider_id") and resolved.get("model"))
 
 
 def _cache_path() -> Path:

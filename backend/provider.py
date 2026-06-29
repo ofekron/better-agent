@@ -751,6 +751,13 @@ def _resolve_class(kind: str) -> type[Provider]:
     return getattr(module, spec.cls)
 
 
+def _provider_runtime_kind(record: dict) -> str:
+    runner = str(record.get("runner") or "").strip()
+    if runner == "openai":
+        return "openai"
+    return record.get("kind") or "claude"
+
+
 def get_provider(provider_id: str) -> Provider:
     """Return the cached `Provider` for `provider_id`, refreshing its
     record from disk on every call so config edits are visible.
@@ -781,7 +788,9 @@ def get_provider(provider_id: str) -> Provider:
                     _perf.unregister_queue(gauge_name)
                 return cached
             raise KeyError(provider_id)
-        if cached is not None:
+        kind = _provider_runtime_kind(record)
+        cls = _resolve_class(kind)
+        if cached is not None and isinstance(cached, cls):
             was_defunct = cached.defunct
             cached.record = record
             cached.defunct = False
@@ -792,8 +801,16 @@ def get_provider(provider_id: str) -> Provider:
             if was_defunct and hasattr(cached, "_register_perf_gauge"):
                 cached._register_perf_gauge()
             return cached
-        kind = record.get("kind") or "claude"
-        cls = _resolve_class(kind)
+        if cached is not None:
+            active_runs = []
+            try:
+                active_runs = cached.active_runs()
+            except Exception:
+                active_runs = []
+            if active_runs:
+                raise RuntimeError(
+                    f"provider {provider_id} runner changed while runs are active"
+                )
         instance = cls(record)
         _PROVIDER_CACHE[provider_id] = instance
         return instance
