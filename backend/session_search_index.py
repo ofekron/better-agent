@@ -28,6 +28,7 @@ _SEARCH_CACHE_MAX = 128
 _SEARCH_CACHE_STALE_SECONDS = 5.0
 _index_generation = 0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
+_REBUILD_INSERT_BATCH_SIZE = 1000
 # Bumped whenever the indexed-row shape changes. A persisted index whose
 # stored version differs is stale (e.g. the pre-lean-extraction multi-GB
 # index that stored raw event blobs) and is rebuilt from disk on startup.
@@ -439,10 +440,6 @@ def rebuild_from_disk() -> None:
         return
     try:
         sessions_dir = ba_home() / "sessions"
-        rows: list[tuple[str, str]] = []
-        if sessions_dir.is_dir():
-            for fpath in sessions_dir.glob("*/events.jsonl"):
-                rows.extend(_index_file_rows(fpath.parent.name, fpath))
         with _lock:
             _close_writer_connection_locked()
             _close_readonly_connection()
@@ -453,11 +450,16 @@ def rebuild_from_disk() -> None:
             _delete_db_files()
             conn = _connect()
             try:
-                if rows:
-                    conn.executemany(
-                        "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
-                        rows,
-                    )
+                if sessions_dir.is_dir():
+                    batch: list[tuple[str, str]] = []
+                    for fpath in sessions_dir.glob("*/events.jsonl"):
+                        for row in _index_file_rows(fpath.parent.name, fpath):
+                            batch.append(row)
+                            if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
+                                _insert_index_rows(conn, batch)
+                                batch.clear()
+                    if batch:
+                        _insert_index_rows(conn, batch)
                 conn.execute(f"PRAGMA user_version = {_INDEX_SCHEMA_VERSION}")
                 conn.commit()
                 with _search_cache_lock:
@@ -466,6 +468,13 @@ def rebuild_from_disk() -> None:
                 conn.close()
     finally:
         _rebuild_lock.release()
+
+
+def _insert_index_rows(conn: sqlite3.Connection, rows: list[tuple[str, str]]) -> None:
+    conn.executemany(
+        "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
+        rows,
+    )
 
 
 def _delete_db_files() -> None:
