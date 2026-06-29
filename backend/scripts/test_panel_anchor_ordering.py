@@ -182,10 +182,44 @@ def test_create_worker_tool_use_is_ignored_does_not_desync_ask():
     print("ok: create_worker tool_use ignored; ask panel still anchors after ask")
 
 
+def test_panel_anchor_cache_reused_until_invalidated():
+    msg = {
+        "events": [
+            _assistant_tool_use(("mcp__communicate__ask", "a1")),
+        ],
+        "workers": [
+            {"delegation_id": "ask_1", "panel_kind": "sub_session",
+             "run_mode": "team_ask", "insert_at": 0,
+             "events": [_worker_event("ASK_ONE")]},
+        ],
+    }
+    labels = [_text_of(e) for e in render_stub.timeline_events(msg)]
+    assert labels == [None, "ASK_ONE"], labels
+    assert "_panel_anchor_cache" in msg
+
+    original = render_stub._derive_panel_anchors
+
+    def fail_rederive(*_args, **_kwargs):
+        raise AssertionError("cached panel anchors should be reused")
+
+    render_stub._derive_panel_anchors = fail_rederive
+    try:
+        labels = [_text_of(e) for e in render_stub.timeline_events(msg)]
+    finally:
+        render_stub._derive_panel_anchors = original
+    assert labels == [None, "ASK_ONE"], labels
+
+    render_stub.invalidate_panel_anchor_cache(msg)
+    labels = [_text_of(e) for e in render_stub.timeline_events(msg)]
+    assert labels == [None, "ASK_ONE"], labels
+    print("ok: panel anchor cache reused until invalidated")
+
+
 if __name__ == "__main__":
     test_create_sub_session_then_ask_orders_panel_after_ask()
     test_parallel_asks_share_entry_keep_firing_order()
     test_ask_async_mode_anchors_like_mssg()
     test_panel_without_tool_use_falls_back_to_stored_insert_at()
     test_create_worker_tool_use_is_ignored_does_not_desync_ask()
+    test_panel_anchor_cache_reused_until_invalidated()
     print("ALL PASS")

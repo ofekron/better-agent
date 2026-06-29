@@ -2144,6 +2144,32 @@ def test_stubbed_tree_cache_key_does_not_scan_message_events() -> None:
     assert "root_events_version" not in key_source
 
 
+def test_worker_panel_anchor_derivation_is_cached() -> None:
+    render_source = (ROOT / "render_stub.py").read_text(encoding="utf-8")
+    assert "_PANEL_ANCHOR_CACHE" in render_source
+    helper_start = render_source.index("def _panel_anchors(")
+    helper_end = render_source.index("def timeline_events(", helper_start)
+    helper_source = render_source[helper_start:helper_end]
+    assert "cached.get(\"key\") == key" in helper_source
+    assert "return anchors" in helper_source
+    assert "anchors = _panel_anchors(msg, manager_events, workers)" in render_source
+
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    append_start = manager_source.index("def append_native_event(")
+    append_end = manager_source.index("def replace_native_event(", append_start)
+    assert "invalidate_panel_anchor_cache(m)" in manager_source[append_start:append_end]
+    replace_start = manager_source.index("def replace_native_event(")
+    replace_end = manager_source.index("def set_agent_sid_on_msg(", replace_start)
+    assert "invalidate_panel_anchor_cache(m)" in manager_source[replace_start:replace_end]
+
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    strip_start = store_source.index("def _strip_volatile_from_tree(")
+    strip_end = store_source.index("def copy_persistable_tree(", strip_start)
+    strip_source = store_source[strip_start:strip_end]
+    assert '"_panel_anchor_cache"' in strip_source
+    assert "panel_anchor_caches" in strip_source
+
+
 def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     build_start = source.index("def _build_stubbed_tree(")
@@ -2725,6 +2751,7 @@ if __name__ == "__main__":
     test_session_search_rebuild_streams_insert_batches()
     test_project_match_rebuild_skips_unchanged_session_state()
     test_stubbed_tree_cache_key_does_not_scan_message_events()
+    test_worker_panel_anchor_derivation_is_cached()
     test_stubbed_tree_cache_attaches_root_events_after_cache_copy()
     test_startup_recovery_defers_cold_runs()
     test_startup_recovery_gate_opens_before_live_integration()

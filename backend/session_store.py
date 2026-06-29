@@ -3472,6 +3472,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     isstreaming: list[tuple[dict, bool]] = []
     events_lists: list[tuple[dict, list]] = []
     uid_idxs: list[tuple[dict, dict]] = []
+    panel_anchor_caches: list[tuple[dict, dict]] = []
     drafts: list[tuple[dict, dict]] = []
     opened: list[tuple[dict, str]] = []
     content_dirty: list[tuple[dict, bool]] = []
@@ -3488,6 +3489,10 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         idx = owner.pop("_uid_idx", None)
         if isinstance(idx, dict):
             uid_idxs.append((owner, idx))
+    def _pop_panel_anchor_cache(owner: dict) -> None:
+        cache = owner.pop("_panel_anchor_cache", None)
+        if isinstance(cache, dict):
+            panel_anchor_caches.append((owner, cache))
     def _pop_opened(node: dict) -> None:
         at = node.pop("last_opened_at", None)
         if isinstance(at, str):
@@ -3523,6 +3528,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
                 del m["isStreaming"]
             _pop_events(m)
             _pop_uid_idx(m)
+            _pop_panel_anchor_cache(m)
             workers = m.get("workers")
             if isinstance(workers, list):
                 for w in workers:
@@ -3536,6 +3542,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         "isstreaming": isstreaming,
         "events_lists": events_lists,
         "uid_idxs": uid_idxs,
+        "panel_anchor_caches": panel_anchor_caches,
         "drafts": drafts,
         "opened": opened,
         "content_dirty": content_dirty,
@@ -3552,6 +3559,8 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner["events"] = ev
     for owner, idx in popped.get("uid_idxs", []):
         owner["_uid_idx"] = idx
+    for owner, cache in popped.get("panel_anchor_caches", []):
+        owner["_panel_anchor_cache"] = cache
     for node, fields in popped.get("drafts", []):
         node.update(fields)
     for node, at in popped.get("opened", []):
