@@ -1109,7 +1109,7 @@ def _refresh_summaries_for_cwd(cwd: str) -> None:
 
 def _worker_summary_count() -> int:
     from stores import worker_store
-    return len(worker_store.list_workers(""))
+    return worker_store.worker_count("")
 
 
 def _refresh_summaries_for_cwd_from(cwd: str, workers: list[dict]) -> None:

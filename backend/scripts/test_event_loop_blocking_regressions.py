@@ -932,6 +932,20 @@ def test_sidebar_summary_omits_worker_refs() -> None:
     assert "summary, cleaned = _sanitize_summary(summary)" in source
 
 
+def test_summary_worker_count_uses_count_projection() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = source.index("def _worker_summary_count()")
+    end = source.index("def _refresh_summaries_for_cwd_from(", start)
+    count_source = source[start:end]
+    assert "worker_store.worker_count(\"\")" in count_source
+    assert "worker_store.list_workers(\"\")" not in count_source
+
+    worker_source = (ROOT / "stores" / "worker_store.py").read_text(encoding="utf-8")
+    assert "_worker_count_cache" in worker_source
+    assert "def worker_count(" in worker_source
+    assert "_worker_count_cache.clear()" in worker_source
+
+
 def test_summary_index_skips_empty_projection_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "def _projection_snapshot()" in source
