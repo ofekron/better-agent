@@ -424,7 +424,7 @@ function mergePlaceholderWorkers(
     merged[idx] = {
       ...placeholder,
       ...worker,
-      events: mergeEventsByUuid(placeholder.events, worker.events),
+      events: mergeEventsByUuid(placeholder.events, worker.events) ?? [],
     };
   }
   return merged;
@@ -532,7 +532,7 @@ function adoptLivePlaceholder(
   return {
     ...canonical,
     content: canonical.content || placeholder.content,
-    events: mergeEventsByUuid(placeholder.events, canonical.events),
+    events: mergeEventsByUuid(placeholder.events, canonical.events) ?? [],
     workers: mergePlaceholderWorkers(placeholder.workers, canonical.workers),
   };
 }
