@@ -315,7 +315,13 @@ def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def list_all() -> list[dict[str, Any]]:
     global _summary_cache, _summary_cache_signature
-    with _lock:
+    acquired = _lock.acquire(blocking=False)
+    if not acquired:
+        with perf.timed("virtual_sessions.list.lock_busy_cached"):
+            if _summary_cache is not None:
+                return _copy_summaries(_summary_cache)
+        _lock.acquire()
+    try:
         with perf.timed("virtual_sessions.list.load"):
             data = _load_shared_locked()
         signature = _cache_signature
@@ -347,6 +353,8 @@ def list_all() -> list[dict[str, Any]]:
                 _summary_cache = _copy_summaries(out)
         with perf.timed("virtual_sessions.list.copy_result"):
             return _copy_summaries(out)
+    finally:
+        _lock.release()
 
 
 def get(session_id: str) -> dict[str, Any] | None:
