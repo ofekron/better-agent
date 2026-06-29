@@ -21,13 +21,20 @@ import project_store  # noqa: E402
 def main() -> None:
     work = tempfile.mkdtemp(prefix="bc-test-project-hot-work-")
     original_read = project_store._read_legacy_deletions
+    original_read_file = project_store._read_file
     reads = {"count": 0}
+    file_reads = {"count": 0}
 
     def counted_read():
         reads["count"] += 1
         return original_read()
 
+    def counted_read_file():
+        file_reads["count"] += 1
+        return original_read_file()
+
     project_store._read_legacy_deletions = counted_read
+    project_store._read_file = counted_read_file
     try:
         one = Path(work, "one")
         two = Path(work, "two")
@@ -36,10 +43,13 @@ def main() -> None:
         project_store.remove_project(str(one))
 
         reads["count"] = 0
+        file_reads["count"] = 0
         project_store.list_projects()
         project_store.list_projects()
         if reads["count"] != 1:
             raise AssertionError(f"legacy deletions reparsed on hot reads: {reads['count']}")
+        if file_reads["count"] != 1:
+            raise AssertionError(f"projects file reparsed on hot reads: {file_reads['count']}")
 
         project_store.add_project(str(one))
         after_write_reads = reads["count"]
@@ -50,6 +60,7 @@ def main() -> None:
             raise AssertionError("legacy deletions reparsed after post-write hot read")
     finally:
         project_store._read_legacy_deletions = original_read
+        project_store._read_file = original_read_file
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
 
