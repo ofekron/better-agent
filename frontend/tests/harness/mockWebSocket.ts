@@ -10,6 +10,7 @@ export interface OutboundFrame {
  *  active instance is exposed via getCurrent() so tests can drive it. */
 export class MockWebSocketController {
   private current: MockWebSocket | null = null;
+  private sockets: MockWebSocket[] = [];
   private originalCtor: typeof WebSocket | undefined;
   private autoOpen = true;
 
@@ -34,10 +35,12 @@ export class MockWebSocketController {
     if (this.originalCtor) globalThis.WebSocket = this.originalCtor;
     this.originalCtor = undefined;
     this.current = null;
+    this.sockets = [];
   }
 
   setCurrent(ws: MockWebSocket): void {
     this.current = ws;
+    this.sockets.push(ws);
   }
 
   shouldAutoOpen(): boolean {
@@ -67,7 +70,7 @@ export class MockWebSocketController {
 
   /** All outbound .send() payloads, parsed. */
   get outbound(): OutboundFrame[] {
-    return this.current?.outbound ?? [];
+    return this.sockets.flatMap((ws) => ws.outbound);
   }
 
   /** Drop the current connection — exercises the reconnect path. */
