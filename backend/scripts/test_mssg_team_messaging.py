@@ -708,6 +708,11 @@ def test_ask_response_falls_back_to_event_text_when_content_empty():
     )
 
     assert response["assistant_content"] == "event answer"
+    repaired = next(
+        m for m in session_manager.get(target["id"])["messages"]
+        if m.get("id") == "assistant-event-answer"
+    )
+    assert repaired["content"] == "event answer"
 
 
 def test_ask_response_uses_matching_lifecycle_turn_only():

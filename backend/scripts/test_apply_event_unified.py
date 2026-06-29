@@ -132,6 +132,38 @@ def test_idempotent_reapply_does_not_duplicate() -> bool:
     return len(asst["events"]) == 1
 
 
+def test_idempotent_reapply_repairs_empty_content() -> bool:
+    sid, msg = _mk_session("manager")
+    strategy = get_strategy("manager")
+    ctx = ApplyEventCtx(root_id=sid)
+    event = _manager_event("content-repair", "repaired answer")
+
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event=event,
+        ctx=ctx,
+        source_is_provider_stream=False,
+    )
+    msg["content"] = ""
+    msg["_content_dirty"] = True
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event=event,
+        ctx=ctx,
+        source_is_provider_stream=False,
+    )
+
+    fresh = session_manager.get(sid)
+    asst = next(m for m in fresh["messages"] if m["role"] == "assistant")
+    return (
+        len(asst["events"]) == 1
+        and asst.get("content") == "repaired answer"
+        and asst.get("_content_dirty") is False
+    )
+
+
 def test_wire_markers_skip_msg_events() -> bool:
     """turn_start / turn_complete have no claude uuid and must
     NOT be appended to msg.events — they're wire-routing frames the
@@ -744,6 +776,7 @@ def test_convergence_manager_event_and_agent_message_write_identical_jsonl() -> 
 
 TESTS = [
     ("idempotent re-apply does not duplicate", test_idempotent_reapply_does_not_duplicate),
+    ("idempotent re-apply repairs empty content", test_idempotent_reapply_repairs_empty_content),
     ("no-uuid wire markers skip msg.events", test_wire_markers_skip_msg_events),
     ("source_is_provider_stream=True tags events.jsonl with msg_id", test_live_true_writes_events_jsonl_with_msg_id),
     ("source_is_provider_stream=False does not write events.jsonl", test_live_false_skips_events_jsonl),
