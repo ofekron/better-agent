@@ -66,6 +66,51 @@ def test_target_bypass_dispatches_directly_no_create():
     assert submit_calls[0]["params"]["app_session_id"] == target["id"]
 
 
+def test_target_bypass_fork_mode_dispatches_to_internal_fork():
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+
+    res = asyncio.run(coord.run_delegate_task(
+        sender_session_id=sender["id"],
+        task="review receiver",
+        target_session_id=target["id"],
+        model="m",
+        cwd="/repo",
+        run_mode="fork",
+    ))
+
+    assert res["success"] is True
+    assert res["run_mode"] == "fork"
+    assert res["forked_from_session_id"] == target["id"]
+    assert res["target_session_id"] != target["id"]
+    fork = session_manager.get(res["target_session_id"])
+    assert fork is not None
+    assert fork["kind"] == "delegate_task_fork"
+    assert fork["user_initiated"] is False
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == res["target_session_id"]
+    assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_fork_mode_requires_explicit_target():
+    coord, sender, _join_calls, _submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+
+    try:
+        asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="review receiver",
+            model="m",
+            cwd="/repo",
+            run_mode="fork",
+        ))
+    except ValueError as exc:
+        assert "requires target_session_id" in str(exc)
+    else:
+        raise AssertionError("run_mode=fork without target_session_id must fail closed")
+
+
 def test_always_new_creates_session_and_dispatches():
     provider_id = config_store.get_default_provider()["id"]
     coord, sender, join_calls, submit_calls = _make_coord(

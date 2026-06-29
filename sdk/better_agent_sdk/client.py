@@ -844,6 +844,7 @@ class Client:
         reasoning_effort: str = "",
         sub_session: bool = True,
         cwd: str = "",
+        run_mode: str = "direct",
     ) -> dict[str, Any]:
         """Smart delegation router — resolves a target (auto-route or create)
         and dispatches fire-and-forget."""
@@ -858,6 +859,7 @@ class Client:
                 "reasoning_effort": reasoning_effort,
                 "sub_session": sub_session,
                 "cwd": cwd or self.cwd,
+                "run_mode": run_mode,
             },
             timeout=30.0,
         )

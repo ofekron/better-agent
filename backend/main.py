@@ -5173,57 +5173,6 @@ async def internal_assistant_ui_last_turn(
     return await asyncio.to_thread(assistant_ui.last_turn, sid)
 
 
-@app.post("/api/internal/assistant-ui/classify")
-async def internal_assistant_ui_classify(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Board fork: classify a batch of open turns into per-turn
-    `{turn_id, status, summary}` deltas. Forks the assistant board analyzer
-    (run_mode=fork, dispatch=in_process); state rides the fork instruction,
-    never the cached base."""
-    _require_assistant_internal(x_internal_token)
-    batch = body.get("batch")
-    if not isinstance(batch, list):
-        raise HTTPException(status_code=400, detail="batch must be a list")
-    return await assistant_ui.classify(batch)
-
-
-@app.post("/api/internal/assistant-ui/extract-status")
-async def internal_assistant_ui_extract_status(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Board fork: given a finished monitored target turn + the current board
-    item set, emit per-item state deltas (`{turn_id, status, summary}`). Fired
-    by the post-turn hook on a dispatched session's turn completion."""
-    _require_assistant_internal(x_internal_token)
-    target_turn = body.get("target_turn")
-    if not isinstance(target_turn, dict):
-        raise HTTPException(status_code=400, detail="target_turn must be an object")
-    items = body.get("items")
-    if not isinstance(items, list):
-        items = []
-    return await assistant_ui.extract_status(target_turn, items)
-
-
-@app.post("/api/internal/assistant-ui/rank")
-async def internal_assistant_ui_rank(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Board fork: order open items most-important-first (importance + focus
-    momentum). Returns `{order: [turn_id, ...]}`."""
-    _require_assistant_internal(x_internal_token)
-    items = body.get("items")
-    if not isinstance(items, list):
-        raise HTTPException(status_code=400, detail="items must be a list")
-    last_topic = body.get("last_topic")
-    if not isinstance(last_topic, dict):
-        last_topic = None
-    return await assistant_ui.rank(items, last_topic)
-
-
 def _tree_has_loaded_events(tree: dict) -> bool:
     stack = [tree]
     while stack:
@@ -9013,6 +8962,7 @@ async def internal_delegate_task(
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
             sub_session=body.get("sub_session") is not False,
             cwd=str(body.get("cwd") or ""),
+            run_mode=str(body.get("run_mode") or "direct").strip() or "direct",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
