@@ -175,6 +175,34 @@ def test_default_list_preserves_summary_order_without_resort(client: TestClient)
     return ok
 
 
+def test_default_list_uses_indexed_summary_lookup(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record("old", "2026-06-16T00:00:00+00:00"))
+    _write(_record("new", "2026-06-18T00:00:00+00:00"))
+
+    original_loader = session_store._load_summary_for_requested_id
+    original_prefs = main._session_list_user_prefs
+
+    def fail_disk_fallback(_sid: str):
+        raise AssertionError("default session list should not fallback-load summaries")
+
+    session_store._load_summary_for_requested_id = fail_disk_fallback
+    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    try:
+        response = client.get("/api/sessions?offset=0&limit=1", headers=HEADERS)
+    finally:
+        session_store._load_summary_for_requested_id = original_loader
+        main._session_list_user_prefs = original_prefs
+    if response.status_code != 200:
+        print(f"{FAIL} /api/sessions indexed summary lookup status {response.status_code}")
+        return False
+    body = response.json()
+    ids = [session["id"] for session in body.get("sessions", [])]
+    ok = ids == ["new"] and body.get("total") == 2
+    print(f"{PASS if ok else FAIL} /api/sessions default list uses indexed summary lookup")
+    return ok
+
+
 def test_selected_session_does_not_override_pagination(client: TestClient) -> bool:
     _reset_home()
     _write(_record("old", "2026-06-16T00:00:00+00:00"))
@@ -1051,6 +1079,7 @@ def main_run() -> int:
         ok = True
         ok = test_paginates_after_global_sort(client) and ok
         ok = test_default_list_preserves_summary_order_without_resort(client) and ok
+        ok = test_default_list_uses_indexed_summary_lookup(client) and ok
         ok = test_selected_session_does_not_override_pagination(client) and ok
         ok = test_filters_before_pagination(client) and ok
         ok = test_file_edit_mode_filters_before_pagination(client) and ok
