@@ -319,6 +319,11 @@ interface UseWebSocketOptions {
     msgId: string,
     autoRetry: { count: number; kind: string } | null
   ) => void;
+  onMessageContentUpdated?: (
+    appSessionId: string,
+    msgId: string,
+    content: string
+  ) => void;
   /** Per-turn picker payload (`ask_result`) stamped on an assistant
    * message — drives the inline session picker rendered below that turn. */
   onMessageAskResultChanged?: (
@@ -437,6 +442,9 @@ export function useWebSocket(
   const onMessageAutoRetryChangedRef = useRef(
     options.onMessageAutoRetryChanged
   );
+  const onMessageContentUpdatedRef = useRef(
+    options.onMessageContentUpdated
+  );
   const onMessageAskResultChangedRef = useRef(
     options.onMessageAskResultChanged
   );
@@ -484,6 +492,7 @@ export function useWebSocket(
     onMessageRecoveringChangedRef.current = options.onMessageRecoveringChanged;
     onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
     onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
+    onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
     onSessionProcessingRef.current = options.onSessionProcessing;
@@ -526,6 +535,7 @@ export function useWebSocket(
     options.onMessageRecoveringChanged,
     options.onMessageRetryingChanged,
     options.onMessageAutoRetryChanged,
+    options.onMessageContentUpdated,
     options.onMessageAskResultChanged,
     options.onMessageAskChoiceChanged,
     options.onSessionProcessing,
@@ -1125,6 +1135,20 @@ export function useWebSocket(
               d.session_id,
               d.msg_id,
               d.auto_retry ?? null
+            );
+          }
+        }
+        if (event.type === "message_content_updated") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            content: string;
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageContentUpdatedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.content ?? ""
             );
           }
         }

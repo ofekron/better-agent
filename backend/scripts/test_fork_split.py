@@ -550,13 +550,37 @@ def test_broadcaster_drops_unknown_kinds() -> bool:
     bcast = SessionWSBroadcaster(FakeCoord())
     bcast._dispatch = lambda payload: captured.append(payload)
 
-    # `agent_sid_set` and `running_content_updated` are backend-internal
-    # here. Message appends are handled in their own test.
+    # `agent_sid_set` is backend-internal here. Message appends and
+    # content updates are handled in their own tests.
     bcast.on_change("sid", {"kind": "agent_sid_set", "mode": "manager"})
-    bcast.on_change("sid", {"kind": "running_content_updated"})
 
     ok = len(captured) == 0
     print(f"{PASS if ok else FAIL} broadcaster drops kinds outside the allowlist")
+    return ok
+
+
+def test_broadcaster_maps_running_content_to_message_delta() -> bool:
+    _reset_home()
+    from session_ws_broadcaster import SessionWSBroadcaster
+    captured: list[dict] = []
+
+    class FakeCoord: pass
+
+    bcast = SessionWSBroadcaster(FakeCoord())
+    bcast._dispatch = lambda payload: captured.append(payload)
+    bcast.on_change(
+        "sid",
+        {"kind": "running_content_updated", "msg_id": "msg-1", "content": "done"},
+    )
+
+    ok = (
+        len(captured) == 1
+        and captured[0]["type"] == "message_content_updated"
+        and captured[0]["data"]["session_id"] == "sid"
+        and captured[0]["data"]["msg_id"] == "msg-1"
+        and captured[0]["data"]["content"] == "done"
+    )
+    print(f"{PASS if ok else FAIL} broadcaster maps running content to message content update")
     return ok
 
 
@@ -948,6 +972,7 @@ def main_runner() -> int:
         test_broadcaster_maps_fork_closed_set_to_metadata_patch,
         test_dispatch_raw_annotates_app_session_id,
         test_broadcaster_drops_unknown_kinds,
+        test_broadcaster_maps_running_content_to_message_delta,
         test_broadcaster_maps_message_appends_to_delta,
         test_broadcaster_maps_renamed_to_session_renamed,
         test_broadcaster_maps_deleted_to_session_deleted,
