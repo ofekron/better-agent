@@ -2338,11 +2338,12 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     once before giving up — covers the case where another process
     (CLI, second backend) created a fork after this process started."""
     global _negative_root_resolve_global_until
-    if (_sessions_dir() / f"{sid}.json").exists():
-        return sid
     _ensure_index()
-    if sid in _fork_index:
-        return _fork_index[sid]
+    with _index_lock:
+        if sid in _root_index_signatures:
+            return sid
+        if sid in _fork_index:
+            return _fork_index[sid]
     now = time.monotonic()
     with _index_lock:
         if _negative_root_resolve_until.get(sid, 0.0) > now:
