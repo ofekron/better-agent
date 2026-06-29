@@ -2116,6 +2116,12 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
     assert "_BUILTIN_FEATURE_CACHE" in source
     assert "def is_builtin_feature_enabled_cached(" in source
+    store_path_start = source.index("def _store_path(")
+    store_path_end = source.index("def store_fingerprint(", store_path_start)
+    store_path_source = source[store_path_start:store_path_end]
+    assert "_STORE_PATH" in source
+    assert "if _STORE_PATH is None:" in store_path_source
+    assert "ba_home()" in store_path_source
     start = source.index("def is_builtin_feature_enabled_cached(")
     end = source.index("def is_extension_runtime_ready(", start)
     helper_source = source[start:end]
