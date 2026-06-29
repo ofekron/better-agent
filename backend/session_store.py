@@ -166,6 +166,7 @@ _index_fingerprint: Optional[tuple[int, int, int]] = None
 _index_build_lock = threading.Lock()
 _negative_root_resolve_cache: dict[str, tuple[int, int, int]] = {}
 _negative_root_resolve_until: dict[str, float] = {}
+_negative_root_resolve_global_until = 0.0
 _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 
 # ── Summary index ─────────────────────────────────────────────────────
@@ -204,6 +205,13 @@ _summary_projection_repair_running = False
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
+
+
+def _clear_negative_root_resolve_cache() -> None:
+    global _negative_root_resolve_global_until
+    _negative_root_resolve_cache.clear()
+    _negative_root_resolve_until.clear()
+    _negative_root_resolve_global_until = 0.0
 
 
 def _copy_jsonish(value):
@@ -1569,8 +1577,7 @@ def _index_tree(
         if file_signature is not None:
             _root_index_signatures[rid] = file_signature
         if topology_changed or force:
-            _negative_root_resolve_cache.clear()
-            _negative_root_resolve_until.clear()
+            _clear_negative_root_resolve_cache()
         return topology_changed
 
 
@@ -1582,8 +1589,7 @@ def _index_set(fork_id: str, root_id: str) -> None:
         _root_forks.setdefault(root_id, set()).add(fork_id)
         _index_loaded = True
         _index_fingerprint = fp
-        _negative_root_resolve_cache.clear()
-        _negative_root_resolve_until.clear()
+        _clear_negative_root_resolve_cache()
 
 
 def _index_pop(sid: str) -> None:
@@ -1596,8 +1602,7 @@ def _index_pop(sid: str) -> None:
                 if not forks:
                     _root_forks.pop(root_id, None)
                     _root_index_signatures.pop(root_id, None)
-        _negative_root_resolve_cache.clear()
-        _negative_root_resolve_until.clear()
+        _clear_negative_root_resolve_cache()
 
 
 # Sidecar files share the sessions dir and the `.json` extension but are
@@ -1975,8 +1980,7 @@ def _install_index_snapshot(
     _root_index_signatures.clear()
     _root_index_signatures.update(root_signatures)
     _index_fingerprint = fp
-    _negative_root_resolve_cache.clear()
-    _negative_root_resolve_until.clear()
+    _clear_negative_root_resolve_cache()
 
 
 def _refresh_index(
@@ -2049,6 +2053,7 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     Cross-process safe: on a miss, re-scans the sessions directory
     once before giving up — covers the case where another process
     (CLI, second backend) created a fork after this process started."""
+    global _negative_root_resolve_global_until
     if (_sessions_dir() / f"{sid}.json").exists():
         return sid
     _ensure_index()
@@ -2057,6 +2062,8 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     now = time.monotonic()
     with _index_lock:
         if _negative_root_resolve_until.get(sid, 0.0) > now:
+            return None
+        if _negative_root_resolve_global_until > now:
             return None
     live_fp = _dir_fingerprint()
     with _index_lock:
@@ -2072,7 +2079,10 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     with _index_lock:
         _negative_root_resolve_cache[sid] = live_fp
         _negative_root_resolve_until[sid] = (
-            time.monotonic() + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
+            now + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
+        )
+        _negative_root_resolve_global_until = (
+            now + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
         )
     return None
 
