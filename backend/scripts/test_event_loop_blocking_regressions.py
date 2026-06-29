@@ -25,6 +25,10 @@ def test_ownership_projection_uses_dedicated_executor() -> None:
     assert "thread_name_prefix=\"ownership-projection\"" in source
     assert "run_in_executor(\n            _OWNERSHIP_PROJECTION_EXECUTOR" in source
     assert "asyncio.to_thread(\n            session_manager.apply_journal_ownership_resolution" not in source
+    assert "_CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"content-projection\"" in source
+    assert "run_in_executor(\n        _CONTENT_PROJECTION_EXECUTOR" in source
+    assert "asyncio.to_thread(\n        session_manager.apply_written_journal_event" not in source
 
 
 def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
