@@ -981,6 +981,162 @@ def _build_start_file_discussion_tool_handler(
     return start_file_discussion
 
 
+def _build_dynamic_tool_set(
+    *,
+    mode: str,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+    mssg_sender_session_id: str,
+    cwd: str,
+    model: Optional[str],
+    open_file_panel_enabled: bool,
+    file_editing_mode: bool,
+    team_orchestration_enabled: bool,
+    disabled_builtin_tools: set[str],
+    existing_tool_names: set[str],
+) -> tuple[list[dict], dict[str, Any]]:
+    dynamic_tools: list[dict] = []
+    tool_handlers: dict[str, Any] = {}
+    if mode == "manager" and team_orchestration_enabled:
+        if not app_session_id or not backend_url or not internal_token:
+            raise RuntimeError(t("runner.manager_mode_missing_fields"))
+        _add_dynamic_tool(
+            dynamic_tools,
+            tool_handlers,
+            _build_create_worker_dynamic_tool(),
+            _build_create_worker_tool_handler(
+                app_session_id=app_session_id,
+                backend_url=backend_url,
+                internal_token=internal_token,
+                model=model,
+                cwd=cwd,
+            ),
+            existing_tool_names=existing_tool_names,
+        )
+    if open_file_panel_enabled:
+        if not app_session_id or not backend_url or not internal_token:
+            raise RuntimeError("open-file-panel requires app_session_id, backend_url, and internal_token")
+        _add_dynamic_tool(
+            dynamic_tools,
+            tool_handlers,
+            _build_open_file_panel_dynamic_tool(),
+            _build_open_file_panel_tool_handler(
+                app_session_id=app_session_id,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ),
+            existing_tool_names=existing_tool_names,
+        )
+        if file_editing_mode:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_start_file_discussion_dynamic_tool(),
+                _build_start_file_discussion_tool_handler(
+                    app_session_id=app_session_id,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+    if mssg_sender_session_id and backend_url and internal_token:
+        if "mssg" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_mssg_dynamic_tool(),
+                _build_mssg_tool_handler(
+                    sender_session_id=mssg_sender_session_id,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "async" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_async_dynamic_tool(),
+                _build_async_tool_handler(
+                    sender_session_id=mssg_sender_session_id,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "ask" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_ask_dynamic_tool(),
+                _build_ask_tool_handler(
+                    sender_session_id=mssg_sender_session_id,
+                    app_session_id=app_session_id or "",
+                    model=model,
+                    cwd=cwd,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "ensure_named_worker" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_ensure_named_worker_dynamic_tool(),
+                _build_ensure_named_worker_tool_handler(
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+    if app_session_id and backend_url and internal_token:
+        if "delegate_task" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_delegate_task_dynamic_tool(),
+                _build_delegate_task_tool_handler(
+                    sender_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "create_session" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_create_session_dynamic_tool(),
+                _build_create_session_tool_handler(
+                    sender_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "create_sub_session" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_create_sub_session_dynamic_tool(),
+                _build_create_sub_session_tool_handler(
+                    sender_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+    return dynamic_tools, tool_handlers
+
+
 class _MappedNotificationStream:
     def __init__(self, queue: asyncio.Queue[Optional[bytes]]) -> None:
         self._queue = queue
@@ -2423,152 +2579,27 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     team_orchestration_enabled = extension_store.is_extension_runtime_ready(
         extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
     )
-    dynamic_tools: list[dict] = []
-    tool_handlers: dict[str, Any] = {}
     existing_tool_names = _codex_existing_tool_names(provider_run_config)
     open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
-    if mode == "manager" and team_orchestration_enabled:
-        if not app_session_id or not backend_url or not internal_token:
-            _fail(run_dir, t("runner.manager_mode_missing_fields"))
-            return 1
-        _add_dynamic_tool(
-            dynamic_tools,
-            tool_handlers,
-            _build_create_worker_dynamic_tool(),
-            _build_create_worker_tool_handler(
-                app_session_id=app_session_id,
-                backend_url=backend_url,
-                internal_token=internal_token,
-                model=model,
-                cwd=cwd,
-            ),
+    try:
+        dynamic_tools, tool_handlers = _build_dynamic_tool_set(
+            mode=mode,
+            app_session_id=app_session_id,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            mssg_sender_session_id=mssg_sender_session_id,
+            cwd=cwd,
+            model=model,
+            open_file_panel_enabled=open_file_panel_enabled,
+            file_editing_mode=file_editing_mode,
+            team_orchestration_enabled=team_orchestration_enabled,
+            disabled_builtin_tools=disabled_builtin_tools,
             existing_tool_names=existing_tool_names,
         )
-    if open_file_panel_enabled:
-        if not app_session_id or not backend_url or not internal_token:
-            _fail(run_dir, "open-file-panel requires app_session_id, backend_url, and internal_token")
-            return 1
-        _add_dynamic_tool(
-            dynamic_tools,
-            tool_handlers,
-            _build_open_file_panel_dynamic_tool(),
-            _build_open_file_panel_tool_handler(
-                app_session_id=app_session_id,
-                backend_url=backend_url,
-                internal_token=internal_token,
-            ),
-            existing_tool_names=existing_tool_names,
-        )
-        if file_editing_mode:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_start_file_discussion_dynamic_tool(),
-                _build_start_file_discussion_tool_handler(
-                    app_session_id=app_session_id,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-    if mssg_sender_session_id and backend_url and internal_token:
-        if "mssg" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_mssg_dynamic_tool(),
-                _build_mssg_tool_handler(
-                    sender_session_id=mssg_sender_session_id,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-        if "async" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_async_dynamic_tool(),
-                _build_async_tool_handler(
-                    sender_session_id=mssg_sender_session_id,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-        if "ask" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_ask_dynamic_tool(),
-                _build_ask_tool_handler(
-                    sender_session_id=mssg_sender_session_id,
-                    app_session_id=app_session_id or "",
-                    model=model,
-                    cwd=cwd,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-        if "ensure_named_worker" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_ensure_named_worker_dynamic_tool(),
-                _build_ensure_named_worker_tool_handler(
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-
-    # Generic handoff tools — available to ALL sessions (team AND native).
-    # delegate (detached handoff) + create_session (fresh standalone session).
-    if app_session_id and backend_url and internal_token:
-        if "delegate_task" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_delegate_task_dynamic_tool(),
-                _build_delegate_task_tool_handler(
-                    sender_session_id=app_session_id,
-                    cwd=cwd,
-                    model=model,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-        if "create_session" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_create_session_dynamic_tool(),
-                _build_create_session_tool_handler(
-                    sender_session_id=app_session_id,
-                    cwd=cwd,
-                    model=model,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
-        if "create_sub_session" not in disabled_builtin_tools:
-            _add_dynamic_tool(
-                dynamic_tools,
-                tool_handlers,
-                _build_create_sub_session_dynamic_tool(),
-                _build_create_sub_session_tool_handler(
-                    sender_session_id=app_session_id,
-                    cwd=cwd,
-                    model=model,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                ),
-                existing_tool_names=existing_tool_names,
-            )
+    except RuntimeError as exc:
+        _fail(run_dir, str(exc))
+        return 1
 
     codex_bin = _resolve_codex_cli(inputs)
     if not codex_bin:

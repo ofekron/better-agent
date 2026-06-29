@@ -90,6 +90,27 @@ def test_async_dynamic_tool_contract(failures: list[str]) -> None:
     check("message" in required, "async requires message", failures)
 
 
+def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
+    tools, handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="sender-1",
+        backend_url="http://backend",
+        internal_token="tok",
+        mssg_sender_session_id="sender-1",
+        cwd="/tmp",
+        model="model-1",
+        open_file_panel_enabled=False,
+        file_editing_mode=False,
+        team_orchestration_enabled=True,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    names = {tool.get("name") for tool in tools}
+    check("mssg" in names, "native loopback registers mssg dynamic tool", failures)
+    check("mssg" in handlers, "native loopback registers mssg handler", failures)
+    check("delegate_task" in names, "native loopback keeps generic handoff tool", failures)
+
+
 def test_dynamic_tool_json_result_is_compact(failures: list[str]) -> None:
     result = runner_codex._dynamic_tool_json_result(
         {"success": True, "value": {"nested": ["x", "y"]}},
@@ -457,6 +478,7 @@ def main() -> int:
     test_create_sub_session_dynamic_tool_contract(failures)
     test_delegate_task_dynamic_tool_contract(failures)
     test_async_dynamic_tool_contract(failures)
+    test_native_loopback_registers_mssg_tool(failures)
     test_dynamic_tool_json_result_is_compact(failures)
     test_subagent_notification_response_item_is_ingested(failures)
     test_regular_user_response_item_is_not_ingested(failures)

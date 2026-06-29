@@ -325,6 +325,62 @@ def test_drive_cli_run_pre_spawn_guard() -> None:
     check("result is cancelled-failure", result.get("success") is False)
 
 
+def test_native_non_user_turn_gets_loopback_credentials() -> None:
+    print("T5b native non-user turn gets loopback credentials")
+    c = _StubCoordinator()
+    tm = TurnManager(c)
+    sid = session_manager.create(name="team-target", cwd="/tmp", model="sonnet")["id"]
+    captured: list[dict] = []
+
+    class _Provider:
+        KIND = "codex"
+        _runs: dict = {}
+
+        def start_run(self, **kw):
+            captured.append(kw)
+            kw["loop"].call_soon_threadsafe(
+                kw["queue"].put_nowait,
+                type("E", (), {
+                    "type": "complete",
+                    "data": {"success": True, "session_id": None, "token_usage": None},
+                })(),
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+    c.provider_for_session = lambda _sid: _Provider()
+    c.user_prompt_manager = _UPM()
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="reply to sender",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            user_initiated=False,
+            turn_run_id="turn-loopback",
+        )
+
+    result = asyncio.run(_go())
+    check("result success", result.get("success") is True)
+    check("provider spawned", len(captured) == 1)
+    backend_url = str(captured[0].get("backend_url") or "")
+    check(
+        "loopback backend_url forwarded",
+        backend_url.startswith("http://localhost:") or backend_url.startswith("http://127.0.0.1:"),
+    )
+    check("internal_token forwarded", captured[0].get("internal_token") == "test-token")
+
+
 def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
     print("T6 rate-limit retry wait stays active and stop-cancellable")
     c = _StubCoordinator()
@@ -661,6 +717,7 @@ def main() -> int:
     test_prune_stale_retrying_pidless_run_is_retained()
     test_codex_initialize_timeout_is_not_transient()
     test_drive_cli_run_pre_spawn_guard()
+    test_native_non_user_turn_gets_loopback_credentials()
     test_rate_limit_wait_keeps_turn_active_and_cancellable()
     test_rate_limit_retry_spawns_once_then_emits_terminal()
     test_rate_limit_wait_uses_reset_or_one_minute_fallback()
