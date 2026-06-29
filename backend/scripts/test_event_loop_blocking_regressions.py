@@ -1095,22 +1095,33 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     assert "session_search_index.has_indexed_rows()" in startup_source
 
 
-def test_missing_event_meta_sidecars_warm_in_background() -> None:
+def test_event_projections_warm_in_background() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _missing_session_event_meta_roots(" in source
-    assert "async def _warm_missing_session_event_meta_sidecars()" in source
-    assert "await asyncio.to_thread(\n        _missing_session_event_meta_roots" in source
-    warm_start = source.index("async def _warm_missing_session_event_meta_sidecars()")
+    assert "def _session_event_projection_warm_roots(" in source
+    assert "def _warm_session_detail_projection_roots_sync(" in source
+    assert "async def _warm_session_event_projections()" in source
+    assert "await asyncio.to_thread(\n        _session_event_projection_warm_roots" in source
+    detail_warm_start = source.index("def _warm_session_detail_projection_roots_sync(")
+    detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
+    detail_warm_source = source[detail_warm_start:detail_warm_end]
+    assert "_session_event_meta(root_id)" in detail_warm_source
+    assert "event_ingester.message_event_summaries(root_id)" in detail_warm_source
+    roots_start = source.index("def _session_event_projection_warm_roots(")
+    roots_end = source.index("async def _warm_session_event_projections()", roots_start)
+    roots_source = source[roots_start:roots_end]
+    assert "events_path = child / \"events.jsonl\"" in roots_source
+    assert "meta_path" not in roots_source
+    warm_start = source.index("async def _warm_session_event_projections()")
     warm_end = source.index("def _schedule_session_event_meta_warm(", warm_start)
     warm_source = source[warm_start:warm_end]
     assert "_SESSION_EVENT_META_GLOBAL_WARM_BATCH" in warm_source
-    assert "await _warm_session_event_meta_roots(batch)" in warm_source
+    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in warm_source
     assert "await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)" in warm_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "startup-session-event-meta-sidecar-warm" in startup_source
-    assert "session_event_meta_sidecar_warm" in startup_source
+    assert "startup-session-event-meta-projection-warm" in startup_source
+    assert "session_event_projection_warm" in startup_source
     assert "_SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS" in startup_source
     assert "_rebuild_session_search_index_if_empty" in startup_source
 

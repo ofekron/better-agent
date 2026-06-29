@@ -246,7 +246,16 @@ def _warm_session_event_meta_roots_sync(root_ids: list[str]) -> None:
             logger.debug("session event meta warm failed for %s", root_id, exc_info=True)
 
 
-def _missing_session_event_meta_roots(limit: int) -> list[str]:
+def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
+    for root_id in root_ids:
+        try:
+            _session_event_meta(root_id)
+            event_ingester.message_event_summaries(root_id)
+        except Exception:
+            logger.debug("session detail projection warm failed for %s", root_id, exc_info=True)
+
+
+def _session_event_projection_warm_roots(limit: int) -> list[str]:
     sessions_dir = ba_home() / "sessions"
     rows: list[tuple[int, str]] = []
     try:
@@ -257,30 +266,29 @@ def _missing_session_event_meta_roots(limit: int) -> list[str]:
         if not child.is_dir():
             continue
         events_path = child / "events.jsonl"
-        meta_path = child / "event_meta.json"
         try:
             stat = events_path.stat()
         except FileNotFoundError:
             continue
         except OSError:
             continue
-        if stat.st_size <= 0 or meta_path.exists():
+        if stat.st_size <= 0:
             continue
         rows.append((stat.st_size, child.name))
     rows.sort(reverse=True)
     return [root_id for _size, root_id in rows[:limit]]
 
 
-async def _warm_missing_session_event_meta_sidecars() -> None:
+async def _warm_session_event_projections() -> None:
     root_ids = await asyncio.to_thread(
-        _missing_session_event_meta_roots,
+        _session_event_projection_warm_roots,
         _SESSION_EVENT_META_GLOBAL_WARM_LIMIT,
     )
     if not root_ids:
         return
     for idx in range(0, len(root_ids), _SESSION_EVENT_META_GLOBAL_WARM_BATCH):
         batch = root_ids[idx:idx + _SESSION_EVENT_META_GLOBAL_WARM_BATCH]
-        await _warm_session_event_meta_roots(batch)
+        await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)
         await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)
 
 
@@ -7949,13 +7957,13 @@ async def on_startup():
         _delayed_startup_task(
             _SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS,
             lambda: run_task(
-                "session_event_meta_sidecar_warm",
-                "startup_tasks.session_event_meta_sidecar_warm",
-                _warm_missing_session_event_meta_sidecars,
+                "session_event_projection_warm",
+                "startup_tasks.session_event_projection_warm",
+                _warm_session_event_projections,
                 in_thread=False,
             ),
         ),
-        name="startup-session-event-meta-sidecar-warm",
+        name="startup-session-event-meta-projection-warm",
     )
 
     asyncio.create_task(
