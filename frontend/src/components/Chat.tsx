@@ -389,10 +389,11 @@ interface Props {
   ) => boolean | Promise<boolean>;
   /** Currently queued prompt (shown in banner). */
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
+  queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: () => void;
   onSteerQueued?: () => void;
   onCancelQueued?: () => void;
-  onQueuedTextEdit?: (text: string) => void;
+  onQueuedTextEdit?: (text: string, queuedId?: string) => void;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
@@ -512,6 +513,7 @@ export function Chat({
   runStateBySession,
   onForkAndSend,
   queuedPrompt,
+  queuedPrompts,
   onPromoteQueued,
   onSteerQueued,
   onCancelQueued,
@@ -1451,6 +1453,7 @@ export function Chat({
               draftImages={draftImages}
               onImagesChange={onImagesChange}
               queuedPrompt={queuedPrompt}
+              queuedPrompts={queuedPrompts}
               onPromoteQueued={onPromoteQueued}
               onSteerQueued={onSteerQueued}
               onCancelQueued={onCancelQueued}

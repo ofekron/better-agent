@@ -78,6 +78,30 @@ describe("InputArea queued prompt promote action", () => {
     expect(button.classList.contains("interrupt")).toBe(true);
   });
 
+  it("renders every queued prompt package as its own banner", () => {
+    const onQueuedTextEdit = vi.fn();
+    renderInputArea(true, "", {
+      queuedPrompts: [
+        { id: "q1", preview: "first queued" },
+        { id: "q2", preview: "second queued" },
+      ],
+      onQueuedTextEdit,
+    });
+
+    const banners = screen.getAllByTestId("queued-prompt-banner");
+    expect(banners).toHaveLength(2);
+    expect(within(banners[0]).getByText("first queued")).toBeTruthy();
+    expect(within(banners[1]).getByText("second queued")).toBeTruthy();
+    expect(within(banners[0]).getByRole("button", { name: "Steer" })).toBeTruthy();
+    expect(within(banners[1]).queryByRole("button", { name: "Steer" })).toBeNull();
+
+    fireEvent.click(within(banners[1]).getByRole("button", { name: "Edit queued prompt" }));
+    const editor = screen.getByDisplayValue("second queued");
+    fireEvent.change(editor, { target: { value: "edited second queued" } });
+    fireEvent.blur(editor);
+    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited second queued", "q2");
+  });
+
   it("shows separate active Queue, Steer, and Interrupt buttons while streaming", () => {
     renderInputArea(true, "active work");
 
@@ -332,7 +356,7 @@ describe("InputArea queued prompt promote action", () => {
     const editor = screen.getByDisplayValue("queued work");
     fireEvent.change(editor, { target: { value: "edited queued work" } });
     fireEvent.blur(editor);
-    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work");
+    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work", "q1");
   });
 
   it("uses the mobile-safe queued editing layout", () => {

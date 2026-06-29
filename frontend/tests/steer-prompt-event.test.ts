@@ -132,8 +132,10 @@ describe("steer prompt events", () => {
     expect(sends.map((frame) => frame.prompt)).toEqual(["first queued", "second queued"]);
     expect(sends.every((frame) => frame.send_mode === "queue")).toBe(true);
     expect(h.outbound.some((frame) => frame.type === "cancel_queued")).toBe(false);
-    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("first queued");
-    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).not.toContain("second queued");
+    const banners = h.$$('[data-testid="queued-prompt-banner"]');
+    expect(banners).toHaveLength(2);
+    expect(banners[0]?.textContent).toContain("first queued");
+    expect(banners[1]?.textContent).toContain("second queued");
     h.unmount();
   });
 
