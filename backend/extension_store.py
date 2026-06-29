@@ -213,6 +213,9 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["llm_tasks"].items() if _pid(k)},
 }
+_EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
+    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
+}
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["runtime_required_paths"].items() if _pid(k)},
 }
@@ -4724,7 +4727,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
 def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
-    return list(_BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()))
+    return list(_EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()))
 
 
 def extension_internal_llm_task_keys() -> set[str]:
