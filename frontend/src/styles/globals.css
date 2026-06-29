@@ -12425,6 +12425,9 @@ pre .inline-tag-highlight {
   padding: 8px;
   min-height: 0;
   overflow-x: auto;
+  transition:
+    grid-template-columns 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    gap 520ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .fork-split-grid-focused {
   overflow-x: hidden;
@@ -12438,6 +12441,7 @@ pre .inline-tag-highlight {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
+  animation: fork-focus-toolbar-enter 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .fork-focus-title {
   min-width: 0;
@@ -12476,6 +12480,14 @@ pre .inline-tag-highlight {
   min-width: 220px;
   min-height: 0;
   overflow: hidden;
+  transform: scale(1);
+  transform-origin: center;
+  opacity: 1;
+  transition:
+    opacity 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 420ms ease,
+    box-shadow 420ms ease;
 }
 .fork-pane-focused {
   border: 2px solid var(--accent, #7b68ee);
@@ -12484,6 +12496,12 @@ pre .inline-tag-highlight {
 .fork-pane-closed {
   opacity: 0.45;
   filter: grayscale(0.6);
+}
+.fork-pane-focus-hidden {
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96);
 }
 .fork-pane-header {
   display: flex;
@@ -12614,6 +12632,24 @@ pre .inline-tag-highlight {
 .fork-pane-close:hover {
   color: var(--text, #eee);
   border-color: var(--text, #eee);
+}
+@keyframes fork-focus-toolbar-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fork-split-grid,
+  .fork-pane,
+  .fork-focus-toolbar {
+    animation: none;
+    transition: none;
+  }
 }
 .fork-bubble {
   margin-bottom: 8px;
