@@ -14,6 +14,7 @@ _LOCK = threading.RLock()
 _SCHEMA_VERSION = 1
 _COUNTS_LOADED_PATH: Path | None = None
 _PENDING_COUNTS_BY_SESSION: dict[str, int] = {}
+_PENDING_REQUESTS_BY_SESSION: dict[str, list[dict[str, Any]]] = {}
 _PENDING_COUNTS_VERSION = 0
 _PATH_CACHE_HOME: Path | None = None
 _PATH_CACHE_VALUE: Path | None = None
@@ -53,12 +54,14 @@ def _rebuild_counts_locked(data: dict[str, Any], path: Path | None = None) -> No
     global _COUNTS_LOADED_PATH, _PENDING_COUNTS_VERSION
     previous = dict(_PENDING_COUNTS_BY_SESSION)
     _PENDING_COUNTS_BY_SESSION.clear()
+    _PENDING_REQUESTS_BY_SESSION.clear()
     for req in data.get("requests", {}).values():
         if not isinstance(req, dict) or req.get("status") != "pending":
             continue
         sid = str(req.get("app_session_id") or "")
         if sid:
             _PENDING_COUNTS_BY_SESSION[sid] = _PENDING_COUNTS_BY_SESSION.get(sid, 0) + 1
+            _PENDING_REQUESTS_BY_SESSION.setdefault(sid, []).append(_public(req))
     _COUNTS_LOADED_PATH = path or _path()
     if _PENDING_COUNTS_BY_SESSION != previous:
         _PENDING_COUNTS_VERSION += 1
@@ -85,6 +88,29 @@ def _adjust_pending_count_locked(app_session_id: Any, delta: int) -> None:
         next_count = 0
     if next_count != previous:
         _PENDING_COUNTS_VERSION += 1
+
+
+def _add_pending_public_locked(req: dict[str, Any]) -> None:
+    sid = str(req.get("app_session_id") or "")
+    if not sid or req.get("status") != "pending":
+        return
+    public_req = _public(req)
+    rows = _PENDING_REQUESTS_BY_SESSION.setdefault(sid, [])
+    rows[:] = [row for row in rows if row.get("request_id") != public_req["request_id"]]
+    rows.append(public_req)
+
+
+def _remove_pending_public_locked(req: dict[str, Any]) -> None:
+    sid = str(req.get("app_session_id") or "")
+    if not sid:
+        return
+    request_id = req.get("request_id")
+    rows = _PENDING_REQUESTS_BY_SESSION.get(sid)
+    if not rows:
+        return
+    rows[:] = [row for row in rows if row.get("request_id") != request_id]
+    if not rows:
+        _PENDING_REQUESTS_BY_SESSION.pop(sid, None)
 
 
 def _write_locked(data: dict[str, Any]) -> None:
@@ -130,17 +156,14 @@ def create_request(
         data["requests"][request_id] = req
         _write_locked(data)
         _adjust_pending_count_locked(app_session_id, 1)
+        _add_pending_public_locked(req)
     return _public(req)
 
 
 def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:
     with _LOCK:
-        data = _read_locked()
-        return [
-            _public(req)
-            for req in data["requests"].values()
-            if req.get("app_session_id") == app_session_id and req.get("status") == "pending"
-        ]
+        _ensure_counts_locked()
+        return [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(app_session_id, [])]
 
 
 def pending_count_for_session(app_session_id: str) -> int:
@@ -202,6 +225,7 @@ def _complete_request(
         _write_locked(data)
         _ensure_counts_locked()
         _adjust_pending_count_locked(req.get("app_session_id"), -1)
+        _remove_pending_public_locked(req)
     return dict(req)
 
 
