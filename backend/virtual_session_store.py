@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime
@@ -18,10 +19,12 @@ _VIRTUAL_PREFIX = "virtual:"
 _MAX_SYNTHETIC_MESSAGES = 500
 _MAX_BACKING_SESSIONS = 25
 _MAX_METADATA_BYTES = 64 * 1024
+_SUMMARY_CACHE_HOT_TTL_SECONDS = 1.0
 _cache_signature: tuple[int, int] | None = None
 _cache_data: dict[str, Any] | None = None
 _summary_cache_signature: tuple[int, int] | None = None
 _summary_cache: list[dict[str, Any]] | None = None
+_summary_cache_fresh_until = 0.0
 
 
 def _path() -> Path:
@@ -68,6 +71,7 @@ def _load_shared_locked() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     global _cache_data, _cache_signature, _summary_cache, _summary_cache_signature
+    global _summary_cache_fresh_until
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
@@ -80,6 +84,7 @@ def _save(data: dict[str, Any]) -> None:
         _cache_data = None
     _summary_cache_signature = None
     _summary_cache = None
+    _summary_cache_fresh_until = 0.0
 
 
 def _clean_extension_id(extension_id: str) -> str:
@@ -314,7 +319,11 @@ def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def list_all() -> list[dict[str, Any]]:
-    global _summary_cache, _summary_cache_signature
+    global _summary_cache, _summary_cache_signature, _summary_cache_fresh_until
+    cached = _summary_cache
+    if cached is not None and time.monotonic() < _summary_cache_fresh_until:
+        with perf.timed("virtual_sessions.list.hot_cached"):
+            return _copy_summaries(cached)
     acquired = _lock.acquire(blocking=False)
     if not acquired:
         with perf.timed("virtual_sessions.list.lock_busy_cached"):
@@ -330,6 +339,7 @@ def list_all() -> list[dict[str, Any]]:
             and _summary_cache_signature == signature
             and _summary_cache is not None
         ):
+            _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
             with perf.timed("virtual_sessions.list.copy_cached"):
                 return _copy_summaries(_summary_cache)
         sessions = data.get("sessions") or {}
@@ -351,6 +361,7 @@ def list_all() -> list[dict[str, Any]]:
             _summary_cache_signature = signature
             with perf.timed("virtual_sessions.list.cache_copy"):
                 _summary_cache = _copy_summaries(out)
+            _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
         with perf.timed("virtual_sessions.list.copy_result"):
             return _copy_summaries(out)
     finally:
