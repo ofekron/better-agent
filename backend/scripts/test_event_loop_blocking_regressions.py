@@ -548,6 +548,47 @@ def test_session_timestamp_sort_value_is_cached() -> None:
     assert "return _timestamp_sort_value_str(value)" in helper_source
 
 
+def test_user_input_file_store_calls_are_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    state_start = source.index("async def _broadcast_user_input_state(")
+    state_end = source.index("@app.get(\"/api/user-input/pending\")", state_start)
+    state_source = source[state_start:state_end]
+    assert "pending_count = await asyncio.to_thread(" in state_source
+    assert "user_input_store.pending_count_for_session" in state_source
+    assert "\"pending_user_input_count\": pending_count" in state_source
+
+    pending_start = source.index("async def get_pending_user_inputs(")
+    pending_end = source.index("@app.post(\"/api/user-input/{request_id}/resolve\")", pending_start)
+    pending_source = source[pending_start:pending_end]
+    assert "await asyncio.to_thread(" in pending_source
+    assert "user_input_store.pending_for_session" in pending_source
+    assert "user_input_store.pending_for_session(sid)" not in pending_source
+
+    resolve_start = source.index("async def resolve_user_input(")
+    resolve_end = source.index("@app.post(\"/api/user-input/{request_id}/cancel\")", resolve_start)
+    resolve_source = source[resolve_start:resolve_end]
+    assert "await asyncio.to_thread(user_input_store.get_request, request_id)" in resolve_source
+    assert "await asyncio.to_thread(\n        user_input_store.resolve_request" in resolve_source
+    assert "user_input_store.resolve_request(request_id, answers)" not in resolve_source
+
+    cancel_start = source.index("async def cancel_user_input(")
+    cancel_end = source.index("@app.post(\"/api/internal/user-input/request\")", cancel_start)
+    cancel_source = source[cancel_start:cancel_end]
+    assert "await asyncio.to_thread(user_input_store.get_request, request_id)" in cancel_source
+    assert "await asyncio.to_thread(user_input_store.cancel_request, request_id)" in cancel_source
+    assert "user_input_store.cancel_request(request_id)" not in cancel_source
+
+    internal_start = source.index("async def internal_request_user_input(")
+    internal_end = source.index("@app.post(\"/api/internal/goal/set\")", internal_start)
+    internal_source = source[internal_start:internal_end]
+    assert "public_req = await asyncio.to_thread(" in internal_source
+    assert "user_input_store.create_request" in internal_source
+    assert "user_input_store.create_request(" not in internal_source.replace(
+        "user_input_store.create_request,\n",
+        "",
+    )
+
+
 def test_stubbed_tree_build_does_not_search_tree_per_node() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     start = source.index("def _build_stubbed_tree(")

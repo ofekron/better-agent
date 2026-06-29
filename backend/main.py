@@ -9372,10 +9372,14 @@ async def _broadcast_user_input_state(app_session_id: str) -> None:
     sid = str(app_session_id or "").strip()
     if not sid:
         return
+    pending_count = await asyncio.to_thread(
+        user_input_store.pending_count_for_session,
+        sid,
+    )
     await coordinator.broadcast_global("session_user_input_changed", {
         "session_id": sid,
         "app_session_id": sid,
-        "pending_user_input_count": user_input_store.pending_count_for_session(sid),
+        "pending_user_input_count": pending_count,
     })
 
 
@@ -9386,12 +9390,17 @@ async def get_pending_user_inputs(app_session_id: str):
         raise HTTPException(status_code=400, detail="app_session_id is required")
     if await _session_lite(sid) is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    return {"requests": user_input_store.pending_for_session(sid)}
+    return {
+        "requests": await asyncio.to_thread(
+            user_input_store.pending_for_session,
+            sid,
+        )
+    }
 
 
 @app.post("/api/user-input/{request_id}/resolve")
 async def resolve_user_input(request_id: str, body: dict):
-    req = user_input_store.get_request(request_id)
+    req = await asyncio.to_thread(user_input_store.get_request, request_id)
     if req is None:
         raise HTTPException(status_code=404, detail="request not found")
     if str(body.get("app_session_id") or "").strip() != req.get("app_session_id"):
@@ -9407,7 +9416,11 @@ async def resolve_user_input(request_id: str, body: dict):
         if not value:
             raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
         answers[qid] = value[:2000]
-    resolved = user_input_store.resolve_request(request_id, answers)
+    resolved = await asyncio.to_thread(
+        user_input_store.resolve_request,
+        request_id,
+        answers,
+    )
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
     await _broadcast_user_input("user_input_resolved", {
@@ -9421,12 +9434,12 @@ async def resolve_user_input(request_id: str, body: dict):
 
 @app.post("/api/user-input/{request_id}/cancel")
 async def cancel_user_input(request_id: str, body: dict):
-    req = user_input_store.get_request(request_id)
+    req = await asyncio.to_thread(user_input_store.get_request, request_id)
     if req is None:
         raise HTTPException(status_code=404, detail="request not found")
     if str(body.get("app_session_id") or "").strip() != req.get("app_session_id"):
         raise HTTPException(status_code=403, detail="session mismatch")
-    resolved = user_input_store.cancel_request(request_id)
+    resolved = await asyncio.to_thread(user_input_store.cancel_request, request_id)
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
     await _broadcast_user_input("user_input_resolved", {
@@ -9463,7 +9476,8 @@ async def internal_request_user_input(
             return {"success": False, "error": "timeout_seconds must be a number"}
         if timeout_seconds <= 0 or timeout_seconds > 86400:
             return {"success": False, "error": "timeout_seconds must be between 1 and 86400"}
-    public_req = user_input_store.create_request(
+    public_req = await asyncio.to_thread(
+        user_input_store.create_request,
         app_session_id=app_session_id,
         questions=questions,
         timeout_seconds=timeout_seconds,
