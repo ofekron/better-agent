@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
 
 _pending = False
 _failed: Optional[str] = None
 _ready: Optional[asyncio.Event] = None
+_DEFAULT_WAIT_TIMEOUT_SECONDS = 2.0
+_log = logging.getLogger(__name__)
 
 
 def begin_recovery() -> None:
@@ -30,10 +33,19 @@ def mark_recovery_failed(error: str) -> None:
         _ready.set()
 
 
-async def wait_for_recovery_ready() -> None:
+async def wait_for_recovery_ready(timeout: float | None = _DEFAULT_WAIT_TIMEOUT_SECONDS) -> None:
     ready = _ready
     if _pending and ready is not None:
-        await ready.wait()
+        try:
+            if timeout is None:
+                await ready.wait()
+            else:
+                await asyncio.wait_for(ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "startup recovery gate still pending after %.1fs; continuing",
+                timeout,
+            )
     if _failed:
         raise RuntimeError(f"startup recovery failed: {_failed}")
 
