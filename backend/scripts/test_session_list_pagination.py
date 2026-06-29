@@ -463,15 +463,21 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
         return False
 
     original = main._decorate_local_sidebar_sessions
+    original_lookup = main._local_session_summaries_by_ids_for_sidebar
 
     def fail_decorate(*_args, **_kwargs):
         raise AssertionError("identical summaries request should use response cache")
 
+    def fail_lookup(*_args, **_kwargs):
+        raise AssertionError("identical summaries request should skip summary lookup")
+
     main._decorate_local_sidebar_sessions = fail_decorate
+    main._local_session_summaries_by_ids_for_sidebar = fail_lookup
     try:
         second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
     finally:
         main._decorate_local_sidebar_sessions = original
+        main._local_session_summaries_by_ids_for_sidebar = original_lookup
     if second.status_code != 200:
         print(f"{FAIL} /api/sessions/summaries cached status {second.status_code}")
         return False
