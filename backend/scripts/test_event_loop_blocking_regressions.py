@@ -469,6 +469,10 @@ def test_internal_workers_list_runs_projection_off_loop() -> None:
     assert "session_manager.get_lite(" not in route_source
     projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
     assert "session_manager.get_fields_many(" in projection_source
+    assert "session_store.summary_fields_many(worker_sids, fields)" in projection_source
+    assert "extension.team_orchestration.workers.summary_fields" in projection_source
+    assert "extension.team_orchestration.workers.fallback_fields" in projection_source
+    assert projection_source.index("session_store.summary_fields_many") < projection_source.index("session_manager.get_fields_many")
     assert "session_manager.get_fields(\n            bc_sid" not in projection_source
     assert "session_manager.get_lite(" not in projection_source
     assert "pair_records: list[dict[str, Any]] = []" in projection_source

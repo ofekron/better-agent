@@ -622,6 +622,24 @@ def summary_version() -> int:
         return _summary_index_version
 
 
+def summary_fields_many(
+    sids: list[str] | tuple[str, ...],
+    fields: set[str] | tuple[str, ...] | list[str],
+) -> dict[str, dict]:
+    _ensure_summary_index(blocking=False)
+    wanted = tuple(fields)
+    with _summary_index_lock:
+        return {
+            sid: {
+                field: copy.deepcopy(summary.get(field))
+                for field in wanted
+            }
+            for sid in sids
+            if isinstance(sid, str)
+            and (summary := _summary_index.get(sid)) is not None
+        }
+
+
 def summary_order_version() -> int:
     with _summary_index_lock:
         return _summary_order_version
