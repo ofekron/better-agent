@@ -154,6 +154,45 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("shows open session tabs when no session is selected", async () => {
+    const sessions = ["One", "Two"].map((name, i) =>
+      makeSession({
+        id: `sess-${i + 1}`,
+        name,
+        cwd: "/tmp/project-a",
+      }),
+    );
+    window.history.pushState(null, "", "/empty-project");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(sessions.map((session) => session.id)),
+    );
+    const h = await renderApp({
+      seed: {
+        sessions,
+        projects: [{
+          path: "/tmp/project-a",
+          name: "project-a",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+
+    expect(h.$(".empty-project")).not.toBeNull();
+    expect(
+      await waitFor(h, () => {
+        const tabsText = h.$(".session-tabs")?.textContent ?? "";
+        return tabsText.includes("One") && tabsText.includes("Two");
+      }),
+    ).toBe(true);
+
+    await h.clickByText(/One/);
+
+    expect(window.location.pathname).toBe("/s/sess-1");
+    h.unmount();
+  }, 10000);
+
   it("does not cap saved open session tabs", async () => {
     const sessions = Array.from({ length: 20 }, (_, i) =>
       makeSession({
