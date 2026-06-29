@@ -4,21 +4,28 @@ from typing import Any
 
 from i18n import t
 from session_manager import manager as session_manager
+import perf
+import session_store
 
 
 def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
     from stores import worker_store as worker_store
 
-    raw = worker_store._read()
-    workers = sorted(
-        raw.get("workers", []),
-        key=lambda worker: worker.get("last_active", ""),
-        reverse=True,
-    )
-    fields_by_sid = session_manager.get_fields_many(
-        [str(worker.get("agent_session_id") or "") for worker in workers],
-        ("agent_session_id", "cwd", "name", "orchestration_mode"),
-    )
+    with perf.timed("extension.team_orchestration.workers.registry"):
+        raw = worker_store._read()
+        workers = sorted(
+            raw.get("workers", []),
+            key=lambda worker: worker.get("last_active", ""),
+            reverse=True,
+        )
+    worker_sids = [str(worker.get("agent_session_id") or "") for worker in workers]
+    fields = ("agent_session_id", "cwd", "name", "orchestration_mode")
+    with perf.timed("extension.team_orchestration.workers.summary_fields"):
+        fields_by_sid = session_store.summary_fields_many(worker_sids, fields)
+    missing_sids = [sid for sid in worker_sids if sid and sid not in fields_by_sid]
+    if missing_sids:
+        with perf.timed("extension.team_orchestration.workers.fallback_fields"):
+            fields_by_sid.update(session_manager.get_fields_many(missing_sids, fields))
     forks = raw.get("forks", {}) or {}
     out: list[dict[str, Any]] = []
     for worker in workers:
@@ -37,28 +44,30 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
         any_pair_stale = False
         pair_records: list[dict[str, Any]] = []
         if not sid_rotated and live_parent_sid:
-            for _caller_sid, by_worker in forks.items():
-                rec = by_worker.get(bc_sid)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("parent_agent_sid") != live_parent_sid:
-                    any_pair_stale = True
-                    break
-                pair_records.append(rec)
+            with perf.timed("extension.team_orchestration.workers.fork_scan"):
+                for _caller_sid, by_worker in forks.items():
+                    rec = by_worker.get(bc_sid)
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("parent_agent_sid") != live_parent_sid:
+                        any_pair_stale = True
+                        break
+                    pair_records.append(rec)
         if not any_pair_stale and pair_records and live_parent_sid:
             from orchs.jsonl_helpers import compute_jsonl_path, count_jsonl_lines
 
-            live_parent_lines = 0
-            path = compute_jsonl_path(worker_cwd, live_parent_sid)
-            if path:
-                try:
-                    live_parent_lines = count_jsonl_lines(path)
-                except Exception:
-                    live_parent_lines = 0
-            for rec in pair_records:
-                if int(rec.get("parent_line_count_at_fork", 0)) < live_parent_lines:
-                    any_pair_stale = True
-                    break
+            with perf.timed("extension.team_orchestration.workers.divergence_lines"):
+                live_parent_lines = 0
+                path = compute_jsonl_path(worker_cwd, live_parent_sid)
+                if path:
+                    try:
+                        live_parent_lines = count_jsonl_lines(path)
+                    except Exception:
+                        live_parent_lines = 0
+                for rec in pair_records:
+                    if int(rec.get("parent_line_count_at_fork", 0)) < live_parent_lines:
+                        any_pair_stale = True
+                        break
         diverged = sid_rotated or any_pair_stale
         out.append({
             "agent_session_id": bc_sid,
