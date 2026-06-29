@@ -34,6 +34,11 @@ steady state instead of O(N-events × N-panes):
      the threadpool, an unrelated coroutine on the event loop still
      gets scheduled within tight latency.
 
+  8. **Subscribe stale-debug probes stay off the normal path**. Replay
+     details are useful when DEBUG is enabled, but the normal reconnect
+     path must not run extra session-manager probes or write INFO logs
+     per subscribe.
+
 Run with:
     cd backend && .venv/bin/python scripts/test_session_hop_redundant_work.py
 """
@@ -583,6 +588,36 @@ def test_ws_event_cursor_uses_server_floor() -> bool:
     return True
 
 
+def test_ws_replay_stale_debug_is_debug_gated() -> bool:
+    source = Path(_BACKEND, "main.py").read_text(encoding="utf-8")
+    start = source.index('await ws_callback({\n                                "type": "messages_replay"')
+    end = source.index('                    except Exception:\n                        logger.exception("messages_replay on subscribe failed")', start)
+    replay_tail = source[start:end]
+    debug_gate = "if logger.isEnabledFor(logging.DEBUG):"
+    if debug_gate not in replay_tail:
+        print("  missing DEBUG gate around stale replay probes")
+        return False
+    gated = replay_tail[replay_tail.index(debug_gate):]
+    for needle in (
+        "session_manager._root_id_for",
+        "session_manager.is_reconcile_dirty",
+        "logger.debug(",
+    ):
+        if needle not in gated:
+            print(f"  {needle} is not behind DEBUG gate")
+            return False
+    normal_path = replay_tail[:replay_tail.index(debug_gate)]
+    for needle in (
+        "session_manager._root_id_for",
+        "session_manager.is_reconcile_dirty",
+        "logger.info(\n                                    \"WS replay",
+    ):
+        if needle in normal_path:
+            print(f"  {needle} still runs on normal replay path")
+            return False
+    return True
+
+
 def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
     sess = session_manager.create(
         name="team-stub", model="glm-5.1", cwd="/tmp",
@@ -674,6 +709,7 @@ async def _amain() -> int:
         ("non-render orphan does not rebuild root events", test_non_render_orphan_does_not_rebuild_root_events_projection),
         ("ws replay cap at msg_limit", test_ws_replay_cap_at_msg_limit),
         ("ws event cursor uses server floor", test_ws_event_cursor_uses_server_floor),
+        ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),
         ("stubbed team tree skips full event hydration", test_stubbed_team_tree_skips_full_event_hydration),
     ]
     async_tests = [
