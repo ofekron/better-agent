@@ -77,6 +77,16 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     assert "sess = session_manager.get_lite(self.app_session_id)" not in source
 
 
+def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
+    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    start = source.index("def _ref_ctx_for_root(")
+    end = source.index("class EventIngester:", start)
+    helper_source = source[start:end]
+    assert 'session_store.summary_fields_many([root_id], ("cwd", "node_id"))' in helper_source
+    assert "session_manager.get_lite(" not in helper_source
+    assert "session_manager.get(" not in helper_source
+
+
 def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     file_start = source.index("class _FileTailFollower:")
@@ -2635,6 +2645,7 @@ if __name__ == "__main__":
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
+    test_event_ingester_file_ref_context_uses_summary_projection()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
