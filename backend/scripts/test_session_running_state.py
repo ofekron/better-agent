@@ -170,6 +170,23 @@ def test_active_pidless_turn_survives_prune() -> None:
     print(f"{PASS} active_pidless_turn_survives_prune")
 
 
+def test_new_pidless_worker_survives_before_pid_attach() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(sid, run_id="worker-race", kind="worker", target_message_id=None)
+
+    pruned = coord._prune_dead_entries(sid)
+    assert pruned is False, "new pidless worker must survive initial prune window"
+
+    coord.run_state_set_pid(sid, "worker-race", os.getpid())
+    runs = coord.get_run_state(sid)
+    assert runs and runs[0].get("pid") == os.getpid(), (
+        f"pid update did not attach to worker run_state: {runs}"
+    )
+    coord.run_state_remove(sid, "worker-race")
+    print(f"{PASS} new_pidless_worker_survives_before_pid_attach")
+
+
 def test_duplicate_worker_run_id_updates_existing_entry() -> None:
     sid = _mk_session()
     coord = _bound_coord()
@@ -201,6 +218,7 @@ def main() -> int:
         test_multiple_runs_single_fire()
         test_worker_fork_does_not_set_running()
         test_active_pidless_turn_survives_prune()
+        test_new_pidless_worker_survives_before_pid_attach()
         test_duplicate_worker_run_id_updates_existing_entry()
         print("ALL PASSED")
         return 0
