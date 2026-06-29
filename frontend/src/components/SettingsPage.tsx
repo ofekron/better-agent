@@ -737,6 +737,8 @@ interface ExtensionListRecord {
     entrypoints?: {
       instructions?: { name: string; level?: string }[];
       provider_capabilities?: { name: string; level?: string }[]; // legacy field name
+      skills?: { name: string }[];
+      mcp?: Array<string | { name?: string }>;
     };
   };
   instructions_enabled?: { global?: boolean; projects?: Record<string, boolean> };
@@ -764,6 +766,12 @@ interface ExtensionRemoteService {
   purpose: string;
 }
 
+interface ExtensionHarnessAddition {
+  kind: "instructions" | "skill" | "mcp" | string;
+  name: string;
+  detail?: string;
+}
+
 interface ExtensionPermissionsConfig {
   permissions?: {
     declared?: Record<string, unknown>;
@@ -781,6 +789,7 @@ interface ExtensionConfigRow {
   hasPage: boolean;
   quickButtonEnabled: boolean;
   pageEnabled: boolean;
+  harnessAdditions: ExtensionHarnessAddition[];
   mcp: Array<{ name: string; label: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
@@ -838,6 +847,29 @@ function buildPermissionViews(cfg: ExtensionPermissionsConfig): ExtensionPermiss
     permissions.push({ name, mode: "required" });
   }
   return permissions.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+type ExtensionManifestEntryPoints = NonNullable<NonNullable<ExtensionListRecord["manifest"]>["entrypoints"]>;
+
+function buildManifestHarnessAdditions(entrypoints: ExtensionManifestEntryPoints): ExtensionHarnessAddition[] {
+  const additions: ExtensionHarnessAddition[] = [];
+  for (const item of entrypoints.instructions ?? []) {
+    if (item.name) additions.push({ kind: "instructions", name: item.name, detail: item.level === "project" ? "project" : "global" });
+  }
+  for (const item of entrypoints.provider_capabilities ?? []) {
+    if (item.name) additions.push({ kind: "instructions", name: item.name, detail: item.level === "project" ? "project" : "global" });
+  }
+  for (const item of entrypoints.skills ?? []) {
+    if (item.name) additions.push({ kind: "skill", name: item.name });
+  }
+  for (const item of entrypoints.mcp ?? []) {
+    if (typeof item === "string") {
+      additions.push({ kind: "mcp", name: item });
+    } else if (item?.name) {
+      additions.push({ kind: "mcp", name: item.name });
+    }
+  }
+  return additions;
 }
 
 function ExtensionConfigGroup({
@@ -957,6 +989,7 @@ export function ExtensionUiSettingsSection() {
             level: s.level === "project" ? "project" : "global",
           }));
         const instructionsEnabled = record.instructions_enabled ?? {};
+        const manifestHarnessAdditions = buildManifestHarnessAdditions(ep);
         try {
           const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}/config`, {
             credentials: "include",
@@ -972,6 +1005,7 @@ export function ExtensionUiSettingsSection() {
             hasPage: Boolean(cfg.has_page),
             quickButtonEnabled: cfg.ui?.quick_button_enabled !== false,
             pageEnabled: cfg.ui?.page_enabled !== false,
+            harnessAdditions: Array.isArray(cfg.harness_additions) ? cfg.harness_additions : manifestHarnessAdditions,
             mcp: Array.isArray(cfg.mcp) ? cfg.mcp : [],
             remoteServices: Array.isArray(cfg.remote_services) ? cfg.remote_services : [],
             settingsSchema: Array.isArray(cfg.settings?.schema) ? cfg.settings.schema : [],
@@ -1186,6 +1220,24 @@ export function ExtensionUiSettingsSection() {
                 />
               </label>
             </ExtensionConfigGroup>
+            {row.harnessAdditions.length > 0 && (
+              <ExtensionConfigGroup
+                title={t("settings.extensionsHarnessAdditions")}
+                description={t("settings.extensionsHarnessAdditionsHelp")}
+              >
+                <div className="extension-ui-settings-harness-additions">
+                  {row.harnessAdditions.map((item) => (
+                    <div key={`${item.kind}:${item.name}:${item.detail || ""}`} className="extension-ui-settings-harness-addition">
+                      <span className="extension-ui-settings-harness-kind">
+                        {t(`settings.extensionsHarnessKind.${item.kind}`, { defaultValue: item.kind })}
+                      </span>
+                      <span className="extension-ui-settings-harness-name">{item.name}</span>
+                      {item.detail && <span className="extension-ui-settings-harness-detail">{item.detail}</span>}
+                    </div>
+                  ))}
+                </div>
+              </ExtensionConfigGroup>
+            )}
             {(row.hasQuickButton || row.hasPage) && (
               <ExtensionConfigGroup
                 title={t("settings.extensionsUiSurfaces")}

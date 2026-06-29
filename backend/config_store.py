@@ -586,6 +586,7 @@ INTERNAL_LLM_TASKS = (
     "provider_config_sync_review",
     "session_search_worker",
     "project_structure_edit",
+    "extension_context_audit",
     "assistant",
     "delegation_task",
     "delegation_message",
