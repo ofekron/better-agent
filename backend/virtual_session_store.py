@@ -73,7 +73,7 @@ def _load_shared_locked() -> dict[str, Any]:
     if not isinstance(sessions, dict):
         data["sessions"] = {}
     _cache_signature = signature
-    _cache_data = deepcopy(data)
+    _cache_data = data
     return _cache_data
 
 
@@ -86,7 +86,7 @@ def _save(data: dict[str, Any]) -> None:
     try:
         st = path.stat()
         _cache_signature = (st.st_mtime_ns, st.st_size)
-        _cache_data = deepcopy(data)
+        _cache_data = data
         _summary_cache_signature = _cache_signature
         _summary_cache = _project_summaries(data)
         _summary_cache.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
