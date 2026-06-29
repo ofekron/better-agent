@@ -1039,9 +1039,11 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "def _warm_session_detail_projection_roots(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
     assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 0.0" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 2.0" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_BATCH = 1" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS" in source
+    assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS = 0.35" in source
     detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
     detail_warm_source = source[detail_warm_start:detail_warm_end]
