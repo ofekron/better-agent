@@ -1984,13 +1984,28 @@ def _sidebar_session_payload(session: dict) -> dict:
     return payload
 
 
-def _decorate_local_sidebar_sessions(sessions: list[dict]) -> list[dict]:
+def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int]]:
+    running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
+    unread_by_sid = session_manager.unread_counts_snapshot()
+    pending_input_by_sid = user_input_store.pending_counts_by_session()
+    return running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+
+
+def _decorate_local_sidebar_sessions(
+    sessions: list[dict],
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+) -> list[dict]:
     local: list[dict] = []
     with perf.timed("sessions.list.local.decorate"):
         with perf.timed("sessions.list.local.decorate.state"):
-            running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
-            unread_by_sid = session_manager.unread_counts_snapshot()
-            pending_input_by_sid = user_input_store.pending_counts_by_session()
+            if state_snapshot is None:
+                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                    _sidebar_state_snapshot()
+                )
+            else:
+                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                    state_snapshot
+                )
             sessions_dir = _root_sessions_dir_path()
         for s in sessions:
             with perf.timed("sessions.list.local.decorate.payload"):
@@ -2225,7 +2240,7 @@ async def internal_session_capabilities(
     action = str((body or {}).get("action") or "").strip()
     if action not in ("list", "load", "release"):
         raise HTTPException(status_code=400, detail="action must be list, load or release")
-    sess = session_manager.get(sid)
+    sess = await asyncio.to_thread(session_manager.get, sid)
     if not sess:
         raise HTTPException(status_code=404, detail="unknown session")
     if action == "list":
@@ -3345,6 +3360,7 @@ def _filter_sort_sessions_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     out = [
         session for session in sessions
@@ -3371,9 +3387,9 @@ def _filter_sort_sessions_for_list(
     unread_by_sid: dict[str, int] = {}
     pending_input_by_sid: dict[str, int] = {}
     if status_sort:
-        _, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
-        unread_by_sid = session_manager.unread_counts_snapshot()
-        pending_input_by_sid = user_input_store.pending_counts_by_session()
+        if state_snapshot is None:
+            state_snapshot = _sidebar_state_snapshot()
+        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
     out.sort(
         key=(
             (lambda session: _session_filtered_sort_key(
@@ -3493,6 +3509,7 @@ def _build_local_sessions_page_for_list(
     status_sort: bool = False,
 ) -> tuple[list[dict], int]:
     content_scores: dict[str, int] = {}
+    state_snapshot = _sidebar_state_snapshot() if status_sort else None
     search_query = (search or "").strip()
     virtual_sessions: list[dict] = []
     if search_query:
@@ -3569,11 +3586,12 @@ def _build_local_sessions_page_for_list(
                 content_scores=content_scores,
                 sort_by=sort_by,
                 status_sort=status_sort,
+                state_snapshot=state_snapshot,
             )
     total = len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
-        page = _decorate_local_sidebar_sessions(out[offset:end])
+        page = _decorate_local_sidebar_sessions(out[offset:end], state_snapshot)
     if content_scores:
         page = [
             {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
@@ -3779,6 +3797,11 @@ async def get_sessions(
     except Exception:
         logger.debug("get_sessions: node merge failed", exc_info=True)
 
+    state_snapshot = (
+        await asyncio.to_thread(_sidebar_state_snapshot)
+        if effective_status_sort
+        else None
+    )
     with perf.timed("sessions.list.filter_sort"):
         out = await asyncio.to_thread(
             _filter_sort_sessions_for_list,
@@ -3797,11 +3820,16 @@ async def get_sessions(
             content_scores=content_scores,
             sort_by=effective_sort_by,
             status_sort=effective_status_sort,
+            state_snapshot=state_snapshot,
         )
     total = len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
-        page = await asyncio.to_thread(_decorate_local_sidebar_sessions, out[offset:end])
+        page = await asyncio.to_thread(
+            _decorate_local_sidebar_sessions,
+            out[offset:end],
+            state_snapshot,
+        )
     if content_scores:
         page = [
             {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
@@ -9927,7 +9955,7 @@ async def internal_agent_board_run_prompt(
         raise HTTPException(status_code=400, detail="prompt too long")
     # Constrain the target to a real, existing session so a bug in the
     # extension subprocess cannot drive arbitrary/virtual session ids.
-    if not session_manager.exists(session_id):
+    if not await _session_exists(session_id):
         raise HTTPException(status_code=404, detail="unknown session")
     # Continue-mode delivery refuses a busy target; surface that synchronously
     # so the drop UI can tell the user instead of silently dropping the prompt.
