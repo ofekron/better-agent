@@ -16,6 +16,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provider_claude  # noqa: E402
+from orchestrator import Coordinator  # noqa: E402
 from session_manager import SessionManager  # noqa: E402
 
 
@@ -45,6 +46,14 @@ def test_session_manager_has_field_snapshot_reader() -> bool:
     )
 
 
+def test_provider_selection_reads_fields_without_full_session_copy() -> bool:
+    source = inspect.getsource(Coordinator.provider_for_session)
+    return (
+        "session_manager.get_fields(app_session_id" in source
+        and "session_manager.get(app_session_id" not in source
+    )
+
+
 def main() -> int:
     results = [
         _check(
@@ -56,6 +65,11 @@ def main() -> int:
             "field snapshot reader skips event hydration",
             test_session_manager_has_field_snapshot_reader(),
             "session field reads may hydrate/copy message events",
+        ),
+        _check(
+            "provider selection uses field snapshots",
+            test_provider_selection_reads_fields_without_full_session_copy(),
+            "provider_for_session deep-copies the full session",
         ),
     ]
     passed = sum(1 for _, ok, _ in results if ok)
