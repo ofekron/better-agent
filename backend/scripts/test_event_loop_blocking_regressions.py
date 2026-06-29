@@ -1175,6 +1175,7 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
 def test_project_update_total_is_maintained_projection() -> None:
     source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
     assert "_total_unseen_count = 0" in source
+    assert "def warm_counts(" in source
     load_start = source.index("def _ensure_counts_locked(")
     load_end = source.index("def _set_count_locked(", load_start)
     load_source = source[load_start:load_end]
@@ -1197,6 +1198,14 @@ def test_project_update_total_is_maintained_projection() -> None:
     assert "_set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)" in mark_source
     assert "return _total_unseen_count" in total_source
     assert "sum(_unseen_counts.values())" not in total_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = main_source.index("async def on_startup()")
+    startup_end = main_source.index("async def on_shutdown()", startup_start)
+    startup_source = main_source[startup_start:startup_end]
+    assert '"project_update_counts_warm"' in startup_source
+    assert "project_update_store.warm_counts" in startup_source
+    assert 'name="startup-project-update-counts-warm"' in startup_source
 
 
 def test_extension_list_reconciliation_is_off_loop() -> None:

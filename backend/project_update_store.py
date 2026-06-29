@@ -120,6 +120,11 @@ def total_unseen() -> int:
         return _total_unseen_count
 
 
+def warm_counts() -> None:
+    with _lock:
+        _ensure_counts_locked()
+
+
 def peek_total_unseen() -> int | None:
     with _lock:
         if not _counts_loaded:
