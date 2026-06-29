@@ -251,7 +251,7 @@ describe("InputArea queued prompt promote action", () => {
     expect(within(minimized).getByRole("button", { name: "Expand queued prompt" })).toBeTruthy();
   });
 
-  it("summarizes hidden queued comments and attachments while minimized", () => {
+  it("renders queued tags and summarizes attachments while minimized", () => {
     renderInputArea(true, "", {
       queuedPrompt: {
         id: "q1",
@@ -265,10 +265,11 @@ describe("InputArea queued prompt promote action", () => {
 
     const minimized = screen.getByTestId("queued-prompt-banner");
     expect(within(minimized).getByText("queued work")).toBeTruthy();
-    expect(screen.queryByText("check this")).toBeNull();
+    expect(within(minimized).getByText("check this")).toBeTruthy();
+    expect(within(minimized).getByText("a.ts:1-2")).toBeTruthy();
     expect(screen.queryByText("notes.txt")).toBeNull();
     expect(screen.getByTestId("queued-minimized-summary").textContent).toBe(
-      "1 comment · 1 image · 1 file",
+      "1 image · 1 file",
     );
   });
 
