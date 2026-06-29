@@ -1341,6 +1341,9 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
     assert "await _run_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
     assert "await asyncio.to_thread(_build_local_sessions_page_for_list" not in route_source
     assert "await _run_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
+    assert "\"sessions.list.page_decorate.worker\"" in route_source
+    assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
+    assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
 
 
 def test_sidebar_summary_omits_worker_refs() -> None:

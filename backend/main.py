@@ -4732,7 +4732,8 @@ async def get_sessions(
             if deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions:
                 end = offset + limit
                 with perf.timed("sessions.list.page_decorate"):
-                    page = await asyncio.to_thread(
+                    page = await _run_hot_path(
+                        "sessions.list.page_decorate.worker",
                         _decorate_local_sidebar_sessions,
                         out[offset:end],
                         None,
@@ -4834,7 +4835,8 @@ async def get_sessions(
                 limit=limit,
             )
         with perf.timed("sessions.list.page_decorate"):
-            page = await asyncio.to_thread(
+            page = await _run_hot_path(
+                "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 page_source,
                 None,
@@ -4858,7 +4860,8 @@ async def get_sessions(
     ):
         end = offset + limit
         with perf.timed("sessions.list.page_decorate"):
-            page = await asyncio.to_thread(
+            page = await _run_hot_path(
+                "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 out[offset:end],
                 None,
@@ -4945,7 +4948,8 @@ async def get_sessions(
     total = local_total if local_total is not None else len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
-        page = await asyncio.to_thread(
+        page = await _run_hot_path(
+            "sessions.list.page_decorate.worker",
             _decorate_local_sidebar_sessions,
             out[offset:end],
             state_snapshot,
