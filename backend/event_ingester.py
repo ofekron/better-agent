@@ -1783,6 +1783,9 @@ class EventIngester:
                 if loaded is not None:
                     summaries, resolutions = loaded
                     self._rebuild_seq_offsets_locked(path, root_id)
+                    self._summaries_cache[root_id] = (
+                        file_size, summaries, resolutions,
+                    )
                 else:
                     summaries, resolutions = self._scan_summaries(
                         path, root_id, tail,
