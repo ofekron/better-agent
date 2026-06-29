@@ -350,6 +350,17 @@ def test_message_cache_hydration_has_substep_perf_metrics() -> None:
     assert "event_journal.message_cache.read_grow" in cache_source
 
 
+def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
+    source = (ROOT / "node_link.py").read_text(encoding="utf-8")
+    assert "_MACHINE_NODES_READY_CACHE_TTL_S" in source
+    start = source.index("def _machine_nodes_not_ready_reason(")
+    end = source.index("def set_registration_listener(", start)
+    readiness_source = source[start:end]
+    assert "time.monotonic()" in readiness_source
+    assert "_machine_nodes_ready_cache" in readiness_source
+    assert "runtime_not_ready_message(" in readiness_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
