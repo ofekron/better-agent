@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
+_SESSION_SIDECAR_SUFFIXES = (
+    ".summary.json",
+    ".drafts.json",
+    ".seen.json",
+    ".opened.json",
+    ".fork-index.json",
+    ".summary-index.json",
+)
+
 
 def sessions_fingerprint() -> tuple[int, int, int]:
     from paths import ba_home
@@ -15,7 +24,7 @@ def sessions_fingerprint() -> tuple[int, int, int]:
     except OSError:
         return (0, 0, 0)
     for path in files:
-        if path.name.endswith(".summary.json"):
+        if path.name.endswith(_SESSION_SIDECAR_SUFFIXES):
             continue
         try:
             stat = path.stat()

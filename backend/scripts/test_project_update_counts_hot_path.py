@@ -89,6 +89,16 @@ def test_project_match_rebuild_skips_unchanged_sessions() -> bool:
     (sessions / "a.json").write_text('{"id":"a","cwd":"/a","messages":[]}', encoding="utf-8")
     (sessions / "a.summary.json").write_text("{}", encoding="utf-8")
     fingerprint = project_match_worker.sessions_fingerprint()
+    for name in (
+        "a.opened.json",
+        "a.seen.json",
+        "a.drafts.json",
+        ".fork-index.json",
+        ".summary-index.json",
+    ):
+        (sessions / name).write_text("{}", encoding="utf-8")
+    if project_match_worker.sessions_fingerprint() != fingerprint:
+        return False
     result = project_match_worker.rebuild_index(fingerprint)
     return result == {"rebuilt": False, "fingerprint": fingerprint}
 
