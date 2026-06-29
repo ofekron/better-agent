@@ -2126,8 +2126,16 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
     core_source = source[core_start:core_end]
     assert "extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in core_source
+    assert "extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID" in core_source
     assert "extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID" in core_source
     assert "extension_store.is_extension_enabled_cached(extension_id)" in core_source
+    team_start = source.index("async def _dispatch_team_orchestration_core_backend(")
+    team_end = source.index("async def _dispatch_machine_nodes_core_backend(", team_start)
+    team_source = source[team_start:team_end]
+    assert 'request.method == "GET" and path == "workers"' in team_source
+    assert 'request.method == "GET" and path == "pending_approvals"' in team_source
+    assert "team_orchestration_read.list_workers_for_cwd" in team_source
+    assert "pending_approvals.list_pending" in team_source
     project_start = source.index("async def _dispatch_project_structure_core_backend(")
     project_end = source.index("@router.post(\"/install\")", project_start)
     project_source = source[project_start:project_end]

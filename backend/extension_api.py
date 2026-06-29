@@ -267,6 +267,12 @@ async def _dispatch_core_builtin_backend(
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
     if extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
+        if extension_id == extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID:
+            if backend_spec is not None:
+                return None
+            if not extension_store.is_extension_enabled_cached(extension_id):
+                return None
+            return await _dispatch_team_orchestration_core_backend(clean_path, request)
         if extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
             return None
         if backend_spec is not None:
@@ -279,6 +285,40 @@ async def _dispatch_core_builtin_backend(
     if not extension_store.is_extension_enabled_cached(extension_id):
         return None
     return await _dispatch_machine_nodes_core_backend(clean_path, request)
+
+
+async def _dispatch_team_orchestration_core_backend(
+    path: str,
+    request: Request,
+) -> JSONResponse | None:
+    if request.method == "GET" and path == "workers":
+        import team_orchestration_read
+
+        cwd = str(request.query_params.get("cwd") or "")
+        with perf.timed("extension.team_orchestration.workers"):
+            return JSONResponse(
+                await asyncio.to_thread(team_orchestration_read.list_workers_for_cwd, cwd)
+            )
+    if request.method == "GET" and path == "pending_approvals":
+        from orchestrator import get_active_coordinator
+        from stores import pending_approvals
+
+        cwd = request.query_params.get("cwd")
+        coordinator = get_active_coordinator()
+        active_dids = (
+            set(coordinator.approval_waiters.keys())
+            if coordinator is not None
+            else set()
+        )
+        with perf.timed("extension.team_orchestration.pending_approvals"):
+            pending = await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)
+            return JSONResponse({
+                "approvals": [
+                    rec for rec in pending
+                    if rec.get("delegation_id") in active_dids
+                ],
+            })
+    return None
 
 
 async def _dispatch_machine_nodes_core_backend(
