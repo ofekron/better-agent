@@ -264,6 +264,29 @@ def test_connected_session_list_pages_virtual_candidates() -> None:
     assert "virtual_session_store.list_all" in virtual_source
 
 
+def test_delegation_status_writes_run_off_loop() -> None:
+    store_source = (ROOT / "delegation_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in store_source
+    assert "await asyncio.to_thread(write_status" in store_source
+    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    start = source.index("async def run_delegation(")
+    run_source = source[start:]
+    assert "await delegation_status_store.write_status_async(" in run_source
+    assert "delegation_status_store.write_status(" not in run_source
+
+
+def test_team_ask_status_writes_run_off_loop() -> None:
+    store_source = (ROOT / "ask_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in store_source
+    assert "await asyncio.to_thread(write_status" in store_source
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    start = source.index("async def ask_team_message(")
+    end = source.index("    def _team_message_turn_response(", start)
+    ask_source = source[start:end]
+    assert "await ask_status_store.write_status_async(" in ask_source
+    assert "ask_status_store.write_status(" not in ask_source
+
+
 def test_extension_plain_load_is_read_only() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
     load_start = source.index("def _load()")
@@ -1818,6 +1841,8 @@ if __name__ == "__main__":
     test_session_content_search_aggregates_in_sqlite()
     test_session_search_delete_is_queued_projection_work()
     test_publish_event_default_path_skips_temp_ack_subscribers()
+    test_delegation_status_writes_run_off_loop()
+    test_team_ask_status_writes_run_off_loop()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
     test_event_ingester_indexes_search_outside_root_lock()

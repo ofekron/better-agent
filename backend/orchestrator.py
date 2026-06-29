@@ -1802,7 +1802,7 @@ class Coordinator:
         try:
             if not reattach:
                 if ask_id:
-                    ask_status_store.write_status(
+                    await ask_status_store.write_status_async(
                         ask_id,
                         lifecycle_msg_id=lifecycle_msg_id,
                         queue_item_id=queue_item_id,
@@ -1903,7 +1903,7 @@ class Coordinator:
             **response,
         }
         if ask_id:
-            ask_status_store.write_status(ask_id, result=full)
+            await ask_status_store.write_status_async(ask_id, result=full)
         return full
 
     def _team_message_turn_response(
