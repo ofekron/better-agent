@@ -31,6 +31,7 @@ from provider import (
     RecoveredPopen,
     StreamEvent,
     build_better_agent_run_env,
+    path_exists_off_loop,
     schedule_loop_task,
     runner_argv,
 )
@@ -545,7 +546,7 @@ class GeminiProvider(Provider):
         # 1) Poll for state.json
         runner_state: Optional[dict] = None
         while True:
-            if state_path.exists():
+            if await path_exists_off_loop(state_path):
                 try:
                     parsed = json.loads(state_path.read_text(encoding="utf-8"))
                     if parsed.get("session_id"):
@@ -559,7 +560,7 @@ class GeminiProvider(Provider):
             # failure (e.g. invalid --resume target); the old
             # `and not state_path.exists()` gate would spin forever.
             if rs.popen.poll() is not None:
-                if complete_path.exists():
+                if await path_exists_off_loop(complete_path):
                     break
                 await self._emit_early_failure(
                     rs, f"runner exited early with code {rs.popen.returncode}"
@@ -632,7 +633,7 @@ class GeminiProvider(Provider):
         complete_path = rs.run_dir / "complete.json"
         try:
             while True:
-                if await asyncio.to_thread(complete_path.exists):
+                if await path_exists_off_loop(complete_path):
                     break
                 # INVARIANT: process death MUST end this loop. If the
                 # runner is SIGKILLed (OOM, manual kill, OS) it never
@@ -648,7 +649,7 @@ class GeminiProvider(Provider):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
                     while (
-                        not await asyncio.to_thread(complete_path.exists)
+                        not await path_exists_off_loop(complete_path)
                         and loop.time() < grace_end
                     ):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)

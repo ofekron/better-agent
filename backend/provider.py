@@ -48,6 +48,20 @@ from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_POLL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="provider-poll",
+)
+
+
+async def path_exists_off_loop(path: Path) -> bool:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)
+
+
+def shutdown_provider_poll_executor() -> None:
+    _PROVIDER_POLL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
 
 def schedule_loop_task(
     loop: asyncio.AbstractEventLoop,

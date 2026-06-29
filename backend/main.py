@@ -9798,6 +9798,11 @@ async def on_shutdown():
         _project_match_executor.shutdown(wait=False, cancel_futures=True)
         _project_match_executor = None
         _project_match_ready = False
+    try:
+        from provider import shutdown_provider_poll_executor
+        shutdown_provider_poll_executor()
+    except Exception:
+        logger.exception("provider poll executor shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
