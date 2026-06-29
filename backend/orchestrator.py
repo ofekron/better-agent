@@ -1241,17 +1241,19 @@ class Coordinator:
                 target_session_id=target_session_id,
             )
         try:
+            queue_item = await asyncio.to_thread(
+                team_messaging.queue_payload,
+                queue_item_id=queue_item_id,
+                sender_session_id=sender_session_id,
+                message=message,
+                metadata=metadata,
+                lifecycle_msg_id=lifecycle_msg_id,
+                target_session_id=target_session_id,
+            )
             await asyncio.to_thread(
                 session_manager.add_queued_prompt,
                 target_session_id,
-                team_messaging.queue_payload(
-                    queue_item_id=queue_item_id,
-                    sender_session_id=sender_session_id,
-                    message=message,
-                    metadata=metadata,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    target_session_id=target_session_id,
-                ),
+                queue_item,
             )
             cli_prompt = await asyncio.to_thread(
                 team_messaging.format_team_message_prompt,
@@ -1856,7 +1858,8 @@ class Coordinator:
         lifecycle_msg_id = (existing or {}).get("lifecycle_msg_id") or str(uuid.uuid4())
         queue_item_id = (existing or {}).get("queue_item_id") or str(uuid.uuid4())
 
-        sender, target = team_messaging.validate_message_route(
+        sender, target = await asyncio.to_thread(
+            team_messaging.validate_message_route,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
@@ -1868,7 +1871,8 @@ class Coordinator:
             model=model,
             reasoning_effort=reasoning_effort,
         )
-        metadata = team_messaging.build_message_metadata(
+        metadata = await asyncio.to_thread(
+            team_messaging.build_message_metadata,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
@@ -1929,19 +1933,23 @@ class Coordinator:
                         sender_session_id=sender_session_id,
                         target_session_id=target_session_id,
                     )
-                session_manager.add_queued_prompt(
-                    target_session_id,
-                    team_messaging.queue_payload(
-                        queue_item_id=queue_item_id,
-                        sender_session_id=sender_session_id,
-                        message=message,
-                        metadata=metadata,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        target_session_id=target_session_id,
-                        source=team_messaging.ASK_SOURCE,
-                    ),
+                queue_item = await asyncio.to_thread(
+                    team_messaging.queue_payload,
+                    queue_item_id=queue_item_id,
+                    sender_session_id=sender_session_id,
+                    message=message,
+                    metadata=metadata,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    target_session_id=target_session_id,
+                    source=team_messaging.ASK_SOURCE,
                 )
-                cli_prompt = team_messaging.format_team_message_prompt(
+                await asyncio.to_thread(
+                    session_manager.add_queued_prompt,
+                    target_session_id,
+                    queue_item,
+                )
+                cli_prompt = await asyncio.to_thread(
+                    team_messaging.format_team_message_prompt,
                     ask_prompt,
                     metadata,
                     target_session_id=target_session_id,
