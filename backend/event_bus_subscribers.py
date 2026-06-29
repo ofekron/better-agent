@@ -46,6 +46,10 @@ _OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="ownership-projection",
 )
+_CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="content-projection",
+)
 
 
 # Declare event schemas at MODULE LOAD time (not inside
@@ -121,14 +125,17 @@ async def _refresh_session_content_projection(event: BusEvent) -> None:
         return
     if payload.get("event_type") not in RENDER_EVENT_TYPES:
         return
-    await asyncio.to_thread(
-        session_manager.apply_written_journal_event,
-        event.root_id,
-        event.sid,
-        event.msg_id,
-        str(payload.get("event_type") or "unknown"),
-        payload.get("data") if isinstance(payload.get("data"), dict) else {},
-        int(payload.get("seq") or 0),
+    await asyncio.get_running_loop().run_in_executor(
+        _CONTENT_PROJECTION_EXECUTOR,
+        functools.partial(
+            session_manager.apply_written_journal_event,
+            event.root_id,
+            event.sid,
+            event.msg_id,
+            str(payload.get("event_type") or "unknown"),
+            payload.get("data") if isinstance(payload.get("data"), dict) else {},
+            int(payload.get("seq") or 0),
+        ),
     )
 
 
