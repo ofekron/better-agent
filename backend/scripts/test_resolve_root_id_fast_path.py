@@ -35,7 +35,8 @@ def _reset_home() -> None:
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
     session_store._summary_index_version = 0
-    session_store._summary_sorted_cache = []
+    session_store._summary_order_version = 0
+    session_store._summary_sorted_id_cache = []
     session_store._summary_sorted_cache_version = -1
 
 

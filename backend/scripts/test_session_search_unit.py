@@ -61,9 +61,10 @@ def _reset_home() -> None:
     sessions_dir.mkdir(parents=True, exist_ok=True)
     with session_store._summary_index_lock:  # type: ignore[attr-defined]
         session_store._summary_index.clear()  # type: ignore[attr-defined]
-        session_store._summary_sorted_cache.clear()  # type: ignore[attr-defined]
+        session_store._summary_sorted_id_cache.clear()  # type: ignore[attr-defined]
         session_store._summary_index_loaded = False  # type: ignore[attr-defined]
         session_store._summary_index_version = 0  # type: ignore[attr-defined]
+        session_store._summary_order_version = 0  # type: ignore[attr-defined]
         session_store._summary_sorted_cache_version = -1  # type: ignore[attr-defined]
     with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
         session_search_index._search_cache.clear()  # type: ignore[attr-defined]

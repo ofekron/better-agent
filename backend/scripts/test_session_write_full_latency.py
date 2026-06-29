@@ -252,6 +252,7 @@ def _run() -> bool:
          f"samples-trim={[f'{s:.1f}' for s in rest_latencies[:5]]}..."))
 
     session_store._ensure_summary_index(blocking=True)
+    order_version_before_projection = session_store._summary_order_version
     session_store.set_marker_projection(sid, "ext-a", {"color": "#ff0000"})
     session_store.set_requirement_tags_projection({
         sid: [{"id": "req-a", "label": "Req A"}],
@@ -268,6 +269,7 @@ def _run() -> bool:
             "session list uses maintained tag/marker projection",
             projected.get("markers") == {"ext-a": {"color": "#ff0000"}}
             and projected.get("requirement_tags") == [{"id": "req-a", "label": "Req A"}]
+            and session_store._summary_order_version == order_version_before_projection
             and summary_version_stable,
             f"markers={projected.get('markers')!r} tags={projected.get('requirement_tags')!r}",
         )

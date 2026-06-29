@@ -176,9 +176,10 @@ _summary_index: dict[str, dict] = {}
 _summary_index_lock = threading.Lock()
 _summary_index_loaded = False
 _summary_index_version = 0
+_summary_order_version = 0
 _summary_metadata_version = 0
 _summary_sorted_cache_version = -1
-_summary_sorted_cache: list[dict] = []
+_summary_sorted_id_cache: list[str] = []
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -541,6 +542,15 @@ def summary_version() -> int:
         return _summary_index_version
 
 
+def _summary_order_key(summary: Optional[dict]) -> tuple[bool, float]:
+    if not summary:
+        return (False, 0.0)
+    return (
+        bool(summary.get("pinned", False)),
+        timestamp_sort_value(summary.get("updated_at")),
+    )
+
+
 def refresh_organization_projection(session_ids: Iterable[str] | None = None) -> None:
     global _summary_index_version
     import session_organization_store
@@ -621,7 +631,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
 def _upsert_summary(root: dict) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
-    global _summary_index_version, _summary_metadata_version
+    global _summary_index_version, _summary_order_version, _summary_metadata_version
     with perf.timed("store.session.summary.build"):
         summary = _build_summary_for_root(root)
     # Preserve pending_eng_session_id from the existing index entry —
@@ -637,6 +647,8 @@ def _upsert_summary(root: dict) -> None:
             else:
                 _summary_index[root["id"]] = summary
                 _summary_index_version += 1
+                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                    _summary_order_version += 1
                 summary_changed = True
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
@@ -906,10 +918,11 @@ def _overlay_last_opened(root: dict, root_id: str) -> None:
 
 def _remove_summary(root_id: str) -> None:
     """Remove a root's summary entry and file (on delete)."""
-    global _summary_index_version, _summary_metadata_version
+    global _summary_index_version, _summary_order_version, _summary_metadata_version
     with _summary_index_lock:
         if _summary_index.pop(root_id, None) is not None:
             _summary_index_version += 1
+            _summary_order_version += 1
             _summary_metadata_version += 1
     try:
         sp = _sessions_dir() / f"{root_id}.summary.json"
@@ -1141,7 +1154,7 @@ def _do_build_summary_index_unsafe() -> None:
         is already cached. Cold build → not cached → no
         `_summary_build_lock → session_manager-RLock` edge forms.
     """
-    global _summary_index_loaded, _summary_index_version, _summary_metadata_version
+    global _summary_index_loaded, _summary_index_version, _summary_order_version, _summary_metadata_version
     _ensure_dir()
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
@@ -1165,6 +1178,7 @@ def _do_build_summary_index_unsafe() -> None:
             _summary_index.clear()
             _summary_index.update(cached_summaries)
             _summary_index_version += 1
+            _summary_order_version += 1
             _summary_metadata_version += 1
             _summary_index_loaded = True
         _start_summary_projection_repair()
@@ -1215,6 +1229,8 @@ def _do_build_summary_index_unsafe() -> None:
                                 existing = _summary_index.get(sid)
                                 _summary_index[sid] = summary
                                 _summary_index_version += 1
+                                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                                    _summary_order_version += 1
                                 if _summary_metadata_changed(existing, summary):
                                     _summary_metadata_version += 1
                             if cleaned:
@@ -1249,6 +1265,8 @@ def _do_build_summary_index_unsafe() -> None:
                 existing = _summary_index.get(data["id"])
                 _summary_index[data["id"]] = summary
                 _summary_index_version += 1
+                if existing is None or _summary_order_key(existing) != _summary_order_key(summary):
+                    _summary_order_version += 1
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
             stale_summaries.append((data["id"], summary))
@@ -3438,20 +3456,25 @@ def list_sessions() -> list[dict]:
     can't affect the index. Summary dicts inside are shared — callers
     must not mutate them, but no current caller does.
     """
-    global _summary_sorted_cache_version, _summary_sorted_cache
+    global _summary_sorted_cache_version, _summary_sorted_id_cache
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
-        if _summary_sorted_cache_version != _summary_index_version:
-            _summary_sorted_cache = sorted(
-                _summary_index.values(),
-                key=lambda s: (
-                    s.get("pinned", False),
-                    timestamp_sort_value(s.get("updated_at")),
-                ),
-                reverse=True,
-            )
-            _summary_sorted_cache_version = _summary_index_version
-        return list(_summary_sorted_cache)
+        if _summary_sorted_cache_version != _summary_order_version:
+            _summary_sorted_id_cache = [
+                str(summary.get("id"))
+                for summary in sorted(
+                    _summary_index.values(),
+                    key=_summary_order_key,
+                    reverse=True,
+                )
+                if summary.get("id")
+            ]
+            _summary_sorted_cache_version = _summary_order_version
+        return [
+            _summary_index[sid]
+            for sid in _summary_sorted_id_cache
+            if sid in _summary_index
+        ]
 
 
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
