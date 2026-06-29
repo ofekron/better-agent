@@ -88,7 +88,15 @@ def _write_events(sid: str, *texts: str) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
     with open(session_dir / "events.jsonl", "w") as f:
         for text in texts:
-            f.write(json.dumps({"data": {"text": text}}) + "\n")
+            f.write(json.dumps({
+                "type": "agent_message",
+                "data": {
+                    "message": {
+                        "role": "user",
+                        "content": text,
+                    },
+                },
+            }) + "\n")
     session_search_index.rebuild_from_disk()
 
 
@@ -371,6 +379,42 @@ def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool
     ids = [session["id"] for session in second.json().get("sessions", [])]
     ok = second.status_code == 200 and ids == ["matched"]
     print(f"{PASS if ok else FAIL} /api/sessions repeated search uses response cache")
+    return ok
+
+
+def test_search_paginates_without_full_sort(client: TestClient) -> bool:
+    _reset_home()
+    for index in range(8):
+        _write(_record_with(
+            f"match-{index}",
+            f"2026-06-2{index}T00:00:00+00:00",
+            name="needle title",
+        ))
+
+    original = main._filter_sort_sessions_for_list
+
+    def fail_full_sort(*_args, **_kwargs):
+        raise AssertionError("search should select the requested page without full sort")
+
+    main._filter_sort_sessions_for_list = fail_full_sort
+    try:
+        response = client.get(
+            "/api/sessions?search=needle&search_fields=title&limit=2",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions search used full sort")
+        return False
+    finally:
+        main._filter_sort_sessions_for_list = original
+
+    body = response.json()
+    ok = (
+        response.status_code == 200
+        and body.get("total") == 8
+        and len(body.get("sessions") or []) == 2
+    )
+    print(f"{PASS if ok else FAIL} /api/sessions search paginates without full sort")
     return ok
 
 
@@ -716,6 +760,7 @@ def main_run() -> int:
         ok = test_search_content_filters_before_pagination(client) and ok
         ok = test_search_avoids_full_sidebar_list(client) and ok
         ok = test_repeated_session_search_uses_response_cache(client) and ok
+        ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
