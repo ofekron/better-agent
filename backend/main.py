@@ -9275,7 +9275,7 @@ async def internal_headless_generate(
     if not agent_sid:
         # Fail closed: no provider sid to fork from yet (session never ran).
         raise HTTPException(status_code=409, detail="session has no provider session yet")
-    provider = coordinator.provider_for_session(session_id)
+    provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)
     # Fail closed: only providers that can fork (no real-session mutation)
     # AND guarantee a tool-less run may serve a fill.
     if not provider.supports_fork or not provider.supports_headless_no_tools:
