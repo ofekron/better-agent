@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 import config_store
+import llm_call_log
 import session_store
 import trace_collector
 
@@ -133,6 +134,7 @@ def _is_real_session(s: dict) -> bool:
 def aggregate(
     sessions: Iterable[dict],
     traces: Iterable[dict],
+    llm_calls: Iterable[dict],
     provider_map: dict,
     start: datetime,
     end: datetime,
@@ -232,6 +234,120 @@ def aggregate(
 
     duration_avg = round(sum(durations) / len(durations), 1) if durations else 0.0
 
+    # ---- LLM calls (single append-only log; all provider/internal call sites) ----
+    def _call_bucket() -> dict:
+        return {
+            "count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    call_series: dict[str, dict] = defaultdict(_call_bucket)
+    calls_by_provider: dict[str, dict] = defaultdict(
+        lambda: {"provider_id": "", "kind": "", "name": "", "calls": 0, "total_tokens": 0}
+    )
+    calls_by_model: dict[tuple, dict] = defaultdict(
+        lambda: {"kind": "", "model": "", "calls": 0, "total_tokens": 0}
+    )
+    calls_by_source: dict[str, dict] = defaultdict(
+        lambda: {"source": "", "calls": 0, "total_tokens": 0}
+    )
+    calls_by_reason: dict[str, dict] = defaultdict(
+        lambda: {"reason": "", "calls": 0, "total_tokens": 0}
+    )
+    recent_calls: list[dict] = []
+    call_total = 0
+    call_token_totals = _call_bucket()
+
+    for call in llm_calls:
+        ts = _parse_dt(call.get("timestamp"))
+        if not ts or ts < start or ts > end:
+            continue
+        usage = call.get("token_usage") if isinstance(call.get("token_usage"), dict) else {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or 0) or (
+            input_tokens + output_tokens
+        )
+        kind = call.get("provider_kind") or "unknown"
+        provider_id = call.get("provider_id") or "unknown"
+        name = call.get("provider_name") or provider_map.get(provider_id, {}).get("name") or kind
+        model = call.get("model") or "unknown"
+        source = call.get("source") or "unknown"
+        reason = call.get("reason") or "unknown"
+
+        call_total += 1
+        for key, value in (
+            ("input_tokens", input_tokens),
+            ("output_tokens", output_tokens),
+            ("cache_read_input_tokens", cache_read),
+            ("cache_creation_input_tokens", cache_creation),
+            ("total_tokens", total_tokens),
+        ):
+            call_token_totals[key] += value
+        bucket = call_series[_bucket_label(ts, granularity)]
+        bucket["count"] += 1
+        bucket["input_tokens"] += input_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["cache_read_input_tokens"] += cache_read
+        bucket["cache_creation_input_tokens"] += cache_creation
+        bucket["total_tokens"] += total_tokens
+
+        bp = calls_by_provider[provider_id]
+        bp["provider_id"] = provider_id
+        bp["kind"] = kind
+        bp["name"] = name
+        bp["calls"] += 1
+        bp["total_tokens"] += total_tokens
+
+        bm = calls_by_model[(kind, model)]
+        bm["kind"] = kind
+        bm["model"] = model
+        bm["calls"] += 1
+        bm["total_tokens"] += total_tokens
+
+        bs = calls_by_source[source]
+        bs["source"] = source
+        bs["calls"] += 1
+        bs["total_tokens"] += total_tokens
+
+        br = calls_by_reason[reason]
+        br["reason"] = reason
+        br["calls"] += 1
+        br["total_tokens"] += total_tokens
+
+        recent_calls.append({
+            "id": call.get("id"),
+            "timestamp": call.get("timestamp"),
+            "source": source,
+            "reason": reason,
+            "provider_id": provider_id,
+            "provider_kind": kind,
+            "provider_name": name,
+            "model": model,
+            "reasoning_effort": call.get("reasoning_effort"),
+            "app_session_id": call.get("app_session_id"),
+            "provider_session_id": call.get("provider_session_id"),
+            "trace_id": call.get("trace_id"),
+            "prompt_preview": call.get("prompt_preview") or "",
+            "token_usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+                "total_tokens": total_tokens,
+            },
+            "success": call.get("success"),
+            "error": call.get("error"),
+        })
+
+    recent_calls.sort(key=lambda c: c.get("timestamp") or "", reverse=True)
+
     return {
         "range": {
             "start": start.isoformat(),
@@ -265,6 +381,22 @@ def aggregate(
             "duration_avg_ms": duration_avg,
             "duration_p50_ms": round(_median(durations), 1),
         },
+        "llm_calls": {
+            "total": call_total,
+            "token_usage": {
+                k: v for k, v in call_token_totals.items()
+                if k != "count"
+            },
+            "series": [
+                {"t": t, **b}
+                for t, b in sorted(call_series.items())
+            ],
+            "by_provider": _sorted(calls_by_provider, "calls"),
+            "by_model": _sorted(calls_by_model, "calls"),
+            "by_source": _sorted(calls_by_source, "calls"),
+            "by_reason": _sorted(calls_by_reason, "calls")[:12],
+            "recent": recent_calls[:100],
+        },
     }
 
 
@@ -284,8 +416,9 @@ def compute_analytics(start: datetime, end: datetime) -> dict:
     """Read live data from the stores and aggregate over [start, end]."""
     sessions = session_store.list_sessions()
     traces = list(trace_collector.iter_trace_index())
+    llm_calls = list(llm_call_log.iter_calls())
     prov_state = config_store.list_providers()
     provider_map = {
         p["id"]: p for p in prov_state.get("providers", []) if p.get("id")
     }
-    return aggregate(sessions, traces, provider_map, start, end)
+    return aggregate(sessions, traces, llm_calls, provider_map, start, end)

@@ -12354,15 +12354,13 @@ async def _process_worker_pool_queue(tag: str) -> None:
                 item.get("id"),
                 target.get("agent_session_id"),
             )
-            failure = await asyncio.to_thread(
+            await asyncio.to_thread(
                 _ws.record_pool_task_failure,
                 tag,
                 str(item.get("id") or ""),
                 str(exc),
             )
             await coordinator.broadcast_workers_changed(None)
-            if failure.get("action") == "requeued" and int(failure.get("queued_count") or 0) <= 1:
-                return
             continue
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)

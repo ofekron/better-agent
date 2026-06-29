@@ -51,6 +51,17 @@ function fmtMs(ms: number): string {
   if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
   return Math.round(ms) + "ms";
 }
+function fmtDateTime(value?: string): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 function tickFormatter(t: string, granularity: string): string {
   if (granularity === "month") return t;
   if (granularity === "hour") return t.split(" ")[1] ?? t;
@@ -67,6 +78,23 @@ const TOOLTIP_STYLE = {
   color: "var(--text-primary)",
   fontSize: 12,
 } as const;
+
+const EMPTY_LLM_CALLS: AnalyticsReport["llm_calls"] = {
+  total: 0,
+  token_usage: {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_tokens: 0,
+  },
+  series: [],
+  by_provider: [],
+  by_model: [],
+  by_source: [],
+  by_reason: [],
+  recent: [],
+};
 
 export function AnalyticsPage({ onBack }: Props) {
   const { t } = useTranslation();
@@ -111,6 +139,8 @@ export function AnalyticsPage({ onBack }: Props) {
   const granularity = report?.range.granularity ?? "day";
   const presets: Preset[] = ["7d", "30d", "90d", "all", "custom"];
   const noData = loading ? t("common.loading") : t("analytics.noData");
+  const llmCalls = report?.llm_calls ?? EMPTY_LLM_CALLS;
+  const llmUsage = llmCalls.token_usage;
 
   return (
     <div className="analytics-page">
@@ -154,9 +184,110 @@ export function AnalyticsPage({ onBack }: Props) {
         <StatCard label={t("analytics.statTurns")} value={fmt(report?.turns.total ?? 0)} />
         <StatCard label={t("analytics.statMessages")} value={fmt(report?.sessions.messages_total ?? 0)} />
         <StatCard label={t("analytics.statAvgTurn")} value={fmtMs(report?.turns.duration_avg_ms ?? 0)} />
+        <StatCard label={t("analytics.statLlmCalls")} value={fmt(llmCalls.total)} />
+        <StatCard label={t("analytics.statLlmTokens")} value={fmt(llmUsage?.total_tokens ?? 0)} />
       </div>
 
       <div className="analytics-charts">
+        <ChartCard title={t("analytics.llmCallsOverTime")} full>
+          {llmCalls.series.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={llmCalls.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, granularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
+                <YAxis yAxisId="calls" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
+                <YAxis yAxisId="tokens" orientation="right" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line yAxisId="calls" type="monotone" dataKey="count" name={t("analytics.statLlmCalls")} stroke={BAR_COLOR} strokeWidth={2} dot={false} />
+                <Line yAxisId="tokens" type="monotone" dataKey="total_tokens" name={t("analytics.statLlmTokens")} stroke="#4ac2c0" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmTokensBreakdown")}>
+          {llmUsage && (llmUsage.input_tokens || llmUsage.output_tokens || llmUsage.cache_read_input_tokens || llmUsage.cache_creation_input_tokens) ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie
+                  data={[
+                    { name: t("tokens.input"), value: llmUsage.input_tokens },
+                    { name: t("tokens.output"), value: llmUsage.output_tokens },
+                    { name: t("analytics.cacheRead"), value: llmUsage.cache_read_input_tokens },
+                    { name: t("analytics.cacheWrite"), value: llmUsage.cache_creation_input_tokens },
+                  ].filter((row) => row.value > 0)}
+                  dataKey="value"
+                  nameKey="name"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={80}
+                  innerRadius={44}
+                  paddingAngle={2}
+                >
+                  {[0, 1, 2, 3].map((i) => (
+                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+                  ))}
+                </Pie>
+                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={tooltipFmt} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmCallsBySource")}>
+          {llmCalls.by_source.length > 0 ? (
+            <HBar data={llmCalls.by_source} dataKey="calls" labelKey="source" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmCallsByReason")}>
+          {llmCalls.by_reason.length > 0 ? (
+            <HBar data={llmCalls.by_reason} dataKey="calls" labelKey="reason" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmCallsByProvider")}>
+          {llmCalls.by_provider.length > 0 ? (
+            <HBar data={llmCalls.by_provider} dataKey="calls" labelKey="name" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmCallsByModel")}>
+          {llmCalls.by_model.length > 0 ? (
+            <HBar data={llmCalls.by_model.slice(0, 10)} dataKey="calls" labelKey="model" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.llmCallLog")} full>
+          {llmCalls.recent.length > 0 ? (
+            <div className="analytics-log-list">
+              {llmCalls.recent.slice(0, 40).map((call) => (
+                <article className="analytics-log-row" key={call.id || `${call.timestamp}-${call.provider_session_id}`}>
+                  <div className="analytics-log-main">
+                    <div className="analytics-log-title">
+                      <span>{call.reason}</span>
+                      <span className={call.success === false ? "analytics-log-status error" : "analytics-log-status"}>
+                        {call.success === false ? t("analytics.failed") : t("analytics.succeeded")}
+                      </span>
+                    </div>
+                    <div className="analytics-log-prompt">{call.prompt_preview || t("analytics.noPromptPreview")}</div>
+                    {call.error && <div className="analytics-log-error">{call.error}</div>}
+                  </div>
+                  <div className="analytics-log-meta">
+                    <span>{fmtDateTime(call.timestamp)}</span>
+                    <span>{call.source}</span>
+                    <span>{call.provider_name || call.provider_kind}</span>
+                    <span>{call.model}</span>
+                    <span>{fmt(call.token_usage.total_tokens)} {t("analytics.tokensShort")}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
         <ChartCard title={t("analytics.sessionsOverTime")} full>
           {report && report.sessions.series.length > 0 ? (
             <ResponsiveContainer width="100%" height={240}>

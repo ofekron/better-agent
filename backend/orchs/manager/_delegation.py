@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from event_bus import BusEvent, bus
 from i18n import t
+import llm_call_log
 import perf
 from orchs.jsonl_helpers import (
     compute_jsonl_path,
@@ -1161,6 +1162,32 @@ async def run_delegation_locked(
     }
     if include_events:
         result_payload["events"] = collected
+    try:
+        await asyncio.to_thread(
+            llm_call_log.append_call,
+            source="worker_delegation",
+            reason=worker_description or "delegation",
+            provider_id=provider.id,
+            provider_kind=provider.KIND,
+            provider_name=provider.record.get("name"),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            app_session_id=worker_agent_session_id,
+            provider_session_id=fork_agent_sid,
+            run_id=run_id,
+            prompt=instructions,
+            token_usage=token_usage,
+            success=success,
+            error=error,
+            metadata={
+                "manager_session_id": app_session_id,
+                "delegation_id": delegation_id,
+                "run_mode": run_mode,
+                "ephemeral": ephemeral,
+            },
+        )
+    except Exception:
+        logger.exception("failed to append worker llm call log")
     await delegation_status_store.write_status_async(
         delegation_id,
         status="complete",

@@ -54,6 +54,7 @@ from capability_contexts import provider_capability_contexts
 from extension_context_audit import runtime_context as extension_audit_context
 from runtime_skills import runtime_skill_contexts
 from i18n import t
+import llm_call_log
 from provider import StreamEvent
 from runs_dir import pid_alive as _pid_alive, salvage_complete_payload
 from session_manager import manager as session_manager
@@ -1397,6 +1398,34 @@ class TurnManager:
                 session = session_manager.get(persist_id) or session
 
             await trace.end_step(step)
+
+            try:
+                provider_record = self._c.provider_for_run(app_session_id, provider_id)
+                await asyncio.to_thread(
+                    llm_call_log.append_call,
+                    source=source or "turn",
+                    reason=trace_step_name,
+                    provider_id=provider_record.id,
+                    provider_kind=provider_record.KIND,
+                    provider_name=provider_record.record.get("name"),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    app_session_id=persist_id,
+                    provider_session_id=primary_result.get("session_id"),
+                    trace_id=trace.trace_id,
+                    run_id=turn_run_id,
+                    prompt=prompt,
+                    token_usage=step.token_usage,
+                    success=bool(primary_result.get("success")),
+                    error=primary_result.get("error"),
+                    metadata={
+                        "mode": mode,
+                        "session_id_field": session_id_field,
+                        "user_initiated": user_initiated,
+                    },
+                )
+            except Exception:
+                logger.exception("failed to append llm call log")
 
             if lifecycle_msg_id:
                 try:
