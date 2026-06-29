@@ -28,6 +28,18 @@ def main() -> int:
         session_manager.append_user_msg(sid, {"content": "root"})
         child = session_manager.fork(sid, name="child")
         session_manager.append_user_msg(child["id"], {"content": "child"})
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": "owned-root-event",
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "owned"}]},
+            },
+            source="test",
+            msg_id="owned-message",
+        )
 
         read_calls = 0
         summary_calls = 0
