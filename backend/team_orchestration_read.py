@@ -8,7 +8,6 @@ from session_manager import manager as session_manager
 
 def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
     from stores import worker_store as worker_store
-    from orchs.jsonl_helpers import compute_jsonl_path, count_jsonl_lines
 
     raw = worker_store._read()
     workers = sorted(
@@ -34,15 +33,8 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
             and worker.get("agent_sid")
             and live_parent_sid != worker.get("agent_sid")
         )
-        live_parent_lines = 0
-        if live_parent_sid:
-            path = compute_jsonl_path(worker_cwd, live_parent_sid)
-            if path:
-                try:
-                    live_parent_lines = count_jsonl_lines(path)
-                except Exception:
-                    live_parent_lines = 0
         any_pair_stale = False
+        pair_records: list[dict[str, Any]] = []
         if not sid_rotated and live_parent_sid:
             for _caller_sid, by_worker in forks.items():
                 rec = by_worker.get(bc_sid)
@@ -51,6 +43,18 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
                 if rec.get("parent_agent_sid") != live_parent_sid:
                     any_pair_stale = True
                     break
+                pair_records.append(rec)
+        if not any_pair_stale and pair_records and live_parent_sid:
+            from orchs.jsonl_helpers import compute_jsonl_path, count_jsonl_lines
+
+            live_parent_lines = 0
+            path = compute_jsonl_path(worker_cwd, live_parent_sid)
+            if path:
+                try:
+                    live_parent_lines = count_jsonl_lines(path)
+                except Exception:
+                    live_parent_lines = 0
+            for rec in pair_records:
                 if int(rec.get("parent_line_count_at_fork", 0)) < live_parent_lines:
                     any_pair_stale = True
                     break
