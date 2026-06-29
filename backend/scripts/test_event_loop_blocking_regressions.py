@@ -264,6 +264,22 @@ def test_connected_session_list_pages_virtual_candidates() -> None:
     assert "virtual_session_store.list_all" in virtual_source
 
 
+def test_connected_session_list_skips_full_sort_without_remote_merge() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("async def get_sessions(")
+    end = source.index("@app.post(\"/api/sessions/search-content\")", start)
+    route_source = source[start:end]
+    assert "appended_remote_sessions = False" in route_source
+    fast_path = (
+        "can_page_remote_local_order\n"
+        "        and not appended_virtual_sessions\n"
+        "        and not appended_remote_sessions\n"
+        "        and local_total is not None"
+    )
+    assert fast_path in route_source
+    assert route_source.index(fast_path) < route_source.index("with perf.timed(\"sessions.list.filter_sort\")")
+
+
 def test_delegation_status_writes_run_off_loop() -> None:
     store_source = (ROOT / "delegation_status_store.py").read_text(encoding="utf-8")
     assert "async def write_status_async(" in store_source
@@ -1857,6 +1873,7 @@ if __name__ == "__main__":
     test_session_content_search_aggregates_in_sqlite()
     test_session_search_delete_is_queued_projection_work()
     test_publish_event_default_path_skips_temp_ack_subscribers()
+    test_connected_session_list_skips_full_sort_without_remote_merge()
     test_delegation_status_writes_run_off_loop()
     test_team_ask_status_writes_run_off_loop()
     test_session_detail_reuses_migrated_root_cache()
