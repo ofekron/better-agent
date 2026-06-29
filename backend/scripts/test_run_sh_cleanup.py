@@ -44,6 +44,19 @@ def main() -> int:
         'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' in text,
         failures,
     )
+    deps_start = text.index("sync_backend_deps() {")
+    deps_end = text.index("# --- Install the `bagent` CLI command", deps_start)
+    deps_source = text[deps_start:deps_end]
+    check(
+        "backend dependency sync is fingerprint-skipped",
+        'local stamp="$DIR/backend/.venv/.requirements.stamp"' in deps_source
+        and "hashlib.sha256(path.read_bytes()).hexdigest()" in deps_source
+        and 'if [ "$stamped" = "$current" ]; then' in deps_source
+        and 'echo "Backend deps unchanged — skipping sync."' in deps_source
+        and '"$UV" pip install -q --python "$PY" -r "$req"' in deps_source
+        and "printf '%s' \"$current\" > \"$stamp\"" in deps_source,
+        failures,
+    )
     check(
         "lock holder cleanup exists",
         "kill_backend_lock_holder()" in text,
