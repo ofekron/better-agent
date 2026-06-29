@@ -849,6 +849,25 @@ def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
     assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in ensure_source
 
 
+def test_fork_index_refresh_updates_changed_roots_incrementally() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32" in source
+    assert "def _refresh_index_incremental(" in source
+    helper_start = source.index("def _refresh_index_incremental(")
+    helper_end = source.index("def _load_index_sidecar(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "changed_roots = {" in helper_source
+    assert "deleted_roots = set(old_signatures) - set(current_signatures)" in helper_source
+    assert "if len(touched_roots) > _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED:" in helper_source
+    assert "_fork_index_entry_from_summary_or_root(current_paths[root_id])" in helper_source
+    refresh_start = source.index("def _refresh_index(")
+    refresh_end = source.index("def _ensure_index(", refresh_start)
+    refresh_source = source[refresh_start:refresh_end]
+    incremental_idx = refresh_source.index("incremental = _refresh_index_incremental(live_fp)")
+    full_idx = refresh_source.index('with perf.timed("store.session.index.refresh.build")')
+    assert incremental_idx < full_idx
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -2832,6 +2851,7 @@ if __name__ == "__main__":
     test_session_exists_uses_index_without_cold_root_load()
     test_unknown_root_resolution_uses_global_negative_throttle()
     test_fork_index_refresh_sidecar_write_is_backgrounded()
+    test_fork_index_refresh_updates_changed_roots_incrementally()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()

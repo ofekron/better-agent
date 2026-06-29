@@ -172,6 +172,7 @@ _index_refresh_attempt_until: dict[tuple[int, int, int], float] = {}
 _index_refresh_global_attempt_until = 0.0
 _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 _DIR_FINGERPRINT_CACHE_TTL_SECONDS = 0.10
+_INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32
 _dir_fingerprint_cache: tuple[float, tuple[int, int, int]] | None = None
 _dir_fingerprint_cache_lock = threading.Lock()
 
@@ -1795,6 +1796,101 @@ def _build_index_snapshot(
     return fp, fork_index, root_forks, root_signatures
 
 
+def _fork_index_entry_from_summary_or_root(
+    path: Path,
+) -> Optional[tuple[str, set[str], tuple[int, int]]]:
+    file_signature = _session_file_signature(path)
+    if file_signature is None:
+        return None
+    sp = path.with_name(f"{path.stem}.summary.json")
+    try:
+        if sp.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+            summary = json.loads(sp.read_text(encoding="utf-8"))
+            if summary.get("id") == path.stem:
+                fork_ids = summary.get("fork_ids")
+                if isinstance(fork_ids, list):
+                    return (
+                        path.stem,
+                        {
+                            fork_id
+                            for fork_id in fork_ids
+                            if isinstance(fork_id, str) and fork_id
+                        },
+                        file_signature,
+                    )
+                if int(summary.get("fork_count") or 0) == 0:
+                    return path.stem, set(), file_signature
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        root = _migrate_session(data)
+        rid = root["id"]
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return None
+    return (
+        rid,
+        {
+            fork["id"]
+            for fork in _walk_forks(root)
+            if isinstance(fork, dict) and isinstance(fork.get("id"), str)
+        },
+        file_signature,
+    )
+
+
+def _refresh_index_incremental(
+    live_fp: tuple[int, int, int],
+) -> Optional[tuple[tuple[int, int, int], dict[str, str], dict[str, set[str]], dict[str, tuple[int, int]]]]:
+    with _index_lock:
+        if not _index_loaded or _index_fingerprint is None:
+            return None
+        fork_index = dict(_fork_index)
+        root_forks = {
+            root_id: set(forks)
+            for root_id, forks in _root_forks.items()
+        }
+        old_signatures = dict(_root_index_signatures)
+
+    current_paths: dict[str, Path] = {}
+    current_signatures: dict[str, tuple[int, int]] = {}
+    for path in _session_json_files():
+        signature = _session_file_signature(path)
+        if signature is None:
+            continue
+        current_paths[path.stem] = path
+        current_signatures[path.stem] = signature
+
+    changed_roots = {
+        root_id
+        for root_id, signature in current_signatures.items()
+        if old_signatures.get(root_id) != signature
+    }
+    deleted_roots = set(old_signatures) - set(current_signatures)
+    touched_roots = changed_roots | deleted_roots
+    if len(touched_roots) > _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED:
+        return None
+
+    for root_id in touched_roots:
+        for fork_id in root_forks.pop(root_id, set()):
+            fork_index.pop(fork_id, None)
+        old_signatures.pop(root_id, None)
+
+    for root_id in changed_roots:
+        parsed = _fork_index_entry_from_summary_or_root(current_paths[root_id])
+        if parsed is None:
+            return None
+        parsed_root_id, forks, signature = parsed
+        if parsed_root_id != root_id:
+            return None
+        root_forks[root_id] = forks
+        old_signatures[root_id] = signature
+        for fork_id in forks:
+            fork_index[fork_id] = root_id
+
+    return live_fp, fork_index, root_forks, old_signatures
+
+
 def _load_index_sidecar(
     expected_fp: tuple[int, int, int],
 ) -> Optional[tuple[tuple[int, int, int], dict[str, str], dict[str, set[str]], dict[str, tuple[int, int]]]]:
@@ -2118,6 +2214,17 @@ def _refresh_index(
                 return live_fp
             if _index_refresh_attempt_until.get(live_fp, 0.0) > time.monotonic():
                 return live_fp
+        incremental = _refresh_index_incremental(live_fp)
+        if incremental is not None:
+            fp, fork_index, root_forks, root_signatures = incremental
+            with _index_lock:
+                if _index_fingerprint is not None and _index_fingerprint == fp:
+                    return fp
+                _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
+                _index_refresh_attempt_until.pop(fp, None)
+                _index_refresh_global_attempt_until = 0.0
+            _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
+            return fp
         for _ in range(2):
             with perf.timed("store.session.index.refresh.build"):
                 fp, fork_index, root_forks, root_signatures = _build_index_snapshot(live_fp)
