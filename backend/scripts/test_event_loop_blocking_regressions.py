@@ -705,6 +705,10 @@ def test_tree_stub_cache_key_reads_render_seq_once() -> None:
 
 def test_session_event_meta_uses_combined_ingester_read() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
+    roots_start = source.index("def _session_event_meta_roots_for_page(")
+    roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
+    roots_source = source[roots_start:roots_end]
+    assert "_session_event_file_fingerprint(root_id) == (0, 0)" in roots_source
     helper_start = source.index("def _session_event_meta(")
     helper_end = source.index("def _session_event_meta_cache_fresh(", helper_start)
     helper_source = source[helper_start:helper_end]

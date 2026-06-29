@@ -208,7 +208,7 @@ def _session_event_meta_roots_for_page(page: list[dict]) -> list[str]:
         root_id = session.get("id")
         if not isinstance(root_id, str) or not root_id or root_id in seen:
             continue
-        if int(session.get("message_count") or 0) <= 0:
+        if int(session.get("message_count") or 0) <= 0 and _session_event_file_fingerprint(root_id) == (0, 0):
             continue
         seen.add(root_id)
         root_ids.append(root_id)
