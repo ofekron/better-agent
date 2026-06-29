@@ -653,6 +653,18 @@ def test_message_summary_reader_filters_requested_message_ids() -> None:
     assert "msg_ids=msg_ids" in facade_source
 
 
+def test_event_summary_sidecar_load_populates_memory_cache() -> None:
+    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    start = source.index("def _summaries_state(")
+    end = source.index("def _seq_byte_range(", start)
+    state_source = source[start:end]
+    loaded_start = state_source.index("if loaded is not None:")
+    loaded_end = state_source.index("else:", loaded_start)
+    loaded_source = state_source[loaded_start:loaded_end]
+    assert "self._rebuild_seq_offsets_locked(path, root_id)" in loaded_source
+    assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in loaded_source
+
+
 def test_connected_session_fallback_sorts_only_requested_page() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _filter_sort_page_for_list(" in source
@@ -3112,6 +3124,7 @@ if __name__ == "__main__":
     test_session_opened_avoids_full_session_copy()
     test_message_delta_replay_skips_full_snapshot_rebuild()
     test_message_summary_reader_filters_requested_message_ids()
+    test_event_summary_sidecar_load_populates_memory_cache()
     test_message_cache_hydration_has_substep_perf_metrics()
     test_session_snapshot_hydration_reuses_existing_message_summary()
     test_stubbed_tree_build_does_not_search_tree_per_node()
