@@ -306,6 +306,15 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
     assert "publish_event_sync(" in broadcast_source
 
 
+def test_codex_complete_watcher_filesystem_poll_runs_off_loop() -> None:
+    source = (ROOT / "provider_codex.py").read_text(encoding="utf-8")
+    start = source.index("async def _watch_complete(")
+    end = source.index("async def _ensure_child_tailer(", start)
+    watcher_source = source[start:end]
+    assert "await asyncio.to_thread(complete_path.exists)" in watcher_source
+    assert "complete_path.exists()" not in watcher_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
