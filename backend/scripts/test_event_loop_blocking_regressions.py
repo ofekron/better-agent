@@ -995,6 +995,23 @@ def test_machine_node_snapshot_reads_are_off_loop() -> None:
     assert "await asyncio.to_thread(_local_node_id_or_primary" not in dispatch_source
 
 
+def test_node_snapshot_caches_static_specs() -> None:
+    source = (ROOT / "node_store.py").read_text(encoding="utf-8")
+    assert "_snapshot_static_cache_key" in source
+    assert "_snapshot_static_cache" in source
+    assert "def _node_registry_fingerprint()" in source
+    registry_source = (ROOT / "node_registry_store.py").read_text(encoding="utf-8")
+    assert "def version_token()" in registry_source
+    assert "node_registry_store.version_token()" in source
+    assert "def _snapshot_static_specs()" in source
+    snapshot_start = source.index("def snapshot()")
+    snapshot_end = source.index("def connected_worker_node_ids_snapshot()", snapshot_start)
+    snapshot_source = source[snapshot_start:snapshot_end]
+    assert "specs = _snapshot_static_specs()" in snapshot_source
+    assert "node_registry_store.list_all()" not in snapshot_source
+    assert "load_topology().all_nodes()" not in snapshot_source
+
+
 def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
     source = (ROOT / "stores" / "pending_approvals.py").read_text(encoding="utf-8")
     assert "_pending_cache_lock = threading.Lock()" in source
@@ -1710,6 +1727,7 @@ if __name__ == "__main__":
     test_filtered_provider_recovery_does_not_rescan_all_runs()
     test_provider_prune_uses_shared_scandir_helper()
     test_machine_node_snapshot_reads_are_off_loop()
+    test_node_snapshot_caches_static_specs()
     test_pending_approval_listing_uses_cached_projection_off_loop()
     test_project_update_counts_batch_uses_single_store_call()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
