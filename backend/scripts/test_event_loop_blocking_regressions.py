@@ -695,6 +695,24 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
 
 
+def test_unknown_root_resolution_uses_global_negative_throttle() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_negative_root_resolve_global_until = 0.0" in source
+    helper_start = source.index("def _clear_negative_root_resolve_cache(")
+    helper_end = source.index("def _copy_jsonish(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "_negative_root_resolve_cache.clear()" in helper_source
+    assert "_negative_root_resolve_until.clear()" in helper_source
+    assert "_negative_root_resolve_global_until = 0.0" in helper_source
+    resolve_start = source.index("def _resolve_root_id(")
+    resolve_end = source.index("def _session_path(", resolve_start)
+    resolve_source = source[resolve_start:resolve_end]
+    throttle_idx = resolve_source.index("_negative_root_resolve_global_until > now")
+    fingerprint_idx = resolve_source.index("live_fp = _dir_fingerprint()")
+    assert throttle_idx < fingerprint_idx
+    assert "_negative_root_resolve_global_until = (" in resolve_source
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -2562,6 +2580,7 @@ if __name__ == "__main__":
     test_team_message_validation_uses_lite_session_read()
     test_known_worker_projection_uses_field_reads()
     test_session_exists_uses_index_without_cold_root_load()
+    test_unknown_root_resolution_uses_global_negative_throttle()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
