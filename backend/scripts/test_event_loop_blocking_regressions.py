@@ -1169,6 +1169,7 @@ def test_extension_backend_get_skips_body_stream() -> None:
 
 def test_extension_backend_invoke_has_split_perf_timers() -> None:
     source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
+    assert "_EMPTY_B64 = \"\"" in source
     start = source.index("async def _invoke_backend(")
     end = source.index("async def dispatch_extension_backend_request(", start)
     invoke_source = source[start:end]
@@ -1181,6 +1182,12 @@ def test_extension_backend_invoke_has_split_perf_timers() -> None:
         "extension.backend.invoke.response",
     ):
         assert timer in invoke_source
+    assert "body_b64 = (" in invoke_source
+    assert "if body_bytes" in invoke_source
+    dispatch_start = source.index("async def dispatch_extension_backend_request(")
+    dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
+    dispatch_source = source[dispatch_start:dispatch_end]
+    assert "else _EMPTY_B64" in dispatch_source
 
 
 def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:

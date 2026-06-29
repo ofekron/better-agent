@@ -47,6 +47,7 @@ _BLOCKED_RESPONSE_HEADERS = {
     "transfer-encoding",
 }
 _METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}
+_EMPTY_B64 = ""
 
 
 def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
@@ -404,12 +405,17 @@ async def _invoke_backend(
     a FastAPI Request) and the inter-extension call endpoint (sourced from a
     JSON body). Callers must have already authenticated."""
     with perf.timed("extension.backend.invoke.payload"):
+        body_b64 = (
+            base64.b64encode(body_bytes).decode("ascii")
+            if body_bytes
+            else _EMPTY_B64
+        )
         request_payload = {
             "method": method,
             "path": "/" + path.lstrip("/"),
             "query_string": query_b64,
             "headers": safe_headers,
-            "body": base64.b64encode(body_bytes).decode("ascii"),
+            "body": body_b64,
         }
     with perf.timed("extension.backend.invoke.handle"):
         handle = _get_handle(spec)
@@ -474,7 +480,11 @@ async def dispatch_extension_backend_request(
         method=method,
         path=path,
         body_bytes=body,
-        query_b64=base64.b64encode(request.scope.get("query_string", b"")).decode("ascii"),
+        query_b64=(
+            base64.b64encode(request.scope.get("query_string", b"")).decode("ascii")
+            if request.scope.get("query_string")
+            else _EMPTY_B64
+        ),
         safe_headers=_safe_request_headers(request),
         base_url=str(request.base_url).rstrip("/"),
     )
@@ -502,7 +512,7 @@ async def invoke_extension_backend(
         method=method,
         path=path,
         body_bytes=body_bytes,
-        query_b64=base64.b64encode(b"").decode("ascii"),
+        query_b64=_EMPTY_B64,
         safe_headers=[("content-type", "application/json")] if body_bytes else [],
         base_url=base_url,
     )
@@ -522,9 +532,9 @@ def invoke_extension_backend_sync(
     request_payload = {
         "method": method,
         "path": "/" + path.lstrip("/"),
-        "query_string": base64.b64encode(b"").decode("ascii"),
+        "query_string": _EMPTY_B64,
         "headers": [("content-type", "application/json")] if body_bytes else [],
-        "body": base64.b64encode(body_bytes).decode("ascii"),
+        "body": base64.b64encode(body_bytes).decode("ascii") if body_bytes else _EMPTY_B64,
     }
     try:
         line = _roundtrip(
