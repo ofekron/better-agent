@@ -157,6 +157,10 @@ _SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-detail",
 )
+_REQUIREMENTS_QUERY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="requirements-query",
+)
 
 
 async def _run_hot_path(name: str, fn, /, *args, **kwargs):
@@ -189,6 +193,24 @@ async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _SESSION_DETAIL_EXECUTOR,
+            _call,
+        )
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def _run_requirements_query(name: str, fn, /, *args, **kwargs):
+    queued_at = time.perf_counter()
+    ctx = contextvars.copy_context()
+
+    def _call():
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, *args, **kwargs)
+
+    start = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _REQUIREMENTS_QUERY_EXECUTOR,
             _call,
         )
     finally:
@@ -3481,7 +3503,8 @@ async def internal_get_requirements(
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
     import requirement_context
-    return await asyncio.to_thread(
+    return await _run_requirements_query(
+        "requirements.processed",
         requirement_context.get_processed_requirements,
         query=query,
         cwd=cwd,
@@ -3534,7 +3557,8 @@ async def internal_search_requirements(
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
     import requirement_context
-    return await asyncio.to_thread(
+    return await _run_requirements_query(
+        "requirements.search",
         requirement_context.search_requirements,
         rg_args=rg_args,
         cwd=cwd,
