@@ -30,12 +30,11 @@ import communicate_mcp  # noqa: E402
 
 # tool name -> (shared constant, [substrings that MUST survive any edit])
 SPEC = {
-    "mssg": (otd.MSSG_DESCRIPTION, ["BLOCK", "joins your turn"]),
-    "async": (
-        otd.ASYNC_DESCRIPTION,
-        ["return immediately", "mssg", "do not want to hold your current turn open"],
+    "mssg": (otd.MSSG_DESCRIPTION, ["backend accepts", "final report"]),
+    "ask": (
+        otd.ASK_DESCRIPTION,
+        ["wait_and_grab_last_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork"],
     ),
-    "ask": (otd.ASK_DESCRIPTION, ["WAIT", "fork", "synchronous"]),
     "delegate_task": (
         otd.DELEGATE_TASK_DESCRIPTION,
         ["DETACHED", "does NOT hold your turn", "delegate_to_session"],
@@ -52,7 +51,6 @@ SPEC = {
 # The `_`-prefixed alias each runner imports must BE the same object (no fork).
 _CLAUDE_ALIASES = {
     "mssg": runner._MSSG_DESCRIPTION,
-    "async": runner._ASYNC_DESCRIPTION,
     "ask": runner._ASK_DESCRIPTION,
     "delegate_task": runner._DELEGATE_TASK_DESCRIPTION,
     "create_session": runner._CREATE_SESSION_DESCRIPTION,
@@ -62,7 +60,6 @@ _CLAUDE_ALIASES = {
 }
 _CODEX_ALIASES = {
     "mssg": runner_codex._MSSG_DESCRIPTION,
-    "async": runner_codex._ASYNC_DESCRIPTION,
     "ask": runner_codex._ASK_DESCRIPTION,
     "delegate_task": runner_codex._DELEGATE_TASK_DESCRIPTION,
     "create_session": runner_codex._CREATE_SESSION_DESCRIPTION,

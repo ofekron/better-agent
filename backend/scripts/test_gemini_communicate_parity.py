@@ -43,6 +43,7 @@ def test_ask_direct_routes_to_ask_endpoint():
     assert captured[0][1]["ask_id"].startswith("ask_")
     assert captured[0][1]["sender_session_id"] == "mgr-session"
     assert captured[0][1]["target_session_id"] == "worker-1"
+    assert captured[0][1]["mode"] == "wait_and_grab_last_mssg_in_turn"
 
 
 def test_ask_fork_routes_to_delegate_engine():
@@ -135,14 +136,19 @@ def test_mssg_still_routes_to_mssg_endpoint():
     assert captured[0][2] == 30.0
 
 
-def test_async_routes_to_async_endpoint():
+def test_ask_async_mode_routes_to_ask_endpoint():
     captured = _instrument()
-    communicate_mcp.async_communicate_response("run in background", target_worker_pool="testape")
+    communicate_mcp.ask_response(
+        "run in background",
+        target_worker_pool="testape",
+        mode="continue_and_expect_mssg_back_async",
+    )
     endpoint, payload, timeout = captured[0]
-    assert endpoint == "/api/internal/async-communicate"
+    assert endpoint == "/api/internal/ask"
     assert payload["sender_session_id"] == "mgr-session"
     assert payload["target_worker_pool"] == "testape"
     assert payload["message"] == "run in background"
+    assert payload["mode"] == "continue_and_expect_mssg_back_async"
     assert payload["provider_id"] is None
     assert payload["model"] == ""
     assert payload["reasoning_effort"] is None

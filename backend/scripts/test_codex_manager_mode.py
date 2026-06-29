@@ -35,6 +35,7 @@ def test_ask_dynamic_tool_contract(failures: list[str]) -> None:
     check("target_worker_id" in properties, "ask accepts worker target", failures)
     check("target_worker_pool" in properties, "ask accepts pool target", failures)
     check("run_mode" in properties, "ask accepts run mode", failures)
+    check("mode" in properties, "ask accepts wait/async behavior mode", failures)
     check("worker_description" in properties, "ask accepts optional session label for fork mode", failures)
 
 
@@ -78,16 +79,6 @@ def test_delegate_task_dynamic_tool_contract(failures: list[str]) -> None:
     check("model" in properties, "delegate_task accepts model override", failures)
     check("reasoning_effort" in properties, "delegate_task accepts effort override", failures)
     check("sub_session" in properties, "delegate_task accepts sub-session override", failures)
-
-
-def test_async_dynamic_tool_contract(failures: list[str]) -> None:
-    spec = runner_codex._build_async_dynamic_tool()
-    check(spec["name"] == "async", "dynamic tool is named async", failures)
-    required = set(spec["inputSchema"]["required"])
-    properties = spec["inputSchema"]["properties"]
-    check("target_worker_id" in properties, "async accepts worker target", failures)
-    check("target_worker_pool" in properties, "async accepts pool target", failures)
-    check("message" in required, "async requires message", failures)
 
 
 def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
@@ -357,7 +348,7 @@ async def _exercise_delegate_task_handler(failures: list[str]) -> None:
     check(payload["sub_session"] is False, "delegate_task payload has sub-session flag", failures)
 
 
-async def _exercise_async_handler(failures: list[str]) -> None:
+async def _exercise_ask_async_mode_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
@@ -368,8 +359,11 @@ async def _exercise_async_handler(failures: list[str]) -> None:
 
     runner_codex._post_loopback_sync = fake_post
     try:
-        handler = runner_codex._build_async_tool_handler(
+        handler = runner_codex._build_ask_tool_handler(
             sender_session_id="sender-1",
+            app_session_id="app1",
+            model="gpt-5.4",
+            cwd="/tmp/project",
             backend_url="http://backend",
             internal_token="tok",
         )
@@ -377,17 +371,19 @@ async def _exercise_async_handler(failures: list[str]) -> None:
             "arguments": {
                 "target_session_id": "worker-1",
                 "message": "run async",
+                "mode": "continue_and_expect_mssg_back_async",
             }
         })
     finally:
         runner_codex._post_loopback_sync = original
 
-    check(result["success"] is True, "async dynamic handler reports success", failures)
-    check(captured["url_path"] == "/api/internal/async-communicate", "async uses endpoint", failures)
+    check(result["success"] is True, "ask async mode handler reports success", failures)
+    check(captured["url_path"] == "/api/internal/ask", "ask async mode uses ask endpoint", failures)
     payload = captured["payload"]
-    check(payload["sender_session_id"] == "sender-1", "async payload has sender", failures)
-    check(payload["target_session_id"] == "worker-1", "async payload has target", failures)
-    check(payload["message"] == "run async", "async payload has message", failures)
+    check(payload["sender_session_id"] == "sender-1", "ask async mode payload has sender", failures)
+    check(payload["target_session_id"] == "worker-1", "ask async mode payload has target", failures)
+    check(payload["message"] == "run async", "ask async mode payload has message", failures)
+    check(payload["mode"] == "continue_and_expect_mssg_back_async", "ask async mode payload has mode", failures)
 
 
 async def _exercise_create_session_handler(failures: list[str]) -> None:
@@ -477,7 +473,6 @@ def main() -> int:
     test_create_session_dynamic_tool_contract(failures)
     test_create_sub_session_dynamic_tool_contract(failures)
     test_delegate_task_dynamic_tool_contract(failures)
-    test_async_dynamic_tool_contract(failures)
     test_native_loopback_registers_mssg_tool(failures)
     test_dynamic_tool_json_result_is_compact(failures)
     test_subagent_notification_response_item_is_ingested(failures)
@@ -487,7 +482,7 @@ def main() -> int:
     asyncio.run(_exercise_create_worker_handler(failures))
     asyncio.run(_exercise_ensure_named_worker_handler(failures))
     asyncio.run(_exercise_delegate_task_handler(failures))
-    asyncio.run(_exercise_async_handler(failures))
+    asyncio.run(_exercise_ask_async_mode_handler(failures))
     asyncio.run(_exercise_create_session_handler(failures))
     asyncio.run(_exercise_create_sub_session_handler(failures))
     if failures:

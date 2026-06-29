@@ -509,7 +509,6 @@ def set_delegate_task_policy(policy: str) -> str:
 # ----------------------------------------------------------------------------
 DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",

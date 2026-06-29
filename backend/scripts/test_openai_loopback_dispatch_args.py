@@ -197,7 +197,7 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
     assert captured[0][1]["message"] == "review"
 
 
-def test_real_async_handler_accepts_dispatched_args() -> None:
+def test_real_ask_async_mode_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
     original_post = runner_openai._post_loopback_sync
 
@@ -218,10 +218,14 @@ def test_real_async_handler_accepts_dispatched_args() -> None:
         )
         emitter = _make_emitter()
         call = {
-            "id": "call_async",
-            "name": "async",
+            "id": "call_ask_async",
+            "name": "ask",
             "arguments": json.dumps(
-                {"target_worker_pool": "testape", "message": "run async"}
+                {
+                    "target_worker_pool": "testape",
+                    "message": "run async",
+                    "mode": "continue_and_expect_mssg_back_async",
+                }
             ),
         }
         result = asyncio.run(
@@ -243,11 +247,12 @@ def test_real_async_handler_accepts_dispatched_args() -> None:
 
     parsed = json.loads(result)
     assert parsed["expects_response"] is True
-    assert captured, "async handler never posted to backend"
-    assert captured[0][0] == "/api/internal/async-communicate"
+    assert captured, "ask async mode handler never posted to backend"
+    assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["sender_session_id"] == "sender-1"
     assert captured[0][1]["target_worker_pool"] == "testape"
     assert captured[0][1]["message"] == "run async"
+    assert captured[0][1]["mode"] == "continue_and_expect_mssg_back_async"
 
 
 def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:

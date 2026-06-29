@@ -154,6 +154,36 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert "idempotency_key" not in queued[0]
 
 
+def test_detached_team_message_does_not_register_turn_join(monkeypatch):
+    sender = session_manager.create(name="sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+
+    monkeypatch.setattr(coordinator.turn_manager, "has_active_turn", lambda _sid: True)
+    monkeypatch.setattr(
+        coordinator,
+        "register_mssg_turn_waiter",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("detached mssg must not register a turn waiter")
+        ),
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda _sid, params: params["_queued_id"],
+    )
+
+    result = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="fire and forget",
+        detach=True,
+    ))
+
+    assert result["success"] is True
+    assert coordinator._mssg_turn_waiters == {}
+
+
 def test_submit_team_message_uses_delegation_message_model_preference(monkeypatch):
     sender = session_manager.create(
         name="manager",

@@ -22,13 +22,12 @@ try:
         "create_session",
         "unknown",
         "mssg",
-        "async",
         "ask",
         "ask",
         "create_sub_session",
         "delegate_task",
     ])
-    assert disabled == ["ask", "async", "create_session", "create_sub_session", "delegate_task", "mssg"]
+    assert disabled == ["ask", "create_session", "create_sub_session", "delegate_task", "mssg"]
     assert config_store.get_disabled_builtin_tools() == disabled
     disabled_extensions = config_store.set_disabled_builtin_extensions([
         extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
@@ -44,7 +43,7 @@ try:
 
     assert runner_codex._disabled_builtin_tools({
         "disabled_builtin_tools": disabled + ["unknown"],
-    }) == {"ask", "async", "create_session", "create_sub_session", "delegate_task", "mssg"}
+    }) == {"ask", "create_session", "create_sub_session", "delegate_task", "mssg"}
 
     gemini_config = runner_gemini._with_communicate_mcp(
         {
@@ -57,7 +56,7 @@ try:
     )
     env = gemini_config["mcp_servers"]["communicate"]["env"]
     assert env["BETTER_CLAUDE_DISABLED_BUILTIN_TOOLS"] == (
-        "ask,async,create_session,create_sub_session,delegate_task,mssg"
+        "ask,create_session,create_sub_session,delegate_task,mssg"
     )
 finally:
     shutil.rmtree(ba_home)
