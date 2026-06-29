@@ -1105,6 +1105,8 @@ def test_event_projections_warm_in_background() -> None:
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
     detail_warm_source = source[detail_warm_start:detail_warm_end]
     assert "_session_event_meta(root_id)" in detail_warm_source
+    assert "session_store.get_session_summaries_by_ids([root_id])" in detail_warm_source
+    assert "message_count" in detail_warm_source
     assert "event_ingester.message_event_summaries(root_id)" in detail_warm_source
     roots_start = source.index("def _session_event_projection_warm_roots(")
     roots_end = source.index("async def _warm_session_event_projections()", roots_start)
