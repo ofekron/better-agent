@@ -23,6 +23,7 @@ def test_frontend_conversion_runs_outside_message_cache_lock() -> None:
         byte_end=1,
         seq_end=1,
         res_version=0,
+        events_fingerprint=(0, 1),
     )
     reader._ensure_message_cache = lambda *_args, **_kwargs: cached  # type: ignore[method-assign]
 

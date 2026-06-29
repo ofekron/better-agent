@@ -1199,6 +1199,7 @@ class _MessageCacheEntry:
     byte_end: int
     seq_end: int
     res_version: int
+    events_fingerprint: tuple[int, int]
 
 
 class EventJournalReader:
@@ -1210,6 +1211,15 @@ class EventJournalReader:
             tuple[str, str, str], _MessageCacheEntry
         ] = OrderedDict()
         self._message_cache_lock = threading.RLock()
+
+    @staticmethod
+    def _events_fingerprint(session_id: str) -> tuple[int, int]:
+        path = _sessions_dir() / session_id / "events.jsonl"
+        try:
+            stat = path.stat()
+        except OSError:
+            return (0, 0)
+        return (stat.st_mtime_ns, stat.st_size)
 
     @staticmethod
     def _context_id(
@@ -1288,6 +1298,13 @@ class EventJournalReader:
             worker_id=worker_id,
             delegate_id=delegate_id,
         )
+        fingerprint = self._events_fingerprint(session_id)
+        key = (session_id, context_id, message_id)
+        with self._message_cache_lock:
+            cached = self._message_cache.get(key)
+            if cached is not None and fingerprint == cached.events_fingerprint:
+                self._message_cache.move_to_end(key)
+                return cached
         summaries_start = time.perf_counter()
         summaries = self.message_event_summaries(
             session_id,
@@ -1307,7 +1324,6 @@ class EventJournalReader:
             (time.perf_counter() - resolutions_start) * 1000,
         )
         res_version = len(resolutions)
-        key = (session_id, context_id, message_id)
         # Effective bounds: summary byte_start/byte_end already span the
         # message's own contiguous run UNION any resolved-in orphan
         # ranges (folded in event_ingester). A single range read + an
@@ -1338,6 +1354,7 @@ class EventJournalReader:
                 )
                 cached.byte_end = byte_end
                 cached.seq_end = seq_end
+                cached.events_fingerprint = fingerprint
                 cached.frontend_events = None
             elif not grow_only:
                 # Cold, shrunk, start moved earlier, or a new resolution
@@ -1360,6 +1377,7 @@ class EventJournalReader:
                     byte_end=byte_end,
                     seq_end=seq_end,
                     res_version=res_version,
+                    events_fingerprint=fingerprint,
                 )
                 self._message_cache[key] = cached
             self._message_cache.move_to_end(key)
