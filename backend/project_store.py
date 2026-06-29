@@ -151,6 +151,7 @@ def _migrate_legacy_or_raise() -> None:
 
 
 _v1_backup_records_cache: list[dict] | None = None
+_deleted_legacy_keys_cache: tuple[tuple[int, int], set[tuple[str, str]]] | None = None
 
 
 def _v1_backup_records() -> list[dict]:
@@ -181,11 +182,26 @@ def _read_legacy_deletions() -> list[dict]:
 
 
 def _write_legacy_deletions(rows: list[dict]) -> None:
+    global _deleted_legacy_keys_cache
     write_json(_legacy_deletions_path(), rows)
+    _deleted_legacy_keys_cache = None
+
+
+def _legacy_deletions_fingerprint() -> tuple[int, int]:
+    try:
+        st = _legacy_deletions_path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _deleted_legacy_keys() -> set[tuple[str, str]]:
     """Paths the user removed — repair must not resurrect them."""
+    global _deleted_legacy_keys_cache
+    fingerprint = _legacy_deletions_fingerprint()
+    cached = _deleted_legacy_keys_cache
+    if cached is not None and cached[0] == fingerprint:
+        return set(cached[1])
     out: set[tuple[str, str]] = set()
     for r in _read_legacy_deletions():
         if not isinstance(r, dict):
@@ -193,6 +209,7 @@ def _deleted_legacy_keys() -> set[tuple[str, str]]:
         norm = _normalize(r.get("path", ""))
         if norm:
             out.add((r.get("node_id") or "primary", norm))
+    _deleted_legacy_keys_cache = (fingerprint, set(out))
     return out
 
 
