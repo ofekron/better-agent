@@ -27,6 +27,8 @@ _search_inflight: dict[tuple[str, int], threading.Event] = {}
 _SEARCH_CACHE_MAX = 128
 _SEARCH_CACHE_STALE_SECONDS = 5.0
 _index_generation = 0
+_published_generation = 0
+_published_generation_at = 0.0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
 _REBUILD_INSERT_BATCH_SIZE = 1000
 # Bumped whenever the indexed-row shape changes. A persisted index whose
@@ -37,7 +39,7 @@ _INDEX_SCHEMA_VERSION = 2
 
 def generation() -> int:
     with _search_cache_lock:
-        return _index_generation
+        return _published_generation
 
 
 def has_cached_result(query: str, limit: int) -> bool:
@@ -288,7 +290,7 @@ def _worker_main() -> None:
 def _apply_rows(rows: list[tuple[str, str | None]]) -> None:
     if not rows:
         return
-    global _index_generation
+    global _index_generation, _published_generation, _published_generation_at
     with _lock:
         conn = _writer_connection()
         for session_id, text in rows:
@@ -305,6 +307,10 @@ def _apply_rows(rows: list[tuple[str, str | None]]) -> None:
         conn.commit()
         with _search_cache_lock:
             _index_generation += 1
+            now = time.monotonic()
+            if now - _published_generation_at >= _SEARCH_CACHE_STALE_SECONDS:
+                _published_generation = _index_generation
+                _published_generation_at = now
 
 
 def _drain_pending() -> None:
@@ -446,7 +452,7 @@ def needs_rebuild() -> bool:
 
 
 def rebuild_from_disk() -> None:
-    global _index_generation
+    global _index_generation, _published_generation, _published_generation_at
     if not _rebuild_lock.acquire(blocking=False):
         return
     try:
@@ -475,6 +481,8 @@ def rebuild_from_disk() -> None:
                 conn.commit()
                 with _search_cache_lock:
                     _index_generation += 1
+                    _published_generation = _index_generation
+                    _published_generation_at = time.monotonic()
             finally:
                 conn.close()
     finally:
