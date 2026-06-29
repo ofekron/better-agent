@@ -3500,6 +3500,22 @@ class SessionManager:
             },
         )
 
+    def set_origin(self, sid: str, *, source: str, user_initiated: bool) -> Optional[dict]:
+        if source not in session_store._VALID_SESSION_SOURCES:
+            raise ValueError(f"Invalid session source: {source}")
+        return self._run(
+            sid,
+            lambda s: (
+                s.__setitem__("source", source),
+                s.__setitem__("user_initiated", bool(user_initiated)),
+            ),
+            {
+                "kind": "origin_set",
+                "source": source,
+                "user_initiated": bool(user_initiated),
+            },
+        )
+
     def set_selectors(
         self,
         sid: str,

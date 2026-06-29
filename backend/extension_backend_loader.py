@@ -80,6 +80,14 @@ def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
     return _HOST_TIMEOUT_SECONDS
 
 
+def _allows_backend_exit_retry(spec: dict[str, Any], path: str) -> bool:
+    retry_paths = spec.get("backend_retry_on_exit")
+    if not isinstance(retry_paths, list):
+        return False
+    normalized = path.strip("/")
+    return normalized in {str(item).strip("/") for item in retry_paths}
+
+
 def _host_env() -> dict[str, str]:
     env = {
         "PYTHONIOENCODING": "utf-8",
@@ -452,6 +460,23 @@ async def _invoke_backend(
         logger.exception("extension backend failed: %s", spec["extension_id"])
         raise HTTPException(status_code=500, detail="Extension backend failed") from exc
 
+    if not response_line and _allows_backend_exit_retry(spec, path):
+        evict_persistent_backend(spec["extension_id"])
+        try:
+            with perf.timed("extension.backend.invoke.retry_after_exit"):
+                retry_handle = _get_handle(spec)
+                response_line = await asyncio.get_running_loop().run_in_executor(
+                    _ROUNDTRIP_EXECUTOR,
+                    _roundtrip,
+                    retry_handle,
+                    spec,
+                    base_url,
+                    request_payload,
+                    timeout,
+                )
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
+
     if not response_line:
         evict_persistent_backend(spec["extension_id"])
         raise HTTPException(status_code=500, detail="Extension backend process exited")
@@ -630,6 +655,14 @@ def invoke_extension_backend_sync(
         )
     except TimeoutError:
         return 500, b""
+    if not line and _allows_backend_exit_retry(spec, path):
+        evict_persistent_backend(extension_id)
+        try:
+            line = _roundtrip(
+                _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
+            )
+        except TimeoutError:
+            return 500, b""
     if not line:
         evict_persistent_backend(extension_id)
         return 500, b""

@@ -176,6 +176,8 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
             sess = session_manager.create(
                 name="Assistant",
                 orchestration_mode="native",
+                source="extension",
+                user_initiated=True,
                 capability_contexts=caps,
             )
             # The singleton is a stable, named entry point — never renamed by
@@ -184,17 +186,23 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
             next_state["session_id"] = sess["id"]
             _write_state(next_state)
         else:
+            if sess.get("source") != "extension" or sess.get("user_initiated") is not True:
+                sess = session_manager.set_origin(
+                    sess["id"],
+                    source="extension",
+                    user_initiated=True,
+                ) or sess
             if caps and state.get("capability_contexts_hash") != cap_hash:
-                session_manager.set_capability_contexts(sess["id"], caps)
+                sess = session_manager.set_capability_contexts(sess["id"], caps) or sess
             # Backfill the lock on singletons created before it existed.
             if not sess.get("name_locked"):
-                session_manager.set_name_locked(sess["id"], True)
+                sess = session_manager.set_name_locked(sess["id"], True) or sess
             # Self-heal the canonical name: a singleton auto-named to its first
             # prompt before the lock existed must be restored to "Assistant" —
             # the frontend board slot renders only for name == "Assistant". The
             # lock pins the canonical name, so restoring it is the lock's intent.
             if sess.get("name") != "Assistant":
-                session_manager.rename(sess["id"], "Assistant", force=True)
+                sess = session_manager.rename(sess["id"], "Assistant", force=True) or sess
             if next_state != state:
                 _write_state(next_state)
         return sess

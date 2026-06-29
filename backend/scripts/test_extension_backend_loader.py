@@ -444,6 +444,35 @@ def main() -> int:
         validated = extension_store._validate_backend_timeouts({"/sessions/search/": 930, "default": 30})  # type: ignore[attr-defined]
         check(validated == {"sessions/search": 930.0, "default": 30.0}, "valid backend_timeouts are slash-normalized")
 
+        try:
+            extension_store._validate_backend_retry_on_exit({"x": True})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("non-array backend_retry_on_exit must be rejected")
+        try:
+            extension_store._validate_backend_retry_on_exit(["../x"])  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("path traversal backend_retry_on_exit must be rejected")
+        validated_retry = extension_store._validate_backend_retry_on_exit(["/assistant/ensure/", "assistant/ensure"])  # type: ignore[attr-defined]
+        check(validated_retry == ("assistant/ensure",), "valid backend_retry_on_exit entries are slash-normalized and deduped")
+        check(
+            extension_backend_loader._allows_backend_exit_retry(  # type: ignore[attr-defined]
+                {"backend_retry_on_exit": ["assistant/ensure"]},
+                "assistant/ensure",
+            ),
+            "backend_retry_on_exit exact route allows retry",
+        )
+        check(
+            not extension_backend_loader._allows_backend_exit_retry(  # type: ignore[attr-defined]
+                {"backend_retry_on_exit": ["assistant/ensure"]},
+                "assistant/ensure/child",
+            ),
+            "backend_retry_on_exit does not prefix-match routes",
+        )
+
         # Concurrency: a fast route must return while a slow route is in flight
         # on the SAME extension subprocess — requests are multiplexed, not
         # serialized behind one lock. Pre-multiplex this fast call would queue
