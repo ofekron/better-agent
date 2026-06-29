@@ -319,10 +319,37 @@ export BETTER_AGENT_FRONTEND_PORT="$FRONTEND_PORT"
 # --- Sync backend dependencies before anything that imports them ----
 # Idempotent; cheap when deps are cached. Required so the argon2 import
 # in the keychain-bootstrap block below works on a fresh checkout.
-echo "Syncing backend deps..."
-# Create the venv on a fresh checkout — `uv pip install` won't make one.
-[ -x "$PY" ] || "$UV" venv "$DIR/backend/.venv"
-"$UV" pip install -q --python "$PY" -r "$DIR/backend/requirements.txt"
+sync_backend_deps() {
+  local req="$DIR/backend/requirements.txt"
+  local stamp="$DIR/backend/.venv/.requirements.stamp"
+  local current=""
+  local stamped=""
+
+  # Create the venv on a fresh checkout — `uv pip install` won't make one.
+  [ -x "$PY" ] || "$UV" venv "$DIR/backend/.venv"
+
+  current="$("$PY" - "$req" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+)"
+  if [ -f "$stamp" ]; then
+    stamped="$(cat "$stamp" 2>/dev/null || true)"
+  fi
+  if [ "$stamped" = "$current" ]; then
+    echo "Backend deps unchanged — skipping sync."
+    return 0
+  fi
+
+  echo "Syncing backend deps..."
+  "$UV" pip install -q --python "$PY" -r "$req"
+  printf '%s' "$current" > "$stamp"
+}
+sync_backend_deps
 
 # --- Install the `bagent` CLI command onto PATH (idempotent) --------
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
