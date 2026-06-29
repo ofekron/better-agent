@@ -3950,6 +3950,7 @@ class SessionManager:
         return self._run(
             sid, _do,
             {"kind": "native_event_appended", "msg_id": msg_id, "event": event},
+            hydrate_events=False,
         )
 
     def replace_native_event(
@@ -3991,6 +3992,7 @@ class SessionManager:
         return self._run(
             sid, _do,
             {"kind": "native_event_replaced", "msg_id": msg_id, "event": event, "uuid": uuid},
+            hydrate_events=False,
         )
 
     def set_agent_sid_on_msg(

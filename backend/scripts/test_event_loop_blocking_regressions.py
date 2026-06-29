@@ -180,6 +180,16 @@ def test_worker_panel_mutations_skip_cold_event_hydration() -> None:
         assert "hydrate_events=False" in helper_source
 
 
+def test_native_event_mutations_skip_cold_event_hydration() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+
+    for name in ("append_native_event", "replace_native_event"):
+        start = source.index(f"    def {name}(")
+        end = source.index("\n    def ", start + 1)
+        helper_source = source[start:end]
+        assert "hydrate_events=False" in helper_source
+
+
 def test_subagent_watcher_scans_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(" in source
@@ -2795,6 +2805,7 @@ if __name__ == "__main__":
     test_session_fork_index_refresh_is_root_scoped()
     test_session_organization_reads_are_cached()
     test_hydration_uses_local_projection_not_extension_backend()
+    test_native_event_mutations_skip_cold_event_hydration()
     test_session_event_extension_callbacks_are_worker_only()
     test_session_event_apply_event_uses_cached_hook_snapshot()
     test_requirement_tag_refresh_is_off_startup_loop()
