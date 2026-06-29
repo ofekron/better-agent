@@ -252,6 +252,18 @@ def test_publish_event_default_path_skips_temp_ack_subscribers() -> None:
     assert "event_journal_ack_" not in default_source
 
 
+def test_connected_session_list_pages_virtual_candidates() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    connected_start = source.index("    if connected:")
+    connected_source = source[connected_start:source.index("@app.post(\"/api/sessions/search-content\")", connected_start)]
+    virtual_start = connected_source.index("if may_include_virtual:")
+    virtual_source = connected_source[virtual_start:connected_source.index("try:", virtual_start)]
+    assert "if can_page_remote_local_order:" in virtual_source
+    assert "virtual_session_store.list_recent" in virtual_source
+    assert "max(offset + limit, 1)" in virtual_source
+    assert "virtual_session_store.list_all" in virtual_source
+
+
 def test_extension_plain_load_is_read_only() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
     load_start = source.index("def _load()")
