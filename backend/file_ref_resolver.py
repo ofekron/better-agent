@@ -106,6 +106,28 @@ class _ExistsCache:
 _cache = _ExistsCache()
 
 
+class _CwdPathCache:
+    _MAX_ENTRIES = 256
+
+    def __init__(self) -> None:
+        self._d: dict[str, Path] = {}
+
+    def resolve(self, cwd: str) -> Path:
+        cached = self._d.get(cwd)
+        if cached is not None:
+            return cached
+        resolved = Path(cwd).resolve()
+        if len(self._d) >= self._MAX_ENTRIES:
+            drop = list(self._d.keys())[: self._MAX_ENTRIES // 4]
+            for key in drop:
+                self._d.pop(key, None)
+        self._d[cwd] = resolved
+        return resolved
+
+
+_cwd_path_cache = _CwdPathCache()
+
+
 # ─── Extension tag rules (declarative, auto-reverting) ──────────────────
 #
 # Installed/enabled extensions can declare `applied_config.tag_rules`: tags
@@ -270,7 +292,7 @@ def rewrite_text(
     if "." not in text:  # cheap negative early-out
         return text
 
-    cwd_path = Path(cwd).resolve() if cwd else None
+    cwd_path = _cwd_path_cache.resolve(cwd) if cwd else None
 
     def _sub(m: re.Match[str]) -> str:
         if m.group("existing_bt"):
