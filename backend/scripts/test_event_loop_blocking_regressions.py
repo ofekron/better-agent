@@ -1581,6 +1581,17 @@ def test_session_store_sessions_dir_is_cached() -> None:
     assert "ba_home()" not in sessions_dir_source
 
 
+def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    assert "def _sessions_dir()" in source
+    assert "_SESSIONS_DIR_CACHE" in source
+    read_start = source.index("def _read_appended_entries(")
+    read_end = source.index("def read_events(", read_start)
+    read_source = source[read_start:read_end]
+    assert "_sessions_dir() / session_id / \"events.jsonl\"" in read_source
+    assert "ba_home()" not in read_source
+
+
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
