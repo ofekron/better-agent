@@ -362,6 +362,223 @@ export function messageHasUuid(msg: ChatMessage, uuid: string): boolean {
   return false;
 }
 
+function isLivePlaceholder(msg: ChatMessage): boolean {
+  return (
+    msg.role === "assistant" &&
+    msg.isStreaming === true &&
+    msg.id.startsWith("live-") &&
+    typeof msg.seq !== "number"
+  );
+}
+
+function mergeEventsByUuid(
+  placeholderEvents: WSEvent[] | undefined,
+  canonicalEvents: WSEvent[] | undefined,
+): WSEvent[] | undefined {
+  if (!placeholderEvents?.length) return canonicalEvents;
+  if (!canonicalEvents?.length) return placeholderEvents;
+  const merged = [...placeholderEvents];
+  const byUuid = new Map<string, number>();
+  merged.forEach((event, index) => {
+    const uuid = extractLiveEventUuid(event);
+    if (uuid) byUuid.set(uuid, index);
+  });
+  for (const event of canonicalEvents) {
+    const uuid = extractLiveEventUuid(event);
+    if (!uuid) {
+      merged.push(event);
+      continue;
+    }
+    const existing = byUuid.get(uuid);
+    if (existing === undefined) {
+      byUuid.set(uuid, merged.length);
+      merged.push(event);
+    } else {
+      merged[existing] = event;
+    }
+  }
+  return merged;
+}
+
+function mergePlaceholderWorkers(
+  placeholderWorkers: ChatMessage["workers"],
+  canonicalWorkers: ChatMessage["workers"],
+): ChatMessage["workers"] {
+  if (!placeholderWorkers?.length) return canonicalWorkers;
+  if (!canonicalWorkers?.length) return placeholderWorkers;
+  const merged = placeholderWorkers.map((worker) => ({ ...worker }));
+  const byDelegation = new Map<string, number>();
+  merged.forEach((worker, index) => {
+    if (worker.delegation_id) byDelegation.set(worker.delegation_id, index);
+  });
+  for (const worker of canonicalWorkers) {
+    const idx = worker.delegation_id
+      ? byDelegation.get(worker.delegation_id)
+      : undefined;
+    if (idx === undefined) {
+      merged.push(worker);
+      if (worker.delegation_id) byDelegation.set(worker.delegation_id, merged.length - 1);
+      continue;
+    }
+    const placeholder = merged[idx];
+    merged[idx] = {
+      ...placeholder,
+      ...worker,
+      events: mergeEventsByUuid(placeholder.events, worker.events),
+    };
+  }
+  return merged;
+}
+
+function shouldAdoptLivePlaceholder(
+  placeholder: ChatMessage,
+  canonical: ChatMessage,
+): boolean {
+  if (!isLivePlaceholder(placeholder) || canonical.role !== "assistant") return false;
+  for (const event of canonical.events ?? []) {
+    const uuid = extractLiveEventUuid(event);
+    if (uuid && messageHasUuid(placeholder, uuid)) return true;
+  }
+  const canonicalDelegations = new Set(
+    (canonical.workers ?? [])
+      .map((worker) => worker.delegation_id)
+      .filter((id): id is string => !!id),
+  );
+  if (canonicalDelegations.size > 0) {
+    for (const worker of placeholder.workers ?? []) {
+      if (worker.delegation_id && canonicalDelegations.has(worker.delegation_id)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function findLivePlaceholderToAdopt(
+  messages: ChatMessage[],
+  canonical: ChatMessage,
+  canonicalIndex?: number,
+): number {
+  const sameGroupCandidates: number[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (i === canonicalIndex) continue;
+    const sameGroup = samePromptGroupForAdoption(messages, i, canonical);
+    if (sameGroup && isLivePlaceholder(messages[i])) sameGroupCandidates.push(i);
+    if (
+      shouldAdoptLivePlaceholder(messages[i], canonical) &&
+      (sameGroup || typeof canonical.seq !== "number")
+    ) {
+      return i;
+    }
+  }
+  if (
+    canonical.isStreaming === true &&
+    totalEventCount(canonical) === 0 &&
+    typeof canonical.seq === "number" &&
+    sameGroupCandidates.length === 1
+  ) {
+    return sameGroupCandidates[0];
+  }
+  return -1;
+}
+
+function previousUserSeqForIndex(
+  messages: ChatMessage[],
+  beforeIndex: number,
+): number | null {
+  for (let i = beforeIndex - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user" && typeof message.seq === "number") {
+      return message.seq;
+    }
+  }
+  return null;
+}
+
+function previousUserSeqForCanonical(
+  messages: ChatMessage[],
+  canonical: ChatMessage,
+): number | null {
+  if (typeof canonical.seq !== "number") return null;
+  let seq: number | null = null;
+  for (const message of messages) {
+    if (
+      message.role === "user" &&
+      typeof message.seq === "number" &&
+      message.seq < canonical.seq &&
+      (seq === null || message.seq > seq)
+    ) {
+      seq = message.seq;
+    }
+  }
+  return seq;
+}
+
+function samePromptGroupForAdoption(
+  messages: ChatMessage[],
+  placeholderIndex: number,
+  canonical: ChatMessage,
+): boolean {
+  const canonicalUserSeq = previousUserSeqForCanonical(messages, canonical);
+  if (canonicalUserSeq === null) return false;
+  const placeholderUserSeq = previousUserSeqForIndex(messages, placeholderIndex);
+  return placeholderUserSeq === canonicalUserSeq;
+}
+
+function adoptLivePlaceholder(
+  placeholder: ChatMessage,
+  canonical: ChatMessage,
+): ChatMessage {
+  return {
+    ...canonical,
+    content: canonical.content || placeholder.content,
+    events: mergeEventsByUuid(placeholder.events, canonical.events),
+    workers: mergePlaceholderWorkers(placeholder.workers, canonical.workers),
+  };
+}
+
+export function mergeIncomingMessagesForNode(
+  existing: ChatMessage[],
+  messages: ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map<string, number>();
+  existing.forEach((m, i) => byId.set(m.id, i));
+  const merged = [...existing];
+  for (const m of messages) {
+    const idx = byId.get(m.id);
+    let next: ChatMessage | null = m;
+    if (idx !== undefined) {
+      const ex = merged[idx];
+      next = mergeIncomingMessageSnapshot(ex, m);
+      if (next === null) continue;
+    }
+    if (next.role === "assistant") {
+      const placeholderIdx = findLivePlaceholderToAdopt(merged, next, idx);
+      if (placeholderIdx !== -1) {
+        next = adoptLivePlaceholder(merged[placeholderIdx], next);
+        merged.splice(placeholderIdx, 1);
+        byId.clear();
+        merged.forEach((message, index) => byId.set(message.id, index));
+      }
+    }
+    const nextIdx = byId.get(next.id);
+    if (nextIdx !== undefined) {
+      merged[nextIdx] = next;
+    } else {
+      byId.set(next.id, merged.length);
+      merged.push(next);
+    }
+  }
+  merged.sort((a, b) => {
+    const sa =
+      typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
+    const sb =
+      typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
+    return sa - sb;
+  });
+  return merged;
+}
+
 /** Pure reducer for one live WS turn-event over a node's message list.
  *
  * Routes the event onto the in-flight assistant (via
@@ -1297,28 +1514,7 @@ export function useSession(authStatus?: string) {
     ): Session => {
       return updateNodeById(prev, sessionId, (node) => {
         const existing = node.messages || [];
-        const byId = new Map<string, number>();
-        existing.forEach((m, i) => byId.set(m.id, i));
-        const merged = [...existing];
-        for (const m of messages) {
-          const idx = byId.get(m.id);
-          if (idx !== undefined) {
-            const ex = merged[idx];
-            const next = mergeIncomingMessageSnapshot(ex, m);
-            if (next !== null) merged[idx] = next;
-          } else {
-            byId.set(m.id, merged.length);
-            merged.push(m);
-          }
-        }
-        merged.sort((a, b) => {
-          const sa =
-            typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
-          const sb =
-            typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
-          return sa - sb;
-        });
-        return { ...node, messages: merged };
+        return { ...node, messages: mergeIncomingMessagesForNode(existing, messages) };
       });
     },
     []
