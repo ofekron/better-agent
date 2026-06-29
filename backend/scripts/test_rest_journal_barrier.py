@@ -44,7 +44,7 @@ def main_test() -> bool:
         source="test",
     )
 
-    original = session_manager.get_root_tree_stubbed
+    original = session_manager.get_root_tree_stubbed_with_cache_key
     inserted: list[int] = []
 
     def _snapshot_then_write(*args, **kwargs):
@@ -58,13 +58,13 @@ def main_test() -> bool:
         inserted.append(written.seq)
         return tree
 
-    session_manager.get_root_tree_stubbed = _snapshot_then_write
+    session_manager.get_root_tree_stubbed_with_cache_key = _snapshot_then_write
     try:
         with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
             authenticate_client(client)
             response = client.get(f"/api/sessions/{sid}")
     finally:
-        session_manager.get_root_tree_stubbed = original
+        session_manager.get_root_tree_stubbed_with_cache_key = original
 
     payload = response.json()
     watermark = (payload.get("max_seq_by_sid") or {}).get(sid)
