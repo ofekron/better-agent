@@ -4049,6 +4049,89 @@ def _filter_sort_sessions_for_list(
     return out
 
 
+def _filter_sort_page_for_list(
+    sessions: list[dict],
+    *,
+    offset: int,
+    limit: int,
+    project_path: str | None,
+    search: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    folder_view: bool,
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    content_scores: dict[str, int],
+    sort_by: str,
+    status_sort: bool = False,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+) -> tuple[list[dict], int]:
+    import heapq
+
+    monitoring_by_sid: dict[str, str] = {}
+    unread_by_sid: dict[str, int] = {}
+    pending_input_by_sid: dict[str, int] = {}
+    if status_sort:
+        if state_snapshot is None:
+            state_snapshot = _sidebar_state_snapshot()
+        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
+
+    def _sort_key(session: dict) -> tuple:
+        if search and search.strip():
+            return _session_filtered_sort_key(
+                session,
+                folder_view=folder_view,
+                search=search,
+                content_scores=content_scores,
+                sort_by=sort_by,
+                status_sort=status_sort,
+                monitoring_by_sid=monitoring_by_sid,
+                unread_by_sid=unread_by_sid,
+                pending_input_by_sid=pending_input_by_sid,
+            )
+        return _session_list_sort_key(
+            session,
+            folder_view,
+            sort_by,
+            status_sort=status_sort,
+            monitoring_by_sid=monitoring_by_sid,
+            unread_by_sid=unread_by_sid,
+            pending_input_by_sid=pending_input_by_sid,
+        )
+
+    total = 0
+    end = offset + limit
+    selected: list[tuple[tuple, int, dict]] = []
+    for idx, session in enumerate(sessions):
+        if not _session_matches_list_filters(
+            session,
+            project_path=project_path,
+            search=search,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            tag_ids=tag_ids,
+            provider_ids=provider_ids,
+            model_ids=model_ids,
+            modes=modes,
+            sources=sources,
+            content_scores=content_scores,
+        ):
+            continue
+        total += 1
+        selected.append((_sort_key(session), -idx, session))
+
+    if len(selected) > end:
+        selected = heapq.nlargest(end, selected, key=lambda item: (item[0], item[1]))
+    else:
+        selected.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [session for _, __, session in selected[offset:end]], total
+
+
 def _filter_sessions_for_list_preserving_order(
     sessions: list[dict],
     *,
@@ -4882,11 +4965,15 @@ async def get_sessions(
         if effective_status_sort
         else None
     )
+    page_source: list[dict] | None = None
+    filtered_total: int | None = None
     with perf.timed("sessions.list.filter_sort"):
         if can_page_remote_local_order:
-            out = await asyncio.to_thread(
-                _filter_sort_sessions_for_list,
+            page_source, filtered_total = await asyncio.to_thread(
+                _filter_sort_page_for_list,
                 out,
+                offset=offset,
+                limit=limit,
                 project_path=project_path,
                 search=search,
                 show_archived=show_archived,
@@ -4945,13 +5032,19 @@ async def get_sessions(
                 status_sort=effective_status_sort,
                 state_snapshot=state_snapshot,
             )
-    total = local_total if local_total is not None else len(out)
+    total = (
+        local_total
+        if local_total is not None
+        else (filtered_total if filtered_total is not None else len(out))
+    )
     end = offset + limit
+    if page_source is None:
+        page_source = out[offset:end]
     with perf.timed("sessions.list.page_decorate"):
         page = await _run_hot_path(
             "sessions.list.page_decorate.worker",
             _decorate_local_sidebar_sessions,
-            out[offset:end],
+            page_source,
             state_snapshot,
         )
     if content_scores:

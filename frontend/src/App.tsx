@@ -3627,24 +3627,24 @@ function AppMain({
     setVisibleOpenTabCapacity((prev) => (prev === next ? prev : next));
   }, []);
 
+  const addOpenSessionId = useCallback((id: string) => {
+    setOpenSessionIds((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx >= 0 && idx === prev.length - 1) return prev;
+      const next = idx >= 0
+        ? [...prev.slice(0, idx), ...prev.slice(idx + 1), id]
+        : [...prev, id];
+      while (next.length > MAX_TAB_CAP) next.shift();
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     if (currentTree?.id) {
-      setOpenSessionIds((prev) => {
-        const id = currentTree.id;
-        if (currentTree.topbar_pinned) return prev;
-        const idx = prev.indexOf(id);
-        if (idx >= 0 && idx === prev.length - 1) return prev; // already most recent
-        let next: string[];
-        if (idx >= 0) {
-          next = [...prev.slice(0, idx), ...prev.slice(idx + 1), id];
-        } else {
-          next = [...prev, id];
-        }
-        while (next.length > MAX_TAB_CAP) next.shift();
-        return next;
-      });
+      if (currentTree.topbar_pinned) return;
+      addOpenSessionId(currentTree.id);
     }
-  }, [currentTree?.id, currentTree?.topbar_pinned]);
+  }, [addOpenSessionId, currentTree?.id, currentTree?.topbar_pinned]);
 
   useEffect(() => {
     if (sessionsLoaded) {
@@ -3782,10 +3782,20 @@ function AppMain({
 
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
-      setOpenSessionRecords((prev) => ({ ...prev, [session.id]: session }));
+      setOpenSessionRecords((prev) => {
+        const merged = mergeOpenSessionRecord(prev[session.id], session);
+        return merged === prev[session.id]
+          ? prev
+          : { ...prev, [session.id]: merged };
+      });
+      if (session.topbar_pinned) {
+        setTopbarPinnedSessions((prev) => ({ ...prev, [session.id]: session }));
+      } else {
+        addOpenSessionId(session.id);
+      }
       navigate(sessionPath(session.id));
     },
-    [navigate],
+    [addOpenSessionId, navigate],
   );
 
   const handleSelectTab = useCallback(
