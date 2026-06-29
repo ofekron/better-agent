@@ -493,7 +493,7 @@ def main() -> int:
                         path="workers",
                         body_bytes=b"",
                         query_b64="",
-                        safe_headers=[],
+                        safe_headers=[("accept", "application/json"), ("x-request-id", "one")],
                         base_url="http://testserver",
                     )
                 )
@@ -505,7 +505,7 @@ def main() -> int:
                         path="workers",
                         body_bytes=b"",
                         query_b64="",
-                        safe_headers=[],
+                        safe_headers=[("accept", "application/json"), ("x-request-id", "two")],
                         base_url="http://testserver",
                     )
                 )

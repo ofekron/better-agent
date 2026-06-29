@@ -41,6 +41,11 @@ _ALLOWED_REQUEST_HEADERS = {
     b"x-request-id",
     b"idempotency-key",
 }
+_GET_COALESCE_HEADER_NAMES = frozenset({
+    b"accept",
+    b"accept-encoding",
+    b"accept-language",
+})
 _BLOCKED_RESPONSE_HEADERS = {
     "content-length",
     "set-cookie",
@@ -120,6 +125,14 @@ def _safe_request_headers(request: Request) -> list[tuple[str, str]]:
         for key, value in request.headers.raw
         if key.lower() in _ALLOWED_REQUEST_HEADERS
     ]
+
+
+def _get_coalesce_headers(safe_headers: list[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (key.lower(), value)
+        for key, value in safe_headers
+        if key.lower().encode("latin-1") in _GET_COALESCE_HEADER_NAMES
+    )
 
 
 async def _read_limited_body(request: Request) -> bytes:
@@ -532,7 +545,7 @@ async def _invoke_backend_get_coalesced(
         str(spec["extension_id"]),
         path,
         query_b64,
-        tuple(safe_headers),
+        _get_coalesce_headers(safe_headers),
         base_url,
     )
     with _GET_INFLIGHT_GUARD:
