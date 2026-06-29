@@ -708,9 +708,10 @@ def test_unknown_root_resolution_uses_global_negative_throttle() -> None:
     resolve_end = source.index("def _session_path(", resolve_start)
     resolve_source = source[resolve_start:resolve_end]
     throttle_idx = resolve_source.index("_negative_root_resolve_global_until > now")
-    fingerprint_idx = resolve_source.index("live_fp = _dir_fingerprint()")
+    fingerprint_idx = resolve_source.index("live_fp = _dir_fingerprint_cached()")
     assert throttle_idx < fingerprint_idx
     assert "_negative_root_resolve_global_until = (" in resolve_source
+    assert "def _dir_fingerprint_cached(" in source
 
 
 def test_session_detail_reuses_migrated_root_cache() -> None:
