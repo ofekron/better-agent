@@ -809,6 +809,21 @@ def test_unknown_root_resolution_uses_global_negative_throttle() -> None:
     assert "def _dir_fingerprint_cached(" in source
 
 
+def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_index_sidecar_write_queue" in source
+    assert "def _schedule_index_sidecar_write(" in source
+    refresh_start = source.index("def _refresh_index(")
+    refresh_end = source.index("def _ensure_index(", refresh_start)
+    refresh_source = source[refresh_start:refresh_end]
+    assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in refresh_source
+    assert "_write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)" not in refresh_source
+    ensure_start = source.index("def _ensure_index(")
+    ensure_end = source.index("def _resolve_root_id(", ensure_start)
+    ensure_source = source[ensure_start:ensure_end]
+    assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in ensure_source
+
+
 def test_session_detail_reuses_migrated_root_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_migrated_root_cache" in source
@@ -2749,6 +2764,7 @@ if __name__ == "__main__":
     test_known_worker_projection_uses_field_reads()
     test_session_exists_uses_index_without_cold_root_load()
     test_unknown_root_resolution_uses_global_negative_throttle()
+    test_fork_index_refresh_sidecar_write_is_backgrounded()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
