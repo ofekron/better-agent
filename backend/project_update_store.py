@@ -107,6 +107,12 @@ def unseen_count(project_id: str) -> int:
         return _unseen_counts.get(project_id, 0)
 
 
+def unseen_counts(project_ids: list[str]) -> dict[str, int]:
+    with _lock:
+        _ensure_counts_locked()
+        return {project_id: _unseen_counts.get(project_id, 0) for project_id in project_ids}
+
+
 def total_unseen() -> int:
     """Sum of unseen counts across every project that has an update log."""
     with _lock:

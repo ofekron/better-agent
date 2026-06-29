@@ -790,6 +790,18 @@ def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
     assert "pending_approvals.list_pending(cwd=cwd)" not in route_source
 
 
+def test_project_update_counts_batch_uses_single_store_call() -> None:
+    store_source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
+    assert "def unseen_counts(project_ids: list[str])" in store_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("async def internal_project_update_counts_batch(")
+    route_end = main_source.index("@app.post(\"/api/internal/project-updates/unseen\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "await asyncio.to_thread(project_update_store.unseen_counts, project_ids)" in route_source
+    assert "project_update_store.unseen_count(project_id)" not in route_source
+
+
 def test_session_list_does_not_prewarm_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_schedule_session_snapshot_prewarm" not in source
@@ -1110,6 +1122,7 @@ if __name__ == "__main__":
     test_pending_node_polling_uses_public_projection_cache()
     test_machine_node_snapshot_reads_are_off_loop()
     test_pending_approval_listing_uses_cached_projection_off_loop()
+    test_project_update_counts_batch_uses_single_store_call()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
     test_startup_reenqueue_reads_sessions_off_loop()
     test_startup_does_not_warm_unread_by_hydrating_sessions()

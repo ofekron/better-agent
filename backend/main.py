@@ -2367,12 +2367,7 @@ async def internal_project_update_counts_batch(
     from paths import encode_cwd
 
     project_ids = [encode_cwd(cwd) for cwd in cwds]
-    return await asyncio.to_thread(
-        lambda: {
-            project_id: project_update_store.unseen_count(project_id)
-            for project_id in project_ids
-        }
-    )
+    return await asyncio.to_thread(project_update_store.unseen_counts, project_ids)
 
 
 @app.post("/api/internal/project-updates/unseen")
