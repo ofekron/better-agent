@@ -9,6 +9,7 @@ Run: python backend/scripts/test_native_files_manager.py
 import os
 import sys
 import tempfile
+import time
 
 import _test_home
 _test_home.isolate("nfm-test-")
@@ -208,6 +209,8 @@ async def test_local_run_state_skips_expensive_jsonl_scan() -> None:
     from runs_dir import runs_root
     from orchs import jsonl_helpers
 
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     sess = session_manager.create(name="state-first", cwd="/tmp/state-first", orchestration_mode="manager")
     sid = sess["id"]
     agent_sid = "STATE-FIRST-SID"
@@ -219,6 +222,7 @@ async def test_local_run_state_skips_expensive_jsonl_scan() -> None:
         _json.dumps({"session_id": agent_sid, "jsonl_path": lag_jsonl}),
         encoding="utf-8",
     )
+    os.utime(run_dir / "state.json", (time.time() + 10, time.time() + 10))
     original_compute = jsonl_helpers.compute_jsonl_read_path
 
     def fail_compute(*_args, **_kwargs):
@@ -405,7 +409,7 @@ async def test_run_state_recent_index_coalesces_concurrent_sid_scans() -> None:
     print("PASS test_run_state_recent_index_coalesces_concurrent_sid_scans")
 
 
-async def test_run_state_lookup_checks_recent_dirs_before_rg() -> None:
+async def test_run_state_lookup_checks_recent_dirs_first() -> None:
     from runs_dir import runs_root
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
@@ -425,18 +429,50 @@ async def test_run_state_lookup_checks_recent_dirs_before_rg() -> None:
         '{"session_id":"RECENT-FIRST-SID","jsonl_path":"/tmp/recent-first.jsonl"}',
         encoding="utf-8",
     )
-    original_run = nfm_mod.subprocess.run
-
-    def fail_rg(*_args, **_kwargs):
-        raise AssertionError("recent run-state lookup should avoid rg")
-
-    nfm_mod.subprocess.run = fail_rg  # type: ignore
-    try:
-        path = nfm_mod._scan_run_state_for_jsonl(agent_sid)
-    finally:
-        nfm_mod.subprocess.run = original_run  # type: ignore
+    path = nfm_mod._scan_run_state_for_jsonl(agent_sid)
     assert str(path) == "/tmp/recent-first.jsonl", path
-    print("PASS test_run_state_lookup_checks_recent_dirs_before_rg")
+    print("PASS test_run_state_lookup_checks_recent_dirs_first")
+
+
+async def test_run_state_lookup_miss_stays_bounded() -> None:
+    from runs_dir import runs_root
+    from orchs import jsonl_helpers
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    root = runs_root()
+    for i in range(nfm_mod._RUN_STATE_RECENT_SCAN_LIMIT + 10):
+        run_dir = root / f"bounded-miss-old-run-{i}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            '{"session_id":"old","jsonl_path":"/tmp/old.jsonl"}',
+            encoding="utf-8",
+        )
+    original_candidates = nfm_mod._recent_state_candidates
+    original_compute = jsonl_helpers.compute_jsonl_read_path
+    candidate_calls = 0
+
+    def counted_candidates(*args, **kwargs):
+        nonlocal candidate_calls
+        candidate_calls += 1
+        return original_candidates(*args, **kwargs)
+
+    def resolved_by_provider(*_args, **_kwargs):
+        return "/tmp/provider-fallback.jsonl"
+
+    nfm_mod._recent_state_candidates = counted_candidates  # type: ignore
+    jsonl_helpers.compute_jsonl_read_path = resolved_by_provider  # type: ignore
+    try:
+        path = nfm_mod._resolve_primary_jsonl(
+            {"id": "bounded-miss", "cwd": "/tmp/bounded-miss"},
+            "NOT-IN-RECENT-SID",
+        )
+    finally:
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
+        jsonl_helpers.compute_jsonl_read_path = original_compute
+    assert str(path) == "/tmp/provider-fallback.jsonl", path
+    assert candidate_calls == 1, f"expected bounded recent scan only, got {candidate_calls}"
+    print("PASS test_run_state_lookup_miss_stays_bounded")
 
 
 async def test_persisted_native_path_skips_run_state_lookup() -> None:
@@ -623,7 +659,8 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_recent_index_coalesces_concurrent_sid_scans())
-    asyncio.run(test_run_state_lookup_checks_recent_dirs_before_rg())
+    asyncio.run(test_run_state_lookup_checks_recent_dirs_first())
+    asyncio.run(test_run_state_lookup_miss_stays_bounded())
     asyncio.run(test_persisted_native_path_skips_run_state_lookup())
     asyncio.run(test_primary_jsonl_positive_cache_skips_path_stat())
     asyncio.run(test_codex_primary_not_tailed_by_claude_tailer())
