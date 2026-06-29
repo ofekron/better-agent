@@ -62,6 +62,12 @@ reporting completion. Never leave local work hanging between turns.
 The final message of every turn MUST include a short TLDR covering the whole
 turn, including any steering messages received during the turn.
 
+## UI internationalization
+
+Every UI change must keep i18n updated in the same turn. Add or update the
+translation keys for any new, changed, or removed user-facing text, and remove
+stale keys when the UI no longer uses them.
+
 ## Security is the top priority (read this before writing any code)
 
 Better Agent is a destructive tool in the wrong hands: it spawns
