@@ -68,6 +68,10 @@ Every UI change must keep i18n updated in the same turn. Add or update the
 translation keys for any new, changed, or removed user-facing text, and remove
 stale keys when the UI no longer uses them.
 
+Every UI change must use intentional, perceptible animation for state and layout
+transitions. Avoid instant/fast swaps unless the user explicitly asks for no
+motion or accessibility settings require reduced motion.
+
 ## Security is the top priority (read this before writing any code)
 
 Better Agent is a destructive tool in the wrong hands: it spawns
