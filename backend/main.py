@@ -296,7 +296,7 @@ def _sessions_list_cache_version(search_query: str) -> int:
         return session_store.search_metadata_version()
     return session_store.summary_version()
 
-_GIT_STATUS_TTL_SECONDS = 2.0
+_GIT_STATUS_TTL_SECONDS = 60.0
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _git_status_inflight: dict[tuple[str, str], asyncio.Task] = {}
 _git_status_cache_lock = asyncio.Lock()
