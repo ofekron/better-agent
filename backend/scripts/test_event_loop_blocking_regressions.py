@@ -327,6 +327,18 @@ def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     assert "_get_cached_snapshot(" not in delta_source
 
 
+def test_connected_session_fallback_sorts_only_requested_page() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "def _filter_sort_page_for_list(" in source
+    route_start = source.index("async def get_sessions(")
+    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_source = source[route_start:route_end]
+    fallback_start = route_source.index("if can_page_remote_local_order:")
+    fallback_source = route_source[fallback_start:route_source.index("elif _can_preserve_summary_order", fallback_start)]
+    assert "_filter_sort_page_for_list" in fallback_source
+    assert "_filter_sort_sessions_for_list" not in fallback_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
