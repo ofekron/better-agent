@@ -1243,6 +1243,11 @@ def test_session_detail_response_bytes_are_cached() -> None:
     assert "def _session_detail_cache_get(" in source
     assert "def _session_detail_cache_put(" in source
     assert "def _session_detail_response_cache_key_sync(" in source
+    assert "_SESSION_DETAIL_RESPONSE_TTL_SECONDS" not in source
+    cache_get_start = source.index("def _session_detail_cache_get(")
+    cache_get_end = source.index("def _session_detail_cache_put(", cache_get_start)
+    cache_get_source = source[cache_get_start:cache_get_end]
+    assert "time.monotonic()" not in cache_get_source
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
