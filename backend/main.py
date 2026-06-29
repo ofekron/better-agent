@@ -13519,15 +13519,16 @@ async def websocket_chat(websocket: WebSocket):
                     # transition).
                     try:
                         _sub_runs = coordinator.turn_manager.get_run_state(sub_sid)
-                        logger.info(
-                            "RUNSTATE_DBG[subscribe] sid=%s serves runs=%s",
-                            sub_sid[:8],
-                            [
-                                f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}"
-                                f"|pid={r.get('pid')}|started={r.get('started_at')}"
-                                for r in _sub_runs
-                            ],
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "RUNSTATE_DBG[subscribe] sid=%s serves runs=%s",
+                                sub_sid[:8],
+                                [
+                                    f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}"
+                                    f"|pid={r.get('pid')}|started={r.get('started_at')}"
+                                    for r in _sub_runs
+                                ],
+                            )
                         await ws_callback({
                             "type": "run_state",
                             "data": {

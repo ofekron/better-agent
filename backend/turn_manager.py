@@ -505,13 +505,15 @@ class TurnManager:
     def _dbg_runstate(self, app_session_id: str, label: str) -> None:
         """Diagnostic snapshot of _run_state + active_run_ids for a session.
         Grep `RUNSTATE_DBG` to trace why a 'Native Running' badge sticks."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
         runs = self._run_state.get(app_session_id) or []
         entries = [
             f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
             f"|tgt={(r.get('target_message_id') or '-')[:8]}"
             for r in runs
         ]
-        logger.info(
+        logger.debug(
             "RUNSTATE_DBG[%s] sid=%s n=%d active_ids=%s entries=%s",
             label, app_session_id[:8], len(runs),
             [str(x)[:8] for x in self.active_run_ids.get(app_session_id, [])],
@@ -881,14 +883,15 @@ class TurnManager:
 
     async def emit_run_state(self, app_session_id: str) -> None:
         snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
-        logger.info(
-            "RUNSTATE_DBG[emit] sid=%s runs=%s",
-            app_session_id[:8],
-            [
-                f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
-                for r in snapshot
-            ],
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "RUNSTATE_DBG[emit] sid=%s runs=%s",
+                app_session_id[:8],
+                [
+                    f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
+                    for r in snapshot
+                ],
+            )
         await self._c.broadcast_session(
             app_session_id,
             "run_state",
