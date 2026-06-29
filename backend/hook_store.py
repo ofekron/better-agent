@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_OUTPUT_BYTES = 64_000
+_state_cache: tuple[tuple[int, int], dict[str, Any]] | None = None
 
 
 class HookConfigError(ValueError):
@@ -31,7 +33,7 @@ def replace_hooks(raw_hooks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     hooks = [_normalize_hook(raw, index=i) for i, raw in enumerate(raw_hooks)]
     _assert_unique_ids(hooks)
     state = {"schema_version": SCHEMA_VERSION, "hooks": hooks}
-    write_json(_store_path(), state)
+    _write_state(state)
     return hooks
 
 
@@ -41,7 +43,7 @@ def upsert_hook(raw_hook: dict[str, Any]) -> dict[str, Any]:
     hooks = [h for h in state["hooks"] if h["id"] != hook["id"]]
     hooks.append(hook)
     _assert_unique_ids(hooks)
-    write_json(_store_path(), {"schema_version": SCHEMA_VERSION, "hooks": hooks})
+    _write_state({"schema_version": SCHEMA_VERSION, "hooks": hooks})
     return hook
 
 
@@ -52,14 +54,33 @@ def delete_hook(hook_id: str) -> bool:
     hooks = [h for h in state["hooks"] if h["id"] != hook_id]
     if len(hooks) == len(state["hooks"]):
         return False
-    write_json(_store_path(), {"schema_version": SCHEMA_VERSION, "hooks": hooks})
+    _write_state({"schema_version": SCHEMA_VERSION, "hooks": hooks})
     return True
 
 
+def _store_fingerprint() -> tuple[int, int]:
+    try:
+        st = _store_path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _write_state(state: dict[str, Any]) -> None:
+    global _state_cache
+    write_json(_store_path(), state)
+    _state_cache = (_store_fingerprint(), copy.deepcopy(state))
+
+
 def _load_state() -> dict[str, Any]:
+    global _state_cache
     path = _store_path()
     if not path.exists():
         return {"schema_version": SCHEMA_VERSION, "hooks": []}
+    fingerprint = _store_fingerprint()
+    cached = _state_cache
+    if cached is not None and cached[0] == fingerprint:
+        return copy.deepcopy(cached[1])
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -76,7 +97,9 @@ def _load_state() -> dict[str, Any]:
         raise HookConfigError("hooks must be a list")
     normalized = [_normalize_hook(raw, index=i) for i, raw in enumerate(hooks)]
     _assert_unique_ids(normalized)
-    return {"schema_version": SCHEMA_VERSION, "hooks": normalized}
+    normalized_state = {"schema_version": SCHEMA_VERSION, "hooks": normalized}
+    _state_cache = (fingerprint, copy.deepcopy(normalized_state))
+    return normalized_state
 
 
 def _normalize_hook(raw: dict[str, Any], *, index: int) -> dict[str, Any]:
