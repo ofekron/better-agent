@@ -2438,7 +2438,7 @@ class SessionManager:
                     m["events"] = []
                     m["stub"] = {
                         "event_count": summary.get("event_count", 0),
-                        "last_events": copy.deepcopy(
+                        "last_events": _copy_jsonish(
                             summary.get("last_events") or []
                         ),
                     }
@@ -2554,7 +2554,7 @@ class SessionManager:
                 m["events"] = []
                 m["stub"] = {
                     "event_count": summary.get("event_count", 0),
-                    "last_events": copy.deepcopy(summary.get("last_events") or []),
+                    "last_events": _copy_jsonish(summary.get("last_events") or []),
                 }
                 if summary:
                     m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
@@ -2622,7 +2622,7 @@ class SessionManager:
                     m["events"] = []
                     m["stub"] = {
                         "event_count": summary.get("event_count", 0),
-                        "last_events": copy.deepcopy(
+                        "last_events": _copy_jsonish(
                             summary.get("last_events") or []
                         ),
                     }

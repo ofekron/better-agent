@@ -98,6 +98,19 @@ def test_migrated_root_cache_returns_isolated_trees(failures: list[str]) -> None
     )
 
 
+def test_stub_last_events_are_isolated(failures: list[str]) -> None:
+    import session_manager as session_manager_module
+
+    summary_event = {"type": "agent_message", "data": {"content": [{"text": "tail"}]}}
+    copied = session_manager_module._copy_jsonish([summary_event])
+    copied[0]["data"]["content"][0]["text"] = "mutated"
+    check(
+        summary_event["data"]["content"][0]["text"] == "tail",
+        "stub last_events copy is isolated",
+        failures,
+    )
+
+
 def test_prompt_templates_use_meipass(failures: list[str]) -> None:
     import prompt_templates
 
@@ -534,6 +547,7 @@ def main() -> int:
     try:
         test_session_index_skips_malformed_roots(failures)
         test_migrated_root_cache_returns_isolated_trees(failures)
+        test_stub_last_events_are_isolated(failures)
         test_prompt_templates_use_meipass(failures)
         test_jsonl_path_positive_cache(failures)
         test_jsonl_path_encoded_cwd_fast_path(failures)
