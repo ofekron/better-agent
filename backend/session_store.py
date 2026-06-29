@@ -267,6 +267,7 @@ def _projection_snapshot() -> tuple[dict[str, list[dict]], dict[str, dict[str, d
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
+    organization_projection: tuple[dict, dict] | None = None,
 ) -> dict:
     """Extract sidebar-visible summary fields from a root session dict.
     Mirrors the per-root block in the old `_build_session_list`."""
@@ -346,7 +347,14 @@ def _build_summary_for_root(
         "archived": bool(root.get("archived", False)),
         "worker_eligible": bool(root.get("worker_eligible", False)),
     }
-    summary = session_organization_store.enrich_session_summary(summary)
+    if organization_projection is None:
+        summary = session_organization_store.enrich_session_summary(summary)
+    else:
+        summary = session_organization_store.enrich_session_summary_from_projection(
+            summary,
+            organization_projection[0],
+            organization_projection[1],
+        )
     summary["tag_filter_ids"] = _tag_filter_ids(
         summary.get("session_tags") or [],
         requirement_tags,
@@ -509,6 +517,45 @@ def _start_summary_projection_repair() -> None:
 def summary_version() -> int:
     with _summary_index_lock:
         return _summary_index_version
+
+
+def refresh_organization_projection(session_ids: Iterable[str] | None = None) -> None:
+    global _summary_index_version
+    import session_organization_store
+
+    organization_projection = session_organization_store.enrichment_projection()
+    requested = set(session_ids) if session_ids is not None else None
+    updates: dict[str, dict] = {}
+    with _summary_index_lock:
+        if not _summary_index_loaded:
+            return
+        items = list(_summary_index.items())
+    for sid, summary in items:
+        if requested is not None and sid not in requested:
+            continue
+        updated = session_organization_store.enrich_session_summary_from_projection(
+            summary,
+            organization_projection[0],
+            organization_projection[1],
+        )
+        updated["tag_filter_ids"] = _tag_filter_ids(
+            updated.get("session_tags") or [],
+            updated.get("requirement_tags") or [],
+        )
+        if updated != summary:
+            updates[sid] = updated
+    if not updates:
+        return
+    with _summary_index_lock:
+        for sid, updated in updates.items():
+            if _summary_index.get(sid) != updated:
+                _summary_index[sid] = updated
+                _summary_index_version += 1
+    for sid, summary in updates.items():
+        try:
+            _write_summary_file(sid, summary)
+        except Exception:
+            pass
 
 
 def search_metadata_version() -> int:
@@ -1003,7 +1050,9 @@ def _do_build_summary_index_unsafe() -> None:
     # (summary mtime must be >= session file mtime — a crash between
     # write_session_full and summary file write leaves a stale summary).
     missing_ids: list[str] = []
+    import session_organization_store
     projection_snapshot = _projection_snapshot()
+    organization_projection = session_organization_store.enrichment_projection()
     for sid in full_files:
         sp = summary_files.get(sid)
         published = False
@@ -1056,7 +1105,11 @@ def _do_build_summary_index_unsafe() -> None:
             data = _migrate_session(json.loads(fpath.read_text(encoding="utf-8")), ctx)
             _overlay_seen_cursors(data, data["id"])
             _overlay_last_opened(data, data["id"])
-            summary = _build_summary_for_root(data, projection_snapshot)
+            summary = _build_summary_for_root(
+                data,
+                projection_snapshot,
+                organization_projection,
+            )
             with _summary_index_lock:
                 existing = _summary_index.get(data["id"])
                 _summary_index[data["id"]] = summary
