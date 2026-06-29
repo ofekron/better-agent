@@ -97,11 +97,10 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes],
 ] = {}
-_session_detail_response_cache: collections.OrderedDict[tuple, tuple[float, bytes]] = (
+_session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
-_SESSION_DETAIL_RESPONSE_TTL_SECONDS = 2.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 16
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.15
@@ -282,14 +281,11 @@ def _json_bytes_response(value: dict) -> Response:
 
 
 def _session_detail_cache_get(key: tuple) -> Response | None:
-    cached = _session_detail_response_cache.get(key)
-    if cached is None:
-        return None
-    if time.monotonic() - cached[0] > _SESSION_DETAIL_RESPONSE_TTL_SECONDS:
-        _session_detail_response_cache.pop(key, None)
+    content = _session_detail_response_cache.get(key)
+    if content is None:
         return None
     _session_detail_response_cache.move_to_end(key)
-    return Response(content=cached[1], media_type="application/json")
+    return Response(content=content, media_type="application/json")
 
 
 def _session_detail_cache_put(key: tuple, value: dict) -> Response:
@@ -301,7 +297,7 @@ def _session_detail_cache_put(key: tuple, value: dict) -> Response:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    _session_detail_response_cache[key] = (time.monotonic(), content)
+    _session_detail_response_cache[key] = content
     return Response(content=content, media_type="application/json")
 
 
