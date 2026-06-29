@@ -89,6 +89,26 @@ _TOOL_ENV_DENY_EXACT = {
 }
 _TOOL_ENV_DENY_PREFIXES = ("anthropic", "openai")
 
+# Detached runners can outlive backend restarts/token rotations. Prefer the
+# spawn-time token for normal requests, but on a 403 retry once with the current
+# disk token. mtime caching keeps steady-state loopback calls cheap.
+_token_cache: dict = {"token": None, "mtime": 0.0}
+
+
+def _load_internal_token() -> Optional[str]:
+    try:
+        from paths import ba_home as _ba_home
+        path = _ba_home() / "internal_token"
+        st = path.stat()
+        if _token_cache["mtime"] != st.st_mtime:
+            _token_cache["token"] = path.read_text(encoding="utf-8").strip()
+            _token_cache["mtime"] = st.st_mtime
+        return _token_cache["token"]
+    except OSError:
+        return None
+    except Exception:
+        return None
+
 
 # --------------------------------------------------------------------------
 # small utils
@@ -1068,29 +1088,47 @@ def _post_loopback_sync(
     internal_token: str,
     url_path: str,
     timeout_s: float,
+    recover: Optional[Callable[[], Optional[dict]]] = None,
 ) -> dict:
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout_s
     backoff = 1.0
-    while True:
+    tried_live_token_after_forbidden = False
+
+    def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             backend_url.rstrip("/") + url_path,
             data=body,
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "X-Internal-Token": internal_token,
+                "X-Internal-Token": token,
             },
         )
+        remaining = max(1.0, deadline - time.monotonic())
+        with urllib.request.urlopen(req, timeout=remaining) as resp:
+            raw = resp.read()
         try:
-            remaining = max(1.0, deadline - time.monotonic())
-            with urllib.request.urlopen(req, timeout=remaining) as resp:
-                raw = resp.read()
-            try:
-                return json.loads(raw.decode("utf-8"))
-            except Exception as e:
-                raise RuntimeError(f"loopback returned non-JSON: {e}; raw={raw[:200]!r}")
-        except urllib.error.HTTPError:
+            return json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            raise RuntimeError(f"loopback returned non-JSON: {e}; raw={raw[:200]!r}")
+
+    while True:
+        try:
+            return _request_once(internal_token)
+        except urllib.error.HTTPError as e:
+            live_token = _load_internal_token()
+            if (
+                e.code == 403
+                and live_token
+                and live_token != internal_token
+                and not tried_live_token_after_forbidden
+            ):
+                tried_live_token_after_forbidden = True
+                try:
+                    return _request_once(live_token)
+                except urllib.error.HTTPError:
+                    raise e
             raise
         except (
             urllib.error.URLError,
@@ -1098,6 +1136,9 @@ def _post_loopback_sync(
             ConnectionError,
             TimeoutError,
         ) as e:
+            recovered = recover() if recover is not None else None
+            if recovered is not None:
+                return recovered
             if time.monotonic() >= deadline:
                 raise
             reason = getattr(e, "reason", e)
@@ -1109,6 +1150,70 @@ def _post_loopback_sync(
             )
             time.sleep(min(backoff, max(0.5, deadline - time.monotonic())))
             backoff = min(backoff * 2, 60.0)
+
+
+def _recover_ask_result(ask_id: str) -> Optional[dict]:
+    try:
+        import ask_status_store
+        status = ask_status_store.read_status(ask_id)
+    except Exception:
+        logger.exception("openai ask status recovery read failed")
+        return None
+    if not status:
+        return None
+    result = status.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _byte_size_if_exists(path: Optional[str]) -> int:
+    if not path:
+        return 0
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _recover_delegate_result(client_delegation_id: str) -> Optional[dict]:
+    try:
+        import delegation_status_store
+        status = delegation_status_store.read_status(client_delegation_id)
+    except Exception:
+        logger.exception("openai delegate status recovery read failed")
+        return None
+    if not status:
+        return None
+
+    result = status.get("result")
+    if isinstance(result, dict):
+        return result
+
+    run_dir = status.get("provider_run_dir")
+    if not run_dir:
+        return None
+    try:
+        from runs_dir import read_best_complete
+        complete = read_best_complete(Path(run_dir))
+    except Exception:
+        logger.exception("openai delegate run complete recovery failed")
+        return None
+    if not complete:
+        return None
+
+    jsonl_path = status.get("jsonl_path")
+    total_bytes_now = _byte_size_if_exists(jsonl_path)
+    return {
+        "success": bool(complete.get("success")),
+        "worker_session_id": status.get("worker_session_id"),
+        "worker_description": status.get("worker_description") or "worker",
+        "agent_session_id": status.get("agent_session_id"),
+        "result": complete.get("result") or complete.get("output") or "",
+        "jsonl_path": jsonl_path,
+        "start_byte": int(status.get("start_byte") or 0),
+        "end_byte": total_bytes_now,
+        "total_bytes_now": total_bytes_now,
+        "error": complete.get("error"),
+    }
 
 
 def _args(params: dict) -> dict:
@@ -1284,6 +1389,7 @@ def _build_loopback_tool_handlers(
             worker_registry_cwd = args.get("worker_registry_cwd")
             if worker_registry_cwd in ("", "null"):
                 worker_registry_cwd = None
+            client_delegation_id = f"del_{uuid.uuid4().hex[:10]}"
             payload = {
                 "app_session_id": app_session_id,
                 "instructions": message,
@@ -1291,13 +1397,15 @@ def _build_loopback_tool_handlers(
                 "worker_description": str(args.get("worker_description") or "").strip(),
                 "model": model,
                 "cwd": cwd,
-                "client_delegation_id": f"del_{uuid.uuid4().hex[:10]}",
+                "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
                 "worker_registry_cwd": worker_registry_cwd,
                 "ephemeral": ephemeral,
             }
             url_path = "/api/internal/ask-fork"
+            recover = lambda: _recover_delegate_result(client_delegation_id)
         else:
+            ask_id = f"ask_{uuid.uuid4().hex[:10]}"
             payload = {
                 "sender_session_id": mssg_sender_session_id,
                 "target_session_id": target_session_id,
@@ -1305,10 +1413,15 @@ def _build_loopback_tool_handlers(
                 "target_worker_pool": target_worker_pool,
                 "pool_affinity_key": pool_affinity_key,
                 "message": message,
-                "ask_id": f"ask_{uuid.uuid4().hex[:10]}",
+                "ask_id": ask_id,
                 "mode": mode,
             }
             url_path = "/api/internal/ask"
+            recover = (
+                None
+                if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC
+                else lambda: _recover_ask_result(ask_id)
+            )
         try:
             result = await asyncio.to_thread(
                 _post_loopback_sync,
@@ -1317,6 +1430,7 @@ def _build_loopback_tool_handlers(
                 internal_token=internal_token,
                 url_path=url_path,
                 timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
+                recover=recover,
             )
         except Exception as e:
             logger.exception("ask dynamic tool handler failed")

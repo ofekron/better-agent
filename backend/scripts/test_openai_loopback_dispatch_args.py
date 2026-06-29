@@ -70,6 +70,8 @@ def test_dispatch_forwards_args_to_loopback_handler() -> None:
             "tok",
             emitter,
             {"ask": fake_ask},
+            runner_openai.LockRegistry(),
+            False,
         )
     )
 
@@ -100,6 +102,7 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
+            lock_registry=runner_openai.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -127,6 +130,8 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
+                runner_openai.LockRegistry(),
+                False,
             )
         )
     finally:
@@ -164,6 +169,7 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
+            lock_registry=runner_openai.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -185,6 +191,8 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
+                runner_openai.LockRegistry(),
+                False,
             )
         )
     finally:
@@ -215,6 +223,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
+            lock_registry=runner_openai.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -241,6 +250,8 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
+                runner_openai.LockRegistry(),
+                False,
             )
         )
     finally:
@@ -287,6 +298,7 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
             },
             cwd="/repo",
             model="model-x",
+            lock_registry=runner_openai.LockRegistry(),
         )
         assert "ensure_named_worker" in handlers
         emitter = _make_emitter()
@@ -314,6 +326,8 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
+                runner_openai.LockRegistry(),
+                False,
             )
         )
     finally:
@@ -348,6 +362,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         team_orchestration_enabled=False,
         open_file_panel_enabled=False,
         file_editing_mode=False,
+        coordination_enabled=False,
     )
     assert all(
         schema.get("function", {}).get("name") != "ensure_named_worker"
@@ -362,6 +377,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         team_orchestration_enabled=True,
         open_file_panel_enabled=False,
         file_editing_mode=False,
+        coordination_enabled=False,
     )
     tool = next(
         schema for schema in with_team

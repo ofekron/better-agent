@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_recovery  # noqa: E402
 from provider_gemini import GeminiProvider  # noqa: E402
+from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
@@ -227,6 +228,41 @@ def test_gemini_live_orphan_returns_live_descriptor_without_complete_json() -> N
     check("complete.json not synthesized", not (run_dir / "complete.json").exists())
 
 
+def test_openai_live_orphan_returns_live_descriptor_without_complete_json() -> None:
+    print("T4b openai live orphan remains live during recovery scan")
+    provider = OpenAIProvider({
+        "id": "openai-test",
+        "kind": "openai",
+        "base_url": "http://127.0.0.1:1/v1",
+        "api_key": "test",
+    })
+    run_id = "openai-live-run"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(run_dir / "backend_state.json", {
+        "run_id": run_id,
+        "app_session_id": "sid",
+        "persist_to": "sid",
+        "mode": "native",
+        "runner_pid": os.getpid(),
+        "started_at": "2026-01-01T00:00:00",
+        "session_id": "openai-session",
+        "jsonl_path": str(run_dir / "session_events.jsonl"),
+        "processed_line": 0,
+        "cancelled": False,
+        "provider_id": "openai-test",
+        "provider_kind": "openai",
+        "target_message_id": "msg",
+    })
+
+    recovered = provider.recover_in_flight(run_id_filter={run_id})
+    desc = recovered[0] if recovered else {}
+    check("openai returned descriptor", len(recovered) == 1)
+    check("openai descriptor is live", desc.get("alive") is True)
+    check("openai descriptor has no complete", desc.get("has_complete_json") is False)
+    check("openai complete.json not synthesized", not (run_dir / "complete.json").exists())
+
+
 def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
     print("T5 missing-target live finalizer leaves run unreconciled")
     run_id = "missing-target-live"
@@ -432,6 +468,7 @@ def main() -> int:
         test_recovery_missing_target_does_not_mutate_latest()
         test_same_target_native_run_state_replaces_but_workers_stay_distinct()
         test_gemini_live_orphan_returns_live_descriptor_without_complete_json()
+        test_openai_live_orphan_returns_live_descriptor_without_complete_json()
         test_missing_target_finalizer_does_not_mark_reconciled()
         test_missing_target_completed_startup_does_not_mark_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()

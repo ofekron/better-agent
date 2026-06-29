@@ -11,10 +11,12 @@ Two layers:
 Uses a temp BETTER_AGENT_HOME so no real session state is touched.
 """
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
 
 # Set BETTER_AGENT_HOME BEFORE importing backend modules.
@@ -116,6 +118,140 @@ def test_bash_tool_scrubs_provider_and_internal_secrets():
     assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
     assert "BETTER_AGENT_INTERNAL_TOKEN" not in env
     assert env.get("SAFE_VISIBLE_FOR_TEST") == "ok"
+
+
+def test_openai_loopback_retries_disk_token_after_forbidden():
+    runner = _mod("runner_openai")
+    token_file = Path(os.environ["BETTER_AGENT_HOME"]) / "internal_token"
+    token_file.write_text("disk-token", encoding="utf-8")
+    runner._token_cache["token"] = None
+    runner._token_cache["mtime"] = 0.0
+
+    seen_tokens = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"success": True}).encode("utf-8")
+
+    def fake_urlopen(req, *args, **kwargs):
+        token = req.headers.get("X-internal-token")
+        seen_tokens.append(token)
+        if token == "spawn-token":
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+        return FakeResponse()
+
+    original_urlopen = runner.urllib.request.urlopen
+    try:
+        runner.urllib.request.urlopen = fake_urlopen
+        recovered = runner._post_loopback_sync(
+            {},
+            backend_url="http://127.0.0.1:9999",
+            internal_token="spawn-token",
+            url_path="/api/internal/ask",
+            timeout_s=30.0,
+        )
+    finally:
+        runner.urllib.request.urlopen = original_urlopen
+
+    assert recovered == {"success": True}
+    assert seen_tokens == ["spawn-token", "disk-token"]
+
+
+def test_openai_loopback_recovers_completed_ask_result():
+    runner = _mod("runner_openai")
+    ask_status_store = _mod("ask_status_store")
+    result = {"success": True, "assistant_content": "done"}
+    ask_status_store.write_status("ask_done", result=result)
+
+    def fake_urlopen(*args, **kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+
+    def fail_sleep(seconds):
+        raise AssertionError("durable ask result should avoid retry sleep")
+
+    original_urlopen = runner.urllib.request.urlopen
+    original_sleep = runner.time.sleep
+    try:
+        runner.urllib.request.urlopen = fake_urlopen
+        runner.time.sleep = fail_sleep
+        recovered = runner._post_loopback_sync(
+            {},
+            backend_url="http://127.0.0.1:9999",
+            internal_token="token",
+            url_path="/api/internal/ask",
+            timeout_s=runner.DELEGATE_HTTP_TIMEOUT_S,
+            recover=lambda: runner._recover_ask_result("ask_done"),
+        )
+    finally:
+        runner.urllib.request.urlopen = original_urlopen
+        runner.time.sleep = original_sleep
+
+    assert recovered == result
+
+
+def test_openai_attach_recovered_run_schedules_bootstrap():
+    provider_mod = _mod("provider_openai")
+    provider = provider_mod.OpenAIProvider({
+        "id": "openai-test",
+        "kind": "openai",
+        "base_url": "http://127.0.0.1:1/v1",
+        "api_key": "test",
+    })
+    scheduled = []
+
+    async def fake_bootstrap(rs):
+        return None
+
+    def fake_schedule(loop, coro, *, name):
+        scheduled.append((loop, coro, name))
+        coro.close()
+
+    original_schedule = provider_mod.schedule_loop_task
+    original_bootstrap = provider._bootstrap_run
+    try:
+        provider_mod.schedule_loop_task = fake_schedule
+        provider._bootstrap_run = fake_bootstrap
+        queue = asyncio.Queue()
+        ok = provider.attach_recovered_run(
+            desc={
+                "run_id": "openai-live-restart",
+                "pid": os.getpid(),
+                "mode": "native",
+                "app_session_id": "app-session",
+                "persist_to": "app-session",
+                "session_id": "openai-session",
+                "processed_line": 7,
+                "target_message_id": "msg-1",
+                "turn_run_id": "turn-1",
+            },
+            queue=queue,
+            loop=asyncio.new_event_loop(),
+        )
+    finally:
+        provider_mod.schedule_loop_task = original_schedule
+        provider._bootstrap_run = original_bootstrap
+        if scheduled:
+            scheduled[0][0].close()
+
+    assert ok is True
+    rs = provider._runs["openai-live-restart"]
+    assert rs.popen.recovered_stub is True
+    assert rs.processed_line == 7
+    assert rs.queue is queue
+    assert rs.target_message_id == "msg-1"
+    assert scheduled and scheduled[0][2].startswith("openai-recover-bootstrap-")
 
 
 def test_tools_path_confinement():
