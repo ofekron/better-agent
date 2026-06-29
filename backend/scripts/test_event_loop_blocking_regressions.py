@@ -471,11 +471,10 @@ def test_internal_workers_list_runs_projection_off_loop() -> None:
     assert "count_jsonl_lines(" not in route_source
     assert "session_manager.get_lite(" not in route_source
     projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
-    assert "session_manager.get_fields_many(" in projection_source
     assert "session_store.summary_fields_many(worker_sids, fields)" in projection_source
     assert "extension.team_orchestration.workers.summary_fields" in projection_source
-    assert "extension.team_orchestration.workers.fallback_fields" in projection_source
-    assert projection_source.index("session_store.summary_fields_many") < projection_source.index("session_manager.get_fields_many")
+    assert "extension.team_orchestration.workers.fallback_fields" not in projection_source
+    assert "session_manager.get_fields_many(" not in projection_source
     assert "session_manager.get_fields(\n            bc_sid" not in projection_source
     assert "session_manager.get_lite(" not in projection_source
     assert "pair_records: list[dict[str, Any]] = []" in projection_source
@@ -1882,6 +1881,21 @@ def test_summary_index_validates_missing_summary_before_provider_context() -> No
     assert parse_idx < validate_idx < provider_idx < migrate_idx
 
 
+def test_extension_audit_inventory_refresh_is_off_provider_hot_path() -> None:
+    source = (ROOT / "extension_context_audit.py").read_text(encoding="utf-8")
+    runtime_start = source.index("def runtime_context(")
+    runtime_end = source.index("def _inventory_projection(", runtime_start)
+    runtime_source = source[runtime_start:runtime_end]
+    assert "build_inventory(" not in runtime_source
+    assert "_trigger_projection_refresh(cwd)" in runtime_source
+    assert "_read_cache_cached()" in runtime_source
+    refresh_start = source.index("def _refresh_projection(")
+    refresh_end = source.index("def build_inventory(", refresh_start)
+    refresh_source = source[refresh_start:refresh_end]
+    assert "inventory = build_inventory(cwd)" in refresh_source
+    assert "_trigger_refresh(fingerprint, inventory)" in refresh_source
+
+
 def test_summary_index_indexes_seen_sidecars_once() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     build_start = source.index("def _do_build_summary_index_unsafe()")
@@ -2633,6 +2647,7 @@ if __name__ == "__main__":
     test_summary_sidecar_stat_only_for_unchanged_summary()
     test_summary_index_skips_empty_projection_scan()
     test_summary_index_validates_missing_summary_before_provider_context()
+    test_extension_audit_inventory_refresh_is_off_provider_hot_path()
     test_summary_index_indexes_seen_sidecars_once()
     test_summary_index_cache_is_sidecar()
     test_session_store_sessions_dir_is_cached()

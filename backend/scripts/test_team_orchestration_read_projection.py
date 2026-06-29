@@ -47,8 +47,31 @@ def test_worker_projection_uses_summary_fields_before_full_session_read() -> Non
     assert projected["workers"][0]["display_name"] == "summary worker"
 
 
+def test_stale_worker_sid_does_not_trigger_full_session_read() -> None:
+    worker_store.upsert_worker(
+        "/repo/stale",
+        "missing-worker-session",
+        "native",
+        "agent-stale-worker",
+    )
+
+    original = team_orchestration_read.session_manager.get_fields_many
+
+    def fail_full_read(*_args, **_kwargs):
+        raise AssertionError("stale worker projection loaded full session fields")
+
+    team_orchestration_read.session_manager.get_fields_many = fail_full_read
+    try:
+        projected = team_orchestration_read.list_workers_for_cwd("/repo/stale")
+    finally:
+        team_orchestration_read.session_manager.get_fields_many = original
+
+    assert all(worker["agent_session_id"] != "missing-worker-session" for worker in projected["workers"])
+
+
 def main() -> int:
     test_worker_projection_uses_summary_fields_before_full_session_read()
+    test_stale_worker_sid_does_not_trigger_full_session_read()
     print("PASS team orchestration read projection")
     return 0
 

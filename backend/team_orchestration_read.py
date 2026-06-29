@@ -22,10 +22,6 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
     fields = ("agent_session_id", "cwd", "name", "orchestration_mode")
     with perf.timed("extension.team_orchestration.workers.summary_fields"):
         fields_by_sid = session_store.summary_fields_many(worker_sids, fields)
-    missing_sids = [sid for sid in worker_sids if sid and sid not in fields_by_sid]
-    if missing_sids:
-        with perf.timed("extension.team_orchestration.workers.fallback_fields"):
-            fields_by_sid.update(session_manager.get_fields_many(missing_sids, fields))
     forks = raw.get("forks", {}) or {}
     out: list[dict[str, Any]] = []
     for worker in workers:

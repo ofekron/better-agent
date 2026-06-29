@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,13 @@ _AUDIT_VERSION = 1
 _MAX_TEXT = 500
 _MAX_ITEMS = 80
 _REFRESH_LOCK = threading.Lock()
+_PROJECTION_LOCK = threading.Lock()
 _IN_FLIGHT: set[str] = set()
+_PROJECTION_IN_FLIGHT: set[str] = set()
+_INVENTORY_PROJECTION: dict[str, tuple[float, str, dict[str, Any]]] = {}
+_CACHE_PROJECTION: tuple[float, dict[str, Any]] | None = None
+_INVENTORY_PROJECTION_TTL_SECONDS = 10.0
+_CACHE_PROJECTION_TTL_SECONDS = 2.0
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
 
 
@@ -63,9 +70,12 @@ AUDIT_SPEC = provisioning.register(ExtensionContextAuditSpec())
 def runtime_context(cwd: str, *, bare_config: bool = False) -> list[dict[str, str]]:
     if bare_config or not _is_runtime_ready():
         return []
-    inventory = build_inventory(cwd)
-    fingerprint = _fingerprint(inventory)
-    cached = _read_cache()
+    projection = _inventory_projection(cwd)
+    if projection is None:
+        _trigger_projection_refresh(cwd)
+        return []
+    fingerprint, inventory = projection
+    cached = _read_cache_cached()
     if cached.get("fingerprint") != fingerprint:
         _trigger_refresh(fingerprint, inventory)
         return []
@@ -78,6 +88,48 @@ def runtime_context(cwd: str, *, bare_config: bool = False) -> list[dict[str, st
         "content_kind": "dynamic_harness_audit",
         "content": content,
     }]
+
+
+def _inventory_projection(cwd: str) -> tuple[str, dict[str, Any]] | None:
+    current = time.monotonic()
+    with _PROJECTION_LOCK:
+        cached = _INVENTORY_PROJECTION.get(cwd)
+        if cached is None:
+            return None
+        written_at, fingerprint, inventory = cached
+    if current - written_at > _INVENTORY_PROJECTION_TTL_SECONDS:
+        _trigger_projection_refresh(cwd)
+    return fingerprint, inventory
+
+
+def _trigger_projection_refresh(cwd: str) -> None:
+    with _PROJECTION_LOCK:
+        if cwd in _PROJECTION_IN_FLIGHT:
+            return
+        _PROJECTION_IN_FLIGHT.add(cwd)
+    thread = threading.Thread(
+        target=_refresh_projection,
+        args=(cwd,),
+        name="extension-context-inventory-refresh",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _refresh_projection(cwd: str) -> None:
+    try:
+        inventory = build_inventory(cwd)
+        fingerprint = _fingerprint(inventory)
+        with _PROJECTION_LOCK:
+            _INVENTORY_PROJECTION[cwd] = (time.monotonic(), fingerprint, inventory)
+        cached = _read_cache_cached(force=True)
+        if cached.get("fingerprint") != fingerprint:
+            _trigger_refresh(fingerprint, inventory)
+    except Exception:
+        logger.exception("extension context inventory refresh failed")
+    finally:
+        with _PROJECTION_LOCK:
+            _PROJECTION_IN_FLIGHT.discard(cwd)
 
 
 def build_inventory(cwd: str) -> dict[str, Any]:
@@ -208,12 +260,32 @@ def _read_cache() -> dict[str, Any]:
     return data
 
 
+def _read_cache_cached(*, force: bool = False) -> dict[str, Any]:
+    global _CACHE_PROJECTION
+    current = time.monotonic()
+    with _PROJECTION_LOCK:
+        cached = _CACHE_PROJECTION
+        if (
+            not force
+            and cached is not None
+            and current - cached[0] <= _CACHE_PROJECTION_TTL_SECONDS
+        ):
+            return cached[1]
+    data = _read_cache()
+    with _PROJECTION_LOCK:
+        _CACHE_PROJECTION = (time.monotonic(), data)
+    return data
+
+
 def _write_cache(data: dict[str, Any]) -> None:
+    global _CACHE_PROJECTION
     path = _cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+    with _PROJECTION_LOCK:
+        _CACHE_PROJECTION = (time.monotonic(), data)
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
