@@ -188,6 +188,7 @@ _markers_by_session: dict[str, dict[str, dict]] = {}
 _markers_lock = threading.Lock()
 _summary_projection_repair_lock = threading.Lock()
 _summary_projection_repair_running = False
+_SUMMARY_INDEX_CACHE_VERSION = 1
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
 # the inner lock of a cycle. The build runs under THIS lock — never under
@@ -951,6 +952,98 @@ def _write_summary_file(root_id: str, summary: dict) -> None:
         raise
 
 
+def _summary_index_cache_path() -> Path:
+    return _sessions_dir() / ".summary-index.json"
+
+
+def _summary_index_cache_fingerprint(
+    full_files: dict[str, Path],
+    summary_files: dict[str, Path],
+    seen_cursor_ids: set[str],
+) -> dict[str, dict[str, list[int]]]:
+    def _signature_map(paths: dict[str, Path]) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        for sid, path in paths.items():
+            signature = _session_file_signature(path)
+            if signature is not None:
+                out[sid] = [signature[0], signature[1]]
+        return out
+
+    seen_paths = {
+        sid: _seen_cursor_path(sid)
+        for sid in seen_cursor_ids
+    }
+    return {
+        "roots": _signature_map(full_files),
+        "summaries": _signature_map(summary_files),
+        "seen": _signature_map(seen_paths),
+    }
+
+
+def _load_summary_index_cache(
+    fingerprint: dict[str, dict[str, list[int]]],
+) -> Optional[dict[str, dict]]:
+    try:
+        raw = json.loads(_summary_index_cache_path().read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("version") != _SUMMARY_INDEX_CACHE_VERSION:
+        return None
+    if raw.get("fingerprint") != fingerprint:
+        return None
+    summaries = raw.get("summaries")
+    if not isinstance(summaries, dict):
+        return None
+    skipped_root_ids = {
+        sid for sid in raw.get("skipped_root_ids") or []
+        if isinstance(sid, str)
+    }
+    clean = {
+        sid: summary
+        for sid, summary in summaries.items()
+        if isinstance(sid, str)
+        and isinstance(summary, dict)
+        and summary.get("id") == sid
+        and "last_seen_event_uid" in summary
+    }
+    root_ids = set(fingerprint.get("roots") or {})
+    if set(clean) | skipped_root_ids != root_ids:
+        return None
+    if set(clean) & skipped_root_ids:
+        return None
+    return clean
+
+
+def _write_summary_index_cache(
+    fingerprint: dict[str, dict[str, list[int]]],
+    summaries: dict[str, dict],
+) -> None:
+    skipped_root_ids = sorted(set(fingerprint.get("roots") or {}) - set(summaries))
+    payload = {
+        "version": _SUMMARY_INDEX_CACHE_VERSION,
+        "fingerprint": fingerprint,
+        "skipped_root_ids": skipped_root_ids,
+        "summaries": summaries,
+    }
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=".summary-index.",
+        suffix=".json.tmp",
+        dir=_sessions_dir(),
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"))
+        os.replace(tmp_path, _summary_index_cache_path())
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _touch_summary_file_current(root_id: str) -> bool:
     sp = _sessions_dir() / f"{root_id}.summary.json"
     if not sp.exists():
@@ -1069,6 +1162,22 @@ def _do_build_summary_index_unsafe() -> None:
             seen_cursor_ids.add(name.removesuffix(".seen.json"))
         elif name.endswith(".json") and not _is_sidecar_json(name):
             full_files[p.stem] = p
+    summary_cache_fingerprint = _summary_index_cache_fingerprint(
+        full_files,
+        summary_files,
+        seen_cursor_ids,
+    )
+    if not _has_projection_snapshot():
+        cached_summaries = _load_summary_index_cache(summary_cache_fingerprint)
+        if cached_summaries is not None:
+            with _summary_index_lock:
+                _summary_index.clear()
+                _summary_index.update(cached_summaries)
+                _summary_index_version += 1
+                _summary_metadata_version += 1
+                _summary_index_loaded = True
+            _start_summary_projection_repair()
+            return
 
     # Trees migrated in Pass 2 that need a persist — written AFTER the
     # locks release so the next start hits the Pass-1 fast path.
@@ -1188,6 +1297,13 @@ def _do_build_summary_index_unsafe() -> None:
     for sid, summary in stale_summaries:
         try:
             _write_summary_file(sid, summary)
+        except Exception:
+            pass
+    if not dirty_trees and not stale_summaries:
+        with _summary_index_lock:
+            summaries = dict(_summary_index)
+        try:
+            _write_summary_index_cache(summary_cache_fingerprint, summaries)
         except Exception:
             pass
 
@@ -1318,6 +1434,7 @@ _SIDECAR_JSON_SUFFIXES = (
     ".seen.json",
     ".opened.json",
     ".fork-index.json",
+    ".summary-index.json",
 )
 
 

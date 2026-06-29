@@ -1118,6 +1118,20 @@ def test_summary_index_indexes_seen_sidecars_once() -> None:
     assert ".glob(\"*.summary.json\")" not in build_source
     assert ".glob(\"*.seen.json\")" not in build_source
     assert "read_seen_cursors(sid) if sid in seen_cursor_ids else {}" in build_source
+    assert "_summary_index_cache_fingerprint(" in build_source
+    assert "_load_summary_index_cache(summary_cache_fingerprint)" in build_source
+    assert "_write_summary_index_cache(summary_cache_fingerprint, summaries)" in build_source
+    assert "\"skipped_root_ids\"" in source
+
+
+def test_summary_index_cache_is_sidecar() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "def _summary_index_cache_path()" in source
+    assert "\".summary-index.json\"" in source
+    sidecar_start = source.index("_SIDECAR_JSON_SUFFIXES = (")
+    sidecar_end = source.index("def _is_sidecar_json", sidecar_start)
+    sidecar_source = source[sidecar_start:sidecar_end]
+    assert "\".summary-index.json\"" in sidecar_source
 
 
 def test_session_store_sessions_dir_is_cached() -> None:
@@ -1536,6 +1550,7 @@ if __name__ == "__main__":
     test_summary_index_skips_empty_projection_scan()
     test_summary_index_validates_missing_summary_before_provider_context()
     test_summary_index_indexes_seen_sidecars_once()
+    test_summary_index_cache_is_sidecar()
     test_session_store_sessions_dir_is_cached()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_project_match_rebuild_skips_unchanged_session_state()
