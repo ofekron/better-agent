@@ -4374,12 +4374,14 @@ def _filter_sort_page_for_list(
         ):
             continue
         total += 1
-        selected.append((_sort_key(session), -idx, session))
+        item = (_sort_key(session), -idx, session)
+        if 0 < end <= len(selected):
+            if (item[0], item[1]) > (selected[0][0], selected[0][1]):
+                heapq.heapreplace(selected, item)
+        else:
+            heapq.heappush(selected, item)
 
-    if len(selected) > end:
-        selected = heapq.nlargest(end, selected, key=lambda item: (item[0], item[1]))
-    else:
-        selected.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [session for _, __, session in selected[offset:end]], total
 
 
