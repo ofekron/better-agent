@@ -1728,6 +1728,23 @@ class EventIngester:
         with self._summaries_state(root_id, path) as (_, resolutions):
             return dict(resolutions)
 
+    def ownership_resolutions_range(
+        self,
+        root_id: str,
+        *,
+        seq_start: int,
+        seq_end: int,
+    ) -> dict[int, str]:
+        path = self._events_path(root_id)
+        if not path.exists() or seq_end < seq_start:
+            return {}
+        with self._summaries_state(root_id, path) as (_, resolutions):
+            return {
+                seq: msg_id
+                for seq, msg_id in resolutions.items()
+                if seq_start <= seq <= seq_end
+            }
+
     @contextmanager
     def _summaries_state(self, root_id: str, path: Path, tail: int = 25):
         """Yield (summaries, resolutions) for `root_id`, refreshing the

@@ -629,6 +629,8 @@ def test_message_cache_hydration_has_substep_perf_metrics() -> None:
     assert "summary: Optional[dict] = None" in cache_source
     assert "msg_ids={message_id}" in cache_source
     assert "event_journal.message_cache.summary_provided" in cache_source
+    assert "event_ingester.ownership_resolutions_range(" in cache_source
+    assert "event_ingester.ownership_resolutions(session_id)" not in cache_source
     assert "event_journal.message_cache.resolutions" in cache_source
     assert "event_journal.message_cache.read_full" in cache_source
     assert "event_journal.message_cache.read_grow" in cache_source
