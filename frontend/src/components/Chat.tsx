@@ -423,15 +423,13 @@ interface Props {
   onQueuedToNote?: (text: string) => void;
   /** Cross-project session tabs. */
   openSessions?: Session[];
-  /** Whether the open-session tabs bar is shown (user pref). */
-  sessionTabsVisible?: boolean;
   /** Active tabs sort field — its timestamp shows on each tab. */
   sessionTabsSort?: string;
   providers?: Provider[];
   onCloseTab?: (id: string) => void;
+  onCloseOtherTabs?: (id: string) => void;
   onSelectTab?: (id: string) => void;
   onToggleTopbarPin?: (id: string, pinned: boolean) => void;
-  onTabCapacityChange?: (capacity: number) => void;
   /** Optional node rendered at the TOP of the message scroll area,
    * above the first group. Used by the Ask view for its greeting box. */
   headerNode?: import("react").ReactNode;
@@ -531,13 +529,12 @@ export function Chat({
   onRemoveNextTurnCapability,
   onQueuedToNote,
   openSessions = [],
-  sessionTabsVisible = true,
   sessionTabsSort = "last_opened_at",
   providers = [],
   onCloseTab,
+  onCloseOtherTabs,
   onSelectTab,
   onToggleTopbarPin,
-  onTabCapacityChange,
   headerNode,
   composerHeaderNode,
   composerOverflowNode,
@@ -1142,7 +1139,7 @@ export function Chat({
       data-testid="chat-container"
       data-session-running={sessionRunning ? "true" : "false"}
     >
-      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && onToggleTopbarPin && (
+      {openSessions.length > 0 && onSelectTab && onCloseTab && onCloseOtherTabs && onToggleTopbarPin && (
         <SessionTabs
           sessions={openSessions}
           providers={providers ?? []}
@@ -1150,8 +1147,8 @@ export function Chat({
           sortField={sessionTabsSort}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onCloseOthers={onCloseOtherTabs}
           onToggleTopbarPin={onToggleTopbarPin}
-          onMeasuredCapacityChange={onTabCapacityChange}
         />
       )}
       {session && !hideToolbar && (

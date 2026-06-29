@@ -203,7 +203,6 @@ const EMPTY_RUNS_PROP: readonly import("./types").RunInfo[] = Object.freeze([]);
 const EMPTY_EVENTS: readonly import("./types").WSEvent[] = Object.freeze([]);
 const EMPTY_INLINE_TAGS: readonly import("./types/inlineTag").InlineTag[] =
   Object.freeze([]);
-const MAX_TAB_CAP = 15;
 const OPEN_SESSION_FRESHNESS_FIELDS = [
   "updated_at",
   "last_user_prompt_at",
@@ -2201,19 +2200,16 @@ function AppMain({
   );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
-  // tabs bar can be hidden and its order chosen from Settings.
+  // tabs order chosen from Settings stays live.
   const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
   const [sessionTabsStatusSort, setSessionTabsStatusSort] = useState(false);
-  const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
     const apply = (d: {
       sessions_tabs_sort?: unknown;
       sessions_tabs_status_sort?: unknown;
-      sessions_tabs_visible?: unknown;
     }) => {
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
       if (typeof d.sessions_tabs_status_sort === "boolean") setSessionTabsStatusSort(d.sessions_tabs_status_sort);
-      if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
     };
     const off = eventBus.subscribe("user_prefs_changed", (p) => apply(p as Record<string, unknown>));
     return off;
@@ -2257,9 +2253,6 @@ function AppMain({
         }
         if (typeof data.sessions_tabs_status_sort === "boolean") {
           setSessionTabsStatusSort(data.sessions_tabs_status_sort);
-        }
-        if (typeof data.sessions_tabs_visible === "boolean") {
-          setSessionTabsVisible(data.sessions_tabs_visible);
         }
         if (data.first_run_wizard_done === false && !firstRunWizardOpenedRef.current) {
           firstRunWizardOpenedRef.current = true;
@@ -3619,29 +3612,6 @@ function AppMain({
     sessionsLoaded,
   ]);
 
-  const [visibleOpenTabCapacity, setVisibleOpenTabCapacity] = useState(MAX_TAB_CAP);
-
-  useEffect(() => {
-    setVisibleOpenTabCapacity(MAX_TAB_CAP);
-  }, [
-    currentSession?.id,
-    fileEditingState,
-    isMobile,
-    mobileRightOpen,
-    promptEngState,
-    rightPanel.size,
-    rightPanelVisible,
-    sessionTabsSort,
-    sessionTabsStatusSort,
-    sidebar.size,
-    viewport.width,
-  ]);
-
-  const handleTabCapacityChange = useCallback((capacity: number) => {
-    const next = Math.min(MAX_TAB_CAP, Math.max(1, Math.floor(capacity)));
-    setVisibleOpenTabCapacity((prev) => (prev === next ? prev : next));
-  }, []);
-
   const addOpenSessionId = useCallback((id: string) => {
     setOpenSessionIds((prev) => {
       const idx = prev.indexOf(id);
@@ -3649,7 +3619,6 @@ function AppMain({
       const next = idx >= 0
         ? [...prev.slice(0, idx), ...prev.slice(idx + 1), id]
         : [...prev, id];
-      while (next.length > MAX_TAB_CAP) next.shift();
       return next;
     });
   }, []);
@@ -3688,6 +3657,16 @@ function AppMain({
       });
     },
     [currentTree?.id, navigate]
+  );
+
+  const handleCloseOtherTabs = useCallback(
+    (id: string) => {
+      setOpenSessionIds((prev) => prev.filter((tid) => tid === id));
+      if (currentTree?.id && currentTree.id !== id && !currentTree.topbar_pinned) {
+        navigate(sessionPath(id));
+      }
+    },
+    [currentTree?.id, currentTree?.topbar_pinned, navigate],
   );
 
   const findOpenSessionRecord = useCallback(
@@ -3780,21 +3759,6 @@ function AppMain({
     tabsStatusTick,
     topbarPinnedSessions,
   ]);
-  const visibleOpenSessions = useMemo(
-    () => {
-      const displaySessions = sortedOpenSessions.filter(
-        (session) => session.id !== currentTree?.id,
-      );
-      const pinned = displaySessions.filter((session) => session.topbar_pinned);
-      const regular = displaySessions.filter((session) => !session.topbar_pinned);
-      return [
-        ...pinned,
-        ...regular.slice(0, Math.max(0, visibleOpenTabCapacity - pinned.length)),
-      ];
-    },
-    [currentTree?.id, sortedOpenSessions, visibleOpenTabCapacity],
-  );
-
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
       setOpenSessionRecords((prev) => {
@@ -6255,14 +6219,11 @@ function AppMain({
                   ))
                 );
               }}
-              openSessions={
-                isAskView || currentSession?.name === "Assistant" ? [] : visibleOpenSessions
-              }
-              sessionTabsVisible={sessionTabsVisible}
+              openSessions={sortedOpenSessions}
               sessionTabsSort={sessionTabsSort}
-              onTabCapacityChange={handleTabCapacityChange}
               providers={providers}
               onCloseTab={handleCloseTab}
+              onCloseOtherTabs={handleCloseOtherTabs}
               onToggleTopbarPin={handleToggleTopbarPin}
               onSelectTab={handleSelectTab}
               messages={chatMessages}
