@@ -54,7 +54,7 @@ def build_message_metadata(
 def _target_team_context(target_session_id: Optional[str]) -> str:
     if not target_session_id:
         return ""
-    target = session_manager.get(target_session_id)
+    target = session_manager.get_lite(target_session_id)
     if not target:
         return ""
     cwd = str(target.get("cwd") or "")
