@@ -24,6 +24,18 @@ MAX_RECENT_RUNS = 10
 _VALID_ORCH_MODES = ("team", "native")
 _VALID_WORKER_POLICIES = ("ask", "approve", "deny")
 
+_VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "api")
+_VALID_ASSESSMENT_KINDS = ("none", "script", "llm_judge")
+_VALID_SCHEDULE_MODES = ("once", "recurring")
+MIN_TRIGGER_INTERVAL_SECONDS = 30
+MAX_TRIGGER_INTERVAL_SECONDS = 60 * 60 * 24 * 365
+MAX_SCRIPT_COMMANDS = 20
+MAX_SCRIPT_ARGS = 64
+MAX_SCRIPT_ARG_LEN = 4096
+MAX_GOAL_LEN = 10_000
+MAX_CRITERIA_LEN = 10_000
+_VALID_VERDICTS = ("pending", "pass", "fail", "error", "skipped")
+
 _lock = threading.RLock()
 _data_cache: tuple[tuple[int, int], dict] | None = None
 
@@ -73,6 +85,8 @@ def _read() -> dict:
     if not isinstance(raw["tasks"], list):
         logger.error("task_store: 'tasks' is not a list - returning empty store")
         return _empty()
+    for t in raw["tasks"]:
+        _normalize_task(t)
     _data_cache = (fingerprint, copy.deepcopy(raw))
     return raw
 
@@ -120,6 +134,177 @@ def _coerce_capability_contexts(value) -> list[dict]:
     return out
 
 
+def _coerce_script(value, *, label: str) -> Optional[dict]:
+    """A script is {command: [str, ...], cwd?: str}. Command runs as an argv
+    list (never a shell string) so untrusted task input cannot inject."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    command = value.get("command")
+    if not isinstance(command, list) or not command:
+        raise ValueError(f"{label}.command must be a non-empty list")
+    if len(command) > MAX_SCRIPT_ARGS:
+        raise ValueError(f"{label}.command has too many args")
+    cmd_out: list[str] = []
+    for arg in command:
+        if not isinstance(arg, str) or not arg:
+            raise ValueError(f"{label}.command args must be non-empty strings")
+        if len(arg) > MAX_SCRIPT_ARG_LEN:
+            raise ValueError(f"{label}.command arg exceeds {MAX_SCRIPT_ARG_LEN} chars")
+        cmd_out.append(arg)
+    cwd = value.get("cwd")
+    if cwd is not None:
+        if not isinstance(cwd, str):
+            raise ValueError(f"{label}.cwd must be a string")
+        cwd = cwd.strip() or None
+    return {"command": cmd_out, "cwd": cwd}
+
+
+def _coerce_script_list(value, *, label: str, max_items: int = MAX_SCRIPT_COMMANDS) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    if len(value) > max_items:
+        raise ValueError(f"{label} exceeds {max_items} entries")
+    out: list[dict] = []
+    for i, item in enumerate(value):
+        script = _coerce_script(item, label=f"{label}[{i}]")
+        if script is not None:
+            out.append(script)
+    return out
+
+
+def _coerce_scripts(value) -> dict:
+    if value is None:
+        return {"pre": [], "post": []}
+    if not isinstance(value, dict):
+        raise ValueError("scripts must be an object")
+    unknown = set(value) - {"pre", "post"}
+    if unknown:
+        raise ValueError(f"scripts has unknown keys: {sorted(unknown)}")
+    return {
+        "pre": _coerce_script_list(value.get("pre"), label="scripts.pre"),
+        "post": _coerce_script_list(value.get("post"), label="scripts.post"),
+    }
+
+
+def _validate_interval(seconds) -> int:
+    if isinstance(seconds, bool) or not isinstance(seconds, int):
+        raise ValueError("interval must be an integer (seconds)")
+    if seconds < MIN_TRIGGER_INTERVAL_SECONDS or seconds > MAX_TRIGGER_INTERVAL_SECONDS:
+        raise ValueError(
+            f"interval must be between {MIN_TRIGGER_INTERVAL_SECONDS} "
+            f"and {MAX_TRIGGER_INTERVAL_SECONDS} seconds",
+        )
+    return seconds
+
+
+def _coerce_trigger(value) -> dict:
+    """Trigger = {kind, config}. manual needs no config. schedule fires at a
+    time/interval. script polls a detector command and fires on exit 0. api is
+    reserved (fires from an external REST call) and not yet active."""
+    if value is None:
+        return {"kind": "manual", "config": {}}
+    if not isinstance(value, dict):
+        raise ValueError("trigger must be an object")
+    kind = value.get("kind") or "manual"
+    if kind not in _VALID_TRIGGER_KINDS:
+        raise ValueError(f"trigger.kind must be one of {_VALID_TRIGGER_KINDS}")
+    config = value.get("config") or {}
+    if not isinstance(config, dict):
+        raise ValueError("trigger.config must be an object")
+    cfg: dict = {}
+    if kind == "manual":
+        if config:
+            raise ValueError("manual trigger takes no config")
+    elif kind == "schedule":
+        mode = config.get("mode") or "once"
+        if mode not in _VALID_SCHEDULE_MODES:
+            raise ValueError(f"schedule.mode must be one of {_VALID_SCHEDULE_MODES}")
+        cfg["mode"] = mode
+        if mode == "once":
+            fire_at = config.get("fire_at")
+            if not isinstance(fire_at, str) or not fire_at.strip():
+                raise ValueError("schedule.once requires fire_at (ISO-8601)")
+            cfg["fire_at"] = fire_at.strip()
+        else:
+            cfg["interval_seconds"] = _validate_interval(config.get("interval_seconds"))
+            if config.get("fire_at"):
+                cfg["fire_at"] = str(config["fire_at"]).strip()
+    elif kind == "script":
+        detector = _coerce_script(config.get("detector"), label="trigger.script.detector")
+        if detector is None:
+            raise ValueError("script trigger requires a detector command")
+        cfg["detector"] = detector
+        cfg["poll_interval_seconds"] = _validate_interval(
+            config.get("poll_interval_seconds", 300),
+        )
+    elif kind == "api":
+        # Reserved: fires when an external caller POSTs the task's fire
+        # endpoint. No active config yet; validation accepts a note only.
+        pass
+    return {"kind": kind, "config": cfg}
+
+
+def _coerce_assessment(value) -> dict:
+    """Assessment = {kind, config}. none skips grading. script runs a command
+    (exit 0 = pass, or stdout JSON {pass, reason}). llm_judge grades the run
+    output against the goal + criteria."""
+    if value is None:
+        return {"kind": "none", "config": {}}
+    if not isinstance(value, dict):
+        raise ValueError("assessment must be an object")
+    kind = value.get("kind") or "none"
+    if kind not in _VALID_ASSESSMENT_KINDS:
+        raise ValueError(f"assessment.kind must be one of {_VALID_ASSESSMENT_KINDS}")
+    config = value.get("config") or {}
+    if not isinstance(config, dict):
+        raise ValueError("assessment.config must be an object")
+    cfg: dict = {}
+    if kind == "none":
+        if config:
+            raise ValueError("none assessment takes no config")
+    elif kind == "script":
+        script = _coerce_script(config, label="assessment.script")
+        if script is None:
+            raise ValueError("script assessment requires a command")
+        cfg = script
+    elif kind == "llm_judge":
+        criteria = config.get("criteria")
+        if not isinstance(criteria, str) or not criteria.strip():
+            raise ValueError("llm_judge requires criteria text")
+        if len(criteria) > MAX_CRITERIA_LEN:
+            raise ValueError(f"criteria exceeds {MAX_CRITERIA_LEN} chars")
+        cfg["criteria"] = criteria.strip()
+        if config.get("model"):
+            cfg["model"] = str(config["model"]).strip()[:200]
+        if config.get("provider_id"):
+            cfg["provider_id"] = str(config["provider_id"]).strip()[:200]
+    return {"kind": kind, "config": cfg}
+
+
+def _normalize_task(t: dict) -> dict:
+    """Default new additive fields on legacy records. The store has no
+    migration framework, so additive optional fields are filled on read."""
+    if not isinstance(t, dict):
+        return t
+    t.setdefault("goal", "")
+    t.setdefault("trigger", {"kind": "manual", "config": {}})
+    t.setdefault("scripts", {"pre": [], "post": []})
+    t.setdefault("assessment", {"kind": "none", "config": {}})
+    runs = t.get("recent_runs")
+    if isinstance(runs, list):
+        for r in runs:
+            if isinstance(r, dict):
+                r.setdefault("verdict", "pending")
+                r.setdefault("verdict_reason", "")
+                r.setdefault("verdict_kind", "none")
+                r.setdefault("queue_item_id", None)
+    return t
+
+
 def _validate_core(
     *,
     name: str,
@@ -157,6 +342,10 @@ def create(
     permission: Optional[dict] = None,
     capability_contexts=None,
     singleton: bool = False,
+    goal: str = "",
+    trigger: Optional[dict] = None,
+    scripts: Optional[dict] = None,
+    assessment: Optional[dict] = None,
 ) -> dict:
     name = _clean_str(name, field="name", max_len=MAX_NAME_LEN, required=True)
     prompt = _clean_str(prompt, field="prompt", max_len=MAX_PROMPT_LEN, required=True)
@@ -177,6 +366,10 @@ def create(
     model = _clean_str(model, field="model", max_len=200, required=False) or None
     provider_id = _clean_str(provider_id, field="provider_id", max_len=200, required=False) or None
     reasoning_effort = _clean_str(reasoning_effort, field="reasoning_effort", max_len=64, required=False) or None
+    goal = _clean_str(goal, field="goal", max_len=MAX_GOAL_LEN, required=False)
+    trigger = _coerce_trigger(trigger)
+    scripts = _coerce_scripts(scripts)
+    assessment = _coerce_assessment(assessment)
 
     now = datetime.now().isoformat()
     record = {
@@ -194,6 +387,10 @@ def create(
         "permission": permission,
         "capability_contexts": capability_contexts,
         "singleton": bool(singleton),
+        "goal": goal,
+        "trigger": trigger,
+        "scripts": scripts,
+        "assessment": assessment,
         "created_at": now,
         "updated_at": now,
         "last_run_at": None,
@@ -269,6 +466,10 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             model = _clean_str(merged.get("model"), field="model", max_len=200, required=False) or None
             provider_id = _clean_str(merged.get("provider_id"), field="provider_id", max_len=200, required=False) or None
             reasoning_effort = _clean_str(merged.get("reasoning_effort"), field="reasoning_effort", max_len=64, required=False) or None
+            goal = _clean_str(merged.get("goal"), field="goal", max_len=MAX_GOAL_LEN, required=False) if "goal" in merged else t.get("goal", "")
+            trigger = _coerce_trigger(merged.get("trigger")) if "trigger" in merged else t.get("trigger")
+            scripts = _coerce_scripts(merged.get("scripts")) if "scripts" in merged else t.get("scripts")
+            assessment = _coerce_assessment(merged.get("assessment")) if "assessment" in merged else t.get("assessment")
 
             t["name"] = name
             t["description"] = description
@@ -281,6 +482,10 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["permission"] = permission
             t["capability_contexts"] = capability_contexts
             t["singleton"] = bool(merged.get("singleton"))
+            t["goal"] = goal
+            t["trigger"] = trigger
+            t["scripts"] = scripts
+            t["assessment"] = assessment
             t["updated_at"] = datetime.now().isoformat()
             _write(data)
             return dict(t)
@@ -298,7 +503,13 @@ def delete(task_id: str) -> Optional[dict]:
     return None
 
 
-def record_run(task_id: str, session_id: str, *, now: Optional[datetime] = None) -> Optional[dict]:
+def record_run(
+    task_id: str,
+    session_id: str,
+    *,
+    queue_item_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Optional[dict]:
     now = now or datetime.now()
     ts = now.isoformat()
     with _lock:
@@ -310,12 +521,60 @@ def record_run(task_id: str, session_id: str, *, now: Optional[datetime] = None)
             t["run_count"] = int(t.get("run_count") or 0) + 1
             runs = [r for r in (t.get("recent_runs") or []) if isinstance(r, dict)]
             runs = [r for r in runs if r.get("session_id") != session_id]
-            runs.insert(0, {"session_id": session_id, "started_at": ts})
+            runs.insert(0, {
+                "session_id": session_id,
+                "started_at": ts,
+                "queue_item_id": queue_item_id,
+                "verdict": "pending",
+                "verdict_reason": "",
+                "verdict_kind": (t.get("assessment") or {}).get("kind", "none"),
+            })
             t["recent_runs"] = runs[:MAX_RECENT_RUNS]
             if t.get("singleton"):
                 t["singleton_session_id"] = session_id
             _write(data)
             return dict(t)
+    return None
+
+
+def find_pending_run_for_session(session_id: str) -> Optional[tuple[str, dict]]:
+    """Return (task_id, run_entry) for the most recent still-pending run of
+    `session_id`, or None. Used by the post-turn assessor to find which task
+    (if any) owns a completed turn."""
+    with _lock:
+        data = _read()
+    for t in data["tasks"]:
+        for r in (t.get("recent_runs") or []):
+            if not isinstance(r, dict):
+                continue
+            if r.get("session_id") == session_id and r.get("verdict") == "pending":
+                return t.get("id"), dict(r)
+    return None
+
+
+def set_run_verdict(
+    task_id: str,
+    session_id: str,
+    *,
+    verdict: str,
+    reason: str = "",
+    verdict_kind: Optional[str] = None,
+) -> Optional[dict]:
+    if verdict not in _VALID_VERDICTS:
+        raise ValueError(f"verdict must be one of {_VALID_VERDICTS}")
+    with _lock:
+        data = _read()
+        for t in data["tasks"]:
+            if t.get("id") != task_id:
+                continue
+            for r in (t.get("recent_runs") or []):
+                if isinstance(r, dict) and r.get("session_id") == session_id:
+                    r["verdict"] = verdict
+                    r["verdict_reason"] = (reason or "")[:2000]
+                    if verdict_kind is not None:
+                        r["verdict_kind"] = verdict_kind
+                    _write(data)
+                    return dict(t)
     return None
 
 
