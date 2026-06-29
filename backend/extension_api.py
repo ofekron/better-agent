@@ -138,6 +138,19 @@ def _cached_json_projection_response(
     return _projection_response_cache_put(name, key, build())
 
 
+async def _cached_json_projection_response_threaded(
+    name: str,
+    key_fn: Callable[[], tuple[Any, ...]],
+    build: Callable[[], dict[str, Any]],
+) -> Response:
+    key = await asyncio.to_thread(key_fn)
+    cached = _projection_response_cache_get(name, key)
+    if cached is not None:
+        return cached
+    value = await asyncio.to_thread(build)
+    return _projection_response_cache_put(name, key, value)
+
+
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
     cache_key = (extension_store.store_fingerprint(), include_hidden)
@@ -163,18 +176,18 @@ async def get_builtin_ids():
 
 @router.get("/frontend-entrypoints")
 async def get_frontend_entrypoints():
-    return _cached_json_projection_response(
+    return await _cached_json_projection_response_threaded(
         "frontend-entrypoints",
-        extension_store.frontend_entrypoints_cache_key(),
+        extension_store.frontend_entrypoints_cache_key,
         lambda: {"entrypoints": extension_store.frontend_entrypoints()},
     )
 
 
 @router.get("/ui-hooks")
 async def get_ui_hooks():
-    return _cached_json_projection_response(
+    return await _cached_json_projection_response_threaded(
         "ui-hooks",
-        extension_store.ui_hooks_cache_key(),
+        extension_store.ui_hooks_cache_key,
         lambda: {"hooks": extension_store.ui_hooks()},
     )
 
