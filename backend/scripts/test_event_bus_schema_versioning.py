@@ -145,6 +145,36 @@ async def _run():
         check("test.idem" in str(exc), "ValueError details type")
     check(raised, "mismatched re-registration raises ValueError")
 
+    # ── 8. Exact subscribers bypass glob matching ───────────────────
+    import event_bus as event_bus_module
+
+    bus3 = EventBus()
+    exact_seen: list[str] = []
+    glob_seen: list[str] = []
+
+    async def exact_recorder(ev: BusEvent) -> None:
+        exact_seen.append(ev.type)
+
+    async def glob_recorder(ev: BusEvent) -> None:
+        glob_seen.append(ev.type)
+
+    bus3.subscribe("test.exact", exact_recorder, priority=20, name="exact")
+    original_fnmatchcase = event_bus_module.fnmatch.fnmatchcase
+
+    def fail_fnmatchcase(_name: str, _pat: str) -> bool:
+        raise AssertionError("exact subscriber used fnmatchcase")
+
+    event_bus_module.fnmatch.fnmatchcase = fail_fnmatchcase
+    try:
+        await bus3.publish(_make_event("test.exact"))
+    finally:
+        event_bus_module.fnmatch.fnmatchcase = original_fnmatchcase
+    check(exact_seen == ["test.exact"], "exact subscriber dispatch bypasses fnmatchcase")
+
+    bus3.subscribe("test.*", glob_recorder, priority=30, name="glob")
+    await bus3.publish(_make_event("test.exact"))
+    check(glob_seen == ["test.exact"], "glob subscriber still dispatches")
+
     if failures:
         print(f"\n{len(failures)} FAILURES")
         return 1
