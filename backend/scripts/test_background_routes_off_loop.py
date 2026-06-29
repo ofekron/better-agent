@@ -197,12 +197,48 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
     project_start = source.index("# ── Project structure updates")
     project_end = source.index("@app.post(\"/api/internal/provisioned-sessions\")", project_start)
     project_source = source[project_start:project_end]
+    assert "async def _require_project_structure_internal_async" in project_source
+    assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" in project_source
+    assert source.count("await _require_project_structure_internal_async(x_internal_token)") >= 9
+    for route in (
+        "internal_project_update_count",
+        "internal_project_update_total",
+        "internal_project_update_counts_batch",
+        "internal_project_updates_unseen",
+        "capture_project_update",
+        "internal_project_updates_list",
+        "internal_project_updates_mark_seen",
+    ):
+        route_start = source.index(f"async def {route}(")
+        route_end = source.index("@app.", route_start + 1)
+        route_source = source[route_start:route_end]
+        assert "await _require_project_structure_internal_async(x_internal_token)" in route_source
+        assert "_require_project_structure_internal(x_internal_token)" not in route_source
     assert "await asyncio.to_thread(project_update_store.unseen_count" in project_source
     assert "project_update_store.peek_total_unseen()" in project_source
     assert "await asyncio.to_thread(project_update_store.total_unseen" in project_source
     assert "await asyncio.to_thread(project_update_store.list_unseen" in project_source
     assert "project_update_store.append(project_id, text)" in project_source
-    assert "await asyncio.to_thread(\n        lambda: {" in project_source
+    for route, calls in {
+        "capture_project_update": (
+            "project_update_store.append(project_id, text)",
+            "project_update_store.unseen_count(project_id)",
+        ),
+        "internal_project_updates_list": (
+            "project_update_store.unseen_count(project_id)",
+            "project_update_store.list_unseen(project_id)",
+        ),
+        "internal_project_updates_mark_seen": (
+            "project_update_store.mark_seen(project_id, entry_ids)",
+            "project_update_store.unseen_count(project_id)",
+        ),
+    }.items():
+        route_start = source.index(f"async def {route}(")
+        route_end = source.index("@app.", route_start + 1)
+        route_source = source[route_start:route_end]
+        assert "await asyncio.to_thread(\n        lambda: (" in route_source
+        for call in calls:
+            assert call in route_source
 
     hooks_start = source.index("@app.get(\"/api/hooks\")")
     hooks_end = source.index("def _parse_session_timestamp", hooks_start)

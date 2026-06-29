@@ -2425,11 +2425,19 @@ async def delete_project_mapping(group_id: str):
 
 
 def _require_project_structure_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    principal = coordinator.resolve_principal(x_internal_token)
+    if principal is None:
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_extension(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
-    if coordinator.principal_extension_id(x_internal_token) != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
+    if (
+        principal[0] != "extension"
+        or principal[1] != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ):
         raise HTTPException(status_code=403, detail="project-structure extension is required")
+
+
+async def _require_project_structure_internal_async(x_internal_token: str) -> None:
+    await asyncio.to_thread(_require_project_structure_internal, x_internal_token)
 
 
 def _require_capabilities_internal(x_internal_token: str) -> None:
@@ -2568,7 +2576,7 @@ async def internal_project_update_count(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -2581,7 +2589,7 @@ async def internal_project_update_total(
     body: dict | None = None,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     count = project_update_store.peek_total_unseen()
     if count is None:
         count = await asyncio.to_thread(project_update_store.total_unseen)
@@ -2593,7 +2601,7 @@ async def internal_project_update_counts_batch(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     cwds = (body or {}).get("cwds")
     if not isinstance(cwds, list) or any(not isinstance(cwd, str) for cwd in cwds):
         raise HTTPException(status_code=400, detail="cwds must be a list of strings")
@@ -2608,7 +2616,7 @@ async def internal_project_updates_unseen(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -2620,7 +2628,7 @@ async def capture_project_update(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     text = body.get("text", "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
@@ -2762,7 +2770,7 @@ async def internal_project_updates_list(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -2784,7 +2792,7 @@ async def internal_project_updates_mark_seen(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -2953,7 +2961,7 @@ async def internal_project_structure_edit_status(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
     return await asyncio.to_thread(project_structure_edit_session.get_edit_status, cwd)
 
@@ -2963,7 +2971,7 @@ async def internal_project_structure_edit_ensure(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_project_structure_internal(x_internal_token)
+    await _require_project_structure_internal_async(x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
     prompt_result = await project_structure_edit_session.submit_review_prompt(cwd)
     return {
