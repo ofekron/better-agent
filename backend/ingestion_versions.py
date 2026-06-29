@@ -59,6 +59,10 @@ def marker_matches_current(path: Path, provider_kind: str | None) -> bool:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    return marker_data_matches_current(data, provider_kind)
+
+
+def marker_data_matches_current(data: dict, provider_kind: str | None) -> bool:
     return (
         data.get("provider_kind") == provider_kind
         and data.get("ingestion_version") == current_ingestion_version(provider_kind)
