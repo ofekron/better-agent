@@ -385,6 +385,17 @@ def test_jsonl_line_count_uses_fingerprint_cache() -> None:
     assert open_calls == 1
 
 
+def test_internal_workers_list_runs_projection_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = source.index("async def internal_list_workers_for_cwd(")
+    route_end = source.index("def _worker_pool_projection(", route_start)
+    route_source = source[route_start:route_end]
+    assert "return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)" in route_source
+    assert "compute_jsonl_path(" not in route_source
+    assert "count_jsonl_lines(" not in route_source
+    assert "session_manager.get_lite(" not in route_source
+
+
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     start = source.index("def get_messages_since(")
