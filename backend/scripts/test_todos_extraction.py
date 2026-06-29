@@ -1097,6 +1097,61 @@ def test_hydration_skips_irrelevant_rows_before_projection() -> bool:
     return True
 
 
+def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
+    from event_ingester import event_ingester
+    import session_local_projection
+
+    sid, _msg = _mk_session("native")
+    todos = [{"content": "Cached", "status": "in_progress", "activeForm": "c"}]
+    event = _claude_todowrite_native("u-cache", todos, tool_id="tu_cache")
+    event_ingester.ingest(
+        sid, sid=sid,
+        event_type="agent_message", data=event["data"],
+        source="test_cache", run_id=None, msg_id=None,
+    )
+
+    original_project = session_local_projection.project_event_fields
+    calls = {"n": 0}
+
+    def counting_project(*args, **kwargs):
+        calls["n"] += 1
+        return original_project(*args, **kwargs)
+
+    rid = session_manager._root_id_for(sid)
+
+    def evict() -> None:
+        with session_manager._lock_for_root(rid):
+            session_manager._roots.pop(rid, None)
+            session_manager._event_hydrated_roots.discard(rid)
+
+    session_local_projection.project_event_fields = counting_project
+    try:
+        evict()
+        with session_manager._lock_for_root(rid):
+            first = session_manager._load_root(sid) or {}
+        first_calls = calls["n"]
+        evict()
+        with session_manager._lock_for_root(rid):
+            second = session_manager._load_root(sid) or {}
+        second_calls = calls["n"] - first_calls
+    finally:
+        session_local_projection.project_event_fields = original_project
+
+    if first.get("current_todos") != todos:
+        print(f"  expected first load todos, got {first.get('current_todos')}")
+        return False
+    if second.get("current_todos") != todos:
+        print(f"  expected cached second load todos, got {second.get('current_todos')}")
+        return False
+    if first_calls != 1:
+        print(f"  expected first load to project once, got {first_calls}")
+        return False
+    if second_calls != 0:
+        print(f"  expected cached second load to skip projection, got {second_calls}")
+        return False
+    return True
+
+
 def test_cli_prompt_open_todos_only() -> bool:
     """The helper injects only unfinished todos and otherwise no-ops."""
     from turn_helpers import _append_todo_reminder
@@ -2310,6 +2365,7 @@ TESTS = [
     ("Gemini re-emission preserves completed", test_gemini_reemission_preserves_completed_status),
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
     ("hydration skips irrelevant rows before projection", test_hydration_skips_irrelevant_rows_before_projection),
+    ("hydration reuses todo projection cache when events unchanged", test_hydration_reuses_todo_projection_cache_when_events_unchanged),
     ("cli_prompt reminder: open todos only", test_cli_prompt_open_todos_only),
     ("ALL_TASKS__DONE marker completes todos and suppresses reminder", test_all_tasks_done_marker_completes_todos_and_suppresses_reminder),
     ("dispatch supervisor branch passes user_initiated=True", test_dispatch_supervisor_branch_passes_user_initiated),

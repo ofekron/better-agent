@@ -280,6 +280,11 @@ class SessionManager:
             dict,
         ] = collections.OrderedDict()
         self._tree_stub_cache_max = 32
+        self._todo_projection_cache: collections.OrderedDict[
+            str,
+            tuple[tuple[int, int] | None, dict[str, tuple[list, list]]],
+        ] = collections.OrderedDict()
+        self._todo_projection_cache_max = 64
         self._queued_prompt_counts_by_sid: dict[str, int] = {}
         # Per-root generation counter bumped after each reconcile.
         self._reconcile_gen: dict[str, int] = {}
@@ -1291,6 +1296,44 @@ class SessionManager:
         from event_ingester import event_ingester
         event_ingester.close(rid)
 
+    def _event_journal_fingerprint(self, root_id: str) -> tuple[int, int] | None:
+        from event_ingester import event_ingester
+
+        path = event_ingester._events_path(root_id)
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _apply_cached_todo_projection(
+        self,
+        root: dict,
+        projected: dict[str, tuple[list, list]],
+    ) -> None:
+        for node in [root, *session_store._walk_forks(root)]:
+            sid = node.get("id")
+            todos, tasks = projected.get(sid, ([], []))
+            node["current_todos"] = copy.deepcopy(todos)
+            node["current_tasks"] = copy.deepcopy(tasks)
+
+    def _cache_todo_projection(
+        self,
+        root_id: str,
+        fingerprint: tuple[int, int] | None,
+        projected: dict[str, tuple[list, list]],
+    ) -> None:
+        self._todo_projection_cache[root_id] = (
+            fingerprint,
+            {
+                sid: (copy.deepcopy(todos), copy.deepcopy(tasks))
+                for sid, (todos, tasks) in projected.items()
+            },
+        )
+        self._todo_projection_cache.move_to_end(root_id)
+        while len(self._todo_projection_cache) > self._todo_projection_cache_max:
+            self._todo_projection_cache.popitem(last=False)
+
     def _hydrate_cached_root_events(self, rid: str, root: dict) -> None:
         # v8 invariant: on-disk snapshot omits msg.events. Full callers
         # replay events.jsonl into the cache on demand; thin snapshot
@@ -1357,6 +1400,15 @@ class SessionManager:
         if not node_sids:
             return
 
+        fingerprint = self._event_journal_fingerprint(root_id)
+        cached = self._todo_projection_cache.get(root_id)
+        if cached is not None and cached[0] == fingerprint:
+            perf.record("session.hydrate_todos.cache_hit", 1.0)
+            self._todo_projection_cache.move_to_end(root_id)
+            self._apply_cached_todo_projection(root, cached[1])
+            return
+        perf.record("session.hydrate_todos.cache_miss", 1.0)
+
         # Single read — no sid_filter — then bucket per sid.
         try:
             with perf.timed("session.hydrate_todos.read_events"):
@@ -1397,6 +1449,8 @@ class SessionManager:
             if sid in buckets and _payload_may_project(row.get("data")):
                 buckets[sid].append(row)
 
+        projected_by_sid: dict[str, tuple[list, list]] = {}
+
         def _apply(node: dict) -> None:
             sid = node.get("id")
             if sid:
@@ -1421,10 +1475,12 @@ class SessionManager:
                             current_tasks = list(fields.get("current_tasks") or [])
                 node["current_todos"] = current_todos
                 node["current_tasks"] = current_tasks
+                projected_by_sid[sid] = (current_todos, current_tasks)
             for f in node.get("forks", []):
                 _apply(f)
 
         _apply(root)
+        self._cache_todo_projection(root_id, fingerprint, projected_by_sid)
 
     def _cached(self, sid: str, *, hydrate_events: bool = True) -> Optional[dict]:
         """Return the live record for `sid` (a node within a cached root
