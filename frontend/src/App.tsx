@@ -3204,6 +3204,7 @@ function AppMain({
   ]);
 
   const [openSessionRecords, setOpenSessionRecords] = useState<Record<string, Session>>({});
+  const openSessionRecordFetchesRef = useRef<Set<string>>(new Set());
   const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
   const markSessionKnown = useCallback((id: string) => {
     if (!id) return;
@@ -3423,12 +3424,17 @@ function AppMain({
     if (!sessionsLoaded) return;
     const loadedIds = new Set(sessions.map((session) => session.id));
     const idsToFetch = openSessionIds.filter(
-      (id) => !loadedIds.has(id) && !openSessionRecords[id] && !missingOpenSessionIds[id],
+      (id) =>
+        !loadedIds.has(id) &&
+        !openSessionRecords[id] &&
+        !missingOpenSessionIds[id] &&
+        !openSessionRecordFetchesRef.current.has(id),
     );
     if (idsToFetch.length === 0) return;
 
     let cancelled = false;
     for (const id of idsToFetch) {
+      openSessionRecordFetchesRef.current.add(id);
       fetch(`${API}/api/sessions/${encodeURIComponent(id)}`, {
         credentials: "include",
       })
@@ -3444,7 +3450,10 @@ function AppMain({
           if (cancelled || !session?.id) return;
           setOpenSessionRecords((prev) => ({ ...prev, [session.id]: session }));
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          openSessionRecordFetchesRef.current.delete(id);
+        });
     }
 
     return () => {
