@@ -609,7 +609,8 @@ def test_session_list_skips_impossible_virtual_filters() -> None:
     local_end = source.index("@app.get(\"/api/sessions\")", local_start)
     local_source = source[local_start:local_end]
     assert "_session_filters_may_include_virtual(" in local_source
-    assert "virtual_session_store.list_all()" in local_source
+    assert "virtual_session_store.list_recent(" in local_source
+    assert "max(offset + limit, 1)" in local_source
     assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in local_source
 
     route_start = source.index("async def get_sessions(")
@@ -634,6 +635,8 @@ def test_session_list_preserves_summary_order_when_no_virtual_rows() -> None:
     local_source = source[local_start:local_end]
     assert "appended_virtual_sessions = False" in local_source
     assert "virtual_sidebar_sessions = [" in local_source
+    assert "_can_page_default_updated_at_with_virtual(" in local_source
+    assert "_merge_updated_at_page(" in local_source
     assert "if virtual_sidebar_sessions:" in local_source
     assert "appended_virtual_sessions = True" in local_source
     assert "appended_virtual_sessions=appended_virtual_sessions" in local_source

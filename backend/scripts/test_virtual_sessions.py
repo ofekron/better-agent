@@ -256,7 +256,7 @@ def test_concurrent_appends_are_not_lost() -> bool:
 
 def test_list_all_cache_isolated_and_invalidated() -> bool:
     source = open(virtual_session_store.__file__, "r", encoding="utf-8").read()
-    list_start = source.index("def list_all()")
+    list_start = source.index("def _list_summaries(")
     list_end = source.index("def get(", list_start)
     list_source = source[list_start:list_end]
     for timer in (
@@ -308,6 +308,43 @@ def test_list_all_cache_isolated_and_invalidated() -> bool:
         return False
     if third_summary.get("message_count") != 2:
         print(f"  cache was not invalidated after append: {third_summary!r}")
+        return False
+    return True
+
+
+def test_list_recent_copies_only_requested_summaries() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    for index in range(4):
+        virtual_session_store.upsert(
+            ext,
+            {
+                "id": f"virtual:{ext}:recent-{index}",
+                "name": f"Recent {index}",
+                "metadata": {"nested": {"count": index}},
+                "messages": [{"id": f"m-{index}", "role": "user", "content": "one"}],
+            },
+        )
+    first, total = virtual_session_store.list_recent(2)
+    if len(first) != 2:
+        print(f"  expected bounded recent list, got {len(first)}")
+        return False
+    if total < 4:
+        print(f"  expected total to include omitted rows, got {total}")
+        return False
+    first[0]["metadata"]["nested"]["count"] = 99
+    second, _ = virtual_session_store.list_recent(2)
+    if second[0].get("metadata", {}).get("nested", {}).get("count") == 99:
+        print("  caller mutation leaked through list_recent")
+        return False
+    excluded, excluded_total = virtual_session_store.list_recent(
+        10,
+        exclude_id=first[0].get("id"),
+    )
+    if any(session.get("id") == first[0].get("id") for session in excluded):
+        print("  excluded id returned from list_recent")
+        return False
+    if excluded_total != total - 1:
+        print(f"  excluded total mismatch: total={total} excluded={excluded_total}")
         return False
     return True
 

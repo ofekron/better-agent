@@ -326,17 +326,36 @@ def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_copy_summary(summary) for summary in summaries]
 
 
-def list_all() -> list[dict[str, Any]]:
+def _summary_cache_slice(
+    summaries: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    exclude_id: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    total = 0
+    selected: list[dict[str, Any]] = []
+    for summary in summaries:
+        if exclude_id and summary.get("id") == exclude_id:
+            continue
+        total += 1
+        if limit is None or len(selected) < limit:
+            selected.append(summary)
+    return _copy_summaries(selected), total
+
+
+def _list_summaries(*, limit: int | None = None, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int]:
     global _summary_cache, _summary_cache_signature, _summary_cache_fresh_until
+    if limit is not None and limit < 1:
+        limit = 1
     cached = _summary_cache
     if cached is not None and time.monotonic() < _summary_cache_fresh_until:
         with perf.timed("virtual_sessions.list.hot_cached"):
-            return _copy_summaries(cached)
+            return _summary_cache_slice(cached, limit=limit, exclude_id=exclude_id)
     acquired = _lock.acquire(blocking=False)
     if not acquired:
         with perf.timed("virtual_sessions.list.lock_busy_cached"):
             if _summary_cache is not None:
-                return _copy_summaries(_summary_cache)
+                return _summary_cache_slice(_summary_cache, limit=limit, exclude_id=exclude_id)
         _lock.acquire()
     try:
         with perf.timed("virtual_sessions.list.load"):
@@ -349,7 +368,7 @@ def list_all() -> list[dict[str, Any]]:
         ):
             _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
             with perf.timed("virtual_sessions.list.copy_cached"):
-                return _copy_summaries(_summary_cache)
+                return _summary_cache_slice(_summary_cache, limit=limit, exclude_id=exclude_id)
         sessions = data.get("sessions") or {}
         out: list[dict[str, Any]] = []
         with perf.timed("virtual_sessions.list.project"):
@@ -371,9 +390,19 @@ def list_all() -> list[dict[str, Any]]:
                 _summary_cache = _copy_summaries(out)
             _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
         with perf.timed("virtual_sessions.list.copy_result"):
-            return _copy_summaries(out)
+            return _summary_cache_slice(out, limit=limit, exclude_id=exclude_id)
     finally:
         _lock.release()
+
+
+def list_recent(limit: int, *, exclude_id: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    with perf.timed("virtual_sessions.list.recent"):
+        return _list_summaries(limit=limit, exclude_id=exclude_id)
+
+
+def list_all() -> list[dict[str, Any]]:
+    summaries, _total = _list_summaries()
+    return summaries
 
 
 def get(session_id: str) -> dict[str, Any] | None:
