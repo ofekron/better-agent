@@ -1647,6 +1647,7 @@ class EventIngester:
         root_id: str,
         *,
         sid_filter: Optional[str] = None,
+        msg_ids: Optional[set[str]] = None,
         tail: int = 25,
     ) -> dict[str, dict]:
         """Return per-message event refs + collapsed-preview data.
@@ -1654,18 +1655,19 @@ class EventIngester:
         Incrementally cached: first call does a full scan. Subsequent
         calls only scan new events appended since the last call (using
         the cached byte_end as the seek offset). Updates existing
-        summaries in-place. Filtered by sid_filter in memory.
+        summaries in-place. Filtered by sid_filter/msg_ids in memory.
         """
         path = self._events_path(root_id)
         if not path.exists():
             return {}
         with self._summaries_state(root_id, path, tail) as (all_summaries, _):
-            if not sid_filter:
+            if not sid_filter and msg_ids is None:
                 return self._public_message_summaries(all_summaries)
             return {
                 k: self._public_message_summary(v)
                 for k, v in all_summaries.items()
-                if v.get("sid") == sid_filter
+                if (not sid_filter or v.get("sid") == sid_filter)
+                if (msg_ids is None or k in msg_ids)
             }
 
     @staticmethod

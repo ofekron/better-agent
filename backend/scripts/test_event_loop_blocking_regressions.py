@@ -583,6 +583,27 @@ def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     delta_source = method_source[delta_start:snapshot_start]
     assert "_compute_messages_window(" in delta_source
     assert "_get_cached_snapshot(" not in delta_source
+    window_start = source.index("def _compute_messages_window(")
+    window_end = source.index("def get_messages_before(", window_start)
+    window_source = source[window_start:window_end]
+    assert "summary_ids = {" in window_source
+    assert "summaries = self._native_event_summaries(\n            rid, node_sid, summary_ids," in window_source
+
+
+def test_message_summary_reader_filters_requested_message_ids() -> None:
+    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    start = ingester_source.index("def message_event_summaries(")
+    end = ingester_source.index("@staticmethod\n    def _public_message_summary", start)
+    summary_source = ingester_source[start:end]
+    assert "msg_ids: Optional[set[str]] = None" in summary_source
+    assert "if not sid_filter and msg_ids is None:" in summary_source
+    assert "if (msg_ids is None or k in msg_ids)" in summary_source
+    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    start = journal_source.index("def message_event_summaries(")
+    end = journal_source.index("def current_seq(", start)
+    facade_source = journal_source[start:end]
+    assert "msg_ids: Optional[set[str]] = None" in facade_source
+    assert "msg_ids=msg_ids" in facade_source
 
 
 def test_connected_session_fallback_sorts_only_requested_page() -> None:
@@ -2849,6 +2870,8 @@ if __name__ == "__main__":
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_user_prefs_uses_cached_path_for_hot_reads()
     test_session_opened_avoids_full_session_copy()
+    test_message_delta_replay_skips_full_snapshot_rebuild()
+    test_message_summary_reader_filters_requested_message_ids()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()

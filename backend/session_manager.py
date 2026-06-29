@@ -1692,12 +1692,18 @@ class SessionManager:
         }
 
     def _native_event_summaries(
-        self, root_id: str, node_sid: str,
+        self,
+        root_id: str,
+        node_sid: str,
+        msg_ids: Optional[set[str]] = None,
     ) -> dict[str, dict]:
         from event_journal import event_journal_reader
         import render_stub
         return event_journal_reader.message_event_summaries(
-            root_id, sid_filter=node_sid, tail=render_stub.STUB_TAIL,
+            root_id,
+            sid_filter=node_sid,
+            msg_ids=msg_ids,
+            tail=render_stub.STUB_TAIL,
         )
 
     def _hydrate_native_message_copy(
@@ -1714,7 +1720,9 @@ class SessionManager:
         )
         msg["events"] = events
         msg.pop("stub", None)
-        summary = self._native_event_summaries(root_id, node_sid).get(msg_id)
+        summary = self._native_event_summaries(
+            root_id, node_sid, {msg_id},
+        ).get(msg_id)
         if summary:
             msg["event_ref"] = self._event_ref(root_id, node_sid, msg_id, summary)
         if not msg.get("isStreaming"):
@@ -2627,7 +2635,14 @@ class SessionManager:
         from event_shape import extract_output_text, strip_synthetic_events
 
         latest_id = render_stub.latest_assistant_id(all_msgs)
-        summaries = self._native_event_summaries(rid, node_sid)
+        summary_ids = {
+            str(m.get("id") or "")
+            for m in window
+            if m.get("role") == "assistant" and m.get("id")
+        }
+        summaries = self._native_event_summaries(
+            rid, node_sid, summary_ids,
+        )
         copied = []
 
         for m in window:
@@ -2743,7 +2758,14 @@ class SessionManager:
             # Older messages are never the latest turn → always stubbed
             # for lazy event fetch. Stubs the already-copied msgs in place
             # (no live mutation). Full events load on expand.
-            summaries = self._native_event_summaries(rid, node_sid)
+            summary_ids = {
+                str(m.get("id") or "")
+                for m in older
+                if m.get("role") == "assistant" and m.get("id")
+            }
+            summaries = self._native_event_summaries(
+                rid, node_sid, summary_ids,
+            )
             for m in copied:
                 if m.get("role") == "assistant" and not m.get("isStreaming"):
                     msg_id = m.get("id")

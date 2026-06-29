@@ -1764,11 +1764,13 @@ class EventJournalReader:
         root_id: str,
         *,
         sid_filter: Optional[str] = None,
+        msg_ids: Optional[set[str]] = None,
         tail: int = 3,
     ) -> dict[str, dict]:
         return event_ingester.message_event_summaries(
             root_id,
             sid_filter=sid_filter,
+            msg_ids=msg_ids,
             tail=tail,
         )
 
