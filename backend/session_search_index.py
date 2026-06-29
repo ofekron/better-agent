@@ -280,6 +280,9 @@ def search(
                     rows = stale_rows or []
                     return [{"session_id": sid, "score": score} for sid, score in rows]
             if event is None:
+                if max_wait_seconds is not None and max_wait_seconds <= 0:
+                    rows = stale_rows or []
+                    return [{"session_id": sid, "score": score} for sid, score in rows]
                 event = threading.Event()
                 _search_inflight[cache_key] = event
                 if max_wait_seconds is not None:
