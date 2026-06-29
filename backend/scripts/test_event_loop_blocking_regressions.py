@@ -768,7 +768,7 @@ def test_session_event_meta_uses_combined_ingester_read() -> None:
     roots_start = source.index("def _session_event_meta_roots_for_page(")
     roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
     roots_source = source[roots_start:roots_end]
-    assert "_session_event_file_fingerprint(root_id) == (0, 0)" in roots_source
+    assert "_session_event_file_fingerprint(root_id) == (0, 0)" not in roots_source
     helper_start = source.index("def _session_event_meta(")
     helper_end = source.index("def _session_event_meta_cache_fresh(", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -1322,6 +1322,16 @@ def test_event_projections_warm_in_background() -> None:
     roots_end = source.index("async def _warm_session_event_projections()", roots_start)
     roots_source = source[roots_start:roots_end]
     assert "events_path = child / \"events.jsonl\"" in roots_source
+
+
+def test_render_hydrate_worker_fingerprint_is_batched() -> None:
+    source = (ROOT / "render_tree_hydrate.py").read_text(encoding="utf-8")
+    start = source.index("            pre_worker_fingerprint = (")
+    end = source.index("            for raw in orphan_rows:", start)
+    worker_source = source[start:end]
+    assert "before_worker" not in worker_source
+    assert worker_source.count("_message_timeline_fingerprint(m)") == 2
+    assert "pre_worker_fingerprint is not None" in worker_source
 
 
 def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
