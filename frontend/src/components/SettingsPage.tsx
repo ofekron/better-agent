@@ -791,6 +791,7 @@ interface ExtensionConfigRow {
   quickButtonEnabled: boolean;
   pageEnabled: boolean;
   harnessAdditions: ExtensionHarnessAddition[];
+  internalLlmTasks: string[];
   mcp: Array<{ name: string; label: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
@@ -1007,6 +1008,9 @@ export function ExtensionUiSettingsSection() {
             quickButtonEnabled: cfg.ui?.quick_button_enabled !== false,
             pageEnabled: cfg.ui?.page_enabled !== false,
             harnessAdditions: Array.isArray(cfg.harness_additions) ? cfg.harness_additions : manifestHarnessAdditions,
+            internalLlmTasks: Array.isArray(cfg.internal_llm_tasks)
+              ? cfg.internal_llm_tasks.filter((task: unknown): task is string => typeof task === "string" && task.length > 0)
+              : [],
             mcp: Array.isArray(cfg.mcp) ? cfg.mcp : [],
             remoteServices: Array.isArray(cfg.remote_services) ? cfg.remote_services : [],
             settingsSchema: Array.isArray(cfg.settings?.schema) ? cfg.settings.schema : [],
@@ -1237,6 +1241,14 @@ export function ExtensionUiSettingsSection() {
                     </div>
                   ))}
                 </div>
+              </ExtensionConfigGroup>
+            )}
+            {row.internalLlmTasks.length > 0 && (
+              <ExtensionConfigGroup
+                title={t("settings.internalLlmTitle")}
+                description={t("settings.internalLlmHint")}
+              >
+                <InternalLLMSetting tasks={row.internalLlmTasks} showHint={false} />
               </ExtensionConfigGroup>
             )}
             {(row.hasQuickButton || row.hasPage) && (

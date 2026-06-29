@@ -156,10 +156,29 @@ describe("ExtensionUiSettingsSection uninstall", () => {
           harness_delivery: "native",
           has_quick_button: false,
           has_page: false,
+          internal_llm_tasks: ["extension_context_audit"],
           ui: {},
           mcp: [],
           settings: { schema: [], values: {}, secret_present: {} },
           permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      if (url.endsWith("/api/settings/internal-llm")) {
+        return jsonResponse({ tasks: [], assignments: {} });
+      }
+      if (url.endsWith("/api/providers")) {
+        return jsonResponse({
+          default_provider_id: "p1",
+          providers: [
+            {
+              id: "p1",
+              name: "Provider",
+              default_model: "model-a",
+              custom_models: [],
+              supports_reasoning_effort: false,
+              reasoning_effort_options: [],
+            },
+          ],
         });
       }
       throw new Error(`unexpected fetch ${url}`);
@@ -172,5 +191,6 @@ describe("ExtensionUiSettingsSection uninstall", () => {
     expect(screen.getByText("Better Agent Harness Behavior")).toBeTruthy();
     expect(screen.getByText("project-structure")).toBeTruthy();
     expect(screen.getByText("better-agent-coordination")).toBeTruthy();
+    expect(await screen.findByText("Extension context audit")).toBeTruthy();
   });
 });

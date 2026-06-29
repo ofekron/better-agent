@@ -9545,8 +9545,9 @@ async def get_internal_llm_endpoint():
     {task → {provider_id?, model?, reasoning_effort?}} map (missing fields
     mean "inherit active provider")."""
     assignments = await asyncio.to_thread(config_store.get_internal_llm_assignments)
+    extension_tasks = await asyncio.to_thread(extension_store.extension_internal_llm_task_keys)
     return {
-        "tasks": list(config_store.INTERNAL_LLM_TASKS),
+        "tasks": [task for task in config_store.INTERNAL_LLM_TASKS if task not in extension_tasks],
         "assignments": assignments,
     }
 

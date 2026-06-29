@@ -80,6 +80,11 @@ def run() -> None:
             task in config_store.INTERNAL_LLM_TASKS,
             f"{task} is a registered internal-LLM task",
         )
+    harness_record = {"manifest": {"id": es.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID}}
+    check(
+        es.extension_internal_llm_tasks(harness_record) == ["extension_context_audit"],
+        "harness extension owns extension_context_audit task",
+    )
     assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
         bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),
