@@ -45,7 +45,14 @@ from typing import Any, Callable, ClassVar, Optional
 
 from event_bus import BusEvent, bus
 from env_compat import get_env
-from provider import Provider, StreamEvent, build_better_agent_run_env, schedule_loop_task, runner_argv
+from provider import (
+    Provider,
+    StreamEvent,
+    build_better_agent_run_env,
+    path_exists_off_loop,
+    schedule_loop_task,
+    runner_argv,
+)
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -481,7 +488,7 @@ class ClaudeProvider(Provider):
         # failures while the runner kept going on its own.
         runner_state: Optional[dict] = None
         while True:
-            if runner_state_path.exists():
+            if await path_exists_off_loop(runner_state_path):
                 try:
                     raw = runner_state_path.read_text(encoding="utf-8")
                     parsed = json.loads(raw)
@@ -497,7 +504,7 @@ class ClaudeProvider(Provider):
             # pre-run failure (SDK init without valid sid). Breaking here
             # falls through to the "runner_state is None" drain below.
             if rs.popen.poll() is not None:
-                if complete_path.exists():
+                if await path_exists_off_loop(complete_path):
                     break  # falls through to "runner_state is None" drain
                 await self._emit_early_failure(
                     rs,
@@ -721,7 +728,7 @@ class ClaudeProvider(Provider):
         cleanup = True
         try:
             while True:
-                if await asyncio.to_thread(complete_path.exists):
+                if await path_exists_off_loop(complete_path):
                     break
                 # No heartbeat-based stuck detection — a live process is
                 # assumed to be doing useful work (long tool calls, model
@@ -730,7 +737,7 @@ class ClaudeProvider(Provider):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
                     while (
-                        not await asyncio.to_thread(complete_path.exists)
+                        not await path_exists_off_loop(complete_path)
                         and loop.time() < grace_end
                     ):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)
@@ -742,7 +749,7 @@ class ClaudeProvider(Provider):
             # late-flushed final line is captured under its msg_id first.
             await self._await_tailer_drained(rs)
 
-            if rs.popen.poll() is None and await asyncio.to_thread(complete_path.exists):
+            if rs.popen.poll() is None and await path_exists_off_loop(complete_path):
                 # Turn done, process still alive. Tailer lifetime =
                 # process lifetime (late post-Result CLI flushes keep
                 # flowing) and the run stays registered so the
@@ -789,7 +796,7 @@ class ClaudeProvider(Provider):
             while rs.popen.poll() is None:
                 if (
                     not rs.lingering
-                    and await asyncio.to_thread(lingering_sentinel.exists)
+                    and await path_exists_off_loop(lingering_sentinel)
                 ):
                     rs.lingering = True
                     await self._publish_lingering(rs, True)

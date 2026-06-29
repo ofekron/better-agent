@@ -503,18 +503,40 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
 
 
 def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
-    for filename in ("provider_claude.py", "provider_codex.py", "provider_gemini.py"):
+    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    assert "_PROVIDER_POLL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(" in provider_source
+    assert "thread_name_prefix=\"provider-poll\"" in provider_source
+    assert "async def path_exists_off_loop(path: Path) -> bool:" in provider_source
+    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)" in provider_source
+    assert "def shutdown_provider_poll_executor() -> None:" in provider_source
+    for filename in (
+        "provider_claude.py",
+        "provider_codex.py",
+        "provider_gemini.py",
+        "provider_openai.py",
+    ):
         source = (ROOT / filename).read_text(encoding="utf-8")
         start = source.index("async def _watch_complete(")
         if filename == "provider_claude.py":
             end = source.index("async def _watch_linger_exit(", start)
         elif filename == "provider_codex.py":
             end = source.index("async def _ensure_child_tailer(", start)
+        elif filename == "provider_openai.py":
+            end = source.index("async def _emit_complete_from_file(", start)
         else:
             end = source.index("# ------------------------------------------------------------------\n    # _emit_complete_from_file", start)
         watcher_source = source[start:end]
-        assert "await asyncio.to_thread(complete_path.exists)" in watcher_source
+        assert "await path_exists_off_loop(complete_path)" in watcher_source
+        assert "await asyncio.to_thread(complete_path.exists)" not in watcher_source
         assert "complete_path.exists()" not in watcher_source
+        bootstrap_start = source.index("async def _bootstrap_run(")
+        bootstrap_end = source.index("if runner_state is None:", bootstrap_start)
+        bootstrap_source = source[bootstrap_start:bootstrap_end]
+        assert "await path_exists_off_loop(state_path)" in bootstrap_source or "await path_exists_off_loop(runner_state_path)" in bootstrap_source
+        assert "await path_exists_off_loop(complete_path)" in bootstrap_source
+        assert "state_path.exists()" not in bootstrap_source
+        assert "runner_state_path.exists()" not in bootstrap_source
+        assert "complete_path.exists()" not in bootstrap_source
 
 
 def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
