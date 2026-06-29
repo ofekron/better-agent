@@ -79,18 +79,23 @@ def _json_projection_response(content: bytes) -> Response:
     return Response(content=content, media_type="application/json")
 
 
-def _cached_json_projection_response(
+def _projection_response_cache_get(name: str, key: tuple[Any, ...]) -> Response | None:
+    cached = _projection_response_cache.get((name, key))
+    if cached is None:
+        return None
+    if time.monotonic() - cached[0] > _PROJECTION_RESPONSE_CACHE_TTL_SECONDS:
+        _projection_response_cache.pop((name, key), None)
+        return None
+    return _json_projection_response(cached[1])
+
+
+def _projection_response_cache_put(
     name: str,
     key: tuple[Any, ...],
-    build: Callable[[], dict[str, Any]],
+    value: dict[str, Any],
 ) -> Response:
-    cache_key = (name, key)
-    now = time.monotonic()
-    cached = _projection_response_cache.get(cache_key)
-    if cached is not None and now - cached[0] <= _PROJECTION_RESPONSE_CACHE_TTL_SECONDS:
-        return _json_projection_response(cached[1])
     content = json.dumps(
-        build(),
+        value,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
@@ -101,19 +106,34 @@ def _cached_json_projection_response(
             key=lambda item: _projection_response_cache[item][0],
         )
         _projection_response_cache.pop(oldest, None)
-    _projection_response_cache[cache_key] = (now, content)
+    _projection_response_cache[(name, key)] = (time.monotonic(), content)
     return _json_projection_response(content)
+
+
+def _cached_json_projection_response(
+    name: str,
+    key: tuple[Any, ...],
+    build: Callable[[], dict[str, Any]],
+) -> Response:
+    cached = _projection_response_cache_get(name, key)
+    if cached is not None:
+        return cached
+    return _projection_response_cache_put(name, key, build())
 
 
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
+    cache_key = (extension_store.store_fingerprint(), include_hidden)
+    cached = _projection_response_cache_get("list", cache_key)
+    if cached is not None:
+        return cached
     extensions, changed = await asyncio.to_thread(
         extension_store.list_extensions_with_reconciliation,
         include_hidden=include_hidden,
     )
     if changed:
         await _broadcast_extensions_changed()
-    return {"extensions": extensions}
+    return _projection_response_cache_put("list", cache_key, {"extensions": extensions})
 
 
 @router.get("/builtin-ids")
