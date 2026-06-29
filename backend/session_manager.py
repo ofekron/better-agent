@@ -2112,21 +2112,6 @@ class SessionManager:
         def _visit(node: dict) -> None:
             node_sid = str(node.get("id") or "")
             if node_sid:
-                event_shape = []
-                for msg in node.get("messages") or []:
-                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                        continue
-                    events = msg.get("events") or []
-                    event_shape.append((
-                        msg.get("id"),
-                        bool(msg.get("isStreaming")),
-                        len(events),
-                        tuple(
-                            event.get("uuid") or event.get("id")
-                            for event in events[-3:]
-                            if isinstance(event, dict)
-                        ),
-                    ))
                 node_keys.append((
                     node_sid,
                     int(node.get("next_seq") or 0),
@@ -2141,7 +2126,6 @@ class SessionManager:
                     bool(node.get("right_panel_open")),
                     int(render_seq_by_sid.get(node_sid, 0)),
                     int(self._reconcile_gen.get(rid, 0)),
-                    tuple(event_shape),
                 ))
             for child in node.get("forks") or []:
                 if isinstance(child, dict):
