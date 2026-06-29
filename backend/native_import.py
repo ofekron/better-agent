@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -694,6 +695,25 @@ _INTERNAL_IMPORT_PROMPT_PREFIXES = (
     "<verdict-prompt>",
 )
 
+_INTERNAL_IMPORT_PROMPT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"^(adversarial(ly)? (re-)?review|read-only adversarial|final adversarial review|second adversarial review)",
+        r"^use hostile adversarial review stance",
+        r"^in /users/[^,\n]+,\s*adversarially review",
+        r"^(read-only:|read-only adversarial validation|in /users/[^,\n]+,\s*read-only:|in /users/[^,\n]+,\s*audit\b)",
+        r"^please review the following git diff representing",
+        r"^investigate this testape product bug\b.*\breturn commit-ready facts",
+        r"you are the dedicated testape ui-testing expert",
+        r"^using the testape\b",
+        r"^(navigate to|open) https?://.*--- you are the dedicated testape ui-testing expert",
+        r"^(a device worker|a sign-in form has two fields|audit this testape learned state graph)",
+        r"^(convert these verified discoveries|analyze these detector/run measurements|preserve observed analytics confirmations)",
+        r"^runtime ui test only\. do not inspect files\.",
+        r"^reply with exactly:\s*testape_ok$",
+    )
+)
+
 
 class SkippedNativeSession(Exception):
     def __init__(self, reason: str):
@@ -706,6 +726,7 @@ def _is_internal_import_prompt(prompt: str) -> bool:
     return (
         text.startswith(_INTERNAL_IMPORT_PROMPT_PREFIXES)
         or any(sig in text for sig in _INTERNAL_IMPORT_PROMPT_SIGNATURES)
+        or any(pattern.search(text) for pattern in _INTERNAL_IMPORT_PROMPT_PATTERNS)
     )
 
 
