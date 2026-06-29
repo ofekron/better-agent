@@ -880,6 +880,13 @@ def test_session_organization_reads_are_cached() -> None:
     source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
     assert "_cache_signature" in source
     assert "_cache_data" in source
+    assert "_path_cache" in source
+    path_start = source.index("def _path():")
+    path_end = source.index("def _now()", path_start)
+    path_source = source[path_start:path_end]
+    assert "ba_home()" in path_source
+    assert "if _path_cache is not None" in path_source
+    assert "return _path_cache[1]" in path_source
     assert "def _load_shared()" in source
     load_start = source.index("def _load()")
     load_end = source.index("def _save(", load_start)

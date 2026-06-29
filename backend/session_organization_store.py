@@ -14,10 +14,18 @@ SCHEMA_VERSION = 1
 _lock = threading.RLock()
 _cache_signature: tuple[int, int] | None = None
 _cache_data: dict[str, Any] | None = None
+_path_cache: tuple[str, Any] | None = None
 
 
 def _path():
-    return ba_home() / "session_organization.json"
+    global _path_cache
+    home = ba_home()
+    home_key = str(home)
+    if _path_cache is not None and _path_cache[0] == home_key:
+        return _path_cache[1]
+    path = home / "session_organization.json"
+    _path_cache = (home_key, path)
+    return path
 
 
 def _now() -> str:
