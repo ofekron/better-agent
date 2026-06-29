@@ -11866,13 +11866,7 @@ async def desktop_update_file(rel_path: str):
 # Workers panel + approval endpoints
 # ============================================================================
 
-@app.post("/api/internal/workers/list")
-async def internal_list_workers_for_cwd(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_team_orchestration_internal(x_internal_token)
-    cwd = str((body or {}).get("cwd") or "")
+def _internal_list_workers_for_cwd_sync(cwd: str) -> dict:
     """Globally registered workers, with their Better Agent session names + status.
 
     `diverged` true if EITHER the worker BC's agent_sid has rotated
@@ -11894,7 +11888,7 @@ async def internal_list_workers_for_cwd(
     out: list[dict] = []
     for w in workers:
         bc_sid = w.get("agent_session_id")
-        bc = await _session_lite(bc_sid) if bc_sid else None
+        bc = session_manager.get_lite(bc_sid) if bc_sid else None
         if not bc:
             continue
         mode = w.get("orchestration_mode") or bc.get("orchestration_mode") or "native"
@@ -11952,6 +11946,16 @@ async def internal_list_workers_for_cwd(
         "pools": _worker_pool_projection(out, raw.get("pool_queues") or {}),
         "teams": _worker_team_projection(out),
     }
+
+
+@app.post("/api/internal/workers/list")
+async def internal_list_workers_for_cwd(
+    body: dict | None = None,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_team_orchestration_internal(x_internal_token)
+    cwd = str((body or {}).get("cwd") or "")
+    return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)
 
 
 def _worker_pool_projection(workers: list[dict], pool_queues: dict) -> list[dict]:
