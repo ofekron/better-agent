@@ -102,6 +102,34 @@ def _save(data: dict) -> None:
         _PREFS_CACHE = (fingerprint, dict(data))
 
 
+def _bool_pref(prefs: dict, key: str, default: bool) -> bool:
+    val = prefs.get(key, default)
+    return val if isinstance(val, bool) else default
+
+
+def _choice_pref(prefs: dict, key: str, default: str, choices: tuple[str, ...]) -> str:
+    val = prefs.get(key, default)
+    return val if val in choices else default
+
+
+def _bounded_int_pref(prefs: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+    val = prefs.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int):
+        return default
+    if val < minimum or val > maximum:
+        return default
+    return val
+
+
+def _optional_positive_int_pref(prefs: dict, key: str, default: int | None) -> int | None:
+    val = prefs.get(key, default)
+    if val is None:
+        return None
+    if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+        return default
+    return val
+
+
 def get_send_mode() -> SendMode:
     prefs = _load()
     mode = prefs.get("send_mode", DEFAULT_SEND_MODE)
@@ -174,13 +202,11 @@ def set_cross_session_delegate_auto(enabled: bool) -> bool:
 
 
 def get_session_auto_delete_days() -> int | None:
-    prefs = _load()
-    val = prefs.get("session_auto_delete_days", DEFAULT_SESSION_AUTO_DELETE_DAYS)
-    if val is None:
-        return None
-    if isinstance(val, bool) or not isinstance(val, int) or val < 1:
-        return DEFAULT_SESSION_AUTO_DELETE_DAYS
-    return val
+    return _optional_positive_int_pref(
+        _load(),
+        "session_auto_delete_days",
+        DEFAULT_SESSION_AUTO_DELETE_DAYS,
+    )
 
 
 def set_session_auto_delete_days(days: int | None) -> int | None:
@@ -195,11 +221,12 @@ def set_session_auto_delete_days(days: int | None) -> int | None:
 
 
 def get_font_family() -> FontFamily:
-    prefs = _load()
-    val = prefs.get("font_family", DEFAULT_FONT_FAMILY)
-    if val not in ("system", "serif", "mono", "inter"):
-        return DEFAULT_FONT_FAMILY
-    return val
+    return _choice_pref(
+        _load(),
+        "font_family",
+        DEFAULT_FONT_FAMILY,
+        ("system", "serif", "mono", "inter"),
+    )
 
 
 def set_font_family(font_family: FontFamily) -> FontFamily:
@@ -212,13 +239,13 @@ def set_font_family(font_family: FontFamily) -> FontFamily:
 
 
 def get_font_size() -> int:
-    prefs = _load()
-    val = prefs.get("font_size", DEFAULT_FONT_SIZE)
-    if isinstance(val, bool) or not isinstance(val, int):
-        return DEFAULT_FONT_SIZE
-    if val < MIN_FONT_SIZE or val > MAX_FONT_SIZE:
-        return DEFAULT_FONT_SIZE
-    return val
+    return _bounded_int_pref(
+        _load(),
+        "font_size",
+        DEFAULT_FONT_SIZE,
+        MIN_FONT_SIZE,
+        MAX_FONT_SIZE,
+    )
 
 
 def set_font_size(font_size: int) -> int:
@@ -236,8 +263,7 @@ def set_font_size(font_size: int) -> int:
 
 
 def get_first_run_wizard_done() -> bool:
-    val = _load().get("first_run_wizard_done", DEFAULT_FIRST_RUN_WIZARD_DONE)
-    return val if isinstance(val, bool) else DEFAULT_FIRST_RUN_WIZARD_DONE
+    return _bool_pref(_load(), "first_run_wizard_done", DEFAULT_FIRST_RUN_WIZARD_DONE)
 
 
 def set_first_run_wizard_done(done: bool) -> bool:
@@ -250,10 +276,12 @@ def set_first_run_wizard_done(done: bool) -> bool:
 
 
 def get_network_bind_address() -> NetworkBindAddress:
-    val = _load().get("network_bind_address", DEFAULT_NETWORK_BIND_ADDRESS)
-    if val not in ("127.0.0.1", "0.0.0.0"):
-        return DEFAULT_NETWORK_BIND_ADDRESS
-    return val
+    return _choice_pref(
+        _load(),
+        "network_bind_address",
+        DEFAULT_NETWORK_BIND_ADDRESS,
+        ("127.0.0.1", "0.0.0.0"),
+    )
 
 
 def set_network_bind_address(address: NetworkBindAddress) -> NetworkBindAddress:
@@ -269,8 +297,7 @@ def get_folder_view_enabled() -> bool:
     """Whether the session list groups sessions into folders (True) or
     shows a flat list (False). Drives the backend sort and the frontend
     tree-vs-flat render."""
-    val = _load().get("folder_view_enabled", DEFAULT_FOLDER_VIEW_ENABLED)
-    return val if isinstance(val, bool) else DEFAULT_FOLDER_VIEW_ENABLED
+    return _bool_pref(_load(), "folder_view_enabled", DEFAULT_FOLDER_VIEW_ENABLED)
 
 
 def set_folder_view_enabled(enabled: bool) -> bool:
@@ -285,8 +312,7 @@ def set_folder_view_enabled(enabled: bool) -> bool:
 def get_session_sort() -> SessionSort:
     """Which timestamp the session list sorts by: last modification
     (`updated_at`) or last user prompt (`last_user_prompt_at`)."""
-    val = _load().get("session_sort", DEFAULT_SESSION_SORT)
-    return val if val in SESSION_SORT_VALUES else DEFAULT_SESSION_SORT
+    return _choice_pref(_load(), "session_sort", DEFAULT_SESSION_SORT, SESSION_SORT_VALUES)
 
 
 def set_session_sort(value: str) -> SessionSort:
@@ -302,8 +328,7 @@ def get_session_status_sort() -> bool:
     """Whether the sidebar session list groups by status bucket (running >
     needs-decision > has-new > all-tasks-done) as the strongest key (below
     empty-new + pinned), with the chosen timestamp as the tie-break."""
-    val = _load().get("session_status_sort", DEFAULT_SESSION_STATUS_SORT)
-    return val if isinstance(val, bool) else DEFAULT_SESSION_STATUS_SORT
+    return _bool_pref(_load(), "session_status_sort", DEFAULT_SESSION_STATUS_SORT)
 
 
 def set_session_status_sort(enabled: bool) -> bool:
@@ -319,8 +344,11 @@ def get_session_tabs_status_sort() -> bool:
     """Status-bucket grouping for the open-session tabs bar (same buckets as
     the sidebar). Tabs are fully loaded client-side so the frontend ranks
     off the live registry; this pref just persists the toggle."""
-    val = _load().get("sessions_tabs_status_sort", DEFAULT_SESSION_TABS_STATUS_SORT)
-    return val if isinstance(val, bool) else DEFAULT_SESSION_TABS_STATUS_SORT
+    return _bool_pref(
+        _load(),
+        "sessions_tabs_status_sort",
+        DEFAULT_SESSION_TABS_STATUS_SORT,
+    )
 
 
 def set_session_tabs_status_sort(enabled: bool) -> bool:
@@ -335,8 +363,12 @@ def set_session_tabs_status_sort(enabled: bool) -> bool:
 def get_session_tabs_sort() -> SessionTabsSort:
     """Which timestamp the open-session tabs bar sorts by (descending):
     last modification, last user prompt, or last opened on a client."""
-    val = _load().get("sessions_tabs_sort", DEFAULT_SESSION_TABS_SORT)
-    return val if val in SESSION_TABS_SORT_VALUES else DEFAULT_SESSION_TABS_SORT
+    return _choice_pref(
+        _load(),
+        "sessions_tabs_sort",
+        DEFAULT_SESSION_TABS_SORT,
+        SESSION_TABS_SORT_VALUES,
+    )
 
 
 def set_session_tabs_sort(value: str) -> SessionTabsSort:
@@ -350,8 +382,7 @@ def set_session_tabs_sort(value: str) -> SessionTabsSort:
 
 def get_session_tabs_visible() -> bool:
     """Whether the open-session tabs bar is shown above the chat."""
-    val = _load().get("sessions_tabs_visible", DEFAULT_SESSION_TABS_VISIBLE)
-    return val if isinstance(val, bool) else DEFAULT_SESSION_TABS_VISIBLE
+    return _bool_pref(_load(), "sessions_tabs_visible", DEFAULT_SESSION_TABS_VISIBLE)
 
 
 def set_session_tabs_visible(enabled: bool) -> bool:
@@ -367,8 +398,11 @@ def get_voice_close_on_background() -> bool:
     """Whether vocal mode auto-closes when the app goes to the background.
     Default ON: the mic stops listening and vocal mode disables itself on
     visibility loss, so the user does not need to remember to turn it off."""
-    val = _load().get("voice_close_on_background", DEFAULT_VOICE_CLOSE_ON_BACKGROUND)
-    return val if isinstance(val, bool) else DEFAULT_VOICE_CLOSE_ON_BACKGROUND
+    return _bool_pref(
+        _load(),
+        "voice_close_on_background",
+        DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
+    )
 
 
 def set_voice_close_on_background(enabled: bool) -> bool:
@@ -440,8 +474,7 @@ def set_last_reasoning_effort(provider_id: str, reasoning_effort: str) -> bool:
 def get_auto_restart_on_idle() -> bool:
     """Whether the backend auto-fires a supervisor restart every time the
     system goes idle after work (to pick up code changes). Default OFF."""
-    val = _load().get("auto_restart_on_idle", DEFAULT_AUTO_RESTART_ON_IDLE)
-    return val if isinstance(val, bool) else DEFAULT_AUTO_RESTART_ON_IDLE
+    return _bool_pref(_load(), "auto_restart_on_idle", DEFAULT_AUTO_RESTART_ON_IDLE)
 
 
 def set_auto_restart_on_idle(enabled: bool) -> bool:
@@ -463,19 +496,77 @@ def get_all() -> dict:
             "cross_session_delegate_auto", DEFAULT_CROSS_SESSION_DELEGATE_AUTO
         ),
         "context_strategy": prefs.get("context_strategy", DEFAULT_CONTEXT_STRATEGY),
-        "session_auto_delete_days": get_session_auto_delete_days(),
-        "font_family": get_font_family(),
-        "font_size": get_font_size(),
-        "first_run_wizard_done": get_first_run_wizard_done(),
-        "network_bind_address": get_network_bind_address(),
-        "folder_view_enabled": get_folder_view_enabled(),
-        "session_sort": get_session_sort(),
-        "session_status_sort": get_session_status_sort(),
-        "sessions_tabs_sort": get_session_tabs_sort(),
-        "sessions_tabs_status_sort": get_session_tabs_status_sort(),
-        "sessions_tabs_visible": get_session_tabs_visible(),
-        "voice_close_on_background": get_voice_close_on_background(),
-        "auto_restart_on_idle": get_auto_restart_on_idle(),
+        "session_auto_delete_days": _optional_positive_int_pref(
+            prefs,
+            "session_auto_delete_days",
+            DEFAULT_SESSION_AUTO_DELETE_DAYS,
+        ),
+        "font_family": _choice_pref(
+            prefs,
+            "font_family",
+            DEFAULT_FONT_FAMILY,
+            ("system", "serif", "mono", "inter"),
+        ),
+        "font_size": _bounded_int_pref(
+            prefs,
+            "font_size",
+            DEFAULT_FONT_SIZE,
+            MIN_FONT_SIZE,
+            MAX_FONT_SIZE,
+        ),
+        "first_run_wizard_done": _bool_pref(
+            prefs,
+            "first_run_wizard_done",
+            DEFAULT_FIRST_RUN_WIZARD_DONE,
+        ),
+        "network_bind_address": _choice_pref(
+            prefs,
+            "network_bind_address",
+            DEFAULT_NETWORK_BIND_ADDRESS,
+            ("127.0.0.1", "0.0.0.0"),
+        ),
+        "folder_view_enabled": _bool_pref(
+            prefs,
+            "folder_view_enabled",
+            DEFAULT_FOLDER_VIEW_ENABLED,
+        ),
+        "session_sort": _choice_pref(
+            prefs,
+            "session_sort",
+            DEFAULT_SESSION_SORT,
+            SESSION_SORT_VALUES,
+        ),
+        "session_status_sort": _bool_pref(
+            prefs,
+            "session_status_sort",
+            DEFAULT_SESSION_STATUS_SORT,
+        ),
+        "sessions_tabs_sort": _choice_pref(
+            prefs,
+            "sessions_tabs_sort",
+            DEFAULT_SESSION_TABS_SORT,
+            SESSION_TABS_SORT_VALUES,
+        ),
+        "sessions_tabs_status_sort": _bool_pref(
+            prefs,
+            "sessions_tabs_status_sort",
+            DEFAULT_SESSION_TABS_STATUS_SORT,
+        ),
+        "sessions_tabs_visible": _bool_pref(
+            prefs,
+            "sessions_tabs_visible",
+            DEFAULT_SESSION_TABS_VISIBLE,
+        ),
+        "voice_close_on_background": _bool_pref(
+            prefs,
+            "voice_close_on_background",
+            DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
+        ),
+        "auto_restart_on_idle": _bool_pref(
+            prefs,
+            "auto_restart_on_idle",
+            DEFAULT_AUTO_RESTART_ON_IDLE,
+        ),
     }
 
 

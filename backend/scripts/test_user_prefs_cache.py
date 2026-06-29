@@ -46,10 +46,34 @@ def test_external_file_change_invalidates_cache() -> None:
     assert user_prefs.get_session_sort() == "last_user_prompt_at"
 
 
+def test_get_all_loads_preferences_once() -> None:
+    user_prefs.set_session_sort("last_opened_at")
+    user_prefs.set_font_size(16)
+    original_read_json = user_prefs.read_json
+    calls = 0
+
+    def counted_read_json(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_read_json(*args, **kwargs)
+
+    user_prefs._PREFS_CACHE = None  # type: ignore[attr-defined]
+    user_prefs.read_json = counted_read_json  # type: ignore[assignment]
+    try:
+        prefs = user_prefs.get_all()
+    finally:
+        user_prefs.read_json = original_read_json  # type: ignore[assignment]
+    assert calls == 1, f"expected one prefs file read, got {calls}"
+    assert prefs["session_sort"] == "last_opened_at"
+    assert prefs["font_size"] == 16
+    assert prefs["folder_view_enabled"] is True
+
+
 if __name__ == "__main__":
     try:
         test_repeated_getters_share_cached_file_read()
         test_external_file_change_invalidates_cache()
+        test_get_all_loads_preferences_once()
         print("PASS test_user_prefs_cache")
     finally:
         import shutil

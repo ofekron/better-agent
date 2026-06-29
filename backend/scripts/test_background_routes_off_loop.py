@@ -117,7 +117,8 @@ def test_sessions_filter_sort_stays_off_loop() -> None:
     helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "page, total = await asyncio.to_thread(_build_local_sessions_page_for_list, **filters)" in route_source
-    assert "await asyncio.to_thread(\n            _filter_sort_sessions_for_list" in route_source
+    assert "await asyncio.to_thread(\n                _filter_sessions_for_list_preserving_order" in route_source
+    assert "await asyncio.to_thread(\n                _filter_sort_sessions_for_list" in route_source
     assert "_filter_sort_sessions_for_list(" in helper_source
     assert "_local_session_summaries_for_sidebar()" in helper_source
     assert "_decorate_local_sidebar_sessions(out[offset:end], state_snapshot)" in helper_source
