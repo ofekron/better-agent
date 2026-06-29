@@ -261,6 +261,25 @@ async def test_run_state_lookup_is_targeted_and_cached() -> None:
     print("PASS test_run_state_lookup_is_targeted_and_cached")
 
 
+async def test_run_state_positive_cache_outlives_negative_cache() -> None:
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    root_key = "/tmp/run-state-cache-root"
+    sid = "CACHE-TTL-SID"
+    positive_path = nfm_mod.Path("/tmp/cache-ttl.jsonl")
+    now = nfm_mod.time.monotonic()
+    nfm_mod._RUN_STATE_LOOKUP_CACHE[(root_key, sid)] = (
+        now - nfm_mod._RUN_STATE_LOOKUP_CACHE_TTL_S - 0.5,
+        positive_path,
+    )
+    assert nfm_mod._run_state_cache_get(root_key, sid) == positive_path
+    nfm_mod._RUN_STATE_LOOKUP_CACHE[(root_key, sid)] = (
+        now - nfm_mod._RUN_STATE_LOOKUP_CACHE_TTL_S - 0.5,
+        None,
+    )
+    assert nfm_mod._run_state_cache_get(root_key, sid) is False
+    print("PASS test_run_state_positive_cache_outlives_negative_cache")
+
+
 async def test_run_state_recent_index_is_reused_across_sids() -> None:
     from runs_dir import runs_root
 
@@ -454,6 +473,28 @@ async def test_persisted_native_path_skips_run_state_lookup() -> None:
     print("PASS test_persisted_native_path_skips_run_state_lookup")
 
 
+async def test_primary_jsonl_positive_cache_skips_path_stat() -> None:
+    nfm = nfm_mod.NativeFilesManager()
+    sess = {"id": "sid-cache", "cwd": "/tmp/cache"}
+    key = ("sid-cache", "/tmp/cache", "PRIMARY-CACHE-SID")
+    nfm._primary_jsonl_cache[key] = (
+        nfm_mod.time.monotonic(),
+        nfm_mod.Path("/tmp/primary-cache.jsonl"),
+    )
+    original_resolve = nfm_mod._resolve_primary_jsonl
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("positive primary cache should avoid resolve/stat path")
+
+    nfm_mod._resolve_primary_jsonl = fail_resolve  # type: ignore
+    try:
+        path = nfm._resolve_primary_jsonl_cached(sess, "PRIMARY-CACHE-SID")
+    finally:
+        nfm_mod._resolve_primary_jsonl = original_resolve  # type: ignore
+    assert str(path) == "/tmp/primary-cache.jsonl"
+    print("PASS test_primary_jsonl_positive_cache_skips_path_stat")
+
+
 async def test_codex_primary_not_tailed_by_claude_tailer() -> None:
     """A Codex rollout must NOT be handed to the claude-shaped
     OwnedClaudeJsonlTailer — it can't normalize raw Codex lines and would
@@ -578,11 +619,13 @@ if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
+    asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_recent_index_coalesces_concurrent_sid_scans())
     asyncio.run(test_run_state_lookup_checks_recent_dirs_before_rg())
     asyncio.run(test_persisted_native_path_skips_run_state_lookup())
+    asyncio.run(test_primary_jsonl_positive_cache_skips_path_stat())
     asyncio.run(test_codex_primary_not_tailed_by_claude_tailer())
     asyncio.run(test_demand_seed_does_not_block_event_loop())
     asyncio.run(test_agent_sid_session_read_does_not_block_event_loop())
