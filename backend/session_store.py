@@ -4365,7 +4365,7 @@ _METADATA_SEARCH_CACHE_MAX = 128
 _metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
 _metadata_text_cache_version = -1
 _metadata_text_cache: tuple[tuple[str, str, str], ...] = ()
-_METADATA_TRIGRAM_MIN_QUERY = 3
+_METADATA_NGRAM_MAX_SIZE = 3
 
 
 def _normalize_search_fields(fields: Iterable[str] | None) -> set[str]:
@@ -4434,12 +4434,22 @@ def _metadata_search_rows() -> tuple[tuple[str, str, str], ...]:
         return rows
 
 
-def _metadata_trigrams(value: str) -> set[str]:
-    if len(value) < _METADATA_TRIGRAM_MIN_QUERY:
+def _metadata_ngrams(value: str, size: int) -> set[str]:
+    if len(value) < size:
         return set()
     return {
-        value[index:index + _METADATA_TRIGRAM_MIN_QUERY]
-        for index in range(len(value) - _METADATA_TRIGRAM_MIN_QUERY + 1)
+        value[index:index + size]
+        for index in range(len(value) - size + 1)
+    }
+
+
+def _metadata_query_grams(query_lower: str) -> set[str]:
+    size = min(len(query_lower), _METADATA_NGRAM_MAX_SIZE)
+    if size <= 0:
+        return set()
+    return {
+        query_lower[index:index + size]
+        for index in range(len(query_lower) - size + 1)
     }
 
 
@@ -4451,10 +4461,11 @@ def _build_metadata_trigram_index(
         SEARCH_FIELD_FIRST_PROMPT: {},
     }
     for sid, title, first_prompt in rows:
-        for trigram in _metadata_trigrams(title):
-            index[SEARCH_FIELD_TITLE].setdefault(trigram, set()).add(sid)
-        for trigram in _metadata_trigrams(first_prompt):
-            index[SEARCH_FIELD_FIRST_PROMPT].setdefault(trigram, set()).add(sid)
+        for size in range(1, _METADATA_NGRAM_MAX_SIZE + 1):
+            for gram in _metadata_ngrams(title, size):
+                index[SEARCH_FIELD_TITLE].setdefault(gram, set()).add(sid)
+            for gram in _metadata_ngrams(first_prompt, size):
+                index[SEARCH_FIELD_FIRST_PROMPT].setdefault(gram, set()).add(sid)
     return index
 
 
@@ -4502,16 +4513,16 @@ def _metadata_search_index_for_current_version() -> tuple[int, dict[str, dict[st
 
 
 def _metadata_candidate_ids(query_lower: str, metadata_fields: tuple[str, ...]) -> set[str] | None:
-    trigrams = _metadata_trigrams(query_lower)
-    if not trigrams:
+    grams = _metadata_query_grams(query_lower)
+    if not grams:
         return None
     _version, index = _metadata_search_index_for_current_version()
     candidates: set[str] | None = None
     for field in metadata_fields:
         field_index = index.get(field) or {}
         field_candidates: set[str] | None = None
-        for trigram in trigrams:
-            ids = field_index.get(trigram)
+        for gram in grams:
+            ids = field_index.get(gram)
             if not ids:
                 field_candidates = set()
                 break
