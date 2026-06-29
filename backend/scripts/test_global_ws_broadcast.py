@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 
 import _test_home
 _test_home.isolate("bc-test-global-ws-")
@@ -28,6 +29,9 @@ async def test_global_broadcast_reaches_unsubscribed_ws() -> bool:
 
     coordinator.register_global_ws(callback)
     await coordinator.broadcast_global("projects_changed", {})
+    deadline = time.monotonic() + 1.0
+    while not received and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
 
     ok = received == [{"type": "projects_changed", "data": {}}]
     print(f"{PASS if ok else FAIL} global broadcast reaches unsubscribed WS")
@@ -44,9 +48,36 @@ async def test_global_broadcast_dedupes_session_subscribed_ws() -> bool:
     coordinator.register_global_ws(callback)
     coordinator.register_ws("sid-1", callback)
     await coordinator.broadcast_global("projects_changed", {})
+    deadline = time.monotonic() + 1.0
+    while not received and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
 
     ok = len(received) == 1 and received[0]["type"] == "projects_changed"
     print(f"{PASS if ok else FAIL} global broadcast dedupes subscribed WS")
+    return ok
+
+
+async def test_global_broadcast_shares_serialization_task() -> bool:
+    coordinator = Coordinator()
+    task_ids: list[int] = []
+
+    async def callback_a(event: dict) -> None:
+        task = getattr(event, "_bc_serialized_json_task", None)
+        task_ids.append(id(task) if task is not None else 0)
+
+    async def callback_b(event: dict) -> None:
+        task = getattr(event, "_bc_serialized_json_task", None)
+        task_ids.append(id(task) if task is not None else 0)
+
+    coordinator.register_global_ws(callback_a)
+    coordinator.register_global_ws(callback_b)
+    await coordinator.broadcast_global("projects_changed", {})
+    deadline = time.monotonic() + 1.0
+    while len(task_ids) < 2 and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+    ok = len(task_ids) == 2 and task_ids[0] == task_ids[1] and task_ids[0] != 0
+    print(f"{PASS if ok else FAIL} global broadcast shares serialization task")
     return ok
 
 
@@ -54,6 +85,7 @@ async def main_runner() -> int:
     tests = [
         test_global_broadcast_reaches_unsubscribed_ws,
         test_global_broadcast_dedupes_session_subscribed_ws,
+        test_global_broadcast_shares_serialization_task,
     ]
     results = [await test() for test in tests]
     failed = sum(1 for result in results if not result)

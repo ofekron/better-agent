@@ -60,6 +60,10 @@ import virtual_session_prompt_handlers
 
 logger = logging.getLogger(__name__)
 
+
+class SerializedGlobalEvent(dict):
+    pass
+
 _IMAGE_EXT_BY_MEDIA_TYPE = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -3508,8 +3512,17 @@ class Coordinator:
                 f"GLOBAL_EVENT_ALLOWLIST if it really is a cross-session "
                 f"invalidation ping with authoritative state in a store"
             )
-        event = {"type": event_type, "data": data}
         snapshot = list(dict.fromkeys(self.global_ws_callbacks))
+        event = SerializedGlobalEvent({"type": event_type, "data": data})
+        if snapshot:
+            event._bc_serialized_json_task = asyncio.create_task(  # type: ignore[attr-defined]
+                asyncio.to_thread(
+                    json.dumps,
+                    event,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            )
         outer_t = _time.perf_counter()
         for cb in snapshot:
             asyncio.create_task(self._broadcast_global_one(cb, event, event_type))
