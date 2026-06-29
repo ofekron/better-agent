@@ -395,7 +395,8 @@ def test_internal_workers_list_runs_projection_off_loop() -> None:
     assert "count_jsonl_lines(" not in route_source
     assert "session_manager.get_lite(" not in route_source
     projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
-    assert "session_manager.get_fields(" in projection_source
+    assert "session_manager.get_fields_many(" in projection_source
+    assert "session_manager.get_fields(\n            bc_sid" not in projection_source
     assert "session_manager.get_lite(" not in projection_source
     assert "pair_records: list[dict[str, Any]] = []" in projection_source
     assert projection_source.index("pair_records.append(rec)") < projection_source.index("compute_jsonl_path(")
@@ -533,7 +534,8 @@ def test_known_worker_projection_uses_field_reads() -> None:
     start = source.index("def list_worker_projection(")
     end = source.index("@perf.timed_fn(\"store.worker.upsert\")", start)
     projection_source = source[start:end]
-    assert "_sm.get_fields(agent_session_id" in projection_source
+    assert "_sm.get_fields_many(" in projection_source
+    assert "_sm.get_fields(agent_session_id" not in projection_source
     assert "_sm.get(agent_session_id)" not in projection_source
     assert "_sm.get_lite(agent_session_id)" not in projection_source
 

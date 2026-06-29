@@ -15,14 +15,15 @@ def list_workers_for_cwd(cwd: str) -> dict[str, Any]:
         key=lambda worker: worker.get("last_active", ""),
         reverse=True,
     )
+    fields_by_sid = session_manager.get_fields_many(
+        [str(worker.get("agent_session_id") or "") for worker in workers],
+        ("agent_session_id", "cwd", "name", "orchestration_mode"),
+    )
     forks = raw.get("forks", {}) or {}
     out: list[dict[str, Any]] = []
     for worker in workers:
         bc_sid = worker.get("agent_session_id")
-        bc = session_manager.get_fields(
-            bc_sid,
-            ("agent_session_id", "cwd", "name", "orchestration_mode"),
-        ) if bc_sid else None
+        bc = fields_by_sid.get(bc_sid) if bc_sid else None
         if not bc:
             continue
         mode = worker.get("orchestration_mode") or bc.get("orchestration_mode") or "native"
