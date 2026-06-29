@@ -109,6 +109,42 @@ describe("ForkSplitView (isolated)", () => {
     h.unmount();
   });
 
+  it("defaults desktop fork view to focused original pane", async () => {
+    const sharedUser = makeUserMsg({ id: "u1", content: "shared", seq: 0 });
+    const root: Session = {
+      ...makeSession({ id: "root", name: "main" }),
+      messages: [sharedUser],
+      forks: [],
+    };
+    const fork1 = makeFork(root, { id: "fork-1", name: "fork one" });
+    const fork2 = makeFork(root, { id: "fork-2", name: "fork two" });
+    root.forks = [fork1, fork2];
+
+    const h = await renderComponent(
+      <ForkSplitView
+        tree={root}
+        pendingBySession={{}}
+        runStateBySession={{}}
+        focusedSessionId={root.id}
+        onSetFocus={() => {}}
+        onCloseFork={() => {}}
+        onReopenFork={() => {}}
+      />,
+    );
+
+    expect(h.container.querySelector('[data-testid="fork-focus-toolbar"]')).not.toBeNull();
+    expect(h.container.querySelectorAll(".fork-pane-focus-hidden").length).toBe(2);
+    expect(
+      h.container
+        .querySelector(`[data-testid="fork-pane"][data-session-id="${root.id}"]`)
+        ?.classList.contains("fork-pane-focus-hidden"),
+    ).toBe(false);
+    expect(
+      (h.container.querySelector('[data-testid="fork-grid"]') as HTMLElement).style.gridTemplateColumns,
+    ).toContain("0fr");
+    h.unmount();
+  });
+
   it("focus radio click invokes onSetFocus with the pane id", async () => {
     const root: Session = {
       ...makeSession({ id: "root" }),
