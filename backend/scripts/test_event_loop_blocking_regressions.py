@@ -1273,6 +1273,26 @@ def test_event_projections_warm_in_background() -> None:
     roots_end = source.index("async def _warm_session_event_projections()", roots_start)
     roots_source = source[roots_start:roots_end]
     assert "events_path = child / \"events.jsonl\"" in roots_source
+
+
+def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("def _session_detail_cached_key_still_current(")
+    helper_end = source.index("def _floor_events_from_seq(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "session_manager.root_tree_stub_cache_key(" in helper_source
+    assert "_session_event_file_fingerprint(root_id)" in helper_source
+    assert "_session_event_meta(" not in helper_source
+    assert "_session_detail_response_cache_key_sync(" not in helper_source
+
+    route_start = source.index("async def get_session(")
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_source = source[route_start:route_end]
+    assert "_session_detail_cached_key_still_current" in route_source
+    assert "_session_detail_response_cache_key_sync" not in route_source[
+        route_source.index("if cached_full_key is not None:"):
+        route_source.index("perf.record(\"sessions.detail.response_cache.miss\"",)
+    ]
     assert "meta_path" not in roots_source
     warm_start = source.index("async def _warm_session_event_projections()")
     warm_end = source.index("def _schedule_session_event_meta_warm(", warm_start)
