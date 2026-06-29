@@ -32,6 +32,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_store  # noqa: E402
+import session_manager as session_manager_module  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -87,6 +88,28 @@ def _run() -> bool:
     ):
         if timer not in upsert_source:
             raise AssertionError(f"missing summary write timer {timer}")
+    manager_source = open(session_manager_module.__file__, "r", encoding="utf-8").read()
+    persist_start = manager_source.index("def _persist_root(")
+    persist_end = manager_source.index("    def _tail_persist(", persist_start)
+    persist_source = manager_source[persist_start:persist_end]
+    for timer in (
+        "session.persist_root.draft_store",
+        "session.persist_root.draft_dirty",
+        "session.persist_root.draft_write",
+    ):
+        if timer not in persist_source:
+            raise AssertionError(f"missing persist-root timer {timer}")
+    tail_start = manager_source.index("def _tail_persist(")
+    tail_end = manager_source.index("    def _drop_pending_persist(", tail_start)
+    tail_source = manager_source[tail_start:tail_end]
+    for timer in (
+        "session.tail_persist.lock_copy",
+        "session.tail_persist.state",
+        "session.tail_persist.copy",
+        "session.tail_persist.write_full",
+    ):
+        if timer not in tail_source:
+            raise AssertionError(f"missing tail-persist timer {timer}")
 
     sid = _build_heavy_session(3000)
 

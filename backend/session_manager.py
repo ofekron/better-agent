@@ -2582,52 +2582,59 @@ class SessionManager:
         # DraftStore so its scheduled coalescer no-ops via its own check.
         # Defense in depth: a misbehaving DraftStore must never tear
         # down the persist path. Both calls are wrapped + logged.
-        try:
-            ds = self._draft_store_or_none()
-        except Exception:
-            logger.exception(
-                "draft store resolution failed in _persist_root for %s",
-                root_id,
-            )
-            ds = None
-        try:
-            dirty = ds is not None and ds.is_dirty(root_id)
-        except Exception:
-            logger.exception(
-                "draft is_dirty raised in _persist_root for %s", root_id,
-            )
-            dirty = False
-        if dirty:
-            session_store.write_drafts(
-                root_id, session_store.collect_tree_drafts(root),
-            )
+        with perf.timed("session.persist_root.draft_store"):
             try:
-                ds.note_root_persisted(root_id)
+                ds = self._draft_store_or_none()
             except Exception:
                 logger.exception(
-                    "draft note_root_persisted failed for %s", root_id,
+                    "draft store resolution failed in _persist_root for %s",
+                    root_id,
                 )
+                ds = None
+        with perf.timed("session.persist_root.draft_dirty"):
+            try:
+                dirty = ds is not None and ds.is_dirty(root_id)
+            except Exception:
+                logger.exception(
+                    "draft is_dirty raised in _persist_root for %s", root_id,
+                )
+                dirty = False
+        if dirty:
+            with perf.timed("session.persist_root.draft_write"):
+                session_store.write_drafts(
+                    root_id, session_store.collect_tree_drafts(root),
+                )
+                try:
+                    ds.note_root_persisted(root_id)
+                except Exception:
+                    logger.exception(
+                        "draft note_root_persisted failed for %s", root_id,
+                    )
 
     def _tail_persist(self, root_id: str) -> None:
         """Timer callback. Copies the root under its lock, then writes
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
         sess = None
-        with self._lock_for_root(root_id):
-            with _persist_state_lock:
-                if root_id in _persist_inflight:
-                    return
-                pending = _persist_pending.pop(root_id, None)
-                _persist_timer.pop(root_id, None)
-                if pending is None:
-                    return
-                _persist_inflight.add(root_id)
-                _persist_last_at[root_id] = time.monotonic()
-            sess = session_store.copy_persistable_tree(pending)
+        with perf.timed("session.tail_persist.lock_copy"):
+            with self._lock_for_root(root_id):
+                with perf.timed("session.tail_persist.state"):
+                    with _persist_state_lock:
+                        if root_id in _persist_inflight:
+                            return
+                        pending = _persist_pending.pop(root_id, None)
+                        _persist_timer.pop(root_id, None)
+                        if pending is None:
+                            return
+                        _persist_inflight.add(root_id)
+                        _persist_last_at[root_id] = time.monotonic()
+                with perf.timed("session.tail_persist.copy"):
+                    sess = session_store.copy_persistable_tree(pending)
         # bump=False — `updated_at` was set at queue time under
         # the caller's lock.
         try:
-            session_store.write_session_full(sess, bump_updated_at=False)
+            with perf.timed("session.tail_persist.write_full"):
+                session_store.write_session_full(sess, bump_updated_at=False)
             self._note_root_file_written(root_id)
         except Exception:
             logger.exception(
