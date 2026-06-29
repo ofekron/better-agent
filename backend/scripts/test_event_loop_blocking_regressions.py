@@ -716,8 +716,16 @@ def test_shortcut_picker_wait_budget_is_small() -> None:
     assert "_PICK_WAIT_TIMEOUT_SECS = 0.25" in source
     pick_start = source.index("async def pick_shortcuts(")
     pick_source = source[pick_start:]
+    timeout_start = pick_source.index("except asyncio.TimeoutError:")
+    exception_start = pick_source.index("except Exception:")
+    timeout_source = pick_source[timeout_start:exception_start]
     assert "asyncio.wait_for(" in pick_source
     assert "await asyncio.to_thread(\n            _shortcut_picker_inputs," in pick_source
+    assert "fallback_shortcuts = list(all_shortcuts)" in pick_source
+    assert "if fallback_shortcuts is not None:" in timeout_source
+    assert timeout_source.index("if fallback_shortcuts is not None:") < timeout_source.index(
+        "await asyncio.to_thread(user_prefs.get_shortcut_responses)"
+    )
     assert "return await asyncio.shield(_cached_pick(key, _pick_uncached))" in pick_source
     assert "user_prefs.get_shortcut_responses()" not in pick_source
     assert "config_store.get_default_provider()" not in pick_source
