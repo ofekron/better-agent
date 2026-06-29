@@ -115,6 +115,10 @@ _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes, tuple[int, int, int]],
 ] = {}
+_session_summaries_response_cache: dict[
+    tuple,
+    tuple[float, bytes, tuple[int, int, int]],
+] = {}
 _sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
 _sidebar_decorated_cache: dict[tuple, dict] = {}
 _sidebar_state_snapshot_cache: tuple[
@@ -609,6 +613,40 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
         separators=(",", ":"),
     ).encode("utf-8")
     _sessions_list_response_cache[key] = (
+        time.monotonic(),
+        content,
+        _sessions_list_transient_state_version(),
+    )
+    return _sessions_list_response(content)
+
+
+def _session_summaries_cache_get(key: tuple) -> Response | None:
+    cached = _session_summaries_response_cache.get(key)
+    if cached is None:
+        return None
+    if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
+        _session_summaries_response_cache.pop(key, None)
+        return None
+    if cached[2] != _sessions_list_transient_state_version():
+        _session_summaries_response_cache.pop(key, None)
+        return None
+    return _sessions_list_response(cached[1])
+
+
+def _session_summaries_cache_put(key: tuple, value: dict) -> Response:
+    if len(_session_summaries_response_cache) >= 64:
+        oldest = min(
+            _session_summaries_response_cache,
+            key=lambda item: _session_summaries_response_cache[item][0],
+        )
+        _session_summaries_response_cache.pop(oldest, None)
+    content = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _session_summaries_response_cache[key] = (
         time.monotonic(),
         content,
         _sessions_list_transient_state_version(),
@@ -6426,13 +6464,22 @@ async def get_session_summaries(ids: str = Query("")):
     )
     by_id = {str(session.get("id")): session for session in summaries if session.get("id")}
     ordered = [by_id[sid] for sid in requested_ids if sid in by_id]
+    cache_key = (
+        tuple(requested_ids),
+        session_store.summary_index_version(),
+    )
+    cached_response = _session_summaries_cache_get(cache_key)
+    if cached_response is not None:
+        perf.record("sessions.summaries.response_cache.hit", 1.0)
+        return cached_response
+    perf.record("sessions.summaries.response_cache.miss", 1.0)
     page = await _run_hot_path(
         "sessions.summaries.decorate.worker",
         _decorate_local_sidebar_sessions,
         ordered,
         None,
     )
-    return {"sessions": page}
+    return _session_summaries_cache_put(cache_key, {"sessions": page})
 
 
 @app.get("/api/sessions/{session_id}/stats")

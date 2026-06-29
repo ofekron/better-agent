@@ -45,6 +45,7 @@ def _reset_home() -> None:
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
     main._sessions_list_response_cache.clear()
+    main._session_summaries_response_cache.clear()
     main._remote_sessions_cache.clear()
     main._remote_sessions_cache_version = 0
     with session_search_index._lock:
@@ -439,6 +440,38 @@ def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool
     ids = [session["id"] for session in second.json().get("sessions", [])]
     ok = second.status_code == 200 and ids == ["matched"]
     print(f"{PASS if ok else FAIL} /api/sessions repeated search uses response cache")
+    return ok
+
+
+def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "open-a",
+        "2026-06-20T00:00:00+00:00",
+        name="open a",
+    ))
+    session_store.wait_for_summary_index(1.0, min_published=1)
+
+    first = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries first status {first.status_code}")
+        return False
+
+    original = main._decorate_local_sidebar_sessions
+
+    def fail_decorate(*_args, **_kwargs):
+        raise AssertionError("identical summaries request should use response cache")
+
+    main._decorate_local_sidebar_sessions = fail_decorate
+    try:
+        second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
+    finally:
+        main._decorate_local_sidebar_sessions = original
+    if second.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries cached status {second.status_code}")
+        return False
+    ok = first.json() == second.json()
+    print(f"{PASS if ok else FAIL} /api/sessions/summaries repeated request uses cache")
     return ok
 
 
@@ -885,6 +918,7 @@ def main_run() -> int:
         ok = test_search_avoids_full_sidebar_list(client) and ok
         ok = test_simple_search_skips_generic_filter_sort(client) and ok
         ok = test_repeated_session_search_uses_response_cache(client) and ok
+        ok = test_repeated_session_summaries_uses_response_cache(client) and ok
         ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
