@@ -271,8 +271,14 @@ def search(
             if reusable_rows is not None:
                 return [{"session_id": sid, "score": score} for sid, score in reusable_rows]
             event = _search_inflight.get(cache_key)
+            if event is not None and max_wait_seconds is not None:
+                rows = stale_rows or []
+                return [{"session_id": sid, "score": score} for sid, score in rows]
             if event is None:
                 event = _inflight_event_for_limit(q, limit)
+                if event is not None and max_wait_seconds is not None:
+                    rows = stale_rows or []
+                    return [{"session_id": sid, "score": score} for sid, score in rows]
             if event is None:
                 event = threading.Event()
                 _search_inflight[cache_key] = event

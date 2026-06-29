@@ -270,6 +270,73 @@ def bounded_search_returns_while_cache_fills_test() -> bool:
     return ok
 
 
+def repeated_bounded_search_reuses_inflight_without_waiting_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+    calls = 0
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def slow_candidate_scores(_conn, _query, _limit, **_kwargs):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.2)
+        return [("sid-bounded", 4)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = slow_candidate_scores
+    try:
+        first_started = time.monotonic()
+        first = session_search_index.search(
+            "bounded-inflight-query",
+            limit=5,
+            max_wait_seconds=0.03,
+        )
+        first_elapsed = time.monotonic() - first_started
+        second_started = time.monotonic()
+        second = session_search_index.search(
+            "bounded-inflight-query",
+            limit=5,
+            max_wait_seconds=0.03,
+        )
+        second_elapsed = time.monotonic() - second_started
+        deadline = time.monotonic() + 1.0
+        final = []
+        while time.monotonic() < deadline:
+            final = session_search_index.search(
+                "bounded-inflight-query",
+                limit=5,
+                max_wait_seconds=0.03,
+            )
+            if final:
+                break
+            time.sleep(0.02)
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_inflight.clear()
+    ok = (
+        calls == 1
+        and first == []
+        and second == []
+        and final == [{"session_id": "sid-bounded", "score": 4}]
+        and 0.02 <= first_elapsed < 0.09
+        and second_elapsed < 0.01
+    )
+    print(
+        f"{PASS if ok else FAIL} repeated bounded search reuses in-flight fill "
+        f"-- calls={calls} first={first_elapsed:.3f}s second={second_elapsed:.3f}s",
+    )
+    return ok
+
+
 def bounded_search_does_not_cache_deadline_miss_test() -> bool:
     session_search_index._search_cache.clear()
     session_search_index._search_inflight.clear()
@@ -500,6 +567,7 @@ if __name__ == "__main__":
         ok = search_does_not_wait_for_pending_index_test() and ok
         ok = grep_sessions_passes_bounded_limit_test() and ok
         ok = bounded_search_returns_while_cache_fills_test() and ok
+        ok = repeated_bounded_search_reuses_inflight_without_waiting_test() and ok
         ok = bounded_search_does_not_cache_deadline_miss_test() and ok
         ok = identical_searches_coalesce_test() and ok
         ok = smaller_search_coalesces_with_larger_inflight_test() and ok
