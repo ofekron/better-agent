@@ -296,6 +296,27 @@ def _sessions_list_cache_version(search_query: str) -> int:
         return session_store.search_metadata_version()
     return session_store.summary_version()
 
+
+def _session_list_user_prefs() -> tuple[bool, str, bool]:
+    prefs = user_prefs.get_all()
+    folder_view_enabled = prefs.get(
+        "folder_view_enabled",
+        user_prefs.DEFAULT_FOLDER_VIEW_ENABLED,
+    )
+    session_sort = prefs.get("session_sort", user_prefs.DEFAULT_SESSION_SORT)
+    if session_sort not in user_prefs.SESSION_SORT_VALUES:
+        session_sort = user_prefs.DEFAULT_SESSION_SORT
+    session_status_sort = prefs.get(
+        "session_status_sort",
+        user_prefs.DEFAULT_SESSION_STATUS_SORT,
+    )
+    return (
+        bool(folder_view_enabled),
+        session_sort,
+        bool(session_status_sort),
+    )
+
+
 _GIT_STATUS_TTL_SECONDS = 60.0
 _git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _git_status_inflight: dict[tuple[str, str], asyncio.Task] = {}
@@ -3652,14 +3673,18 @@ async def get_sessions(
             if not _machine_nodes_enabled_cached():
                 connected = ()
     with perf.timed("sessions.list.filters"):
+        (
+            default_folder_view,
+            default_sort_by,
+            effective_status_sort,
+        ) = await asyncio.to_thread(_session_list_user_prefs)
         effective_folder_view = (
-            folder_view if folder_view is not None else user_prefs.get_folder_view_enabled()
+            folder_view if folder_view is not None else default_folder_view
         )
         effective_sort_by = (
             sort_by if sort_by in user_prefs.SESSION_SORT_VALUES
-            else user_prefs.get_session_sort()
+            else default_sort_by
         )
-        effective_status_sort = user_prefs.get_session_status_sort()
         effective_search_fields = _split_session_search_fields(search_fields)
         filters = {
             "offset": offset,
