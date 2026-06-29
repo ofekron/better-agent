@@ -87,12 +87,16 @@ def _save(data: dict[str, Any]) -> None:
         st = path.stat()
         _cache_signature = (st.st_mtime_ns, st.st_size)
         _cache_data = deepcopy(data)
+        _summary_cache_signature = _cache_signature
+        _summary_cache = _project_summaries(data)
+        _summary_cache.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
+        _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
     except OSError:
         _cache_signature = None
         _cache_data = None
-    _summary_cache_signature = None
-    _summary_cache = None
-    _summary_cache_fresh_until = 0.0
+        _summary_cache_signature = None
+        _summary_cache = None
+        _summary_cache_fresh_until = 0.0
 
 
 def _clean_extension_id(extension_id: str) -> str:
@@ -326,6 +330,22 @@ def _copy_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_copy_summary(summary) for summary in summaries]
 
 
+def _project_summaries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    sessions = data.get("sessions") or {}
+    out: list[dict[str, Any]] = []
+    for session in sessions.values():
+        if not (
+            isinstance(session, dict)
+            and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
+        ):
+            continue
+        summary = dict(session)
+        summary.pop("synthetic_messages", None)
+        summary.pop("messages", None)
+        out.append(summary)
+    return out
+
+
 def _summary_cache_slice(
     summaries: list[dict[str, Any]],
     *,
@@ -369,19 +389,8 @@ def _list_summaries(*, limit: int | None = None, exclude_id: str | None = None) 
             _summary_cache_fresh_until = time.monotonic() + _SUMMARY_CACHE_HOT_TTL_SECONDS
             with perf.timed("virtual_sessions.list.copy_cached"):
                 return _summary_cache_slice(_summary_cache, limit=limit, exclude_id=exclude_id)
-        sessions = data.get("sessions") or {}
-        out: list[dict[str, Any]] = []
         with perf.timed("virtual_sessions.list.project"):
-            for session in sessions.values():
-                if not (
-                    isinstance(session, dict)
-                    and _is_valid_virtual_id(session.get("id"), session.get("extension_id"))
-                ):
-                    continue
-                summary = dict(session)
-                summary.pop("synthetic_messages", None)
-                summary.pop("messages", None)
-                out.append(summary)
+            out = _project_summaries(data)
         with perf.timed("virtual_sessions.list.sort"):
             out.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
         if signature is not None:

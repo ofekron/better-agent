@@ -434,6 +434,34 @@ def test_list_all_returns_cached_projection_when_store_lock_busy() -> bool:
     return any(session.get("id") == sid for session in cached)
 
 
+def test_write_warms_summary_cache_for_recent_list() -> bool:
+    ext = extension_store.BUILTIN_ASK_EXTENSION_ID
+    sid = f"virtual:{ext}:write-warm-cache"
+    virtual_session_store.upsert(
+        ext,
+        {
+            "id": sid,
+            "name": "Write warm cache",
+            "messages": [{"id": "m-1", "role": "user", "content": "one"}],
+        },
+    )
+    original = virtual_session_store._load_shared_locked
+
+    def fail_load():
+        raise AssertionError("list_recent_cached touched virtual session store after write")
+
+    virtual_session_store._load_shared_locked = fail_load
+    try:
+        cached = virtual_session_store.list_recent_cached(10)
+    finally:
+        virtual_session_store._load_shared_locked = original
+    if cached is None:
+        print("  write did not warm virtual summary cache")
+        return False
+    sessions, _total = cached
+    return any(session.get("id") == sid for session in sessions)
+
+
 def test_sdk_namespaces_short_virtual_ids_for_all_methods() -> bool:
     ext = extension_store.BUILTIN_ASK_EXTENSION_ID
     client = SdkClient(extension_id=ext, internal_token="token")
@@ -526,6 +554,7 @@ TESTS = [
     ("list_all summary cache skips full payload copy", test_list_all_summary_cache_skips_full_payload_copy),
     ("list_all hot cache skips store load", test_list_all_hot_cache_skips_store_load),
     ("list_all returns cached projection when store lock busy", test_list_all_returns_cached_projection_when_store_lock_busy),
+    ("write warms summary cache for recent list", test_write_warms_summary_cache_for_recent_list),
     ("SDK namespaces short virtual ids for all methods", test_sdk_namespaces_short_virtual_ids_for_all_methods),
     ("internal API rejects extension without session_state", test_internal_api_rejects_extension_without_session_state),
     ("synthetic injection queues normal turn", test_synthetic_injection_queues_normal_turn),
