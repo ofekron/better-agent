@@ -744,10 +744,6 @@ class OrchestrationStrategy(ABC):
             session_manager.apply_worker_panel_event(
                 app_session_id, msg_id, delegation_id, inner,
             )
-        if ctx.workers_list is not None:
-            session_manager.snapshot_workers(
-                app_session_id, msg_id, ctx.workers_list,
-            )
         # events.jsonl gets the OUTER worker_event wrapper so
         # reconcile can re-apply through this same branch.
         self._publish_provider_event(

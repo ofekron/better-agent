@@ -420,17 +420,8 @@ def test_h_multi_panel_routes_correctly() -> bool:
     return ok
 
 
-def test_i_snapshot_workers_preserves_appended_event() -> bool:
-    """Branch order: `apply_worker_panel_event` mutates panel.events
-    on the panel dict in `m["workers"]`, THEN `snapshot_workers` does
-    `m["workers"] = list(ctx.workers_list)`. In production the panel
-    dicts in `ctx.workers_list` (=`coordinator.current_turn_workers
-    [app_session_id]`) are the SAME refs as in `m["workers"]` (the
-    list is built up via `panels.append(panel)` in
-    `_delegation.py:288` and snapshot_workers stores those refs).
-    With shared refs the snapshot's list-rebuild is harmless. Locks
-    that invariant — if anyone breaks the shared-ref contract,
-    snapshot would wipe the mutation."""
+def test_i_worker_event_does_not_need_snapshot_workers() -> bool:
+    """Worker-event routing mutates the matching panel directly."""
     sess = session_manager.create(
         name="t", model="sonnet", cwd="/tmp",
         orchestration_mode="manager", source="cli",
@@ -475,7 +466,7 @@ def test_i_snapshot_workers_preserves_appended_event() -> bool:
     panel_evs = _panel_events(sid, msg_id, "del_I")
     mgr_evs = _mgr_events(sid, msg_id)
     ok = len(panel_evs) == 1 and len(mgr_evs) == 0
-    print(f"{PASS if ok else FAIL} I: snapshot_workers preserves append — "
+    print(f"{PASS if ok else FAIL} I: worker_event updates panel directly — "
           f"panel.events={len(panel_evs)} mgr={len(mgr_evs)}")
     return ok
 
@@ -677,7 +668,7 @@ def main() -> int:
             test_g_reconcile_roundtrip_rehydrates_panel_events(),
             test_g3_worker_event_updates_raw_session_content(),
             test_h_multi_panel_routes_correctly(),
-            test_i_snapshot_workers_preserves_appended_event(),
+            test_i_worker_event_does_not_need_snapshot_workers(),
             test_j_malformed_inner_no_crash_no_pollute(),
             test_k_worker_start_creates_panel_before_worker_event(),
             test_l_post_trigger_insert_at_counts_after_current_event(),
