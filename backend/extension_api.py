@@ -72,7 +72,10 @@ async def _broadcast_extensions_changed() -> None:
 
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
-    extensions, changed = extension_store.list_extensions_with_reconciliation(include_hidden=include_hidden)
+    extensions, changed = await asyncio.to_thread(
+        extension_store.list_extensions_with_reconciliation,
+        include_hidden=include_hidden,
+    )
     if changed:
         await _broadcast_extensions_changed()
     return {"extensions": extensions}
