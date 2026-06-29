@@ -801,6 +801,22 @@ def test_extension_backend_get_skips_body_stream() -> None:
     assert "else b\"\"" in dispatch_source
 
 
+def test_extension_backend_invoke_has_split_perf_timers() -> None:
+    source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
+    start = source.index("async def _invoke_backend(")
+    end = source.index("async def dispatch_extension_backend_request(", start)
+    invoke_source = source[start:end]
+    for timer in (
+        "extension.backend.invoke.payload",
+        "extension.backend.invoke.handle",
+        "extension.backend.invoke.timeout",
+        "extension.backend.invoke.roundtrip",
+        "extension.backend.invoke.decode",
+        "extension.backend.invoke.response",
+    ):
+        assert timer in invoke_source
+
+
 def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
     dispatch_start = source.index("async def dispatch_backend_extension(")
@@ -886,6 +902,7 @@ if __name__ == "__main__":
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
+    test_extension_backend_invoke_has_split_perf_timers()
     test_builtin_extension_core_dispatch_precedes_backend_spec_lookup()
     test_search_sessions_response_cache_uses_metadata_version()
     test_internal_communication_worker_lookup_is_off_loop()

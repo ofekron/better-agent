@@ -21,6 +21,7 @@ from starlette.requests import ClientDisconnect
 
 from env_compat import dual_env_many
 import extension_store
+import perf
 
 logger = logging.getLogger(__name__)
 
@@ -402,19 +403,23 @@ async def _invoke_backend(
     Shared by the public ``/api/extensions/{id}/backend/*`` route (sourced from
     a FastAPI Request) and the inter-extension call endpoint (sourced from a
     JSON body). Callers must have already authenticated."""
-    request_payload = {
-        "method": method,
-        "path": "/" + path.lstrip("/"),
-        "query_string": query_b64,
-        "headers": safe_headers,
-        "body": base64.b64encode(body_bytes).decode("ascii"),
-    }
-    handle = _get_handle(spec)
-    timeout = _resolve_host_timeout(spec, path)
+    with perf.timed("extension.backend.invoke.payload"):
+        request_payload = {
+            "method": method,
+            "path": "/" + path.lstrip("/"),
+            "query_string": query_b64,
+            "headers": safe_headers,
+            "body": base64.b64encode(body_bytes).decode("ascii"),
+        }
+    with perf.timed("extension.backend.invoke.handle"):
+        handle = _get_handle(spec)
+    with perf.timed("extension.backend.invoke.timeout"):
+        timeout = _resolve_host_timeout(spec, path)
     try:
-        response_line = await asyncio.get_running_loop().run_in_executor(
-            _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
-        )
+        with perf.timed("extension.backend.invoke.roundtrip"):
+            response_line = await asyncio.get_running_loop().run_in_executor(
+                _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
+            )
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
     except HTTPException:
@@ -428,21 +433,23 @@ async def _invoke_backend(
         raise HTTPException(status_code=500, detail="Extension backend process exited")
 
     try:
-        result = json.loads(response_line.decode("utf-8"))
-        status = int(result["status"])
-        content = base64.b64decode(str(result.get("body") or ""))
-        headers = {
-            str(key): str(value)
-            for key, value in (result.get("headers") or [])
-            if str(key).lower() not in _BLOCKED_RESPONSE_HEADERS
-        }
+        with perf.timed("extension.backend.invoke.decode"):
+            result = json.loads(response_line.decode("utf-8"))
+            status = int(result["status"])
+            content = base64.b64decode(str(result.get("body") or ""))
+            headers = {
+                str(key): str(value)
+                for key, value in (result.get("headers") or [])
+                if str(key).lower() not in _BLOCKED_RESPONSE_HEADERS
+            }
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Extension backend returned an invalid response") from exc
 
-    if status >= 500:
-        headers = {"content-type": "text/plain"}
-        content = b"Extension backend failed"
-    return Response(content=content, status_code=status, headers=headers)
+    with perf.timed("extension.backend.invoke.response"):
+        if status >= 500:
+            headers = {"content-type": "text/plain"}
+            content = b"Extension backend failed"
+        return Response(content=content, status_code=status, headers=headers)
 
 
 async def dispatch_extension_backend_request(
