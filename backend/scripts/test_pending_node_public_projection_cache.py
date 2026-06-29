@@ -21,7 +21,9 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def test_public_projection_cache_invalidates_on_mutation() -> bool:
+    cold = node_link.public_pending_nodes_cached()
     first = node_link.public_pending_nodes()
+    warm = node_link.public_pending_nodes_cached()
     pending_node_registrations.create(
         node_id="worker-a",
         address="127.0.0.1:9000",
@@ -34,7 +36,9 @@ def test_public_projection_cache_invalidates_on_mutation() -> bool:
     pending_node_registrations.approve("worker-a")
     fourth = node_link.public_pending_nodes()
     ok = (
-        first == []
+        cold is None
+        and first == []
+        and warm == []
         and len(second) == 1
         and second == third
         and second[0].get("node_id") == "worker-a"

@@ -104,15 +104,20 @@ _public_pending_cache: tuple[int, list[dict]] | None = None
 _public_pending_cache_lock = threading.Lock()
 
 
-def public_pending_nodes() -> list[dict]:
-    global _public_pending_cache
-    from stores import pending_node_registrations
-
+def public_pending_nodes_cached() -> list[dict] | None:
     version = pending_node_registrations.version()
     with _public_pending_cache_lock:
         cached = _public_pending_cache
-        if cached is not None and cached[0] == version:
-            return [dict(item) for item in cached[1]]
+        if cached is None or cached[0] != version:
+            return None
+        return [dict(item) for item in cached[1]]
+
+
+def public_pending_nodes() -> list[dict]:
+    global _public_pending_cache
+    cached = public_pending_nodes_cached()
+    if cached is not None:
+        return cached
     projected = [
         _public_rec(rec)
         for rec in pending_node_registrations.list_pending()
