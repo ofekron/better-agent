@@ -4719,7 +4719,9 @@ async def get_session(
     if not tree:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
 
-    _strip_synthetic_events_from_tree(tree)
+    strip_start = time.perf_counter()
+    await asyncio.to_thread(_strip_synthetic_events_from_tree, tree)
+    strip_ms = (time.perf_counter() - strip_start) * 1000
     root_id = tree.get("id")
     if isinstance(root_id, str):
         if has_events:
@@ -4735,14 +4737,14 @@ async def get_session(
                 "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
                 "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
                 "last_asst_stub=%s timings="
-                "max_seq=%.1fms barrier=%.1fms tree=%.1fms",
+                "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
                 root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
                 msg_count,
                 len(tree.get("queued_prompts") or []),
                 len(tree.get("draft_input") or ""),
                 len(last_events) if last_events else None,
                 last_stub.get("event_count") if last_stub else None,
-                max_seq_ms, barrier_ms, tree_ms,
+                max_seq_ms, barrier_ms, tree_ms, strip_ms,
             )
         if has_events:
             max_context_start = time.perf_counter()
@@ -4758,10 +4760,10 @@ async def get_session(
         else:
             tree["max_seq_by_sid"] = {}
         total_ms = (time.perf_counter() - get_start) * 1000
-        if total_ms >= 50 or max_context_ms >= 20:
+        if total_ms >= 50 or max_context_ms >= 20 or strip_ms >= 20:
             logger.info(
-                "GET session %s timings total=%.1fms max_context=%.1fms has_events=%s",
-                root_id[:8], total_ms, max_context_ms, has_events,
+                "GET session %s timings total=%.1fms max_context=%.1fms strip=%.1fms has_events=%s",
+                root_id[:8], total_ms, max_context_ms, strip_ms, has_events,
             )
         tree["file_path"] = str(_session_path(root_id))
     return tree
