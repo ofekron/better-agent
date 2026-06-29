@@ -30,6 +30,11 @@ _index_generation = 0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
 
 
+def generation() -> int:
+    with _search_cache_lock:
+        return _index_generation
+
+
 def _search_cache_valid(cached_at: float, generation: int, now: float) -> bool:
     return generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS
 

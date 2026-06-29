@@ -501,9 +501,13 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
     return _sessions_list_response(content)
 
 
-def _sessions_list_cache_version(search_query: str) -> int:
+def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> tuple[int, int | None] | int:
     if search_query:
-        return session_store.search_metadata_version()
+        content_generation = None
+        if session_store.SEARCH_FIELD_CONTENT in search_fields:
+            import session_search_index
+            content_generation = session_search_index.generation()
+        return (session_store.search_metadata_version(), content_generation)
     return session_store.summary_version()
 
 
@@ -3990,7 +3994,7 @@ async def get_sessions(
         effective_status_sort,
         connected_version,
         connected,
-        _sessions_list_cache_version(search_query),
+        _sessions_list_cache_version(search_query, effective_search_fields),
     )
     cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:
