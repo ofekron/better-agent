@@ -32,6 +32,11 @@ Gemini. When adding or changing a provider-facing feature, implement the
 equivalent behavior for every supported provider in the same turn, or stop and
 ask if true parity is not possible.
 
+Always reason from the user's stated requirement when reading code. Code can be
+wrong, stale, or shaped by an older requirement; if the code looks irrational
+against the requirement, verify the requirement and ask before preserving the
+current behavior.
+
 For provider tools/MCPs, prefer the provider-native configuration path whenever
 it works. Detect config drift between the provider conversation's start-time
 tool/MCP set and the currently desired set; when a resumed conversation is
