@@ -264,6 +264,44 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     });
   });
 
+  it("placeholder adoption normalizes missing event arrays to empty arrays", () => {
+    const merged = mergeIncomingMessagesForNode(
+      [
+        makeUserMsg({ id: "u", content: "hi", seq: 0 }),
+        makeAssistantMsg({
+          id: "live-worker",
+          seq: undefined,
+          isStreaming: true,
+          workers: [{
+            delegation_id: "d1",
+            worker_session_id: "w1",
+            worker_description: "worker",
+            events: undefined,
+          }],
+        }),
+      ],
+      [
+        makeAssistantMsg({
+          id: "a-canonical",
+          content: "",
+          seq: 1,
+          isStreaming: true,
+          events: undefined,
+          workers: [{
+            delegation_id: "d1",
+            worker_session_id: "w1",
+            worker_description: "worker",
+            events: undefined,
+          }],
+        }),
+      ],
+    );
+
+    const canonical = merged.find((m) => m.id === "a-canonical");
+    expect(canonical?.events).toEqual([]);
+    expect(canonical?.workers?.[0].events).toEqual([]);
+  });
+
   it("placeholder adoption ignores empty seq-less canonical snapshots without overlap", () => {
     const merged = mergeIncomingMessagesForNode(
       [
