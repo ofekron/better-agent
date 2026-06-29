@@ -176,6 +176,22 @@ _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32
 _dir_fingerprint_cache: tuple[float, tuple[int, int, int]] | None = None
 _dir_fingerprint_cache_lock = threading.Lock()
 
+
+def _fingerprint_after_root_write_locked(
+    previous_signature: tuple[int, int] | None,
+    file_signature: tuple[int, int],
+) -> tuple[int, int, int] | None:
+    if _index_fingerprint is None:
+        return None
+    count, newest_mtime_ns, total_size = _index_fingerprint
+    if previous_signature is None:
+        count += 1
+        total_size += file_signature[1]
+    else:
+        total_size += file_signature[1] - previous_signature[1]
+    newest_mtime_ns = max(newest_mtime_ns, file_signature[0])
+    return count, newest_mtime_ns, total_size
+
 # ── Summary index ─────────────────────────────────────────────────────
 #
 # In-memory dict of root_session_id → summary_dict. Writers update their
@@ -2220,13 +2236,19 @@ def _schedule_index_sidecar_write(
         pass
 
 
-def _persist_index_sidecar_if_loaded() -> None:
-    global _index_fingerprint
+def _persist_index_sidecar_if_loaded(
+    fingerprint: tuple[int, int, int] | None = None,
+) -> None:
+    global _index_fingerprint, _dir_fingerprint_cache
     with _index_lock:
         if not _index_loaded:
             return
-        fp = _dir_fingerprint()
+        fp = fingerprint
+        if fp is None:
+            fp = _dir_fingerprint()
         _index_fingerprint = fp
+        with _dir_fingerprint_cache_lock:
+            _dir_fingerprint_cache = (time.monotonic(), fp)
         fork_index = dict(_fork_index)
         root_forks = {
             root_id: set(forks)
@@ -4007,13 +4029,19 @@ def write_session_full(
     with perf.timed("store.session.write_full.index_signature"):
         if file_signature is not None:
             with _index_lock:
+                previous_signature = _root_index_signatures.get(root["id"])
+                updated_fingerprint = _fingerprint_after_root_write_locked(
+                    previous_signature,
+                    file_signature,
+                )
                 _root_index_signatures[root["id"]] = file_signature
                 index_loaded = _index_loaded
         else:
             index_loaded = False
+            updated_fingerprint = None
     if index_loaded and (fork_topology_changed or root.get("forks")):
         with perf.timed("store.session.write_full.index_sidecar"):
-            _persist_index_sidecar_if_loaded()
+            _persist_index_sidecar_if_loaded(updated_fingerprint)
     elif root.get("forks"):
         with perf.timed("store.session.write_full.index_sidecar"):
             _refresh_index_sidecar_for_written_root(root, file_signature)
