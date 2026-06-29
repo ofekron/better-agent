@@ -542,6 +542,43 @@ def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
         shutil.rmtree(claude_home, ignore_errors=True)
 
 
+def test_missing_jsonl_warning_is_throttled(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-warn-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    warnings: list[tuple] = []
+    old_warning = helpers.log.warning
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        helpers._MISSING_JSONL_WARNED_AT.clear()
+        helpers.log.warning = lambda *args, **kwargs: warnings.append(args)  # type: ignore[assignment]
+
+        first = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+        helpers._JSONL_PATH_CACHE.clear()
+        second = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
+
+        check(first is None and second is None, "jsonl helper returns throttled missing path", failures)
+        check(len(warnings) == 1, "jsonl helper throttles repeated missing-path warnings", failures)
+    finally:
+        helpers.log.warning = old_warning  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        helpers._MISSING_JSONL_WARNED_AT.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
 def main() -> int:
     failures: list[str] = []
     try:
@@ -558,6 +595,7 @@ def main() -> int:
         test_jsonl_path_targets_run_state_by_sid(failures)
         test_jsonl_path_reuses_recent_run_state_index(failures)
         test_jsonl_path_run_state_miss_stays_bounded(failures)
+        test_missing_jsonl_warning_is_throttled(failures)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
