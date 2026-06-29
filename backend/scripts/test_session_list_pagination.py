@@ -53,6 +53,8 @@ def _reset_home() -> None:
     session_search_index._search_cache.clear()
     session_search_index._search_inflight.clear()
     session_search_index._index_generation += 1
+    session_search_index._published_generation = session_search_index._index_generation
+    session_search_index._published_generation_at = time.monotonic()
     index_path = Path(_TMP_HOME) / "session_search_index.sqlite3"
     index_path.unlink(missing_ok=True)
 
@@ -505,21 +507,29 @@ def test_search_index_cache_invalidates_on_write() -> bool:
     finally:
         session_search_index._candidate_scores = original
 
-    _write(_record("second", "2026-06-21T00:00:00+00:00"))
-    _write_events("second", "needle")
+    generation_before_write = session_search_index.generation()
+    session_search_index._apply_rows([("second", "needle")])
+    generation_during_write_burst = session_search_index.generation()
     stale_during_write_burst = session_search_index.search("needle", limit=10)
     original_stale_seconds = session_search_index._SEARCH_CACHE_STALE_SECONDS
+    original_published_at = session_search_index._published_generation_at
     session_search_index._SEARCH_CACHE_STALE_SECONDS = 0
+    session_search_index._published_generation_at = 0
     try:
+        session_search_index._apply_rows([("third", "needle")])
+        generation_after_stale_window = session_search_index.generation()
         refreshed = session_search_index.search("needle", limit=10)
     finally:
         session_search_index._SEARCH_CACHE_STALE_SECONDS = original_stale_seconds
+        session_search_index._published_generation_at = original_published_at
     ids = {row["session_id"] for row in refreshed}
     ok = (
         [row["session_id"] for row in first] == ["first"]
         and [row["session_id"] for row in cached] == ["first"]
+        and generation_during_write_burst == generation_before_write
+        and generation_after_stale_window != generation_before_write
         and [row["session_id"] for row in stale_during_write_burst] == ["first"]
-        and ids == {"first", "second"}
+        and ids == {"first", "second", "third"}
     )
     print(f"{PASS if ok else FAIL} session search cache invalidates on write")
     return ok
