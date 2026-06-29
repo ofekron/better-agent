@@ -434,6 +434,16 @@ def test_message_cache_hydration_has_substep_perf_metrics() -> None:
     assert "event_journal.message_cache.read_grow" in cache_source
 
 
+def test_written_journal_projection_avoids_full_event_list_copy() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("    def apply_written_journal_event(")
+    end = source.index("    def _root_id_for(", start)
+    projection_source = source[start:end]
+    assert "event_uuid = _event_uuid_safe" in projection_source
+    assert "before = copy.deepcopy(strategy._events_list(msg))" not in projection_source
+    assert '"msg": _copy_jsonish(msg)' in projection_source
+
+
 def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
     source = (ROOT / "node_link.py").read_text(encoding="utf-8")
     assert "_MACHINE_NODES_READY_CACHE_TTL_S" in source
@@ -2310,6 +2320,7 @@ if __name__ == "__main__":
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
     test_message_hydration_reuses_full_scan_cache()
+    test_written_journal_projection_avoids_full_event_list_copy()
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()
