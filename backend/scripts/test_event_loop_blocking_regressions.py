@@ -3611,6 +3611,17 @@ def test_run_state_emit_debug_logging_is_gated() -> None:
     assert "await self._c.broadcast_session" in run_state_source
 
 
+def test_run_state_emit_debug_logging_is_gated() -> None:
+    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    start = source.index("async def emit_run_state(")
+    end = source.index("# ======================================================================", start)
+    emit_source = source[start:end]
+    assert "logger.isEnabledFor(logging.DEBUG)" in emit_source
+    assert "logger.debug(" in emit_source
+    assert "logger.info(" not in emit_source
+    assert "await self._c.broadcast_session" in emit_source
+
+
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
