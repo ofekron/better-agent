@@ -568,13 +568,13 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     assert "return _summary_metadata_version" in store_source
 
 
-def test_sidebar_session_search_bounds_content_only_scoring() -> None:
+def test_sidebar_session_search_bounds_content_scoring() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
     helper_start = main_source.index("async def _sidebar_search_scores(")
     helper_end = main_source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = main_source[helper_start:helper_end]
-    assert "if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}" in helper_source
+    assert "if session_store.SEARCH_FIELD_CONTENT in selected_search_fields" in helper_source
     assert "metadata_max_wait_seconds" not in helper_source
     route_start = main_source.index("def _build_local_sessions_page_for_list(")
     route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)

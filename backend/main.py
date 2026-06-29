@@ -3499,7 +3499,7 @@ def _build_local_sessions_page_for_list(
         selected_search_fields = _split_session_search_fields(search_fields)
         content_max_wait_seconds = (
             _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
-            if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}
+            if session_store.SEARCH_FIELD_CONTENT in selected_search_fields
             else None
         )
         with perf.timed("sessions.list.search_scores"):
@@ -3591,7 +3591,7 @@ async def _sidebar_search_scores(
     selected_search_fields = _split_session_search_fields(search_fields)
     content_max_wait_seconds = (
         _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS
-        if selected_search_fields == {session_store.SEARCH_FIELD_CONTENT}
+        if session_store.SEARCH_FIELD_CONTENT in selected_search_fields
         else None
     )
     return await asyncio.to_thread(
