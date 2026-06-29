@@ -4269,7 +4269,7 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
 
 
 def frontend_entrypoints() -> list[dict[str, Any]]:
-    key = (store_fingerprint(),)
+    key = frontend_entrypoints_cache_key()
     cached = _projection_cache_get("frontend_entrypoints", key)
     if cached is not None:
         return cached
@@ -4310,6 +4310,10 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
             }
         )
     return _projection_cache_put("frontend_entrypoints", key, entries)
+
+
+def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
+    return (store_fingerprint(),)
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -4407,7 +4411,7 @@ def _ui_hook_enabled(settings: dict[str, dict[str, Any]], extension_id: str, key
 def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     """Quick buttons and pages for every active extension (built-ins
     included), filtered by per-extension UI-surface toggles."""
-    key = (store_fingerprint(), _file_fingerprint(_ui_settings_path()))
+    key = ui_hooks_cache_key()
     cached = _projection_cache_get("ui_hooks", key)
     if cached is not None:
         return cached
@@ -4449,6 +4453,10 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
                 page_item["badge"] = page["badge"]
             pages.append(page_item)
     return _projection_cache_put("ui_hooks", key, {"quick_buttons": quick_buttons, "pages": pages})
+
+
+def ui_hooks_cache_key() -> tuple[Any, ...]:
+    return (store_fingerprint(), _file_fingerprint(_ui_settings_path()))
 
 
 # ── extension settings + per-MCP-server enable/disable ───────────────

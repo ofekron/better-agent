@@ -353,6 +353,28 @@ def test_extension_list_uses_projection_cache() -> None:
     assert "return list_extensions(include_hidden=include_hidden), False" in list_source
 
 
+def test_extension_projection_routes_cache_json_bytes() -> None:
+    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
+    assert "_projection_response_cache" in source
+    assert "def _cached_json_projection_response(" in source
+    assert "json.dumps(" in source
+    assert "Response(content=content, media_type=\"application/json\")" in source
+
+    frontend_start = source.index("async def get_frontend_entrypoints(")
+    frontend_end = source.index("@router.get(\"/ui-hooks\")", frontend_start)
+    frontend_source = source[frontend_start:frontend_end]
+    assert "_cached_json_projection_response(" in frontend_source
+    assert "extension_store.frontend_entrypoints_cache_key()" in frontend_source
+    assert "extension_store.frontend_entrypoints()" in frontend_source
+
+    hooks_start = source.index("async def get_ui_hooks(")
+    hooks_end = source.index("@router.get(\"/{extension_id}/frontend/{asset_path:path}\")", hooks_start)
+    hooks_source = source[hooks_start:hooks_end]
+    assert "_cached_json_projection_response(" in hooks_source
+    assert "extension_store.ui_hooks_cache_key()" in hooks_source
+    assert "extension_store.ui_hooks()" in hooks_source
+
+
 def test_startup_reenqueue_reads_sessions_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
@@ -1228,6 +1250,7 @@ if __name__ == "__main__":
     test_project_update_counts_batch_uses_single_store_call()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
     test_extension_list_uses_projection_cache()
+    test_extension_projection_routes_cache_json_bytes()
     test_startup_reenqueue_reads_sessions_off_loop()
     test_startup_does_not_warm_unread_by_hydrating_sessions()
     test_startup_defers_requirement_and_project_match_warmers()

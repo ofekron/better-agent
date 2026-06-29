@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
+import time
+from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import extension_store
@@ -12,6 +14,9 @@ import extension_backend_loader
 import perf
 
 router = APIRouter(prefix="/api/extensions", tags=["extensions"])
+
+_PROJECTION_RESPONSE_CACHE_TTL_SECONDS = 5.0
+_projection_response_cache: dict[tuple[str, tuple[Any, ...]], tuple[float, bytes]] = {}
 
 
 class InstallExtensionRequest(BaseModel):
@@ -70,6 +75,36 @@ async def _broadcast_extensions_changed() -> None:
         await coordinator.broadcast_global("extensions_changed", {})
 
 
+def _json_projection_response(content: bytes) -> Response:
+    return Response(content=content, media_type="application/json")
+
+
+def _cached_json_projection_response(
+    name: str,
+    key: tuple[Any, ...],
+    build: Callable[[], dict[str, Any]],
+) -> Response:
+    cache_key = (name, key)
+    now = time.monotonic()
+    cached = _projection_response_cache.get(cache_key)
+    if cached is not None and now - cached[0] <= _PROJECTION_RESPONSE_CACHE_TTL_SECONDS:
+        return _json_projection_response(cached[1])
+    content = json.dumps(
+        build(),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(_projection_response_cache) >= 16:
+        oldest = min(
+            _projection_response_cache,
+            key=lambda item: _projection_response_cache[item][0],
+        )
+        _projection_response_cache.pop(oldest, None)
+    _projection_response_cache[cache_key] = (now, content)
+    return _json_projection_response(content)
+
+
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
     extensions, changed = await asyncio.to_thread(
@@ -91,12 +126,20 @@ async def get_builtin_ids():
 
 @router.get("/frontend-entrypoints")
 async def get_frontend_entrypoints():
-    return {"entrypoints": extension_store.frontend_entrypoints()}
+    return _cached_json_projection_response(
+        "frontend-entrypoints",
+        extension_store.frontend_entrypoints_cache_key(),
+        lambda: {"entrypoints": extension_store.frontend_entrypoints()},
+    )
 
 
 @router.get("/ui-hooks")
 async def get_ui_hooks():
-    return {"hooks": extension_store.ui_hooks()}
+    return _cached_json_projection_response(
+        "ui-hooks",
+        extension_store.ui_hooks_cache_key(),
+        lambda: {"hooks": extension_store.ui_hooks()},
+    )
 
 
 @router.get("/{extension_id}/frontend/{asset_path:path}")
