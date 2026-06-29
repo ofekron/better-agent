@@ -15,7 +15,7 @@ import threading
 from typing import Literal
 
 from json_store import read_json, write_json
-from paths import ba_home
+from paths import bc_home
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,11 @@ DEFAULT_SHORTCUT_RESPONSES = [
 ]
 _PREFS_CACHE_LOCK = threading.Lock()
 _PREFS_CACHE: tuple[tuple[int, int], dict] | None = None
+_PREFS_PATH = bc_home() / "user_prefs.json"
 
 
 def _prefs_path():
-    return ba_home() / "user_prefs.json"
+    return _PREFS_PATH
 
 
 def _load() -> dict:
