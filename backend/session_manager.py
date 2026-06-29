@@ -346,6 +346,7 @@ class SessionManager:
         # bound `_compute_monitoring` (injected via `bind_monitoring_check`).
         self._last_broadcast_monitoring: dict[str, str] = {}
         self._compute_monitoring: Optional[Callable[[str], str]] = None
+        self._project_key_cache: dict[str, tuple[str, str]] = {}
         self._unread_counts: dict[str, set[str]] = {}
         self._unread_counts_version = 0
         # Sessions whose `_unread_counts` has been hydrated from disk
@@ -1849,19 +1850,22 @@ class SessionManager:
         import working_mode as _wm
         rid = self._root_id_for(sid)
         if rid is None:
-            return ("", "primary")
+            return self._project_key_cache.get(sid, ("", "primary"))
         lock = self._lock_for_root(rid)
         if not lock.acquire(blocking=False):
-            return ("", "primary")
+            return self._project_key_cache.get(sid, ("", "primary"))
         try:
             root = self._load_root(sid, hydrate_events=False)
             s = session_store._find_in_tree(root, sid) if root else None
             if s is None:
-                return ("", "primary")
+                return self._project_key_cache.get(sid, ("", "primary"))
             node_id = s.get("node_id") or "primary"
             if _wm.should_hide_from_sidebar(s):
-                return ("", node_id)
-            return (s.get("cwd") or "", node_id)
+                key = ("", node_id)
+            else:
+                key = (s.get("cwd") or "", node_id)
+            self._project_key_cache[sid] = key
+            return key
         finally:
             lock.release()
 

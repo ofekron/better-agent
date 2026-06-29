@@ -31,6 +31,8 @@ _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_RECENT_INDEX: tuple[str, float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]] | None = None
 _JSONL_LINE_COUNT_LOCK = threading.Lock()
 _JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
+_MISSING_JSONL_WARNING_TTL_S = 60.0
+_MISSING_JSONL_WARNED_AT: dict[tuple[str, str, str], float] = {}
 
 
 def _claude_projects_dir() -> Path:
@@ -280,11 +282,23 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
     run_path = _run_state_path_for_sid(agent_sid)
     if run_path is not None and run_path.exists():
         return _cache_existing_path(agent_sid, run_path)
-    # Silent ingestion failure made visible: no provider's jsonl could be
-    # located for this sid, so the tailer/strategy will read nothing and
-    # events for this turn never ingest. Surface it so encoded-cwd mismatches
-    # (common on Windows) and missing run-state are findable in the log. The
-    # negative cache (5s TTL) keeps this to ~once per sid per window, not spam.
+    _warn_missing_jsonl(cwd, agent_sid, encoded_path, claude_index)
+    _cache_missing_path(agent_sid)
+    return None
+
+
+def _warn_missing_jsonl(
+    cwd: str,
+    agent_sid: str,
+    encoded_path: Optional[Path],
+    claude_index: dict[str, Path],
+) -> None:
+    key = _cache_key(agent_sid)
+    now = time.monotonic()
+    last = _MISSING_JSONL_WARNED_AT.get(key)
+    if last is not None and now - last < _MISSING_JSONL_WARNING_TTL_S:
+        return
+    _MISSING_JSONL_WARNED_AT[key] = now
     log.warning(
         "ingestion: no jsonl located for agent_sid=%s cwd=%r — tried "
         "encoded_cwd=%s (exists=%s); claude index=%d entries, run-state path cache=%d "
@@ -297,8 +311,6 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
         len(_RUN_STATE_PATH_CACHE),
         _claude_projects_dir(),
     )
-    _cache_missing_path(agent_sid)
-    return None
 
 
 def compute_jsonl_read_path(
