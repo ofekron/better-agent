@@ -1014,6 +1014,36 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function QueuedTagCards({
+  comments,
+  collapsed = false,
+}: {
+  comments: ReturnType<typeof splitPreview>["comments"];
+  collapsed?: boolean;
+}) {
+  if (comments.length === 0) return null;
+  return (
+    <div className={`queued-tags-cards${collapsed ? " is-collapsed" : ""}`}>
+      {comments.map((c, i) => {
+        const fileHeader =
+          c.file && c.range ? `${c.file}:${c.range}` :
+          c.file ? c.file : null;
+        return (
+          <div key={i} className="comment-card inline-tags-card queued-tag-card">
+            {fileHeader && (
+              <div className="inline-tags-card-anchor">{fileHeader}</div>
+            )}
+            {c.selected && (
+              <div className="inline-tags-card-selected">{c.selected}</div>
+            )}
+            <div className="comment-card-comment">{c.comment}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Editable banner showing a queued prompt. Click to expand an inline editor.
  *  When the preview contains an `<inline-tags>` envelope, renders the
  *  comments as stacked cards (same style as InlineTagsCards) and the
@@ -1119,9 +1149,6 @@ function QueuedPromptBanner({
   // collapsing always wins.
   if (minimized) {
     const summaryBits: string[] = [];
-    if (comments.length > 0) {
-      summaryBits.push(`${comments.length} comment${comments.length !== 1 ? "s" : ""}`);
-    }
     if (imageCount > 0) {
       summaryBits.push(`${imageCount} image${imageCount !== 1 ? "s" : ""}`);
     }
@@ -1130,22 +1157,25 @@ function QueuedPromptBanner({
     }
     return (
       <div
-        className="queued-prompt-banner is-minimized"
+        className={`queued-prompt-banner is-minimized${hasComments ? " has-tags" : ""}`}
         data-testid="queued-prompt-banner"
         data-minimized="true"
       >
-        <button
-          className="queued-minimize-btn"
-          type="button"
-          data-testid="queued-expand-btn"
-          title={expandLabel}
-          aria-label={expandLabel}
-          aria-expanded={false}
-          onClick={() => setMinimized(false)}
-        >
-          <Icon name="chevron-right" size={14} />
-        </button>
-        <span className="queued-prompt-label">{queuedLabel}</span>
+        <div className="queued-prompt-header">
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            data-testid="queued-expand-btn"
+            title={expandLabel}
+            aria-label={expandLabel}
+            aria-expanded={false}
+            onClick={() => setMinimized(false)}
+          >
+            <Icon name="chevron-right" size={14} />
+          </button>
+          <span className="queued-prompt-label">{queuedLabel}</span>
+        </div>
+        <QueuedTagCards comments={comments} collapsed />
         <span
           className="queued-prompt-preview"
           onClick={() => setMinimized(false)}
@@ -1156,7 +1186,7 @@ function QueuedPromptBanner({
             if (e.key === "Enter" || e.key === " ") setMinimized(false);
           }}
         >
-          {hasComments ? userText : preview}
+          {displayText}
         </span>
         {summaryBits.length > 0 && (
           <span className="queued-attachments-count" data-testid="queued-minimized-summary">
@@ -1306,26 +1336,7 @@ function QueuedPromptBanner({
           )}
         </div>
       )}
-      {hasComments && (
-        <div className="queued-tags-cards">
-          {comments.map((c, i) => {
-            const fileHeader =
-              c.file && c.range ? `${c.file}:${c.range}` :
-              c.file ? c.file : null;
-            return (
-              <div key={i} className="comment-card inline-tags-card queued-tag-card">
-                {fileHeader && (
-                  <div className="inline-tags-card-anchor">{fileHeader}</div>
-                )}
-                {c.selected && (
-                  <div className="inline-tags-card-selected">{c.selected}</div>
-                )}
-                <div className="comment-card-comment">{c.comment}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <QueuedTagCards comments={comments} />
       <span
         className="queued-prompt-preview"
         onClick={startEditing}

@@ -5979,6 +5979,9 @@ button.run-badge-clickable:focus-visible {
   padding: 4px 8px;
   gap: 6px;
 }
+.queued-prompt-banner.is-minimized.has-tags {
+  align-items: stretch;
+}
 .queued-prompt-header {
   display: inline-flex;
   align-items: center;
@@ -6044,11 +6047,42 @@ button.run-badge-clickable:focus-visible {
   gap: 6px;
   width: 100%;
 }
+.queued-tags-cards.is-collapsed {
+  gap: 4px;
+}
 .queued-tag-card {
   /* Override position:static from .inline-tags-card — cards inside the
      queued banner need no extra positioning tweaks. */
 }
+.queued-tags-cards.is-collapsed .queued-tag-card {
+  padding: 6px 8px;
+}
+.queued-tags-cards.is-collapsed .inline-tags-card-anchor,
+.queued-tags-cards.is-collapsed .inline-tags-card-selected,
+.queued-tags-cards.is-collapsed .comment-card-comment {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+.queued-tags-cards.is-collapsed .inline-tags-card-anchor {
+  -webkit-line-clamp: 1;
+}
+.queued-tags-cards.is-collapsed .inline-tags-card-selected,
+.queued-tags-cards.is-collapsed .comment-card-comment {
+  -webkit-line-clamp: 2;
+}
 .queued-prompt-banner.has-tags .queued-prompt-preview {
+  white-space: normal;
+}
+.queued-prompt-banner.is-minimized .queued-prompt-preview {
+  display: block;
+  white-space: nowrap;
+}
+.queued-prompt-banner.is-minimized.has-tags .queued-prompt-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   white-space: normal;
 }
 .queued-attachments {
