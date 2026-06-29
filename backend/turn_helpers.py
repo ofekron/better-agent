@@ -142,29 +142,48 @@ def _is_stale_session_error(error: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Open-todo cli_prompt reminder.
+# Session todo cli_prompt reminder.
 # ---------------------------------------------------------------------------
 _UNFINISHED_TODOS_OPEN = "<bc-todo-reminder>"
 _UNFINISHED_TODOS_CLOSE = "</bc-todo-reminder>"
 
 
+def _session_work_items(session: dict) -> list[dict]:
+    items: list[dict] = []
+    seen: dict[str, int] = {}
+    for field in ("current_todos", "current_tasks"):
+        for item in session.get(field) or []:
+            if not isinstance(item, dict):
+                continue
+            content = " ".join(str(item.get("content") or "Untitled todo").split())
+            key = content.casefold()
+            normalized = {**item, "content": content}
+            if key in seen:
+                existing = items[seen[key]]
+                if existing.get("status") == "completed" and normalized.get("status") != "completed":
+                    items[seen[key]] = normalized
+                continue
+            seen[key] = len(items)
+            items.append(normalized)
+    return items
+
+
 def _append_todo_reminder(cli_prompt: str, session: dict) -> str:
-    """Append a tagged list of unfinished session todos to `cli_prompt`.
+    """Append tagged session todo state to `cli_prompt`.
 
     Caller-side gates (user_initiated, empty-prompt) decide whether
-    to call this. Empty and all-completed lists leave the prompt
-    unchanged.
+    to call this. Empty and all-completed lists leave the prompt unchanged.
     """
-    todos = session.get("current_todos") or []
+    todos = _session_work_items(session)
     unfinished = [
         todo for todo in todos
-        if isinstance(todo, dict) and todo.get("status") != "completed"
+        if todo.get("status") != "completed"
     ]
     if not unfinished:
         return cli_prompt
 
     lines = []
-    for todo in unfinished:
+    for todo in todos:
         status = html.escape(
             " ".join(str(todo.get("status") or "pending").split())
         )
@@ -174,7 +193,7 @@ def _append_todo_reminder(cli_prompt: str, session: dict) -> str:
         lines.append(f"- [{status}] {content}")
     unfinished_block = (
         f"{_UNFINISHED_TODOS_OPEN}\n"
-        "Unfinished todos from the current session:\n"
+        "Current todo state from this session:\n"
         + "\n".join(lines)
         + f"\n{_UNFINISHED_TODOS_CLOSE}"
     )
