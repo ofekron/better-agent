@@ -51,6 +51,21 @@ async def main() -> int:
         check("missing CLI reports uninstalled", status["installed"] is False)
         check("missing prerequisite captured", status["prerequisite"]["returncode"] == 127)
         check("status exposes prerequisite command", status["prerequisite_command"] == "npm")
+    provider_setup.clear_status_cache()
+
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_check(argv: tuple[str, ...]) -> dict:
+        calls.append(argv)
+        return {"ok": True, "stdout": "ok", "stderr": "", "returncode": 0}
+
+    with mock.patch.object(provider_setup, "_check_argv", side_effect=fake_check):
+        first = await provider_setup.provider_setup_status("claude")
+        first["verify"]["stdout"] = "mutated"
+        second = await provider_setup.provider_setup_status("claude")
+        check("provider setup status reuses cached checks", len(calls) == 2)
+        check("provider setup status returns isolated copies", second["verify"]["stdout"] == "ok")
+    provider_setup.clear_status_cache()
 
     installer = provider_setup.ProviderInstaller(
         kind="test",
