@@ -690,7 +690,7 @@ class Coordinator:
         Single-machine path (default): unchanged — pick the session's
         configured provider, fall back to the active provider when
         the record's provider_id is missing or defunct."""
-        sess = session_manager.get(app_session_id)
+        sess = session_manager.get_fields(app_session_id, ("node_id", "provider_id"))
         node_id = (sess or {}).get("node_id") or "primary"
         try:
             from topology import local_node_id
