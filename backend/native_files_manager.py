@@ -59,6 +59,7 @@ _RUN_STATE_LOOKUP_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RUN_STATE_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 _RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
+_RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
 
 
 @dataclass
@@ -164,19 +165,37 @@ def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
             ts, _fingerprint, index = cached
             if now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
                 return index
-    candidates = _recent_state_candidates(root)
-    if not candidates:
-        return {}
-    with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
-        if cached is not None:
-            ts, fingerprint, index = cached
-            if fingerprint == candidates and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
-                return index
-    index = _build_recent_state_index(candidates)
-    with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
-    return index
+        event = _RUN_STATE_RECENT_INDEX_INFLIGHT.get(root_key)
+        if event is None:
+            event = threading.Event()
+            _RUN_STATE_RECENT_INDEX_INFLIGHT[root_key] = event
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        event.wait(_RUN_STATE_LOOKUP_TIMEOUT_S)
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+            return cached[2] if cached is not None else {}
+    try:
+        candidates = _recent_state_candidates(root)
+        if not candidates:
+            return {}
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+            if cached is not None:
+                ts, fingerprint, index = cached
+                if fingerprint == candidates and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+                    return index
+        index = _build_recent_state_index(candidates)
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
+        return index
+    finally:
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            done = _RUN_STATE_RECENT_INDEX_INFLIGHT.pop(root_key, None)
+        if done is not None:
+            done.set()
 
 
 def _recent_state_candidates(root: Path) -> tuple[tuple[int, int, str], ...]:
