@@ -824,6 +824,22 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "_session_event_meta(" not in route_source
 
 
+def test_session_detail_has_split_perf_timers() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = source.index("async def get_session(")
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_source = source[route_start:route_end]
+    for timer in (
+        "sessions.detail.event_meta",
+        "sessions.detail.tree",
+        "sessions.detail.strip_synthetic",
+        "sessions.detail.reconcile_snapshot",
+        "sessions.detail.max_context_copy",
+        "sessions.detail.total",
+    ):
+        assert f'perf.record("{timer}"' in route_source
+
+
 def test_sidebar_summary_omits_worker_refs() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def _build_summary_for_root(")
@@ -1133,6 +1149,8 @@ if __name__ == "__main__":
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
     test_session_list_does_not_prewarm_snapshots()
+    test_session_list_warms_event_meta_off_path()
+    test_session_detail_has_split_perf_timers()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_sidebar_summary_omits_worker_refs()
