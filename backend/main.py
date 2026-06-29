@@ -1440,6 +1440,8 @@ bind_rearranger(rearranger)
 bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
 bind_post_turn_hooks()
 bind_pre_turn_hooks()
+import task_assessor
+task_assessor.bind(coordinator)
 
 # Rebuild the declarative tag-rule registry from every enabled extension
 # so styling/markers apply from boot, not only after the periodic
@@ -11257,6 +11259,7 @@ async def internal_tasks(
     """
     _require_tasks_internal(x_internal_token)
     from stores import task_store
+    from stores import task_trigger_store
     import task_runner
 
     action = (body or {}).get("action")
@@ -11296,9 +11299,14 @@ async def internal_tasks(
                 permission=(body or {}).get("permission"),
                 capability_contexts=(body or {}).get("capability_contexts"),
                 singleton=bool((body or {}).get("singleton", False)),
+                goal=(body or {}).get("goal") or "",
+                trigger=(body or {}).get("trigger"),
+                scripts=(body or {}).get("scripts"),
+                assessment=(body or {}).get("assessment"),
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
+        await asyncio.to_thread(task_trigger_store.register_for_task, rec)
         await task_runner.broadcast_tasks_changed(coordinator, rec["cwd"], rec["node_id"])
         return {"success": True, "task": rec}
 
@@ -11313,6 +11321,7 @@ async def internal_tasks(
             return {"success": False, "error": str(e)}
         if rec is None:
             return {"success": False, "error": "unknown task_id"}
+        await asyncio.to_thread(task_trigger_store.register_for_task, rec)
         await task_runner.broadcast_tasks_changed(coordinator, rec["cwd"], rec["node_id"])
         return {"success": True, "task": rec}
 
@@ -11321,6 +11330,7 @@ async def internal_tasks(
         removed = await asyncio.to_thread(task_store.delete, task_id)
         if removed is None:
             return {"success": False, "error": "unknown task_id"}
+        await asyncio.to_thread(task_trigger_store.unregister_task, task_id)
         await task_runner.broadcast_tasks_changed(
             coordinator, removed.get("cwd") or "", removed.get("node_id") or "primary",
         )

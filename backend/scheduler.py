@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 from session_manager import manager as session_manager
 from stores import schedule_store
+from stores import task_trigger_store
+import task_script
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ class Scheduler:
         while True:
             try:
                 await self.fire_due()
+                await self.fire_task_triggers()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -139,3 +142,54 @@ class Scheduler:
                         )
             await broadcast_schedules(self._coordinator, sid)
         return fired
+
+    async def fire_task_triggers(self, now: datetime | None = None) -> int:
+        """Fire due task triggers (schedule + script-detector). Returns the
+        number of task launches triggered (exposed for tests). Script detectors
+        only launch on exit 0 but always advance their poll window so a failing
+        detector backs off instead of hot-spinning."""
+        import task_runner
+
+        now = now or datetime.now()
+        launched = 0
+        for rec in task_trigger_store.due(now):
+            trigger_id = rec["id"]
+            task_id = rec.get("task_id")
+            if not task_id:
+                task_trigger_store.mark_fired(trigger_id, now)
+                continue
+            if rec.get("kind") == "script":
+                detector = rec.get("detector")
+                res = await asyncio.to_thread(
+                    task_script.run_script, detector, timeout=30,
+                )
+                # Advance the poll window either way (at-most-once + backoff).
+                task_trigger_store.mark_fired(trigger_id, now)
+                if res is None or not res.ok:
+                    logger.info(
+                        "scheduler: task %s detector did not fire (exit %s)",
+                        task_id, res.exit_code if res else "n/a",
+                    )
+                    continue
+            else:
+                task_trigger_store.mark_fired(trigger_id, now)
+            try:
+                await task_runner.launch_task(
+                    task_id, coordinator=self._coordinator, source="trigger",
+                )
+                launched += 1
+                logger.info(
+                    "scheduler: trigger %s launched task %s",
+                    trigger_id, task_id,
+                )
+            except Exception:
+                logger.exception(
+                    "scheduler: launch failed for trigger %s task %s",
+                    trigger_id, task_id,
+                )
+            await task_runner.broadcast_tasks_changed(
+                self._coordinator,
+                rec.get("task_cwd") or "",
+                rec.get("task_node_id") or "primary",
+            )
+        return launched

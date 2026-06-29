@@ -37,10 +37,12 @@ async def launch_task(
     coordinator,
     prompt_override: Optional[str] = None,
     client_id: Optional[str] = None,
+    source: str = "manual",
 ) -> dict[str, Any]:
     import asyncio
 
     import config_store
+    import task_script
     from session_manager import manager as session_manager
     from stores import task_store
 
@@ -88,6 +90,22 @@ async def launch_task(
     permission = task.get("permission")
     capability_contexts = task.get("capability_contexts") or []
 
+    # Pre-scripts gate the run: run before the agent, stop at first failure.
+    # Their combined stdout is appended to the prompt so the agent sees the
+    # setup output (test inventory, env snapshot, etc.) as context.
+    scripts = task.get("scripts") or {}
+    pre_scripts = scripts.get("pre") or []
+    if pre_scripts:
+        ok, stdout = await asyncio.to_thread(
+            lambda: task_script.run_scripts(pre_scripts, fallback_cwd=cwd, timeout=120),
+        )
+        if not ok:
+            raise TaskLaunchError(
+                f"pre-script failed:\n{stdout[:2000]}", status=400,
+            )
+        if stdout.strip():
+            prompt = f"{prompt}\n\n<pre-script-output>\n{stdout.strip()}\n</pre-script-output>"
+
     await asyncio.to_thread(config_store.apply_env_vars)
 
     reused = False
@@ -133,7 +151,11 @@ async def launch_task(
         "user_initiated": False,
     })
 
-    await asyncio.to_thread(task_store.record_run, task_id, session_id, now=datetime.now())
+    await asyncio.to_thread(
+        task_store.record_run, task_id, session_id,
+        queue_item_id=str(item_id) if item_id is not None else None,
+        now=datetime.now(),
+    )
     await broadcast_tasks_changed(coordinator, cwd, node_id)
 
     return {
@@ -141,6 +163,7 @@ async def launch_task(
         "session_id": session_id,
         "queue_item_id": item_id,
         "reused": reused,
+        "source": source,
     }
 
 
