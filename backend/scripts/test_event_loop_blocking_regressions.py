@@ -769,6 +769,30 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     assert "return _summary_metadata_version" in store_source
 
 
+def test_session_list_waits_briefly_for_summary_warm() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.15" in main_source
+    local_start = main_source.index("def _local_session_summaries_for_sidebar()")
+    local_end = main_source.index(
+        "def _local_session_summaries_by_ids_for_sidebar(",
+        local_start,
+    )
+    local_source = main_source[local_start:local_end]
+    assert "sessions.list.local.summary_warm_wait" in local_source
+    assert (
+        "session_store.wait_for_summary_index(_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS)"
+        in local_source
+    )
+
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    wait_start = store_source.index("def wait_for_summary_index(")
+    wait_end = store_source.index("def _replace_summary_projection_field(", wait_start)
+    wait_source = store_source[wait_start:wait_end]
+    assert "_ensure_summary_index(blocking=False)" in wait_source
+    assert "_summary_build_lock.acquire(timeout=max(0.0, timeout_seconds))" in wait_source
+    assert "_do_build_summary_index_unsafe()" not in wait_source
+
+
 def test_sidebar_session_search_bounds_content_scoring() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
@@ -1321,6 +1345,7 @@ if __name__ == "__main__":
     test_project_aggregates_use_bulk_cached_state()
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_session_list_uses_sorted_summary_cache()
+    test_session_list_waits_briefly_for_summary_warm()
     test_session_list_does_not_prewarm_snapshots()
     test_session_list_warms_event_meta_off_path()
     test_session_list_reads_user_prefs_once()

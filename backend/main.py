@@ -96,6 +96,7 @@ _sessions_list_response_cache: dict[
 ] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
+_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.15
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 
@@ -1949,6 +1950,8 @@ async def _forward_requirement_tags_refreshed(event: BusEvent) -> None:
 def _local_session_summaries_for_sidebar() -> list[dict]:
     # Hide ephemeral working-mode sessions from the sidebar.
     import working_mode as _wm
+    with perf.timed("sessions.list.local.summary_warm_wait"):
+        session_store.wait_for_summary_index(_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS)
     with perf.timed("sessions.list.local.session_manager"):
         summaries = session_manager.list()
     with perf.timed("sessions.list.local.hide_filter"):
