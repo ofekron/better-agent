@@ -35,6 +35,7 @@ import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../util
 import { API } from "../api";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { flattenClaudeMessages } from "../utils/agentMessages";
+import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 
@@ -308,12 +309,15 @@ const MessageBox = memo(function MessageBox({
   const preview = firstLineSummary(
     renderedText.replace(STYLE_SENTINEL_STRIP_RE, ""),
   );
+  // Pretty-print messages whose entire body is JSON/JSONL (e.g. reviewer
+  // verdict payloads) into a fenced code block for the markdown renderer.
+  const mdSource = formatWholeJsonMessage(renderedText);
   const mdComponents = markdownLinkifyComponents(onFileClick);
   if (!collapsible) {
     return (
       <div className="message-box message-box-static">
         <div className="message-box-body" data-color-mode="dark">
-          <ScaledMarkdown source={renderedText} components={mdComponents} />
+          <ScaledMarkdown source={mdSource} components={mdComponents} />
         </div>
       </div>
     );
@@ -331,7 +335,7 @@ const MessageBox = memo(function MessageBox({
       </button>
       {open ? (
         <div className="message-box-body" data-color-mode="dark">
-          <ScaledMarkdown source={renderedText} components={mdComponents} />
+          <ScaledMarkdown source={mdSource} components={mdComponents} />
         </div>
       ) : (
         <button
