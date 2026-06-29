@@ -79,12 +79,18 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
 
 def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert "_SESSIONS_DIR = bc_home() / \"sessions\"" in source
     start = source.index("def _ref_ctx_for_root(")
     end = source.index("class EventIngester:", start)
     helper_source = source[start:end]
     assert 'session_store.summary_fields_many([root_id], ("cwd", "node_id"))' in helper_source
     assert "session_manager.get_lite(" not in helper_source
     assert "session_manager.get(" not in helper_source
+    root_dir_start = source.index("def _root_dir(")
+    root_dir_end = source.index("def _events_path(", root_dir_start)
+    root_dir_source = source[root_dir_start:root_dir_end]
+    assert "bc_home()" not in root_dir_source
+    assert "ba_home()" not in root_dir_source
 
 
 def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
@@ -103,6 +109,16 @@ def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
     assert "return _snapshot(data)" in remembered_source
     assert "return get_all()" not in selected_source
     assert "return get_all()" not in remembered_source
+
+
+def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
+    source = (ROOT / "user_prefs.py").read_text(encoding="utf-8")
+    assert "_PREFS_PATH = bc_home() / \"user_prefs.json\"" in source
+    path_start = source.index("def _prefs_path():")
+    path_end = source.index("def _load()", path_start)
+    path_source = source[path_start:path_end]
+    assert "bc_home()" not in path_source
+    assert "ba_home()" not in path_source
 
 
 def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
@@ -2665,6 +2681,7 @@ if __name__ == "__main__":
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
+    test_user_prefs_uses_cached_path_for_hot_reads()
     test_stubbed_tree_build_does_not_search_tree_per_node()
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
