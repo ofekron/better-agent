@@ -1263,6 +1263,15 @@ function QueuedPromptBanner({
       <div className="queued-prompt-header">
         <span className="queued-prompt-label">{queuedLabel}</span>
         <button
+          className="queued-icon-btn"
+          type="button"
+          aria-label="Edit queued prompt"
+          title="Edit queued prompt"
+          onClick={startEditing}
+        >
+          <Icon name="edit" size={14} />
+        </button>
+        <button
           className="queued-minimize-btn"
           type="button"
           data-testid="queued-minimize-btn"
@@ -1325,7 +1334,7 @@ function QueuedPromptBanner({
           if (e.key === "Enter" || e.key === " ") startEditing();
         }}
       >
-        {hasComments ? userText : preview}
+        {(hasComments ? userText : preview) || "Edit queued prompt"}
       </span>
       <div className="queued-prompt-actions">
         {compactActions ? null : (

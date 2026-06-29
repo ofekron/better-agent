@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitPreview, applyQueuedEdit } from "../src/utils/queuedPreview";
+import { splitPreview, applyQueuedEdit, applyQueuedInlineTags } from "../src/utils/queuedPreview";
 
 const TAGS = "<inline-tags><c file=\"a.ts\" range=\"1-2\">look here</c></inline-tags>";
 
@@ -46,5 +46,28 @@ describe("applyQueuedEdit — preserves the envelope when editing a tagged queue
     const preview = "just a plain prompt";
     expect(splitPreview(preview).prefix).toBe("");
     expect(splitPreview(preview).userText).toBe(preview);
+  });
+
+  it("appends a new queued comment without dropping the existing queued comment", () => {
+    const preview = `${TAGS}\n\nfix the bug`;
+    const next = applyQueuedInlineTags(preview, [{
+      id: "tag-b",
+      messageId: "__file__/tmp/b.ts",
+      selectedText: "",
+      comment: "second comment",
+      timestamp: "2026-06-29T00:00:00.000Z",
+      fileAnchor: {
+        filePath: "/tmp/b.ts",
+        startLine: 3,
+        endLine: 3,
+        startCol: 1,
+        endCol: 5,
+      },
+    }]);
+    expect(splitPreview(next).comments.map((comment) => comment.comment)).toEqual([
+      "look here",
+      "second comment",
+    ]);
+    expect(splitPreview(next).userText).toBe("fix the bug");
   });
 });
