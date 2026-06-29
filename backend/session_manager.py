@@ -5223,13 +5223,21 @@ class SessionManager:
         `apply_event` is what suppresses redundant fires under
         recovery replay).
         """
+        next_todos = list(todos)
+        rid = self._root_id_for(sid)
+
         def _do(s: dict) -> None:
-            s["current_todos"] = list(todos)
-        return self._run(
+            s["current_todos"] = next_todos
+
+        result = self._run(
             sid, _do,
             {"kind": "todos_updated", "client_id": client_id},
             enrich=lambda s: {"current_todos": list(s.get("current_todos") or [])},
         )
+        if rid is not None:
+            self._todo_projection_cache.pop(rid, None)
+        session_store._replace_summary_projection_field(sid, "current_todos", next_todos)
+        return result
 
     # ── Cross-provider current_tasks (TaskCreate / TaskUpdate) ─────
 
@@ -5248,13 +5256,21 @@ class SessionManager:
         self, sid: str, tasks: list, *, client_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Replace the session's `current_tasks` list and broadcast."""
+        next_tasks = list(tasks)
+        rid = self._root_id_for(sid)
+
         def _do(s: dict) -> None:
-            s["current_tasks"] = list(tasks)
-        return self._run(
+            s["current_tasks"] = next_tasks
+
+        result = self._run(
             sid, _do,
             {"kind": "tasks_updated", "client_id": client_id},
             enrich=lambda s: {"current_tasks": list(s.get("current_tasks") or [])},
         )
+        if rid is not None:
+            self._todo_projection_cache.pop(rid, None)
+        session_store._replace_summary_projection_field(sid, "current_tasks", next_tasks)
+        return result
 
     def apply_provenance_from_event(self, sid: str, normalized: dict) -> bool:
         """Append provenance rows (tool + WHY) for this event and ping any
