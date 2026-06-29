@@ -2040,6 +2040,8 @@ def test_summary_worker_count_uses_count_projection() -> None:
 
 def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_summary_sidecar_write_queue" in source
+    assert "def _schedule_summary_sidecar_write(" in source
     start = source.index("def _upsert_summary(")
     end = source.index("def _drafts_path(", start)
     upsert_source = source[start:end]
@@ -2047,6 +2049,8 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     assert "if not summary_changed:" in upsert_source
     assert "root_mtime_ns=root_mtime_ns" in upsert_source
     assert "if summary_changed or not sidecar_current:" in upsert_source
+    assert "_schedule_summary_sidecar_write(" in upsert_source
+    assert "_write_summary_file(" not in upsert_source
     write_start = source.index("def write_session_full(")
     write_end = source.index("def list_sessions(", write_start)
     write_source = source[write_start:write_end]
