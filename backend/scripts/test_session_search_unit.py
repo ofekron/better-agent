@@ -803,8 +803,165 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Entry point
+# Lean content index: only conversation text is indexed, not event blobs.
+# Regression for the multi-GB bloated FTS index that made content search
+# take seconds.
 # ──────────────────────────────────────────────────────────────────────
+
+
+def _reset_search_index_db() -> None:
+    """Drop any persisted FTS db + pooled connections + caches so the next
+    rebuild starts clean under the temp home."""
+    with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
+        session_search_index._search_cache.clear()  # type: ignore[attr-defined]
+        session_search_index._search_inflight.clear()  # type: ignore[attr-defined]
+    session_search_index._close_readonly_connection()  # type: ignore[attr-defined]
+    with session_search_index._lock:  # type: ignore[attr-defined]
+        session_search_index._close_writer_connection_locked()  # type: ignore[attr-defined]
+        session_search_index._delete_db_files()  # type: ignore[attr-defined]
+
+
+def _write_events_file(sid: str, entries: list[dict]) -> None:
+    sessions_dir = Path(_TMP_HOME) / "sessions"
+    sess_dir = sessions_dir / sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    with (sess_dir / "events.jsonl").open("w", encoding="utf-8") as h:
+        for entry in entries:
+            h.write(json.dumps(entry) + "\n")
+
+
+def test_event_text_extracts_only_conversation_text() -> bool:
+    cases = [
+        # assistant text block -> indexed
+        (
+            {"type": "agent_message", "data": {"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "needle in reply"}],
+            }}},
+            "needle in reply",
+            "assistant text block indexed",
+        ),
+        # tool_use -> only the name, not the (huge) input
+        (
+            {"type": "agent_message", "data": {"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Edit",
+                             "input": {"path": "/x.py", "content": "BLOAT" * 1000}}],
+            }}},
+            "Edit",
+            "tool_use name indexed without input",
+        ),
+        # tool_result -> skipped entirely
+        (
+            {"type": "agent_message", "data": {"type": "user", "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "HUGE FILE DUMP"}],
+            }}},
+            "",
+            "tool_result skipped",
+        ),
+        # worker_complete / run_state / worker_event -> no searchable text
+        (
+            {"type": "worker_complete", "data": {"sdk_output": "needle", "events": []}},
+            "",
+            "worker_complete skipped",
+        ),
+        (
+            {"type": "run_state", "data": {"runs": [{"needle": 1}]}},
+            "",
+            "run_state skipped",
+        ),
+        (
+            {"type": "worker_event", "data": {"event": {"data": {"text": "needle"}}}},
+            "",
+            "worker_event skipped",
+        ),
+        # non-(user/assistant) agent_message subtype (last-prompt) -> skipped
+        (
+            {"type": "agent_message", "data": {"type": "last-prompt", "lastPrompt": "needle"}},
+            "",
+            "last-prompt subtype skipped",
+        ),
+    ]
+    for entry, expected, label in cases:
+        got = session_search_index._event_text(entry)
+        if expected:
+            if expected not in got:
+                print(f"{FAIL} event_text[{label}]: expected to contain {expected!r} in {got!r}")
+                return False
+            if "BLOAT" in got or "FILE DUMP" in got:
+                print(f"{FAIL} event_text[{label}]: bloat leaked into {got!r}")
+                return False
+        elif got != "":
+            print(f"{FAIL} event_text[{label}]: expected empty, got {got!r}")
+            return False
+    # tool_use input must never leak even when name is kept
+    tool = session_search_index._event_text(cases[1][0])
+    if "BLOAT" in tool or "/x.py" in tool:
+        print(f"{FAIL} event_text: tool input leaked: {tool!r}")
+        return False
+    print(f"{PASS} _event_text indexes conversation text + tool names, skips bloat")
+    return True
+
+
+def test_event_text_caps_per_event_length() -> bool:
+    long_text = "z" * 50_000
+    entry = {"type": "agent_message", "data": {"type": "assistant", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": long_text}],
+    }}}
+    got = session_search_index._event_text(entry)
+    if len(got) != session_search_index._INDEX_TEXT_PER_EVENT_LIMIT:  # type: ignore[attr-defined]
+        print(f"{FAIL} cap: len={len(got)} want={session_search_index._INDEX_TEXT_PER_EVENT_LIMIT}")
+        return False
+    print(f"{PASS} _event_text caps per-event text length")
+    return True
+
+
+def test_rebuild_indexes_needle_skips_bloat_and_stamps_schema() -> bool:
+    _reset_home()
+    _reset_search_index_db()
+    unique_bloat = "zzbloatchecken72761"  # appears ONLY inside a worker_complete blob
+    _write_events_file("sess-lean", [
+        {"type": "agent_message", "data": {"type": "assistant", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "we found the leanneedle here"}],
+        }}},
+        {"type": "worker_complete", "data": {
+            "sdk_output": unique_bloat * 500, "events": [{"x": unique_bloat}],
+        }},
+        {"type": "run_state", "data": {"runs": [{"label": unique_bloat}]}},
+    ])
+    session_search_index.rebuild_from_disk()
+
+    # Conversation term is found.
+    hits = {h["session_id"] for h in session_search_index.search("leanneedle", limit=10)}
+    if hits != {"sess-lean"}:
+        print(f"{FAIL} rebuild: leanneedle hits={hits}")
+        return False
+    # Bloat token that exists only inside worker_complete/run_state is NOT found.
+    bloat_hits = session_search_index.search(unique_bloat, limit=10)
+    if bloat_hits:
+        print(f"{FAIL} rebuild: bloat leaked into index: {bloat_hits!r}")
+        return False
+    # Schema stamped -> no rebuild needed now.
+    if session_search_index.needs_rebuild():
+        print(f"{FAIL} rebuild: needs_rebuild=True after fresh rebuild")
+        return False
+    # Forcing a stale user_version flips needs_rebuild back to True.
+    conn = session_search_index._connect()  # type: ignore[attr-defined]
+    try:
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+    if not session_search_index.needs_rebuild():
+        print(f"{FAIL} rebuild: needs_rebuild=False on stale schema version")
+        return False
+    print(f"{PASS} rebuild_from_disk indexes conversation, skips bloat, stamps schema version")
+    return True
+
+
+
 
 
 def main_run() -> int:
@@ -824,6 +981,9 @@ def main_run() -> int:
         test_run_search_sessions_short_circuits_empty_candidates,
         test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
         test_empty_query_returns_empty_query_error,
+        test_event_text_extracts_only_conversation_text,
+        test_event_text_caps_per_event_length,
+        test_rebuild_indexes_needle_skips_bloat_and_stamps_schema,
         test_parse_failed_is_not_an_error_bubble,
         test_ask_error_message_mapping,
         test_rest_endpoint_rejects_empty_query,
