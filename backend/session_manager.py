@@ -2088,6 +2088,23 @@ class SessionManager:
             node = session_store._find_in_tree(root, node_sid)
             if node is None:
                 return None
+            if since_seq > 0:
+                snapshot_start = time.perf_counter()
+                delta = self._compute_messages_window(
+                    node_sid,
+                    rid,
+                    node,
+                    since_seq=since_seq,
+                    limit=limit,
+                )
+                snapshot_ms = (time.perf_counter() - snapshot_start) * 1000
+                perf.record("session.get_messages_since.delta_window", snapshot_ms)
+                if snapshot_ms >= 20:
+                    logger.info(
+                        "get_messages_since %s: delta_window=%.1fms since=%s",
+                        node_sid[:8], snapshot_ms, since_seq,
+                    )
+                return delta
             snapshot_start = time.perf_counter()
             snapshot = self._get_cached_snapshot(node_sid, rid, node)
             snapshot_ms = (time.perf_counter() - snapshot_start) * 1000
@@ -2450,6 +2467,99 @@ class SessionManager:
             "next_seq": next_seq,
             "_render_max_seq": render_max_seq,
         }
+
+    def _compute_messages_window(
+        self,
+        node_sid: str,
+        rid: str,
+        node: dict,
+        *,
+        since_seq: int,
+        limit: int,
+    ) -> Optional[dict]:
+        all_msgs = node.get("messages") or []
+        next_seq = node.get("next_seq") or 0
+        if not all_msgs:
+            return {"messages": [], "next_seq": next_seq}
+
+        window = [
+            m for m in all_msgs
+            if (m.get("seq") or 0) >= since_seq
+        ][-limit:]
+        if not window:
+            return {"messages": [], "next_seq": next_seq}
+
+        import render_stub
+        from event_journal import event_journal_reader
+        from event_shape import extract_output_text, strip_synthetic_events
+
+        latest_id = render_stub.latest_assistant_id(all_msgs)
+        summaries = self._native_event_summaries(rid, node_sid)
+        copied = []
+
+        for m in window:
+            msg_id = m.get("id", "")
+            is_latest = msg_id == latest_id or m.get("isStreaming")
+            if m.get("role") == "assistant":
+                out = {k: v for k, v in m.items() if k not in ("events", "_uid_idx")}
+                out["events"] = []
+                workers = []
+                for worker in m.get("workers") or []:
+                    if not isinstance(worker, dict):
+                        continue
+                    wc = {
+                        k: v for k, v in worker.items()
+                        if k not in ("events", "_uid_idx")
+                    }
+                    wc["events"] = (
+                        copy.deepcopy(worker.get("events") or [])
+                        if is_latest else []
+                    )
+                    workers.append(wc)
+                out["workers"] = workers
+                copied.append(out)
+            elif is_latest:
+                copied.append(copy.deepcopy(m))
+            else:
+                copied.append(copy.deepcopy(m))
+
+        for m in copied:
+            if m.get("role") != "assistant":
+                continue
+            msg_id = m.get("id")
+            if not msg_id:
+                continue
+            is_latest = msg_id == latest_id or m.get("isStreaming")
+            summary = summaries.get(msg_id, {})
+            if is_latest and summary:
+                m["events"] = event_journal_reader.read_frontend_events(
+                    rid,
+                    fork_id=node_sid if node_sid != rid else None,
+                    message_id=msg_id,
+                )
+                m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
+                if not m.get("isStreaming"):
+                    content = extract_output_text(
+                        strip_synthetic_events(m["events"])
+                    )
+                    if content != (m.get("content") or ""):
+                        m["content"] = content
+            elif is_latest:
+                m["events"] = []
+            else:
+                m["events"] = []
+                m["stub"] = {
+                    "event_count": summary.get("event_count", 0),
+                    "last_events": copy.deepcopy(summary.get("last_events") or []),
+                }
+                if summary:
+                    m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
+
+        if self._recovering_msg_ids:
+            for m in copied:
+                if m.get("id") in self._recovering_msg_ids:
+                    m["isRecovering"] = True
+        return {"messages": copied, "next_seq": next_seq}
 
     def get_messages_before(
         self,

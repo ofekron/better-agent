@@ -315,6 +315,18 @@ def test_codex_complete_watcher_filesystem_poll_runs_off_loop() -> None:
     assert "complete_path.exists()" not in watcher_source
 
 
+def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    start = source.index("def get_messages_since(")
+    end = source.index("def _get_cached_snapshot(", start)
+    method_source = source[start:end]
+    delta_start = method_source.index("if since_seq > 0:")
+    snapshot_start = method_source.index("snapshot = self._get_cached_snapshot(")
+    delta_source = method_source[delta_start:snapshot_start]
+    assert "_compute_messages_window(" in delta_source
+    assert "_get_cached_snapshot(" not in delta_source
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
