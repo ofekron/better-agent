@@ -171,6 +171,46 @@ def hydrate_msg_events_from_jsonl(
     if not root_id:
         return
     bulk_live_root = session_manager.get_ref(root_id) is tree
+    rows_cache: Optional[dict[str, tuple[dict[str, list[dict]], list[dict]]]] = None
+    tree_sids: set[str] = set()
+
+    def _collect_tree_sids(node: dict) -> None:
+        node_sid = node.get("id")
+        if node_sid:
+            tree_sids.add(node_sid)
+        for child in node.get("forks", []):
+            if isinstance(child, dict):
+                _collect_tree_sids(child)
+
+    _collect_tree_sids(tree)
+
+    def _event_rows_for_tree_sid(sid: str) -> tuple[dict[str, list[dict]], list[dict]]:
+        nonlocal rows_cache
+        if len(tree_sids) <= 1:
+            return _event_rows_for_sid(root_id, sid)
+        if rows_cache is None:
+            start = time.perf_counter()
+            all_raw, _, _ = event_journal_reader.read_events(
+                root_id, limit=200_000,
+            )
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            if elapsed_ms >= 20 or len(all_raw) >= 1000:
+                logger.info(
+                    "hydrate event_rows bulk %s: rows=%d %.1fms",
+                    root_id[:8], len(all_raw), elapsed_ms,
+                )
+            rows_cache = {}
+            for event in all_raw:
+                event_sid = event.get("sid")
+                if not event_sid or event.get("source") == FORK_BACKUP_SOURCE:
+                    continue
+                by_msg_id, orphan_raw = rows_cache.setdefault(event_sid, ({}, []))
+                msg_id = event.get("msg_id")
+                if msg_id:
+                    by_msg_id.setdefault(msg_id, []).append(event)
+                else:
+                    orphan_raw.append(event)
+        return rows_cache.get(sid, ({}, []))
 
     def _visit(node: dict, parent_sid: Optional[str] = None) -> None:
         sid = node.get("id")
@@ -207,7 +247,7 @@ def hydrate_msg_events_from_jsonl(
         # the cache already matches the journal.
         all_finalized = all(not m.get("isStreaming") for _, m in assistant_msgs)
 
-        by_msg_id, orphan_raw = _event_rows_for_sid(root_id, lookup_sid)
+        by_msg_id, orphan_raw = _event_rows_for_tree_sid(lookup_sid)
 
         # No orphans + every msg already matches jsonl count → skip.
         if not orphan_raw and all_finalized:

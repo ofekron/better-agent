@@ -10,6 +10,7 @@ _test_home.isolate("bc_test_hydrate_bulk_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from event_ingester import event_ingester  # noqa: E402
+from event_journal import event_journal_reader  # noqa: E402
 from orchs import get_strategy  # noqa: E402
 from render_tree_hydrate import hydrate_msg_events_from_jsonl  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -21,6 +22,7 @@ def main() -> int:
             name="bulk", cwd="/tmp", orchestration_mode="native",
         )
         sid = session["id"]
+        session_manager.get_ref(sid)["agent_session_id"] = "agent-root"
         msg_id = "msg-bulk"
         session_manager.append_assistant_msg(
             sid,
@@ -74,6 +76,61 @@ def main() -> int:
 
         assert len(msg["events"]) == 1000, len(msg["events"])
         assert calls == 0, calls
+
+        fork = session_manager.fork(sid, name="fork")
+        fork_sid = fork["id"]
+        fork_msg_id = "msg-fork"
+        session_manager.append_assistant_msg(
+            fork_sid,
+            {
+                "id": fork_msg_id,
+                "role": "assistant",
+                "content": "",
+                "events": [],
+                "timestamp": "2026-06-19T00:00:01",
+                "isStreaming": False,
+                "workers": [],
+            },
+        )
+        event_ingester.ingest(
+            sid,
+            sid=fork_sid,
+            event_type="agent_message",
+            data={
+                "uuid": str(uuid.uuid4()),
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "fork chunk"}],
+                },
+            },
+            source="bulk-test",
+            msg_id=fork_msg_id,
+        )
+        event_ingester.close_all()
+        root = session_manager.get_ref(sid)
+        fork_node = root["forks"][0]
+        msg["events"] = []
+        msg.pop("_uid_idx", None)
+        fork_msg = next(m for m in fork_node["messages"] if m["id"] == fork_msg_id)
+        fork_msg["events"] = []
+        fork_msg.pop("_uid_idx", None)
+        original_read_events = event_journal_reader.read_events
+        read_calls = 0
+
+        def counted_read_events(*args, **kwargs):
+            nonlocal read_calls
+            read_calls += 1
+            return original_read_events(*args, **kwargs)
+
+        event_journal_reader.read_events = counted_read_events
+        try:
+            hydrate_msg_events_from_jsonl(root)
+        finally:
+            event_journal_reader.read_events = original_read_events
+
+        assert read_calls == 1, read_calls
+        assert fork_msg["events"], fork_msg
         print("PASS: live hydrate bulk-loads ordinary render events")
         return 0
     finally:
