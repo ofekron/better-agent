@@ -40,6 +40,14 @@ def generation() -> int:
         return _index_generation
 
 
+def has_cached_result(query: str, limit: int) -> bool:
+    q = query.strip()
+    if not q:
+        return True
+    with _search_cache_lock:
+        return _cached_rows_for_limit(q, limit, time.monotonic()) is not None
+
+
 def _search_cache_valid(cached_at: float, generation: int, now: float) -> bool:
     return generation == _index_generation or now - cached_at < _SEARCH_CACHE_STALE_SECONDS
 
