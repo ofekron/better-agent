@@ -3201,6 +3201,65 @@ function AppMain({
     refreshProjects();
   }, [refreshProjects, authStatus]);
 
+  const resolveSessionForProject = useCallback(
+    async (path: string, nodeId: string = "primary") => {
+      const remembered = getRememberedSessionId(path, nodeId);
+      const localTarget = pickSessionForProject(
+        sessions,
+        path,
+        nodeId,
+        remembered,
+      );
+      if (remembered && localTarget?.id === remembered) return localTarget;
+
+      if (remembered) {
+        try {
+          const res = await progressTrackedFetch(
+            `session:restore:${remembered}`,
+            `${API}/api/sessions/${encodeURIComponent(remembered)}?msg_limit=1`,
+            { credentials: "include" },
+          );
+          if (res.ok) {
+            const session = (await res.json()) as Session;
+            const restored = pickSessionForProject(
+              [session],
+              path,
+              nodeId,
+              remembered,
+            );
+            if (restored) return restored;
+          }
+        } catch {}
+      }
+
+      try {
+        const params = new URLSearchParams({
+          offset: "0",
+          limit: "200",
+          project_path: path,
+        });
+        const res = await progressTrackedFetch(
+          `session:first:${nodeId}:${path}`,
+          `${API}/api/sessions?${params}`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const data = await res.json() as { sessions?: Session[] };
+          const target = pickSessionForProject(
+            data.sessions ?? [],
+            path,
+            nodeId,
+            remembered,
+          );
+          if (target) return target;
+        }
+      } catch {}
+
+      return localTarget;
+    },
+    [sessions],
+  );
+
   // Project list refetch on backend `projects_changed` is wired
   // directly through the WS handler (`onProjectsChanged` option above);
   // no buffer-scan effect needed.
@@ -3210,12 +3269,7 @@ function AppMain({
       setCwd(path);
       setSelectedProjectPath(path);
       setSelectedProjectNodeId(nodeId);
-      const target = pickSessionForProject(
-        sessions,
-        path,
-        nodeId,
-        getRememberedSessionId(path, nodeId),
-      );
+      const target = await resolveSessionForProject(path, nodeId);
       skipSidebarCloseOnNavRef.current = true;
       // No session for this (machine, project) → show the empty-project
       // surface instead of falling back to the Ask singleton. Ask is
@@ -3236,7 +3290,7 @@ function AppMain({
         // ignore
       }
     },
-    [refreshProjects, sessions, navigate]
+    [refreshProjects, resolveSessionForProject, navigate]
   );
 
   const handleAddProject = useCallback(
@@ -3469,6 +3523,56 @@ function AppMain({
     clearCurrentSession,
     navigate,
     selectSession,
+  ]);
+
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    if (!selectedProjectPath) return;
+    if (route.kind !== "session") return;
+    if (
+      route.sessionId === ASK_SINGLETON_ID ||
+      route.sessionId === editSingletonId()
+    ) {
+      return;
+    }
+    const routed =
+      currentTree?.id === route.sessionId
+        ? currentTree
+        : sessions.find((s) => s.id === route.sessionId) ??
+          openSessionRecords[route.sessionId] ??
+          null;
+    if (!routed) return;
+    if (
+      routed.cwd === selectedProjectPath &&
+      (routed.node_id || "primary") === selectedProjectNodeId &&
+      !routed.archived
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const target = await resolveSessionForProject(
+        selectedProjectPath,
+        selectedProjectNodeId,
+      );
+      if (cancelled) return;
+      skipSidebarCloseOnNavRef.current = true;
+      navigate(target ? sessionPath(target.id) : "/empty-project");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    route,
+    sessionsLoaded,
+    selectedProjectPath,
+    selectedProjectNodeId,
+    currentTree,
+    sessions,
+    openSessionRecords,
+    resolveSessionForProject,
+    navigate,
   ]);
 
   // Auto-select a session instead of sitting on the empty Ask "home".

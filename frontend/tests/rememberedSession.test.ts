@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getRememberedSessionId,
   pickSessionForProject,
   setRememberedSessionId,
-} from "../src/utils/rememberedSession";
+} from "../src/utils/uiSelection";
 import type { Session } from "../src/types";
 
 const mk = (
@@ -22,8 +22,22 @@ const mk = (
   messages: [],
 });
 
+function stubUiSelectionPatch(): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
+  );
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("rememberedSession storage", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    stubUiSelectionPatch();
+  });
 
   it("round-trips a remembered id per project+node", () => {
     setRememberedSessionId("/a", "primary", "s1");
