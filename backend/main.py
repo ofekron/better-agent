@@ -4408,6 +4408,7 @@ async def get_sessions(
 
     content_scores: dict[str, int] = {}
     appended_virtual_sessions = False
+    appended_remote_sessions = False
     local_total: int | None = None
     can_page_remote_local_order = _can_page_local_summary_order(
         search_query=search_query,
@@ -4507,10 +4508,35 @@ async def get_sessions(
                 rs.setdefault("unread_count", 0)
                 rs.setdefault("monitoring_state", "idle")
                 out.append(rs)
+                appended_remote_sessions = True
             if local_total is not None:
                 local_total += len(remote)
     except Exception:
         logger.debug("get_sessions: node merge failed", exc_info=True)
+
+    if (
+        can_page_remote_local_order
+        and not appended_virtual_sessions
+        and not appended_remote_sessions
+        and local_total is not None
+    ):
+        end = offset + limit
+        with perf.timed("sessions.list.page_decorate"):
+            page = await asyncio.to_thread(
+                _decorate_local_sidebar_sessions,
+                out[offset:end],
+                None,
+            )
+        _schedule_session_event_meta_warm(page)
+        return _sessions_list_cache_put(cache_key, {
+            "sessions": page,
+            "offset": offset,
+            "limit": limit,
+            "total": local_total,
+            "has_more": end < local_total,
+            "sort_by": effective_sort_by,
+            "status_sort": effective_status_sort,
+        })
 
     state_snapshot = (
         await asyncio.to_thread(_sidebar_state_snapshot)
