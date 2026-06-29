@@ -231,7 +231,7 @@ def bounded_search_returns_while_cache_fills_test() -> bool:
     def fake_connect():
         return FakeConn()
 
-    def slow_candidate_scores(_conn, _query, _limit):
+    def slow_candidate_scores(_conn, _query, _limit, **_kwargs):
         time.sleep(0.2)
         return [("sid-bounded", 4)]
 
@@ -283,7 +283,7 @@ def identical_searches_coalesce_test() -> bool:
     def fake_connect():
         return FakeConn()
 
-    def slow_candidate_scores(_conn, _query, _limit):
+    def slow_candidate_scores(_conn, _query, _limit, **_kwargs):
         nonlocal calls
         with calls_lock:
             calls += 1
@@ -342,6 +342,47 @@ def content_search_caps_matched_rows_test() -> bool:
     return ok
 
 
+def larger_cached_search_satisfies_smaller_limit_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+    calls = 0
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def candidate_scores(_conn, _query, limit, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [(f"sid-{i}", limit - i) for i in range(limit)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = candidate_scores
+    try:
+        first = session_search_index.search("reuse-query", limit=20)
+        second = session_search_index.search("reuse-query", limit=5)
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_cache.clear()
+        session_search_index._search_inflight.clear()
+    ok = (
+        calls == 1
+        and len(first) == 20
+        and second == first[:5]
+    )
+    print(
+        f"{PASS if ok else FAIL} larger cached search satisfies smaller limit "
+        f"-- calls={calls}",
+    )
+    return ok
+
+
 if __name__ == "__main__":
     try:
         ok = index_event_nonblocking_test()
@@ -350,6 +391,7 @@ if __name__ == "__main__":
         ok = bounded_search_returns_while_cache_fills_test() and ok
         ok = identical_searches_coalesce_test() and ok
         ok = content_search_caps_matched_rows_test() and ok
+        ok = larger_cached_search_satisfies_smaller_limit_test() and ok
         ok = main_test() and ok
         sys.exit(0 if ok else 1)
     finally:
