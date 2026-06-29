@@ -121,8 +121,17 @@ def test_create_worker_rejects_missing_fields():
 
 def test_mssg_still_routes_to_mssg_endpoint():
     captured = _instrument()
-    communicate_mcp.mssg_response("hello", target_session_id="w")
+    communicate_mcp.mssg_response(
+        "hello",
+        target_session_id="w",
+        provider_id="provider-1",
+        model="model-1",
+        reasoning_effort="high",
+    )
     assert captured[0][0] == "/api/internal/mssg"
+    assert captured[0][1]["provider_id"] == "provider-1"
+    assert captured[0][1]["model"] == "model-1"
+    assert captured[0][1]["reasoning_effort"] == "high"
     assert captured[0][2] == 30.0
 
 
@@ -134,6 +143,9 @@ def test_async_routes_to_async_endpoint():
     assert payload["sender_session_id"] == "mgr-session"
     assert payload["target_worker_pool"] == "testape"
     assert payload["message"] == "run in background"
+    assert payload["provider_id"] is None
+    assert payload["model"] == ""
+    assert payload["reasoning_effort"] is None
     assert timeout == 30.0
 
 
