@@ -47,6 +47,8 @@ def _reset_home() -> None:
     session_store._metadata_search_cache.clear()
     session_store._metadata_text_cache = ()
     session_store._metadata_text_cache_version = -1
+    session_store._metadata_text_by_id_cache = {}
+    session_store._metadata_text_by_id_cache_version = -1
     session_store._metadata_trigram_index = {}
     session_store._metadata_trigram_index_version = -1
     main._sessions_list_response_cache.clear()
@@ -711,6 +713,46 @@ def test_metadata_trigram_search_preserves_substring_behavior() -> bool:
     return ok
 
 
+def test_warm_metadata_search_scores_only_candidate_rows() -> bool:
+    _reset_home()
+    _write(_record_with(
+        "needle",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    _write(_record_with(
+        "miss",
+        "2026-06-19T00:00:00+00:00",
+        name="unrelated title",
+    ))
+
+    first = session_store.grep_session_scores("needle", {session_store.SEARCH_FIELD_TITLE})
+    deadline = time.monotonic() + 1.0
+    while (
+        session_store._metadata_trigram_index_version != session_store.search_metadata_version()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    session_store._metadata_search_cache.clear()
+
+    original_rows = session_store._metadata_search_rows
+
+    def fail_rows():
+        raise AssertionError("warm candidate search must not rebuild all metadata rows")
+
+    session_store._metadata_search_rows = fail_rows
+    try:
+        second = session_store.grep_session_scores("needle", {session_store.SEARCH_FIELD_TITLE})
+    except AssertionError:
+        second = {}
+    finally:
+        session_store._metadata_search_rows = original_rows
+
+    ok = first == {"needle": 1} and second == first
+    print(f"{PASS if ok else FAIL} warm metadata search scores only candidate rows")
+    return ok
+
+
 def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
     _reset_home()
     _write(_record_with(
@@ -1022,6 +1064,7 @@ def main_run() -> int:
         ok = test_search_index_cache_invalidates_on_write() and ok
         ok = test_metadata_search_warms_trigram_candidates_off_path() and ok
         ok = test_metadata_trigram_search_preserves_substring_behavior() and ok
+        ok = test_warm_metadata_search_scores_only_candidate_rows() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok

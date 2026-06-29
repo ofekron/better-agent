@@ -4612,6 +4612,8 @@ _METADATA_SEARCH_CACHE_MAX = 128
 _metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
 _metadata_text_cache_version = -1
 _metadata_text_cache: tuple[tuple[str, str, str], ...] = ()
+_metadata_text_by_id_cache_version = -1
+_metadata_text_by_id_cache: dict[str, tuple[str, str]] = {}
 _METADATA_NGRAM_MAX_SIZE = 3
 
 
@@ -4663,6 +4665,7 @@ def _first_user_prompt(root: dict) -> str:
 
 def _metadata_search_rows() -> tuple[tuple[str, str, str], ...]:
     global _metadata_text_cache_version, _metadata_text_cache
+    global _metadata_text_by_id_cache_version, _metadata_text_by_id_cache
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
         if _metadata_text_cache_version == _summary_metadata_version:
@@ -4678,7 +4681,32 @@ def _metadata_search_rows() -> tuple[tuple[str, str, str], ...]:
         )
         _metadata_text_cache = rows
         _metadata_text_cache_version = _summary_metadata_version
+        _metadata_text_by_id_cache = {
+            sid: (title, first_prompt)
+            for sid, title, first_prompt in rows
+        }
+        _metadata_text_by_id_cache_version = _summary_metadata_version
         return rows
+
+
+def _metadata_search_row_map() -> dict[str, tuple[str, str]]:
+    global _metadata_text_by_id_cache_version, _metadata_text_by_id_cache
+    while True:
+        _ensure_summary_index(blocking=False)
+        with _summary_index_lock:
+            version = _summary_metadata_version
+            if _metadata_text_by_id_cache_version == version:
+                return _metadata_text_by_id_cache
+        rows = _metadata_search_rows()
+        row_map = {sid: (title, first_prompt) for sid, title, first_prompt in rows}
+        with _summary_index_lock:
+            if _summary_metadata_version != version:
+                continue
+            if _metadata_text_by_id_cache_version == version:
+                return _metadata_text_by_id_cache
+            _metadata_text_by_id_cache = row_map
+            _metadata_text_by_id_cache_version = version
+            return _metadata_text_by_id_cache
 
 
 def _metadata_ngrams(value: str, size: int) -> set[str]:
@@ -4805,14 +4833,22 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
         cached = _metadata_search_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
-    rows = _metadata_search_rows()
     candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)
+    if candidate_ids is None:
+        rows = _metadata_search_rows()
+    elif not candidate_ids:
+        rows = ()
+    else:
+        row_map = _metadata_search_row_map()
+        rows = (
+            (sid, row[0], row[1])
+            for sid in candidate_ids
+            if (row := row_map.get(sid)) is not None
+        )
     scores: dict[str, int] = {}
     search_title = SEARCH_FIELD_TITLE in metadata_fields
     search_first_prompt = SEARCH_FIELD_FIRST_PROMPT in metadata_fields
     for sid, title, first_prompt in rows:
-        if candidate_ids is not None and sid not in candidate_ids:
-            continue
         if search_title:
             score = title.count(query_lower)
             if score > 0:
