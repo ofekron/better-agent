@@ -4524,10 +4524,17 @@ def _build_local_sessions_page_for_list(
         virtual_total = 0
         if may_include_virtual and sort_by == "last_user_prompt_at":
             with perf.timed("sessions.list.virtual_count"):
-                _virtual_page, virtual_total = virtual_session_store.list_recent(
+                cached_virtual = virtual_session_store.list_recent_cached(
                     1,
                     exclude_id=session_search.ASK_SINGLETON_ID,
                 )
+                if cached_virtual is None:
+                    _virtual_page, virtual_total = virtual_session_store.list_recent(
+                        1,
+                        exclude_id=session_search.ASK_SINGLETON_ID,
+                    )
+                else:
+                    _virtual_page, virtual_total = cached_virtual
         if len(page_source) >= limit or not may_include_virtual:
             total = local_total + virtual_total
             with perf.timed("sessions.list.page_decorate"):
@@ -4570,10 +4577,18 @@ def _build_local_sessions_page_for_list(
                             sources=sources,
                             content_scores=content_scores,
                         )
-                    virtual_sessions, virtual_total = virtual_session_store.list_recent(
-                        max(offset + limit, 1),
+                    virtual_limit = max(offset + limit, 1)
+                    cached_virtual = virtual_session_store.list_recent_cached(
+                        virtual_limit,
                         exclude_id=session_search.ASK_SINGLETON_ID,
                     )
+                    if cached_virtual is None:
+                        virtual_sessions, virtual_total = virtual_session_store.list_recent(
+                            virtual_limit,
+                            exclude_id=session_search.ASK_SINGLETON_ID,
+                        )
+                    else:
+                        virtual_sessions, virtual_total = cached_virtual
                 else:
                     with perf.timed("sessions.list.local"):
                         out = _local_session_summaries_for_sidebar()

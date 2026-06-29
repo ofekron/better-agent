@@ -2192,6 +2192,17 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert "_sessions_list_response(\n                    json.dumps(" in route_source
 
 
+def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    build_start = source.index("def _build_local_sessions_page_for_list(")
+    build_end = source.index("async def _sidebar_search_scores(", build_start)
+    build_source = source[build_start:build_end]
+    assert "virtual_session_store.list_recent_cached(" in build_source
+    assert build_source.index("virtual_session_store.list_recent_cached(") < build_source.index(
+        "virtual_session_store.list_recent("
+    )
+
+
 def test_default_session_page_uses_visible_order_cache() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("def _local_visible_order_ids(")
