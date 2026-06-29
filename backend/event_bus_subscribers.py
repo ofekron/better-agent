@@ -145,11 +145,7 @@ async def _refresh_session_search_projection(event: BusEvent) -> None:
     }
     if event.msg_id:
         entry["msg_id"] = event.msg_id
-    await asyncio.to_thread(
-        _enqueue_session_search_projection,
-        event.root_id,
-        entry,
-    )
+    _enqueue_session_search_projection(event.root_id, entry)
 
 
 def _enqueue_session_search_projection(root_id: str, entry: dict) -> None:
