@@ -773,6 +773,26 @@ function AppMain({
     setSessionListFilters,
     wsTargetSessionId,
   } = useSession(authStatus);
+  const [topbarPinnedSessions, setTopbarPinnedSessions] = useState<Record<string, Session>>({});
+
+  const refreshTopbarPinnedSessions = useCallback(() => {
+    fetch(`${API}/api/sessions/topbar-pinned`, { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sessions?: Session[] } | null) => {
+        const next: Record<string, Session> = {};
+        for (const session of data?.sessions ?? []) {
+          if (session?.id) next[session.id] = session;
+        }
+        setTopbarPinnedSessions(next);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    refreshTopbarPinnedSessions();
+  }, [sessionsLoaded, refreshTopbarPinnedSessions]);
+
   const [donationWelcomeMilestone, setDonationWelcomeMilestone] =
     useState<number | null>(null);
   useEffect(() => {
@@ -869,9 +889,9 @@ function AppMain({
     () => `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
 
-  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen";
+  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen" | "board";
   const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
+    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
   >("better-agent-right-panel-states", {});
 
   /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
@@ -997,6 +1017,8 @@ function AppMain({
         case "canvas":
           return false;
         case "screen":
+          return false;
+        case "board":
           return false;
         case "navigate": {
           return (
@@ -1593,6 +1615,23 @@ function AppMain({
         draftDebounceRef.current.has(sessionId),
       );
       applySessionMetadata(sessionId, toApply);
+      if ("topbar_pinned" in toApply) {
+        const nextPinned = Boolean(toApply.topbar_pinned);
+        const session = getNode(sessionId);
+        setTopbarPinnedSessions((prev) => {
+          const next = { ...prev };
+          if (nextPinned && session) {
+            next[sessionId] = {
+              ...session,
+              topbar_pinned: true,
+              topbar_pinned_at: toApply.topbar_pinned_at ?? session.topbar_pinned_at ?? null,
+            };
+          }
+          else delete next[sessionId];
+          return next;
+        });
+        if (nextPinned && !session) refreshTopbarPinnedSessions();
+      }
       if ("queued_prompts" in patch) {
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
         setQueuedForSession(
@@ -2101,6 +2140,10 @@ function AppMain({
       const base = localQueued && localQueued.length > 0 ? localQueued : persistedQueuedPrompts;
       const latest = base[base.length - 1] ?? null;
       if (!latest) return false;
+      // An empty/blank queued prompt isn't a composition in progress — it's a
+      // stale/orphan entry. Don't let it swallow the comment; fall through to a
+      // normal inline tag so the highlight + Comments panel entry still appear.
+      if (!String(latest.preview ?? "").trim()) return false;
       const nextPreview = applyQueuedInlineTags(latest.preview, tagsToAppend);
       const sent = sendUpdateQueued(sessionId, latest.id, nextPreview);
       if (!sent) return false;
@@ -3521,6 +3564,7 @@ function AppMain({
     if (currentTree?.id) {
       setOpenSessionIds((prev) => {
         const id = currentTree.id;
+        if (currentTree.topbar_pinned) return prev;
         const idx = prev.indexOf(id);
         if (idx >= 0 && idx === prev.length - 1) return prev; // already most recent
         let next: string[];
@@ -3533,7 +3577,7 @@ function AppMain({
         return next;
       });
     }
-  }, [currentTree?.id]);
+  }, [currentTree?.id, currentTree?.topbar_pinned]);
 
   useEffect(() => {
     if (sessionsLoaded) {
@@ -3569,12 +3613,61 @@ function AppMain({
     [openSessionRecords, sessions],
   );
 
+  const handleToggleTopbarPin = useCallback(
+    (id: string, pinned: boolean) => {
+      const session = findOpenSessionRecord(id);
+      if (session) {
+        const topbarPinnedAt = pinned ? new Date().toISOString() : null;
+        const nextSession = {
+          ...session,
+          topbar_pinned: pinned,
+          topbar_pinned_at: topbarPinnedAt,
+        };
+        setOpenSessionRecords((prev) => ({ ...prev, [id]: nextSession }));
+        setTopbarPinnedSessions((prev) => {
+          const next = { ...prev };
+          if (pinned) next[id] = nextSession;
+          else delete next[id];
+          return next;
+        });
+        applySessionMetadata(id, {
+          topbar_pinned: pinned,
+          topbar_pinned_at: topbarPinnedAt,
+        });
+      }
+      fetch(`${API}/api/sessions/${encodeURIComponent(id)}/topbar-pin`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned }),
+      })
+        .then((res) => {
+          if (!res.ok) refreshTopbarPinnedSessions();
+        })
+        .catch(() => refreshTopbarPinnedSessions());
+    },
+    [applySessionMetadata, findOpenSessionRecord, refreshTopbarPinnedSessions],
+  );
+
   // Open-session tabs, ordered by the `sessions_tabs_sort` pref (descending
   // on the chosen timestamp). Open-order (newest-opened first) is the stable
   // tie-break for sessions sharing/lacking a timestamp.
   const sortedOpenSessions = useMemo(() => {
     void tabsStatusTick; // recompute when live status changes (status sort on)
-    const openOrder = openSessionIds.slice().reverse();
+    const pinnedRecords = Object.values(topbarPinnedSessions)
+      .map((session) => findOpenSessionRecord(session.id) || session)
+      .filter((session): session is Session => Boolean(session?.topbar_pinned))
+      .sort((a, b) => {
+        const aPinnedAt = a.topbar_pinned_at ? Date.parse(a.topbar_pinned_at) : 0;
+        const bPinnedAt = b.topbar_pinned_at ? Date.parse(b.topbar_pinned_at) : 0;
+        const delta = bPinnedAt - aPinnedAt;
+        return delta !== 0 ? delta : a.id.localeCompare(b.id);
+      });
+    const pinnedIds = new Set(pinnedRecords.map((session) => session.id));
+    const openOrder = openSessionIds
+      .filter((id) => !pinnedIds.has(id))
+      .slice()
+      .reverse();
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
       .filter((s): s is Session => !!s);
@@ -3583,7 +3676,7 @@ function AppMain({
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
       return Number.isNaN(ms) ? -Infinity : ms;
     };
-    return records
+    const sortedRecords = records
       .map((s, i) => ({ s, i }))
       .sort((a, b) => {
         // Tabs are fully loaded → rank straight off the live registry. Status
@@ -3596,15 +3689,24 @@ function AppMain({
         return d !== 0 ? d : a.i - b.i; // stable: keep open-order on ties
       })
       .map((e) => e.s);
+    return [...pinnedRecords, ...sortedRecords];
   }, [
     openSessionIds,
     findOpenSessionRecord,
     sessionTabsSort,
     sessionTabsStatusSort,
     tabsStatusTick,
+    topbarPinnedSessions,
   ]);
   const visibleOpenSessions = useMemo(
-    () => sortedOpenSessions.slice(0, visibleOpenTabCapacity),
+    () => {
+      const pinned = sortedOpenSessions.filter((session) => session.topbar_pinned);
+      const regular = sortedOpenSessions.filter((session) => !session.topbar_pinned);
+      return [
+        ...pinned,
+        ...regular.slice(0, Math.max(0, visibleOpenTabCapacity - pinned.length)),
+      ];
+    },
     [sortedOpenSessions, visibleOpenTabCapacity],
   );
 
@@ -6047,6 +6149,7 @@ function AppMain({
               onTabCapacityChange={handleTabCapacityChange}
               providers={providers}
               onCloseTab={handleCloseTab}
+              onToggleTopbarPin={handleToggleTopbarPin}
               onSelectTab={handleSelectTab}
               messages={chatMessages}
               pendingMessages={chatPendingMessages}
