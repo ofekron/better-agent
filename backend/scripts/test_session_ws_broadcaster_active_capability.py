@@ -71,6 +71,26 @@ def test_last_opened_emits_metadata_patch() -> None:
     }]
 
 
+def test_journal_event_projected_emits_messages_delta() -> None:
+    captured: list[dict] = []
+    broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
+    msg = {"id": "msg-1", "content": "updated"}
+
+    broadcaster.on_change("sid-1", {
+        "kind": "journal_event_projected",
+        "msg_id": "msg-1",
+        "msg": msg,
+    })
+
+    assert captured == [{
+        "type": "messages_delta",
+        "data": {
+            "app_session_id": "sid-1",
+            "messages": [msg],
+        },
+    }]
+
+
 def test_internal_worker_changes_do_not_warn_or_dispatch() -> None:
     captured: list[dict] = []
     seen: list[object] = []
@@ -91,5 +111,6 @@ def test_internal_worker_changes_do_not_warn_or_dispatch() -> None:
 if __name__ == "__main__":
     test_active_capability_changes_emit_metadata_patch()
     test_last_opened_emits_metadata_patch()
+    test_journal_event_projected_emits_messages_delta()
     test_internal_worker_changes_do_not_warn_or_dispatch()
     print("ok")

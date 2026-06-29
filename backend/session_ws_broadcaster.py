@@ -248,6 +248,17 @@ class SessionWSBroadcaster:
                 },
             })
             return
+        if kind == "journal_event_projected":
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [msg],
+                    },
+                })
+            return
         if kind == "running_content_updated":
             self._dispatch({
                 "type": "message_content_updated",
