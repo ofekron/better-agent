@@ -4513,6 +4513,24 @@ async def internal_assistant_ui_rank(
     return await assistant_ui.rank(items, last_topic)
 
 
+def _tree_has_loaded_events(tree: dict) -> bool:
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        for m in node.get("messages") or []:
+            events = m.get("events")
+            if isinstance(events, list) and events:
+                return True
+            for worker in m.get("workers") or []:
+                if not isinstance(worker, dict):
+                    continue
+                events = worker.get("events")
+                if isinstance(events, list) and events:
+                    return True
+        stack.extend(node.get("forks", []) or [])
+    return False
+
+
 def _strip_synthetic_events_from_tree(tree: dict) -> None:
     """Walk every node in the tree and strip SDK continuation markers
     (model="<synthetic>", "No response requested.") from both
@@ -4753,7 +4771,8 @@ def _session_detail_snapshot_sync(
         return None
 
     strip_start = time.perf_counter()
-    _strip_synthetic_events_from_tree(tree)
+    if _tree_has_loaded_events(tree):
+        _strip_synthetic_events_from_tree(tree)
     strip_ms = (time.perf_counter() - strip_start) * 1000
     perf.record("sessions.detail.strip_synthetic", strip_ms)
     root_id = tree.get("id")
