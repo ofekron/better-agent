@@ -2726,6 +2726,37 @@ class SessionManager:
             finally:
                 self._batches.pop(rid, None)
 
+    @contextmanager
+    def message_batch(
+        self,
+        sid: str,
+        msg_id: str,
+        *,
+        bump_updated_at: bool = True,
+        hydrate_events: bool = True,
+    ):
+        rid = self._root_id_for(sid)
+        if rid is None:
+            raise KeyError(sid)
+        with self._lock_for_root(rid):
+            root = self._load_root(sid, hydrate_events=hydrate_events)
+            node = _find_message_node(root, msg_id) if root else None
+            if node is None:
+                raise KeyError(msg_id)
+            msg = _find_message(node, msg_id)
+            if msg is None:
+                raise KeyError(msg_id)
+            if rid in self._batches:
+                yield node, msg
+                return
+            ctx = {"bump_updated_at": bump_updated_at}
+            self._batches[rid] = ctx
+            try:
+                yield node, msg
+                self._persist_root(rid, bump=ctx["bump_updated_at"])
+            finally:
+                self._batches.pop(rid, None)
+
     def reload_root_from_disk(self, root_id: str) -> None:
         """Evict the in-memory root for `root_id` and discard any pending
         debounced persist so the next access cold-loads the current

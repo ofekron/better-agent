@@ -49,6 +49,16 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
 
 
+def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
+    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    start = source.index("async def save_ws_callback(")
+    end = source.index("            if event_dict.get(\"type\") in _BRIDGE_EVENT_TYPES:", start)
+    callback_source = source[start:end]
+    assert "session_manager.message_batch(" in callback_source
+    assert "hydrate_events=False" in callback_source
+    assert "with session_manager.batch(persist_to):" not in callback_source
+
+
 def test_subagent_watcher_scans_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     watch_start = source.index("async def _watch_subagents(")
