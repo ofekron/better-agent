@@ -1619,6 +1619,15 @@ def test_session_list_waits_briefly_for_partial_summary_warm() -> None:
     assert "_do_build_summary_index_unsafe()" not in wait_source
 
 
+def test_session_search_projection_enqueue_stays_on_event_loop() -> None:
+    source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
+    start = source.index("async def _refresh_session_search_projection(")
+    end = source.index("async def _refresh_requirement_tags(", start)
+    projection_source = source[start:end]
+    assert "_enqueue_session_search_projection(event.root_id, entry)" in projection_source
+    assert "asyncio.to_thread(" not in projection_source
+
+
 def test_sidebar_session_search_bounds_content_scoring() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
@@ -2768,6 +2777,7 @@ if __name__ == "__main__":
     test_session_list_uses_sorted_summary_cache()
     test_session_list_pages_last_user_prompt_order_before_full_sort()
     test_session_list_waits_briefly_for_partial_summary_warm()
+    test_session_search_projection_enqueue_stays_on_event_loop()
     test_session_list_does_not_prewarm_snapshots()
     test_session_list_warms_event_meta_off_path()
     test_session_list_reads_user_prefs_once()
