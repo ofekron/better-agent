@@ -54,6 +54,7 @@ _PRIMARY_JSONL_CACHE_TTL_S = 5.0
 _RUN_STATE_LOOKUP_TIMEOUT_S = 1.0
 _RUN_STATE_LOOKUP_CACHE_TTL_S = 5.0
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
+_RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_LOOKUP_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
@@ -185,7 +186,13 @@ def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
             cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
             if cached is not None:
                 ts, fingerprint, index = cached
-                if fingerprint == candidates and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+                if (
+                    fingerprint == candidates
+                    and now - ts < _RUN_STATE_RECENT_INDEX_MAX_AGE_S
+                ):
+                    _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+                        now, fingerprint, index,
+                    )
                     return index
         index = _build_recent_state_index(candidates)
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
