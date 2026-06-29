@@ -851,11 +851,13 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     helper_end = main_source.index("_GIT_STATUS_TTL_SECONDS", helper_start)
     helper_source = main_source[helper_start:helper_end]
     assert "session_store.search_metadata_version()" in helper_source
+    assert "session_search_index.generation()" in helper_source
+    assert "session_store.SEARCH_FIELD_CONTENT in search_fields" in helper_source
     assert "session_store.summary_version()" in helper_source
     route_start = main_source.index("async def get_sessions(")
     route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = main_source[route_start:route_end]
-    assert "_sessions_list_cache_version(search_query)" in route_source
+    assert "_sessions_list_cache_version(search_query, effective_search_fields)" in route_source
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
