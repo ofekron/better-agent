@@ -11,6 +11,7 @@ Auto-matching uses three confidence levels (strongest first):
 The user can confirm, reject, or manually reassign groups via the UI.
 """
 
+import copy
 import json
 import logging
 import uuid
@@ -29,14 +30,31 @@ SCHEMA_VERSION = 1
 CONFIDENCE_LEVELS = ("git_remote", "path", "name", "manual")
 # For display ordering / comparison.
 _CONFIDENCE_RANK = {c: i for i, c in enumerate(CONFIDENCE_LEVELS)}
+_raw_cache: tuple[tuple[int, int], dict] | None = None
 
 
 def _mappings_path() -> Path:
     return ba_home() / "project_mappings.json"
 
 
+def _mappings_fingerprint() -> tuple[int, int]:
+    try:
+        st = _mappings_path().stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _read_raw() -> dict:
-    return read_json(_mappings_path(), {"version": SCHEMA_VERSION, "groups": [], "rejected_ids": []})
+    global _raw_cache
+    fingerprint = _mappings_fingerprint()
+    cached = _raw_cache
+    if cached is not None and cached[0] == fingerprint:
+        return copy.deepcopy(cached[1])
+    data = read_json(_mappings_path(), {"version": SCHEMA_VERSION, "groups": [], "rejected_ids": []})
+    raw = data if isinstance(data, dict) else {}
+    _raw_cache = (fingerprint, copy.deepcopy(raw))
+    return raw
 
 
 def _read_file() -> list[dict]:
@@ -54,13 +72,16 @@ def _read_rejected() -> set[str]:
 
 
 def _write_file(groups: list[dict], rejected_ids: Optional[set[str]] = None) -> None:
+    global _raw_cache
     if rejected_ids is None:
         rejected_ids = _read_rejected()
-    write_json(_mappings_path(), {
+    data = {
         "version": SCHEMA_VERSION,
         "groups": groups,
         "rejected_ids": sorted(rejected_ids),
-    })
+    }
+    write_json(_mappings_path(), data)
+    _raw_cache = (_mappings_fingerprint(), copy.deepcopy(data))
 
 
 # ---------------------------------------------------------------------------
