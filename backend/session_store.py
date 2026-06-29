@@ -3920,7 +3920,7 @@ DEFAULT_SEARCH_FIELDS = frozenset({
 _METADATA_SEARCH_CACHE_MAX = 128
 _metadata_search_cache: dict[tuple[str, tuple[str, ...], int], dict[str, int]] = {}
 _metadata_text_cache_version = -1
-_metadata_text_cache: list[tuple[str, str, str]] = []
+_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()
 
 
 def _normalize_search_fields(fields: Iterable[str] | None) -> set[str]:
@@ -3969,13 +3969,13 @@ def _first_user_prompt(root: dict) -> str:
     return ""
 
 
-def _metadata_search_rows() -> list[tuple[str, str, str]]:
+def _metadata_search_rows() -> tuple[tuple[str, str, str], ...]:
     global _metadata_text_cache_version, _metadata_text_cache
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
         if _metadata_text_cache_version == _summary_metadata_version:
-            return list(_metadata_text_cache)
-        rows = [
+            return _metadata_text_cache
+        rows = tuple(
             (
                 str(summary.get("id") or ""),
                 str(summary.get("name") or "").lower(),
@@ -3983,10 +3983,10 @@ def _metadata_search_rows() -> list[tuple[str, str, str]]:
             )
             for summary in _summary_index.values()
             if summary.get("id")
-        ]
+        )
         _metadata_text_cache = rows
         _metadata_text_cache_version = _summary_metadata_version
-        return list(rows)
+        return rows
 
 
 def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:

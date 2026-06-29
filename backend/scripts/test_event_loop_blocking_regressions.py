@@ -762,6 +762,7 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
     assert "_metadata_text_cache" in source
+    assert "_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()" in source
     assert "_summary_metadata_version" in source
     rows_start = source.index("def _metadata_search_rows(")
     rows_end = source.index("def _metadata_search_scores(", rows_start)
@@ -769,6 +770,9 @@ def test_metadata_session_search_uses_metadata_version_cache() -> None:
     assert "str(summary.get(\"name\") or \"\").lower()" in rows_source
     assert "str(summary.get(\"first_prompt\") or \"\").lower()" in rows_source
     assert "_metadata_text_cache_version == _summary_metadata_version" in rows_source
+    assert "return _metadata_text_cache" in rows_source
+    assert "rows = tuple(" in rows_source
+    assert "return list(_metadata_text_cache)" not in rows_source
     start = source.index("def _metadata_search_scores(")
     end = source.index("def grep_session_scores(", start)
     search_source = source[start:end]
