@@ -670,6 +670,46 @@ def test_ask_response_omits_token_usage():
     assert "token_usage" not in response
 
 
+def test_ask_response_falls_back_to_event_text_when_content_empty():
+    target = session_manager.create(
+        name="manager event fallback",
+        cwd="/repo",
+        orchestration_mode="manager",
+    )
+    coordinator = Coordinator()
+    user_msg = coordinator._init_turn_messages(
+        session=session_manager.get(target["id"]),
+        app_session_id=target["id"],
+        prompt="question",
+        images=None,
+        source="team_ask",
+        lifecycle_msg_id="life-event-fallback",
+    )
+    session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-event-answer",
+        "role": "assistant",
+        "content": "",
+        "events": [{
+            "type": "agent_message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "event answer"}],
+                },
+            },
+        }],
+        "timestamp": "2026-06-16T10:01:00",
+        "isStreaming": False,
+    })
+
+    response = coordinator._team_message_turn_response(
+        target_session_id=target["id"],
+        lifecycle_msg_id=user_msg["lifecycle_msg_id"],
+    )
+
+    assert response["assistant_content"] == "event answer"
+
+
 def test_ask_response_uses_matching_lifecycle_turn_only():
     target = session_manager.create(
         name="manager four",

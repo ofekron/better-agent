@@ -3326,7 +3326,6 @@ function AppMain({
     if (!id) return;
     setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }, []);
-  const [missingOpenSessionIds, setMissingOpenSessionIds] = useState<Record<string, true>>({});
 
   useEffect(() => {
     setOpenSessionRecords((prev) => {
@@ -3567,7 +3566,6 @@ function AppMain({
       (id) =>
         !loadedIds.has(id) &&
         !openSessionRecords[id] &&
-        !missingOpenSessionIds[id] &&
         !openSessionRecordFetchesRef.current.has(id),
     );
     if (idsToFetch.length === 0) return;
@@ -3583,10 +3581,8 @@ function AppMain({
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { sessions?: Session[] } | null) => {
         if (cancelled) return;
-        const returned = new Set<string>();
         for (const session of data?.sessions ?? []) {
           if (!session?.id) continue;
-          returned.add(session.id);
           setOpenSessionRecords((prev) => {
             const merged = mergeOpenSessionRecord(prev[session.id], session);
             return merged === prev[session.id]
@@ -3594,15 +3590,6 @@ function AppMain({
               : { ...prev, [session.id]: merged };
           });
         }
-        setMissingOpenSessionIds((prev) => {
-          let next: Record<string, true> | null = null;
-          for (const id of idsToFetch) {
-            if (returned.has(id)) continue;
-            if (!next) next = { ...prev };
-            next[id] = true;
-          }
-          return next ?? prev;
-        });
       })
       .catch(() => {})
       .finally(() => {
@@ -3615,7 +3602,6 @@ function AppMain({
       cancelled = true;
     };
   }, [
-    missingOpenSessionIds,
     openSessionIds,
     openSessionRecords,
     sessions,
@@ -3639,16 +3625,6 @@ function AppMain({
       addOpenSessionId(currentTree.id);
     }
   }, [addOpenSessionId, currentTree?.id, currentTree?.topbar_pinned]);
-
-  useEffect(() => {
-    if (sessionsLoaded) {
-      setOpenSessionIds((prev) => {
-        const valid = prev.filter((id) => !missingOpenSessionIds[id]);
-        if (valid.length !== prev.length) return valid;
-        return prev;
-      });
-    }
-  }, [missingOpenSessionIds, sessionsLoaded]);
 
   const handleCloseTab = useCallback(
     (id: string) => {

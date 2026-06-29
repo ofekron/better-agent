@@ -1093,7 +1093,11 @@ class SessionManager:
         drain_failed = False
         if pending is not None:
             try:
-                session_store.write_session_full(pending, bump_updated_at=False)
+                session_store.write_session_full(
+                    pending,
+                    bump_updated_at=False,
+                    preserve_projection_fields=True,
+                )
                 self._note_root_file_written(rid)
             except Exception:
                 drain_failed = True
@@ -2931,7 +2935,11 @@ class SessionManager:
         # the caller's lock.
         try:
             with perf.timed("session.tail_persist.write_full"):
-                session_store.write_session_full(sess, bump_updated_at=False)
+                session_store.write_session_full(
+                    sess,
+                    bump_updated_at=False,
+                    preserve_projection_fields=True,
+                )
             self._note_root_file_written(root_id)
         except Exception:
             logger.exception(
@@ -2989,7 +2997,11 @@ class SessionManager:
                             break
                         _persist_last_at[rid] = time.monotonic()
                     try:
-                        session_store.write_session_full(sess, bump_updated_at=False)
+                        session_store.write_session_full(
+                            sess,
+                            bump_updated_at=False,
+                            preserve_projection_fields=True,
+                        )
                         self._note_root_file_written(rid)
                     except Exception:
                         logger.exception(
@@ -5377,7 +5389,11 @@ class SessionManager:
         )
         if rid is not None:
             self._todo_projection_cache.pop(rid, None)
-        session_store._replace_summary_projection_field(sid, "current_todos", next_todos)
+        replaced = session_store._replace_summary_projection_field(sid, "current_todos", next_todos)
+        if not replaced and rid is not None:
+            root = self.get(rid)
+            if root is not None:
+                session_store._upsert_summary(root)
         return result
 
     # ── Cross-provider current_tasks (TaskCreate / TaskUpdate) ─────
@@ -5410,7 +5426,11 @@ class SessionManager:
         )
         if rid is not None:
             self._todo_projection_cache.pop(rid, None)
-        session_store._replace_summary_projection_field(sid, "current_tasks", next_tasks)
+        replaced = session_store._replace_summary_projection_field(sid, "current_tasks", next_tasks)
+        if not replaced and rid is not None:
+            root = self.get(rid)
+            if root is not None:
+                session_store._upsert_summary(root)
         return result
 
     def apply_provenance_from_event(self, sid: str, normalized: dict) -> bool:

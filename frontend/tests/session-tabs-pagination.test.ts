@@ -65,6 +65,50 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
+  it("retries restored tab summaries after a transient startup miss", async () => {
+    const sessions = Array.from({ length: 60 }, (_, i) =>
+      makeSession({
+        id: `sess-${i + 1}`,
+        name: `Session ${i + 1}`,
+        cwd: i === 59 ? "/tmp/project-b" : "/tmp/project-a",
+      }),
+    );
+    window.history.pushState(null, "", "/s/sess-1");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(["sess-60", "sess-1"]),
+    );
+    const h = await renderApp({
+      seed: {
+        sessions,
+        summaryMissOnceIds: ["sess-60"],
+      },
+    });
+
+    h.emit({
+      type: "session_created",
+      data: {
+        session: makeSession({
+          id: "trigger-session",
+          name: "Trigger",
+          cwd: "/tmp/project-a",
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(
+      await waitFor(
+        h,
+        () => h.$(".session-tabs")?.textContent?.includes("Session 60") === true,
+      ),
+    ).toBe(true);
+    expect(
+      h.restCalls.filter((c) => c.method === "GET" && c.path === "/api/sessions/summaries").length,
+    ).toBeGreaterThanOrEqual(2);
+    h.unmount();
+  }, 15000);
+
   it("keeps session tabs visible for active and Assistant sessions", async () => {
     const assistant = makeSession({
       id: "assistant-session",

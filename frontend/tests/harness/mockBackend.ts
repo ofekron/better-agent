@@ -22,6 +22,7 @@ export interface BackendState {
   config: Record<string, unknown>;
   capabilitySources: unknown[];
   projectSuggestion: ProjectSuggestion | null;
+  summaryMissOnceIds: string[];
   /** Mocked file content keyed by absolute path. FileEditor polls
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
@@ -122,6 +123,7 @@ function emptyState(): BackendState {
     config: { default_model: "claude-sonnet-4-6" },
     capabilitySources: [],
     projectSuggestion: null,
+    summaryMissOnceIds: [],
     files: {},
   };
 }
@@ -350,8 +352,12 @@ export class MockBackend {
     }
     if (method === "GET" && path === "/api/sessions/summaries") {
       const ids = splitFilter(query.ids);
+      const missOnce = new Set(this.state.summaryMissOnceIds);
+      if (missOnce.size > 0) {
+        this.state.summaryMissOnceIds = this.state.summaryMissOnceIds.filter((id) => !ids.has(id));
+      }
       const sessions = this.state.sessions
-        .filter((s) => ids.has(s.id))
+        .filter((s) => ids.has(s.id) && !missOnce.has(s.id))
         .map((s) => sessionSummary(s));
       return { sessions };
     }

@@ -80,7 +80,11 @@ class SessionsStorage(Protocol):
     def get_root_tree(self, session_id: str) -> Optional[dict]: ...
 
     def write_session_full(
-        self, root: dict, *, bump_updated_at: bool = True,
+        self,
+        root: dict,
+        *,
+        bump_updated_at: bool = True,
+        preserve_projection_fields: bool = False,
     ) -> None: ...
 
     def list_sessions(self) -> list[dict]: ...

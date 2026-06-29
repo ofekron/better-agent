@@ -54,6 +54,7 @@ from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import extension_store  # noqa: E402
 import session_event_extensions  # noqa: E402
+import session_store  # noqa: E402
 from backend.extractor import (  # noqa: E402
     extract_todos_from_normalized,
     extract_tasks_from_normalized,
@@ -1501,6 +1502,36 @@ def test_sidebar_summary_includes_current_todos_and_tasks() -> bool:
     return True
 
 
+def test_summary_by_ids_loads_requested_todos_before_warm_index() -> bool:
+    sid, _msg = _mk_session("native")
+    todos = [
+        {"content": "Keep restored tab badge accurate", "status": "in_progress", "activeForm": "badge"},
+    ]
+    session_manager.set_current_todos(sid, todos)
+    session_manager.flush_pending_persists()
+
+    acquired = session_store._summary_build_lock.acquire(blocking=False)
+    if not acquired:
+        print("  could not lock summary builder for cold-index simulation")
+        return False
+    try:
+        with session_store._summary_index_lock:
+            session_store._summary_index.clear()
+            session_store._summary_index_loaded = False
+        summaries = session_store.get_session_summaries_by_ids([sid])
+    finally:
+        session_store._summary_build_lock.release()
+
+    if not summaries:
+        print("  summary-by-ids returned no requested session before warm index")
+        return False
+    got = summaries[0].get("current_todos")
+    if got != todos:
+        print(f"  summary-by-ids returned stale todos: {got}")
+        return False
+    return True
+
+
 # ─── Codex todo_list tests ───────────────────────────────────────
 
 def test_codex_todo_list_first_incomplete_is_in_progress() -> bool:
@@ -2428,6 +2459,7 @@ TESTS = [
         test_run_turn_gate_covers_every_user_prompt),
     ("get_current_todos_snapshot returns copy", test_get_current_todos_snapshot_returns_copy),
     ("sidebar summary includes current todos/tasks", test_sidebar_summary_includes_current_todos_and_tasks),
+    ("summary-by-ids loads requested todos before warm index", test_summary_by_ids_loads_requested_todos_before_warm_index),
     ("Codex todo_list: first incomplete → in_progress", test_codex_todo_list_first_incomplete_is_in_progress),
     ("Codex todo_list: completed then first incomplete", test_codex_todo_list_completed_then_first_incomplete),
     ("Codex todo_list: all completed → no in_progress", test_codex_todo_list_all_completed_no_in_progress),

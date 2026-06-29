@@ -2038,8 +2038,15 @@ class Coordinator:
             return {"response_message_id": None, "assistant_content": ""}
         return {
             "response_message_id": assistant_msg.get("id"),
-            "assistant_content": assistant_msg.get("content") or "",
+            "assistant_content": self._team_message_assistant_content(assistant_msg),
         }
+
+    def _team_message_assistant_content(self, assistant_msg: dict) -> str:
+        content = assistant_msg.get("content")
+        if isinstance(content, str) and content:
+            return content
+        events = assistant_msg.get("events") or []
+        return _extract_output_text(_strip_synthetic_events(events)) if events else ""
 
     def _team_message_user_and_assistant(
         self,
@@ -2134,7 +2141,7 @@ class Coordinator:
 
         response = {
             "response_message_id": assistant_msg.get("id"),
-            "assistant_content": assistant_msg.get("content") or "",
+            "assistant_content": self._team_message_assistant_content(assistant_msg),
         }
         complete = self._team_message_complete_for_assistant(
             target_session_id=target_session_id,
