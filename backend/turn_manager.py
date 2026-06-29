@@ -51,6 +51,7 @@ from event_shape import (
     is_synthetic_event as _is_synthetic_event,
 )
 from capability_contexts import provider_capability_contexts
+from extension_context_audit import runtime_context as extension_audit_context
 from runtime_skills import runtime_skill_contexts
 from i18n import t
 from provider import StreamEvent
@@ -1677,12 +1678,17 @@ class TurnManager:
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
+        dynamic_capability_contexts = extension_audit_context(
+            cwd,
+            bare_config=bool((_session_rec or {}).get("bare_config")),
+        )
         run_capability_contexts = _provider_capability_contexts(
             [*session_capability_contexts, *(capability_contexts or [])],
             provider_kind,
         )
         run_capability_contexts = [
             *runtime_capability_contexts,
+            *dynamic_capability_contexts,
             *run_capability_contexts,
         ]
         transient_attempt = 0
@@ -1793,12 +1799,17 @@ class TurnManager:
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
+            dynamic_capability_contexts = extension_audit_context(
+                cwd,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
             run_capability_contexts = _provider_capability_contexts(
                 [*session_capability_contexts, *(capability_contexts or [])],
                 provider_kind,
             )
             run_capability_contexts = [
                 *runtime_capability_contexts,
+                *dynamic_capability_contexts,
                 *run_capability_contexts,
             ]
 

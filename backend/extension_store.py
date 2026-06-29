@@ -4705,6 +4705,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "has_quick_button": bool(entrypoints.get("quick_button")),
         "has_page": bool(entrypoints.get("page")),
         "harness_delivery": harness_delivery_mode(extension_id),
+        "harness_additions": extension_harness_additions(record),
         "ui": get_ui_settings(extension_id),
         "mcp": extension_mcp_servers(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),
@@ -4716,6 +4717,32 @@ def extension_config(extension_id: str) -> dict[str, Any]:
             "effective": effective_permissions(record),
         },
     }
+
+
+def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, str]]:
+    manifest = record.get("manifest") or {}
+    entrypoints = manifest.get("entrypoints") or {}
+    additions: list[dict[str, str]] = []
+    for item in extension_instructions.instruction_items_from_entrypoints(entrypoints) or []:
+        if isinstance(item, dict) and item.get("name"):
+            additions.append({
+                "kind": "instructions",
+                "name": str(item["name"]),
+                "detail": "project" if item.get("level") == "project" else "global",
+            })
+    for item in entrypoints.get("skills") or []:
+        if isinstance(item, dict) and item.get("name"):
+            additions.append({"kind": "skill", "name": str(item["name"]), "detail": ""})
+    for item in _stored_mcp_entrypoints(record):
+        name = str(item.get("name") or "")
+        if not name or name in _RESERVED_MCP_SERVER_NAMES:
+            continue
+        additions.append({
+            "kind": "mcp",
+            "name": name,
+            "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name) else "disabled",
+        })
+    return additions
 
 
 def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:

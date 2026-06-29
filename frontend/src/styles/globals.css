@@ -4979,6 +4979,38 @@ button.run-badge-clickable:focus-visible {
   display: inline-flex;
   min-width: min(220px, 100%);
 }
+.extension-ui-settings-harness-additions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.extension-ui-settings-harness-addition {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.extension-ui-settings-harness-kind {
+  color: var(--accent);
+  font-weight: 600;
+}
+.extension-ui-settings-harness-name {
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.extension-ui-settings-harness-detail {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: calc(11px * var(--app-font-scale));
+}
 .extension-ui-settings-permission {
   width: 100%;
   min-width: 0;

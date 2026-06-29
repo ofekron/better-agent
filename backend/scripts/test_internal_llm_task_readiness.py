@@ -74,6 +74,7 @@ def run() -> None:
         "delegation_message",
         "delegation_ask",
         "delegation_session_bridge",
+        "extension_context_audit",
     ):
         check(
             task in config_store.INTERNAL_LLM_TASKS,

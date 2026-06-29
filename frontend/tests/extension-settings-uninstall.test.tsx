@@ -125,4 +125,52 @@ describe("ExtensionUiSettingsSection uninstall", () => {
       );
     });
   });
+
+  it("shows harness additions on extension items", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            {
+              enabled: true,
+              manifest: {
+                id: "better-agent.harness-for-better-agent",
+                entrypoints: {
+                  instructions: [{ name: "Better Agent Harness Behavior", level: "global" }],
+                  skills: [{ name: "project-structure" }],
+                  mcp: [{ name: "better-agent-coordination" }],
+                },
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/better-agent.harness-for-better-agent/config")) {
+        return jsonResponse({
+          name: "Better Agent Harness",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Better Agent Harness")).toBeTruthy();
+    expect(screen.getByText("Harness additions")).toBeTruthy();
+    expect(screen.getByText("Better Agent Harness Behavior")).toBeTruthy();
+    expect(screen.getByText("project-structure")).toBeTruthy();
+    expect(screen.getByText("better-agent-coordination")).toBeTruthy();
+  });
 });
