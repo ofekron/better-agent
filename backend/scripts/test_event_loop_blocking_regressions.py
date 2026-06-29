@@ -842,6 +842,14 @@ def test_session_exists_uses_index_without_cold_root_load() -> None:
     end = source.index("    def get_field(", start)
     exists_source = source[start:end]
     assert "session_store._resolve_root_id(sid)" in exists_source
+    assert "session_store._loaded_root_id_for(sid)" in exists_source
+    assert "session_store.session_file_fingerprint(sid)" in exists_source
+    assert exists_source.index("session_store._loaded_root_id_for(sid)") < exists_source.index(
+        "session_store.session_file_fingerprint(sid)"
+    )
+    assert exists_source.index("session_store.session_file_fingerprint(sid)") < exists_source.index(
+        "session_store._resolve_root_id(sid)"
+    )
     assert "self._load_root(" not in exists_source
     assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
 
@@ -852,6 +860,14 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     end = source.index("    def _lock_for_root(", start)
     helper_source = source[start:end]
     assert "rid = self._node_root_id.get(sid)" in helper_source
+    assert "session_store._loaded_root_id_for(sid)" in helper_source
+    assert "session_store.session_file_fingerprint(sid)" in helper_source
+    assert helper_source.index("session_store._loaded_root_id_for(sid)") < helper_source.index(
+        "session_store.session_file_fingerprint(sid)"
+    )
+    assert helper_source.index("session_store.session_file_fingerprint(sid)") < helper_source.index(
+        "rid = session_store._resolve_root_id(sid)"
+    )
     assert "self._node_root_missing_until.get(sid, 0.0) > now" in helper_source
     assert "rid = session_store._resolve_root_id(sid)" in helper_source
     assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
@@ -2080,24 +2096,35 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     assert "if not summary_changed:" in upsert_source
     assert "root_mtime_ns=root_mtime_ns" in upsert_source
     assert "if summary_changed or not sidecar_current:" in upsert_source
+    assert "if sync_sidecar:" in upsert_source
+    assert "_write_summary_file(" in upsert_source
     assert "_schedule_summary_sidecar_write(" in upsert_source
-    assert "_write_summary_file(" not in upsert_source
     write_start = source.index("def write_session_full(")
     write_end = source.index("def list_sessions(", write_start)
     write_source = source[write_start:write_end]
     assert "root_mtime_ns=file_signature[0] if file_signature is not None else None" in write_source
+    assert "sync_sidecar=bool(root.get(\"forks\"))" in write_source
 
 
-def test_root_resolution_consults_loaded_index_before_filesystem_exists() -> None:
+def test_root_resolution_consults_loaded_index_before_filesystem_shortcut() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def _resolve_root_id(")
     end = source.index("def _session_path(", start)
     helper_source = source[start:end]
+    loaded_start = source.index("def _loaded_root_id_for(")
+    loaded_end = source.index("def _resolve_root_id(", loaded_start)
+    loaded_source = source[loaded_start:loaded_end]
+    assert "(_sessions_dir() / f\"{sid}.json\").exists()" in helper_source
     assert "_ensure_index()" in helper_source
-    assert "sid in _root_index_signatures" in helper_source
-    assert "sid in _fork_index" in helper_source
-    assert helper_source.index("sid in _root_index_signatures") < helper_source.index(
+    assert "_loaded_root_id_for(sid)" in helper_source
+    assert "if not _index_loaded:" in loaded_source
+    assert "sid in _root_index_signatures" in loaded_source
+    assert "_fork_index.get(sid)" in loaded_source
+    assert helper_source.index("_loaded_root_id_for(sid)") < helper_source.index(
         "(_sessions_dir() / f\"{sid}.json\").exists()"
+    )
+    assert helper_source.index("(_sessions_dir() / f\"{sid}.json\").exists()") < helper_source.index(
+        "_ensure_index()"
     )
 
 
@@ -3063,7 +3090,7 @@ if __name__ == "__main__":
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()
-    test_root_resolution_consults_loaded_index_before_filesystem_exists()
+    test_root_resolution_consults_loaded_index_before_filesystem_shortcut()
     test_summary_index_skips_empty_projection_scan()
     test_summary_index_validates_missing_summary_before_provider_context()
     test_extension_audit_inventory_refresh_is_off_provider_hot_path()

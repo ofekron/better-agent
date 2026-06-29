@@ -74,7 +74,54 @@ def test_session_manager_unknown_sid_resolution_is_negative_cached() -> None:
         session_store._resolve_root_id = original_resolve  # type: ignore[attr-defined]
 
 
+def test_session_store_root_sid_skips_index_load() -> None:
+    _reset_index()
+    created = session_manager.create(
+        name="root-fast",
+        cwd="/tmp/project",
+        orchestration_mode="native",
+    )
+    sid = created["id"]
+    original_ensure = session_store._ensure_index  # type: ignore[attr-defined]
+
+    def fail_ensure() -> None:
+        raise AssertionError("root sid should not load the fork index")
+
+    session_store._ensure_index = fail_ensure  # type: ignore[attr-defined]
+    try:
+        assert session_store._resolve_root_id(sid) == sid  # type: ignore[attr-defined]
+    finally:
+        session_store._ensure_index = original_ensure  # type: ignore[attr-defined]
+
+
+def test_loaded_fork_mapping_wins_over_stray_root_file() -> None:
+    _reset_index()
+    root = session_manager.create(
+        name="root-with-fork",
+        cwd="/tmp/project",
+        orchestration_mode="native",
+    )
+    child_id = "child-stray"
+    with session_store._index_lock:  # type: ignore[attr-defined]
+        session_store._index_loaded = True  # type: ignore[attr-defined]
+        session_store._fork_index[child_id] = root["id"]  # type: ignore[attr-defined]
+        session_store._root_forks[root["id"]] = {child_id}  # type: ignore[attr-defined]
+        session_store._root_index_signatures[root["id"]] = (  # type: ignore[attr-defined]
+            session_store.session_file_fingerprint(root["id"])
+        )
+    (session_store._sessions_dir() / f"{child_id}.json").write_text(  # type: ignore[attr-defined]
+        '{"id":"stray-child-file"}',
+        encoding="utf-8",
+    )
+
+    assert session_store._resolve_root_id(child_id) == root["id"]  # type: ignore[attr-defined]
+    session_manager._node_root_id.clear()  # type: ignore[attr-defined]
+    assert session_manager._root_id_for(child_id) == root["id"]  # type: ignore[attr-defined]
+
+
 if __name__ == "__main__":
     test_unknown_sid_resolution_is_negative_cached_until_dir_changes()
     test_session_manager_unknown_sid_resolution_is_negative_cached()
+    test_session_store_root_sid_skips_index_load()
+    test_loaded_fork_mapping_wins_over_stray_root_file()
     print("PASS root resolve negative cache")
