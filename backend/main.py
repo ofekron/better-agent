@@ -57,6 +57,7 @@ import perf
 import provider_setup
 import user_input_store
 import file_panel_drafts
+from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 
 # Resolved once at import time — stable for the process lifetime.
 _GIT_HASH: str | None = None
@@ -9862,6 +9863,7 @@ async def on_shutdown():
         logger.exception("provider poll executor shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    shutdown_ws_json_executor()
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
     # before hitting disk — without this drain a clean shutdown would
@@ -13920,12 +13922,7 @@ async def websocket_chat(websocket: WebSocket):
             if serialized_task is not None:
                 text = await serialized_task
             else:
-                text = await asyncio.to_thread(
-                    json.dumps,
-                    event_dict,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
+                text = await dumps_ws_json(event_dict)
             perf.record(
                 "ws.send_json.serialize_off_loop",
                 (time.perf_counter() - serialize_t) * 1000.0,
