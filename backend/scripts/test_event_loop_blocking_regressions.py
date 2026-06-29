@@ -970,7 +970,15 @@ def test_session_list_does_not_prewarm_snapshots() -> None:
 def test_session_list_warms_event_meta_off_path() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _schedule_session_event_meta_warm(" in source
+    assert "def _session_detail_projection_roots_for_page(" in source
+    assert "def _warm_session_detail_projection_roots(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
+    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, pending)" in source
+    warm_start = source.index("def _schedule_session_event_meta_warm(")
+    warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
+    warm_source = source[warm_start:warm_end]
+    assert "_session_detail_projection_roots_for_page(page)" in warm_source
+    assert "_warm_session_detail_projection_roots(projection_root_ids)" in warm_source
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]

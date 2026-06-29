@@ -92,6 +92,7 @@ _session_event_meta_cache: dict[
 _session_organization_refresh_task: asyncio.Task | None = None
 _session_organization_refresh_pending = False
 _session_event_meta_warm_inflight: set[str] = set()
+_session_detail_projection_warm_inflight: set[str] = set()
 _SESSION_EVENT_META_WARM_LIMIT = 20
 _SESSION_EVENT_META_GLOBAL_WARM_LIMIT = 250
 _SESSION_EVENT_META_GLOBAL_WARM_BATCH = 4
@@ -219,6 +220,26 @@ def _session_event_meta_roots_for_page(page: list[dict]) -> list[str]:
     return root_ids
 
 
+def _session_detail_projection_roots_for_page(page: list[dict]) -> list[str]:
+    root_ids: list[str] = []
+    seen: set[str] = set()
+    for session in page:
+        if len(root_ids) >= _SESSION_EVENT_META_WARM_LIMIT:
+            break
+        if session.get("node_id") not in (None, "primary"):
+            continue
+        if int(session.get("message_count") or 0) <= 0:
+            continue
+        root_id = session.get("id")
+        if not isinstance(root_id, str) or not root_id or root_id in seen:
+            continue
+        if _session_event_file_fingerprint(root_id) == (0, 0):
+            continue
+        seen.add(root_id)
+        root_ids.append(root_id)
+    return root_ids
+
+
 async def _warm_session_event_meta_roots(root_ids: list[str]) -> None:
     pending: list[str] = []
     for root_id in root_ids:
@@ -260,6 +281,23 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
             logger.debug("session detail projection warm failed for %s", root_id, exc_info=True)
 
 
+async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
+    pending: list[str] = []
+    for root_id in root_ids:
+        if root_id in _session_detail_projection_warm_inflight:
+            continue
+        _session_detail_projection_warm_inflight.add(root_id)
+        pending.append(root_id)
+    if not pending:
+        return
+
+    try:
+        await asyncio.to_thread(_warm_session_detail_projection_roots_sync, pending)
+    finally:
+        for root_id in pending:
+            _session_detail_projection_warm_inflight.discard(root_id)
+
+
 def _session_event_projection_warm_roots(limit: int) -> list[str]:
     sessions_dir = ba_home() / "sessions"
     rows: list[tuple[int, str]] = []
@@ -299,10 +337,13 @@ async def _warm_session_event_projections() -> None:
 
 def _schedule_session_event_meta_warm(page: list[dict]) -> None:
     root_ids = _session_event_meta_roots_for_page(page)
-    if not root_ids:
-        return
-    task = asyncio.create_task(_warm_session_event_meta_roots(root_ids))
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    if root_ids:
+        task = asyncio.create_task(_warm_session_event_meta_roots(root_ids))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    projection_root_ids = _session_detail_projection_roots_for_page(page)
+    if projection_root_ids:
+        task = asyncio.create_task(_warm_session_detail_projection_roots(projection_root_ids))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
 def _machine_nodes_enabled_cached() -> bool:
