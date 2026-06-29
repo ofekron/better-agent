@@ -555,6 +555,17 @@ def _json_bytes_response(value: dict) -> Response:
     return Response(content=content, media_type="application/json")
 
 
+async def _json_bytes_response_async(value: dict) -> Response:
+    content = await asyncio.to_thread(
+        json.dumps,
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    return Response(content=content.encode("utf-8"), media_type="application/json")
+
+
 def _sessions_list_response_maybe_cache(
     cache_key: tuple,
     value: dict,
@@ -600,6 +611,30 @@ def _session_detail_cache_put(key: tuple, value: dict) -> Response:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
+    _session_detail_response_cache[key] = content
+    simple_key = _session_detail_simple_cache_key_from_full(key)
+    if simple_key is not None:
+        _session_detail_response_cache_latest[simple_key] = key
+    return Response(content=content, media_type="application/json")
+
+
+async def _session_detail_cache_put_async(key: tuple, value: dict) -> Response:
+    content_text = await asyncio.to_thread(
+        json.dumps,
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    while len(_session_detail_response_cache) >= _SESSION_DETAIL_RESPONSE_CACHE_MAX:
+        old_key, _ = _session_detail_response_cache.popitem(last=False)
+        old_simple = _session_detail_simple_cache_key_from_full(old_key)
+        if (
+            old_simple is not None
+            and _session_detail_response_cache_latest.get(old_simple) == old_key
+        ):
+            _session_detail_response_cache_latest.pop(old_simple, None)
+    content = content_text.encode("utf-8")
     _session_detail_response_cache[key] = content
     simple_key = _session_detail_simple_cache_key_from_full(key)
     if simple_key is not None:
@@ -6683,8 +6718,8 @@ async def get_session(
     else:
         tree.pop("_detail_response_cache_key_parts", None)
     if cache_key is not None:
-        return _session_detail_cache_put(cache_key, tree)
-    return _json_bytes_response(tree)
+        return await _session_detail_cache_put_async(cache_key, tree)
+    return await _json_bytes_response_async(tree)
 
 
 @app.get("/api/sessions/{session_id}/messages")
