@@ -34,7 +34,6 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
 )
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_STATUS_SORT = False
-DEFAULT_SESSION_TABS_STATUS_SORT = False
 DEFAULT_SESSION_TABS_VISIBLE = True
 DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
@@ -340,26 +339,6 @@ def set_session_status_sort(enabled: bool) -> bool:
     return enabled
 
 
-def get_session_tabs_status_sort() -> bool:
-    """Status-bucket grouping for the open-session tabs bar (same buckets as
-    the sidebar). Tabs are fully loaded client-side so the frontend ranks
-    off the live registry; this pref just persists the toggle."""
-    return _bool_pref(
-        _load(),
-        "sessions_tabs_status_sort",
-        DEFAULT_SESSION_TABS_STATUS_SORT,
-    )
-
-
-def set_session_tabs_status_sort(enabled: bool) -> bool:
-    if not isinstance(enabled, bool):
-        raise ValueError(f"Invalid sessions_tabs_status_sort: {enabled!r}")
-    prefs = _load()
-    prefs["sessions_tabs_status_sort"] = enabled
-    _save(prefs)
-    return enabled
-
-
 def get_session_tabs_sort() -> SessionTabsSort:
     """Which timestamp the open-session tabs bar sorts by (descending):
     last modification, last user prompt, or last opened on a client."""
@@ -545,11 +524,6 @@ def get_all() -> dict:
             "sessions_tabs_sort",
             DEFAULT_SESSION_TABS_SORT,
             SESSION_TABS_SORT_VALUES,
-        ),
-        "sessions_tabs_status_sort": _bool_pref(
-            prefs,
-            "sessions_tabs_status_sort",
-            DEFAULT_SESSION_TABS_STATUS_SORT,
         ),
         "sessions_tabs_visible": _bool_pref(
             prefs,

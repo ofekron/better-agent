@@ -220,6 +220,59 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("ignores the removed session-tabs status sort preference", async () => {
+    const oldRunning = makeSession({
+      id: "old-running",
+      name: "Old Running",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const newIdle = makeSession({
+      id: "new-idle",
+      name: "New Idle",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([oldRunning.id, newIdle.id]),
+    );
+    const h = await renderApp({ seed: { sessions: [oldRunning, newIdle] } });
+
+    expect(
+      await waitFor(
+        h,
+        () =>
+          h.$$(".session-tab-wrapper").map((el) => el.dataset.tabMovementKey).join(",") ===
+          "new-idle,old-running",
+      ),
+    ).toBe(true);
+
+    h.emit({
+      type: "user_prefs_changed",
+      data: {
+        sessions_tabs_status_sort: true,
+      },
+    });
+    await h.flush();
+    h.emit({
+      type: "session_monitoring_changed",
+      data: {
+        session_id: oldRunning.id,
+        cwd: oldRunning.cwd,
+        node_id: "primary",
+        monitoring_state: "active",
+      },
+    });
+    await h.flush();
+
+    expect(h.$$(".session-tab-wrapper").map((el) => el.dataset.tabMovementKey)).toEqual([
+      "new-idle",
+      "old-running",
+    ]);
+    h.unmount();
+  }, 10000);
+
   it("shows open session tabs when no session is selected", async () => {
     const sessions = ["One", "Two"].map((name, i) =>
       makeSession({

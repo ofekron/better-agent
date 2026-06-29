@@ -2188,11 +2188,6 @@ async def patch_user_prefs(body: dict = Body(...)):
             if not isinstance(val, str):
                 raise ValueError("sessions_tabs_sort must be a string")
             user_prefs.set_session_tabs_sort(val)
-        if "sessions_tabs_status_sort" in body:
-            val = body["sessions_tabs_status_sort"]
-            if not isinstance(val, bool):
-                raise ValueError("sessions_tabs_status_sort must be a boolean")
-            user_prefs.set_session_tabs_status_sort(val)
         if "sessions_tabs_visible" in body:
             val = body["sessions_tabs_visible"]
             if not isinstance(val, bool):

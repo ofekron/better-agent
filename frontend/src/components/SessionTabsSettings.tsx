@@ -15,7 +15,6 @@ function normalize(value: unknown): SortValue {
 export function SessionTabsSettings() {
   const { t } = useTranslation();
   const [sort, setSort] = useState<SortValue>("last_opened_at");
-  const [statusSort, setStatusSort] = useState(false);
   const [visible, setVisible] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -25,11 +24,9 @@ export function SessionTabsSettings() {
       .then((r: Response) => r.json())
       .then((data: {
         sessions_tabs_sort?: unknown;
-        sessions_tabs_status_sort?: unknown;
         sessions_tabs_visible?: unknown;
       }) => {
         setSort(normalize(data.sessions_tabs_sort));
-        if (typeof data.sessions_tabs_status_sort === "boolean") setStatusSort(data.sessions_tabs_status_sort);
         if (typeof data.sessions_tabs_visible === "boolean") setVisible(data.sessions_tabs_visible);
       })
       .catch(() => {});
@@ -83,18 +80,6 @@ export function SessionTabsSettings() {
             { value: "updated_at", label: t("session.sortByModified") },
             { value: "last_user_prompt_at", label: t("session.sortByUserPrompt") },
           ]}
-        />
-      </label>
-      <label className="context-strategy-row" title={t("session.groupByStatusHint")}>
-        <span>{t("session.groupByStatus")}</span>
-        <input
-          type="checkbox"
-          checked={statusSort}
-          disabled={saving || !visible}
-          onChange={(e) => void patch(
-            { sessions_tabs_status_sort: e.target.checked },
-            () => setStatusSort(e.target.checked),
-          )}
         />
       </label>
     </div>
