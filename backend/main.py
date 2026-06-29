@@ -117,6 +117,10 @@ _sessions_list_response_cache: dict[
 ] = {}
 _sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
 _sidebar_decorated_cache: dict[tuple, dict] = {}
+_sidebar_state_snapshot_cache: tuple[
+    tuple[int, int, int],
+    tuple[set[str], dict[str, str], dict[str, int], dict[str, int]],
+] | None = None
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
 _remote_sessions_refresh_tasks: set[str] = set()
@@ -2663,10 +2667,20 @@ def _sidebar_session_payload(session: dict) -> dict:
 
 
 def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int]]:
+    global _sidebar_state_snapshot_cache
+    version = _sessions_list_transient_state_version()
+    cached = _sidebar_state_snapshot_cache
+    if cached is not None and cached[0] == version:
+        return cached[1]
     running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
-    return running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+    snapshot = running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+    _sidebar_state_snapshot_cache = (
+        _sessions_list_transient_state_version(),
+        snapshot,
+    )
+    return snapshot
 
 
 def _decorate_local_sidebar_sessions(
