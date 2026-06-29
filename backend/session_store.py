@@ -4449,6 +4449,47 @@ def _metadata_search_scores(query: str, fields: set[str]) -> dict[str, int]:
     return scores
 
 
+def _rank_search_score_items(
+    scores: dict[str, int],
+    *,
+    offset: int,
+    limit: int,
+    sort_by: str,
+    folder_view: bool,
+) -> tuple[list[tuple[str, int]], int]:
+    if not scores:
+        return [], 0
+    import heapq
+
+    def visible(summary: dict) -> bool:
+        wm = summary.get("working_mode")
+        if not wm:
+            return True
+        meta = summary.get("working_mode_meta") or {}
+        return wm == "file_editing" and bool(meta.get("persistent"))
+
+    _ensure_summary_index(blocking=False)
+    with _summary_index_lock:
+        sort_keys = {
+            sid: (
+                bool(summary.get("folder_id")) if folder_view else False,
+                bool(summary.get("pinned", False)),
+                score,
+                timestamp_sort_value(summary.get(sort_by)),
+            )
+            for sid, score in scores.items()
+            if (summary := _summary_index.get(sid)) is not None
+            and visible(summary)
+        }
+    end = max(offset + limit, 0)
+    items = ((sid, scores[sid]) for sid in sort_keys)
+    if 0 < end < len(sort_keys):
+        ranked = heapq.nlargest(end, items, key=lambda item: sort_keys[item[0]])
+    else:
+        ranked = sorted(items, key=lambda item: sort_keys[item[0]], reverse=True)
+    return ranked[offset:end], len(sort_keys)
+
+
 def grep_session_scores(
     query: str,
     fields: Iterable[str] | None = None,
@@ -4480,7 +4521,38 @@ def grep_session_scores(
     return scores
 
 
+def grep_session_score_page(
+    query: str,
+    fields: Iterable[str] | None = None,
+    *,
+    offset: int = 0,
+    limit: int = 50,
+    sort_by: str = "updated_at",
+    folder_view: bool = False,
+    content_limit: int = 10_000,
+    content_max_wait_seconds: float | None = None,
+) -> tuple[list[tuple[str, int]], int]:
+    scores = grep_session_scores(
+        query,
+        fields,
+        content_limit=content_limit,
+        content_max_wait_seconds=content_max_wait_seconds,
+    )
+    return _rank_search_score_items(
+        scores,
+        offset=offset,
+        limit=limit,
+        sort_by=sort_by,
+        folder_view=folder_view,
+    )
+
+
 def grep_sessions(query: str, limit: int = 50, fields: Iterable[str] | None = None) -> list[dict]:
-    scores = grep_session_scores(query, fields, content_limit=max(limit, 1))
-    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+    ranked, _total = grep_session_score_page(
+        query,
+        fields,
+        offset=0,
+        limit=limit,
+        content_limit=max(limit, 1),
+    )
     return [{"session_id": sid, "score": score} for sid, score in ranked]
