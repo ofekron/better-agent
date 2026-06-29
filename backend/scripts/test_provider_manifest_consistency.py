@@ -89,11 +89,11 @@ def test_codex_only_gates():
 def test_runner_choices_are_valid():
     for kind, spec in pm.SPECS.items():
         assert spec.runner_choices, kind
-        assert set(spec.runner_choices).issubset({"native", "openai"}), kind
-        if spec.runner_choices == ("openai",):
+        assert set(spec.runner_choices).issubset({"native", "better_agent_runner"}), kind
+        if spec.runner_choices == ("better_agent_runner",):
             assert pm.runner_module_for(kind) == "runner_openai", kind
     assert pm.default_runner_for("claude") == "native"
-    assert pm.default_runner_for("openai") == "openai"
+    assert pm.default_runner_for("openai") == "better_agent_runner"
 
 
 def test_provider_runner_round_trips():
@@ -105,16 +105,16 @@ def test_provider_runner_round_trips():
         "mode": "api_key",
         "base_url": "https://example.test/v1",
         "default_model": "model",
-        "runner": "openai",
+        "runner": "better_agent_runner",
     })
-    assert openai["runner"] == "openai"
-    assert openai["runner_options"] == ["openai"]
+    assert openai["runner"] == "better_agent_runner"
+    assert openai["runner_options"] == ["better_agent_runner"]
 
     claude = config_store.add_provider({
         "name": "Claude",
         "kind": "claude",
         "mode": "subscription",
-        "runner": "openai",
+        "runner": "better_agent_runner",
     })
     assert claude["runner"] == "native"
     assert claude["runner_options"] == ["native"]

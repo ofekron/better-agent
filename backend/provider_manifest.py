@@ -87,7 +87,7 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner_openai", recovery_family="gemini",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
-        runner_choices=("openai",),
+        runner_choices=("better_agent_runner",),
     ),
     "agy": ProviderSpec(
         kind="agy", module="provider_agy", cls="AgyProvider",

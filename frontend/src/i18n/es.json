@@ -178,7 +178,7 @@
   "setup.apiKeyButton": "Clave API",
   "setup.runnerLabel": "Runner",
   "setup.runner.native": "Native",
-  "setup.runner.openai": "OpenAI",
+  "setup.runner.better_agent_runner": "Better Agent",
   "setup.runnerHint": "Execution engine for this provider.",
   "setup.apiKeyLabel": "ANTHROPIC_API_KEY",
   "setup.apiKeyPlaceholderKeep": "Guardada en el llavero — déjala en blanco para conservarla",

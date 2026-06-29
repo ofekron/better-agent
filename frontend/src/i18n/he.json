@@ -179,7 +179,7 @@
   "setup.apiKeyButton": "מפתח API",
   "setup.runnerLabel": "Runner",
   "setup.runner.native": "Native",
-  "setup.runner.openai": "OpenAI",
+  "setup.runner.better_agent_runner": "Better Agent",
   "setup.runnerHint": "Execution engine for this provider.",
   "setup.apiKeyLabel": "ANTHROPIC_API_KEY",
   "setup.apiKeyPlaceholderKeep": "מאוחסן בצרור המפתחות — השאירו ריק כדי לשמור",
