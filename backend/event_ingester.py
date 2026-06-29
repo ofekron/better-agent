@@ -140,6 +140,9 @@ class EventIngester:
     def _event_meta_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "event_meta.json"
 
+    def _event_summaries_path(self, root_id: str) -> Path:
+        return self._root_dir(root_id) / "event_summaries.json"
+
     @staticmethod
     def _event_file_signature(path: Path) -> Optional[tuple[int, int]]:
         try:
@@ -221,6 +224,69 @@ class EventIngester:
             "root_events_version": root_events_version,
             "root_events_candidate_version": root_events_candidate_version,
             "root_events_by_sid": root_events_by_sid or {},
+        }
+        try:
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp_path, sidecar_path)
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _load_event_summaries_sidecar_locked(
+        self, root_id: str, path: Path, tail: int,
+    ) -> Optional[tuple[dict[str, dict], dict[int, str]]]:
+        signature = self._event_file_signature(path)
+        if signature is None:
+            return None
+        try:
+            sidecar = json.loads(
+                self._event_summaries_path(root_id).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        if (
+            sidecar.get("mtime_ns") != signature[0]
+            or sidecar.get("size") != signature[1]
+            or sidecar.get("tail") != tail
+        ):
+            return None
+        summaries = sidecar.get("summaries")
+        resolutions = sidecar.get("resolutions")
+        if not isinstance(summaries, dict) or not isinstance(resolutions, dict):
+            return None
+        clean_resolutions: dict[int, str] = {}
+        for seq, msg_id in resolutions.items():
+            try:
+                seq_int = int(seq)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(msg_id, str):
+                clean_resolutions[seq_int] = msg_id
+        self._summaries_cache[root_id] = (signature[1], summaries, clean_resolutions)
+        return summaries, clean_resolutions
+
+    def _write_event_summaries_sidecar_locked(
+        self,
+        root_id: str,
+        path: Path,
+        *,
+        tail: int,
+        summaries: dict[str, dict],
+        resolutions: dict[int, str],
+    ) -> None:
+        signature = self._event_file_signature(path)
+        if signature is None:
+            return
+        sidecar_path = self._event_summaries_path(root_id)
+        tmp_path = sidecar_path.with_suffix(".json.tmp")
+        payload = {
+            "mtime_ns": signature[0],
+            "size": signature[1],
+            "tail": tail,
+            "summaries": summaries,
+            "resolutions": {str(k): v for k, v in resolutions.items()},
         }
         try:
             tmp_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -841,6 +907,8 @@ class EventIngester:
         render_projection_version = 0
         root_event_candidate_seqs: set[int] = set()
         resolved_root_event_seqs: set[int] = set()
+        summaries: dict[str, dict] = {}
+        resolutions: dict[int, str] = {}
         parsed_lines = 0
         seq_offsets: list[int] = []
         all_entries: list[dict] = []
@@ -862,6 +930,10 @@ class EventIngester:
                 parsed_lines += 1
                 seq_offsets.append(line_start)
                 all_entries.append(entry)
+                self._update_summary_line(
+                    summaries, resolutions, root_id,
+                    entry, line_start, cur_offset, 25,
+                )
                 sid = entry.get("sid")
                 seq = entry.get("seq")
                 if not isinstance(sid, str) or not isinstance(seq, int):
@@ -891,6 +963,15 @@ class EventIngester:
         self._seq_offsets[root_id] = seq_offsets
         self._next_offset[root_id] = cur_offset
         self._full_scan_cache[root_id] = (cur_offset, all_entries)
+        self._fold_resolutions(root_id, summaries, resolutions)
+        self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)
+        self._write_event_summaries_sidecar_locked(
+            root_id,
+            path,
+            tail=25,
+            summaries=summaries,
+            resolutions=resolutions,
+        )
         root_events_by_sid = (
             self._build_root_events_projection(all_entries)
             if root_events_candidate_version > 0 else {}
@@ -1467,13 +1548,24 @@ class EventIngester:
                     file_size, summaries, resolutions,
                 )
             else:
-                summaries, resolutions = self._scan_summaries(
-                    path, root_id, tail,
-                )
-                self._fold_resolutions(root_id, summaries, resolutions)
-                self._summaries_cache[root_id] = (
-                    file_size, summaries, resolutions,
-                )
+                loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
+                if loaded is not None:
+                    summaries, resolutions = loaded
+                else:
+                    summaries, resolutions = self._scan_summaries(
+                        path, root_id, tail,
+                    )
+                    self._fold_resolutions(root_id, summaries, resolutions)
+                    self._summaries_cache[root_id] = (
+                        file_size, summaries, resolutions,
+                    )
+                    self._write_event_summaries_sidecar_locked(
+                        root_id,
+                        path,
+                        tail=tail,
+                        summaries=summaries,
+                        resolutions=resolutions,
+                    )
             yield summaries, resolutions
 
     def _seq_byte_range(
