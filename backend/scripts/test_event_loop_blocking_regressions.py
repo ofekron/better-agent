@@ -726,14 +726,38 @@ def test_pending_node_polling_uses_public_projection_cache() -> None:
     route_start = main_source.index("async def internal_list_pending_nodes(")
     route_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", route_start)
     route_source = main_source[route_start:route_end]
-    assert "node_link.public_pending_nodes()" in route_source
+    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in route_source
     assert "pending_node_registrations.list_pending()" not in route_source
 
     extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
     dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
     dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
     dispatch_source = extension_source[dispatch_start:dispatch_end]
-    assert "node_link.public_pending_nodes()" in dispatch_source
+    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
+
+
+def test_machine_node_snapshot_reads_are_off_loop() -> None:
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    list_start = main_source.index("async def internal_get_nodes(")
+    list_end = main_source.index("@app.get(\"/api/providers\")", list_start)
+    list_source = main_source[list_start:list_end]
+    pending_start = main_source.index("async def internal_list_pending_nodes(")
+    pending_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", pending_start)
+    pending_source = main_source[pending_start:pending_end]
+    assert "await asyncio.to_thread(node_store.snapshot)" in list_source
+    assert "node_store.snapshot()" not in list_source
+    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in pending_source
+    assert "node_link.public_pending_nodes()" not in pending_source
+
+    extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
+    dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
+    dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
+    dispatch_source = extension_source[dispatch_start:dispatch_end]
+    assert "await asyncio.to_thread(node_store.snapshot)" in dispatch_source
+    assert "node_store.snapshot()" not in dispatch_source
+    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
+    assert "node_link.public_pending_nodes()" not in dispatch_source
+    assert "await asyncio.to_thread(_local_node_id_or_primary)" in dispatch_source
 
 
 def test_session_list_does_not_prewarm_snapshots() -> None:
@@ -1053,6 +1077,8 @@ if __name__ == "__main__":
     test_jsonl_cursor_persistence_uses_dedicated_executor()
     test_event_ingester_indexes_search_outside_root_lock()
     test_private_extension_reconcile_skips_current_smoked_install()
+    test_pending_node_polling_uses_public_projection_cache()
+    test_machine_node_snapshot_reads_are_off_loop()
     test_frontend_entrypoints_do_not_run_smoke_subprocesses()
     test_startup_reenqueue_reads_sessions_off_loop()
     test_startup_does_not_warm_unread_by_hydrating_sessions()

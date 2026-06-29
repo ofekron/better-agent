@@ -1362,7 +1362,7 @@ async def internal_get_nodes(
     node-status badges and the per-worker node selector."""
     try:
         import node_store
-        return node_store.snapshot()
+        return await asyncio.to_thread(node_store.snapshot)
     except Exception:
         logger.exception("get_nodes failed")
         return []
@@ -11394,7 +11394,9 @@ async def internal_list_pending_nodes(
 
     Secrets never leave the server — only the display fingerprint does."""
     import node_link
-    return {"pending_nodes": node_link.public_pending_nodes()}
+    return {
+        "pending_nodes": await asyncio.to_thread(node_link.public_pending_nodes),
+    }
 
 
 @app.post("/api/internal/machine-nodes/approve")
