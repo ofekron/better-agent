@@ -1547,6 +1547,13 @@ class EventIngester:
                 self._summaries_cache[root_id] = (
                     file_size, summaries, resolutions,
                 )
+                self._write_event_summaries_sidecar_locked(
+                    root_id,
+                    path,
+                    tail=tail,
+                    summaries=summaries,
+                    resolutions=resolutions,
+                )
             else:
                 loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
                 if loaded is not None:
