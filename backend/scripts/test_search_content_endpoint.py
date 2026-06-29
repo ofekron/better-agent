@@ -316,6 +316,65 @@ def identical_searches_coalesce_test() -> bool:
     return ok
 
 
+def smaller_search_coalesces_with_larger_inflight_test() -> bool:
+    session_search_index._search_cache.clear()
+    session_search_index._search_inflight.clear()
+    original_connect = session_search_index._connect_readonly
+    original_candidate_scores = session_search_index._candidate_scores
+    calls: list[int] = []
+    calls_lock = threading.Lock()
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    def fake_connect():
+        return FakeConn()
+
+    def slow_candidate_scores(_conn, _query, limit, **_kwargs):
+        with calls_lock:
+            calls.append(limit)
+        time.sleep(0.1)
+        return [(f"sid-{i}", limit - i) for i in range(limit)]
+
+    session_search_index._connect_readonly = fake_connect
+    session_search_index._candidate_scores = slow_candidate_scores
+    results: dict[str, list[dict]] = {}
+    try:
+        larger = threading.Thread(
+            target=lambda: results.setdefault(
+                "larger",
+                session_search_index.search("shared-limit-query", limit=20),
+            )
+        )
+        smaller = threading.Thread(
+            target=lambda: results.setdefault(
+                "smaller",
+                session_search_index.search("shared-limit-query", limit=5),
+            )
+        )
+        larger.start()
+        time.sleep(0.02)
+        smaller.start()
+        larger.join()
+        smaller.join()
+    finally:
+        session_search_index._connect_readonly = original_connect
+        session_search_index._candidate_scores = original_candidate_scores
+        session_search_index._search_cache.clear()
+        session_search_index._search_inflight.clear()
+    ok = (
+        calls == [20]
+        and len(results.get("larger") or []) == 20
+        and results.get("smaller") == results["larger"][:5]
+    )
+    print(
+        f"{PASS if ok else FAIL} smaller cold search reuses larger in-flight search "
+        f"-- calls={calls}",
+    )
+    return ok
+
+
 def content_search_caps_matched_rows_test() -> bool:
     class FakeConn:
         def __init__(self):
@@ -390,6 +449,7 @@ if __name__ == "__main__":
         ok = grep_sessions_passes_bounded_limit_test() and ok
         ok = bounded_search_returns_while_cache_fills_test() and ok
         ok = identical_searches_coalesce_test() and ok
+        ok = smaller_search_coalesces_with_larger_inflight_test() and ok
         ok = content_search_caps_matched_rows_test() and ok
         ok = larger_cached_search_satisfies_smaller_limit_test() and ok
         ok = main_test() and ok

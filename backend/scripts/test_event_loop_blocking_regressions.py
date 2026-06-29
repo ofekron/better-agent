@@ -148,6 +148,8 @@ def test_session_content_search_aggregates_in_sqlite() -> None:
     candidate_end = source.index("def _match_literal(", candidate_start)
     candidate_source = source[candidate_start:candidate_end]
     assert "_candidate_scores(conn, q, limit)" in search_source
+    assert "def _inflight_event_for_limit(" in source
+    assert "event = _inflight_event_for_limit(q, limit)" in search_source
     assert "COUNT(*) AS score" in candidate_source
     assert "GROUP BY session_id ORDER BY score DESC LIMIT ?" in candidate_source
     assert "SELECT session_id, text" not in candidate_source

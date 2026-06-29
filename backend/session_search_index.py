@@ -54,6 +54,21 @@ def _cached_rows_for_limit(
     return best_rows[:limit]
 
 
+def _inflight_event_for_limit(
+    query: str,
+    limit: int,
+) -> threading.Event | None:
+    best_limit: int | None = None
+    best_event: threading.Event | None = None
+    for (inflight_query, inflight_limit), event in _search_inflight.items():
+        if inflight_query != query or inflight_limit < limit:
+            continue
+        if best_limit is None or inflight_limit < best_limit:
+            best_limit = inflight_limit
+            best_event = event
+    return best_event
+
+
 def _db_path() -> Path:
     return ba_home() / "session_search_index.sqlite3"
 
@@ -256,6 +271,8 @@ def search(
             if reusable_rows is not None:
                 return [{"session_id": sid, "score": score} for sid, score in reusable_rows]
             event = _search_inflight.get(cache_key)
+            if event is None:
+                event = _inflight_event_for_limit(q, limit)
             if event is None:
                 event = threading.Event()
                 _search_inflight[cache_key] = event
