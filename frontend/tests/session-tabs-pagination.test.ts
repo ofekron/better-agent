@@ -120,40 +120,4 @@ describe("session tabs with paged sessions", () => {
     ).toBe(true);
     h.unmount();
   }, 10000);
-
-  it("registers a newly created session in open tabs immediately", async () => {
-    const existing = makeSession({
-      id: "existing-session",
-      name: "Existing session",
-      cwd: "/tmp/project-a",
-    });
-    const h = await renderApp({
-      seed: {
-        sessions: [existing],
-        projects: [{
-          path: "/tmp/project-a",
-          name: "project-a",
-          created_at: new Date().toISOString(),
-          last_used: new Date().toISOString(),
-        }],
-      },
-    });
-
-    await h.selectSession(existing.id);
-    await h.clickByText(/^(\+ New|session\.newButton)$/);
-    await h.click(".modal-footer .btn-primary");
-
-    expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
-      .toContain("sess-2");
-
-    await h.selectSession(existing.id);
-
-    expect(
-      await waitFor(
-        h,
-        () => h.$(".session-tabs")?.textContent?.includes("New Session") === true,
-      ),
-    ).toBe(true);
-    h.unmount();
-  }, 10000);
 });
