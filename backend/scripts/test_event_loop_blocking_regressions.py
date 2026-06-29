@@ -60,6 +60,17 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     assert "frontend_logger.log(log_level, line)" not in frontend_source
 
 
+def test_messages_replay_json_serializes_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    ws_start = source.index("async def ws_callback(event_dict):")
+    ws_end = source.index("# Per-connection token", ws_start)
+    ws_source = source[ws_start:ws_end]
+    assert 'if event_type == "messages_replay":' in ws_source
+    assert "text = await asyncio.to_thread(\n                    json.dumps" in ws_source
+    assert "await websocket.send_text(text)" in ws_source
+    assert "ws.send_json.serialize_off_loop" in ws_source
+
+
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source
