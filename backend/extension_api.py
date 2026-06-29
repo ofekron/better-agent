@@ -190,18 +190,21 @@ async def _dispatch_machine_nodes_core_backend(
 ) -> JSONResponse | None:
     if request.method == "GET" and path == "nodes":
         import node_store
-        return JSONResponse(node_store.snapshot())
+        return JSONResponse(await asyncio.to_thread(node_store.snapshot))
     if request.method == "GET" and path == "pending_nodes":
         import node_link
         return JSONResponse({
-            "pending_nodes": node_link.public_pending_nodes(),
+            "pending_nodes": await asyncio.to_thread(node_link.public_pending_nodes),
         })
     if request.method == "GET" and path == "local_node_id":
-        try:
-            from topology import local_node_id
-            node_id = local_node_id()
-        except Exception:
-            node_id = "primary"
+        def _local_node_id_or_primary() -> str:
+            try:
+                from topology import local_node_id
+                return local_node_id()
+            except Exception:
+                return "primary"
+
+        node_id = await asyncio.to_thread(_local_node_id_or_primary)
         return JSONResponse({"node_id": node_id})
     if request.method == "POST" and path.startswith("pending_nodes/"):
         parts = path.split("/")
