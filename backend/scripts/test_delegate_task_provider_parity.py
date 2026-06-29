@@ -48,6 +48,7 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
             team_orchestration_enabled=False,
             open_file_panel_enabled=False,
             file_editing_mode=False,
+            coordination_enabled=False,
         )
         if schema.get("function", {}).get("name") == "delegate_task"
     )
@@ -206,6 +207,7 @@ def test_openai_delegate_task_posts_shared_payload() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
+            lock_registry=runner_openai.LockRegistry(),
         )
         result = asyncio.run(handlers["delegate_task"]({"arguments": {
             "task": "do work",

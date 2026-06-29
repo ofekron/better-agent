@@ -30,6 +30,7 @@ import httpx
 
 from provider import (
     Provider,
+    RecoveredPopen,
     StreamEvent,
     build_better_agent_run_env,
     schedule_loop_task,
@@ -600,6 +601,60 @@ class OpenAIProvider(Provider):
             _atomic_write_json(self._backend_state_path(rs), data)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+
+    def attach_recovered_run(
+        self,
+        *,
+        desc: dict,
+        queue: asyncio.Queue,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Re-attach a still-running detached OpenAI runner after a
+        backend restart.
+
+        `recover_in_flight` only classifies the on-disk run. This method
+        rebuilds the provider-side RunState and restarts the same
+        `session_events.jsonl` tailer/completion watcher used by a live
+        spawn, so events emitted after the backend restart are streamed into
+        the recovered turn immediately instead of waiting for a later cold
+        replay.
+        """
+        run_id = str(desc.get("run_id") or "")
+        pid = desc.get("pid")
+        if not run_id or not pid or run_id in self._runs:
+            return False
+        try:
+            runner_pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        try:
+            processed_line = int(desc.get("processed_line") or 0)
+        except (TypeError, ValueError):
+            processed_line = 0
+
+        rs = RunState(
+            run_id=run_id,
+            run_dir=_runs_root() / run_id,
+            popen=RecoveredPopen(runner_pid),
+            mode=desc.get("mode") or "native",
+            app_session_id=desc.get("app_session_id") or "",
+            queue=queue,
+            session_id=desc.get("session_id"),
+            processed_line=processed_line,
+            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            cancelled=bool(desc.get("cancelled", False)),
+            persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
+            target_message_id=desc.get("target_message_id"),
+            turn_run_id=desc.get("turn_run_id"),
+        )
+        self._runs[run_id] = rs
+        self._write_backend_state(rs)
+        schedule_loop_task(
+            loop,
+            self._bootstrap_run(rs),
+            name=f"openai-recover-bootstrap-{run_id[:8]}",
+        )
+        return True
 
     def _post_cancel_hook(self, rs: RunState) -> None:
         """Wake the tailer's stop_event so it exits its poll-sleep
