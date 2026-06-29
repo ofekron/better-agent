@@ -336,6 +336,44 @@ def test_search_avoids_full_sidebar_list(client: TestClient) -> bool:
     return ok
 
 
+def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "matched",
+        "2026-06-20T00:00:00+00:00",
+        name="needle title",
+    ))
+    first = client.get(
+        "/api/sessions?search=needle&search_fields=title",
+        headers=HEADERS,
+    )
+    if first.status_code != 200:
+        print(f"{FAIL} /api/sessions first cached search status {first.status_code}")
+        return False
+
+    original = main._build_local_sessions_page_for_list
+
+    def fail_recompute(*_args, **_kwargs):
+        raise AssertionError("identical session search should use response cache")
+
+    main._build_local_sessions_page_for_list = fail_recompute
+    try:
+        second = client.get(
+            "/api/sessions?search=needle&search_fields=title",
+            headers=HEADERS,
+        )
+    except AssertionError:
+        print(f"{FAIL} /api/sessions repeated search recomputed page")
+        return False
+    finally:
+        main._build_local_sessions_page_for_list = original
+
+    ids = [session["id"] for session in second.json().get("sessions", [])]
+    ok = second.status_code == 200 and ids == ["matched"]
+    print(f"{PASS if ok else FAIL} /api/sessions repeated search uses response cache")
+    return ok
+
+
 def test_search_index_cache_invalidates_on_write() -> bool:
     _reset_home()
     _write(_record("first", "2026-06-20T00:00:00+00:00"))
@@ -677,6 +715,7 @@ def main_run() -> int:
         ok = test_file_edit_mode_filters_before_pagination(client) and ok
         ok = test_search_content_filters_before_pagination(client) and ok
         ok = test_search_avoids_full_sidebar_list(client) and ok
+        ok = test_repeated_session_search_uses_response_cache(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
