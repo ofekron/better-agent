@@ -4653,6 +4653,35 @@ def _build_local_sessions_page_for_list(
                 out = _local_session_summaries_for_sidebar()
             perf.record("sessions.list.virtual.skipped", 1.0)
     with perf.timed("sessions.list.filter_sort"):
+        if search_query:
+            page_source, total = _filter_sort_page_for_list(
+                out,
+                offset=offset,
+                limit=limit,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=folder_ids,
+                folder_view=folder_view,
+                tag_ids=tag_ids,
+                provider_ids=provider_ids,
+                model_ids=model_ids,
+                modes=modes,
+                sources=sources,
+                content_scores=content_scores,
+                sort_by=sort_by,
+                status_sort=status_sort,
+                state_snapshot=state_snapshot,
+            )
+            with perf.timed("sessions.list.page_decorate"):
+                page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
+            if content_scores:
+                page = [
+                    {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
+                    for session in page
+                ]
+            return page, total
         if _can_preserve_summary_order(
             search_query=search_query,
             appended_virtual_sessions=appended_virtual_sessions,
@@ -5138,7 +5167,7 @@ async def get_sessions(
     page_source: list[dict] | None = None
     filtered_total: int | None = None
     with perf.timed("sessions.list.filter_sort"):
-        if can_page_remote_local_order:
+        if can_page_remote_local_order or search_query:
             page_source, filtered_total = await asyncio.to_thread(
                 _filter_sort_page_for_list,
                 out,
