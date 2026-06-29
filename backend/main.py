@@ -9254,6 +9254,19 @@ async def on_startup():
         name="startup-project-update-counts-warm",
     )
 
+    def _warm_pending_node_projection() -> None:
+        import node_link
+        node_link.public_pending_nodes()
+
+    asyncio.create_task(
+        run_task(
+            "pending_node_projection_warm",
+            "startup_tasks.pending_node_projection_warm",
+            _warm_pending_node_projection,
+        ),
+        name="startup-pending-node-projection-warm",
+    )
+
     import session_search_index
 
     def _rebuild_session_search_index_if_empty() -> None:
