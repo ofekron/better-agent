@@ -110,7 +110,7 @@ def _file_fingerprint() -> tuple[int, int]:
 
 
 def _empty() -> dict:
-    return {"version": SCHEMA_VERSION, "workers": [], "forks": {}, "pool_queues": {}}
+    return {"version": SCHEMA_VERSION, "workers": [], "forks": {}, "pool_queues": {}, "pool_failed_tasks": {}}
 
 
 def normalize_tags(value) -> list[str]:
@@ -379,6 +379,49 @@ def pop_pool_task(tag: str, item_id: str) -> bool:
             return False
         _write("", registry, refresh_worker_summaries=False)
         return True
+
+
+def record_pool_task_failure(
+    tag: str,
+    item_id: str,
+    error: str,
+    *,
+    max_attempts: int = 3,
+) -> dict:
+    clean = str(tag or "").strip()
+    iid = str(item_id or "").strip()
+    if not clean or not iid:
+        return {"action": "missing"}
+    with _lock_for():
+        registry = _read()
+        queues = registry.get("pool_queues") or {}
+        queue = queues.get(clean)
+        if not isinstance(queue, list):
+            return {"action": "missing"}
+        for index, item in enumerate(queue):
+            if item.get("id") != iid:
+                continue
+            failed = dict(item)
+            failed["attempts"] = int(failed.get("attempts") or 0) + 1
+            failed["last_error"] = str(error or "")
+            failed["last_failed_at"] = _now()
+            queue.pop(index)
+            if failed["attempts"] >= max_attempts:
+                failures = registry.setdefault("pool_failed_tasks", {}).setdefault(clean, [])
+                failures.append(failed)
+                registry["pool_failed_tasks"][clean] = failures[-50:]
+                action = "failed"
+            else:
+                queue.append(failed)
+                action = "requeued"
+            if queue:
+                queues[clean] = queue
+            else:
+                queues.pop(clean, None)
+            registry["pool_queues"] = queues
+            _write("", registry, refresh_worker_summaries=False)
+            return {"action": action, "item": failed}
+    return {"action": "missing"}
 
 
 @perf.timed_fn("store.worker.touch")
