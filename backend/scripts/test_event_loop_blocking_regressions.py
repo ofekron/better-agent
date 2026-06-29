@@ -1553,6 +1553,21 @@ def test_stubbed_tree_cache_key_does_not_scan_message_events() -> None:
     assert "render_seq_by_sid = event_ingester.render_seq_by_sid(rid)" in key_source
     assert 'msg.get("events")' not in key_source
     assert "event_shape" not in key_source
+    assert "root_events_version" not in key_source
+
+
+def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    build_start = source.index("def _build_stubbed_tree(")
+    build_end = source.index("def _compute_messages_snapshot(", build_start)
+    build_source = source[build_start:build_end]
+    assert "self._attach_root_events_to_stubbed_tree(tree, rid)" in build_source
+    assert build_source.index("tree = _copy_jsonish(cached)") < build_source.index(
+        "self._attach_root_events_to_stubbed_tree(tree, rid)"
+    )
+    assert build_source.index("self._tree_stub_cache[cache_key] = _copy_jsonish(tree)") < build_source.rindex(
+        "self._attach_root_events_to_stubbed_tree(tree, rid)"
+    )
 
 
 def test_startup_recovery_defers_cold_runs() -> None:
@@ -2004,6 +2019,7 @@ if __name__ == "__main__":
     test_startup_session_search_rebuild_skips_persisted_index()
     test_project_match_rebuild_skips_unchanged_session_state()
     test_stubbed_tree_cache_key_does_not_scan_message_events()
+    test_stubbed_tree_cache_attaches_root_events_after_cache_copy()
     test_startup_recovery_defers_cold_runs()
     test_startup_recovery_gate_opens_before_live_integration()
     test_recovery_dispatch_skips_reconciled_runs_before_owner_read()
