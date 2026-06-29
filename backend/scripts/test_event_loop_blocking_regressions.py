@@ -1706,7 +1706,8 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
     decorate_end = source.index("def _local_sessions_for_sidebar(", decorate_start)
     decorate_source = source[decorate_start:decorate_end]
     assert "decorated_cache_key = (" in decorate_source
-    assert "id(s)," in decorate_source
+    assert "summary_version = session_store.summary_index_version()" in decorate_source
+    assert "sid,\n                summary_version," in decorate_source
     assert "pending_user_input_count," in decorate_source
     assert "_sidebar_decorated_cache.get(decorated_cache_key)" in decorate_source
     assert "_sidebar_decorated_cache[decorated_cache_key] = decorated" in decorate_source
@@ -2068,6 +2069,16 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
     assert "\"sessions.list.page_decorate.worker\"" in route_source
     assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
     assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
+
+
+def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _decorate_local_sidebar_sessions(")
+    end = source.index("def _sidebar_stats_payload(", start)
+    decorate_source = source[start:end]
+    assert "summary_version = session_store.summary_index_version()" in decorate_source
+    assert "id(s)," not in decorate_source
+    assert "sid,\n                summary_version," in decorate_source
 
 
 def test_sidebar_summary_omits_worker_refs() -> None:
@@ -3090,6 +3101,7 @@ if __name__ == "__main__":
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
+    test_sidebar_decoration_cache_uses_stable_session_version_key()
     test_provider_context_runtime_discovery_runs_off_loop()
     test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()

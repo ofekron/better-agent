@@ -2814,6 +2814,7 @@ def _decorate_local_sidebar_sessions(
                     state_snapshot
                 )
             sessions_dir = _root_sessions_dir_path()
+            summary_version = session_store.summary_index_version()
         for s in sessions:
             with perf.timed("sessions.list.local.decorate.payload"):
                 sidebar_session = _sidebar_session_payload(s)
@@ -2832,8 +2833,8 @@ def _decorate_local_sidebar_sessions(
             has_error = bool(s.get("unseen_error"))
             file_path = f"{sessions_dir}/{sid}.json"
             decorated_cache_key = (
-                id(s),
                 sid,
+                summary_version,
                 running,
                 monitoring_state,
                 unread_count,
