@@ -88,6 +88,8 @@ _session_event_meta_cache: dict[
     str,
     tuple[tuple[int, int], bool, int, dict[str, int]],
 ] = {}
+_session_organization_refresh_task: asyncio.Task | None = None
+_session_organization_refresh_pending = False
 _session_event_meta_warm_inflight: set[str] = set()
 _SESSION_EVENT_META_WARM_LIMIT = 20
 _sessions_list_response_cache: dict[
@@ -1931,9 +1933,32 @@ async def _broadcast_projects_changed() -> None:
     await coordinator.broadcast_global("project_mappings_changed", {})
 
 
-async def _broadcast_session_organization_changed() -> None:
-    await asyncio.to_thread(session_store.refresh_organization_projection)
-    await coordinator.broadcast_global("session_organization_changed", {})
+async def _broadcast_session_organization_changed(session_ids: list[str] | None = None) -> None:
+    if session_ids:
+        await asyncio.to_thread(session_store.refresh_organization_projection, session_ids)
+        await coordinator.broadcast_global("session_organization_changed", {})
+        return
+
+    global _session_organization_refresh_pending, _session_organization_refresh_task
+    _session_organization_refresh_pending = True
+    if _session_organization_refresh_task is not None and not _session_organization_refresh_task.done():
+        return
+
+    async def _refresh_loop() -> None:
+        global _session_organization_refresh_pending, _session_organization_refresh_task
+        try:
+            while _session_organization_refresh_pending:
+                _session_organization_refresh_pending = False
+                await asyncio.to_thread(session_store.refresh_organization_projection)
+                await coordinator.broadcast_global("session_organization_changed", {})
+        except Exception:
+            logger.warning("session organization projection refresh failed", exc_info=True)
+        finally:
+            _session_organization_refresh_task = None
+            if _session_organization_refresh_pending:
+                _session_organization_refresh_task = asyncio.create_task(_refresh_loop())
+
+    _session_organization_refresh_task = asyncio.create_task(_refresh_loop())
 
 
 async def _apply_initial_session_folder(session_id: str | None, folder_id: str | None) -> None:
@@ -1948,7 +1973,7 @@ async def _apply_initial_session_folder(session_id: str | None, folder_id: str |
             session_id,
             folder_id,
         )
-        await _broadcast_session_organization_changed()
+        await _broadcast_session_organization_changed([session_id])
     except ValueError as e:
         logger.warning("initial folder assignment failed for %s: %s", session_id[:8], e)
 
@@ -4151,7 +4176,7 @@ async def update_session_organization(session_id: str, body: dict = Body(default
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _broadcast_session_organization_changed()
+    await _broadcast_session_organization_changed([session_id])
     return {"session_id": session_id, "organization": org}
 
 
@@ -4348,7 +4373,7 @@ async def internal_session_organization_update_session(body: dict = Body(default
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _broadcast_session_organization_changed()
+    await _broadcast_session_organization_changed([session_id])
     return {"session_id": session_id, "organization": org}
 
 

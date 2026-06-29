@@ -1160,6 +1160,17 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     assert "_builtin_extension_runtime_ready(" not in route_source
 
 
+def test_session_organization_refresh_is_coalesced_background_work() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    helper_start = source.index("async def _broadcast_session_organization_changed(")
+    helper_end = source.index("async def _apply_initial_session_folder(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "_session_organization_refresh_pending = True" in helper_source
+    assert "asyncio.create_task(_refresh_loop())" in helper_source
+    assert "await asyncio.to_thread(session_store.refresh_organization_projection, session_ids)" in helper_source
+    assert "if _session_organization_refresh_task is not None and not _session_organization_refresh_task.done()" in helper_source
+
+
 def test_get_session_strips_synthetic_events_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _tree_has_loaded_events(" in source
