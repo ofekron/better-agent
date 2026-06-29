@@ -1,24 +1,32 @@
 """Generic shared session-mining base.
 
 One pass over ``bc_home()/sessions/`` fans a normalized session stream out to N
-extension consumers (requirements, assistant requirement-states, ...) so each
-extension no longer reimplements session iteration, ``events.jsonl`` parsing,
-and delta watermarks. Scanning the sessions tree once and routing each session
-to every registered consumer is what keeps the mining cost flat in the number
-of extensions instead of growing with it.
+extension consumers (requirements, assistant, ...) so each extension stops
+reimplementing session iteration, ``events.jsonl`` parsing, and delta
+watermarks. Scanning the sessions tree once and routing each session to every
+registered consumer keeps mining cost flat in the number of extensions instead
+of growing with it.
 
-A consumer either iterates a ``SessionMiner`` directly (single consumer,
-streaming) or calls ``mine(*consumers)`` to drive one pass that fans each
-changed session out to several consumers. The miner owns the per-file mtime
-watermark inside a ``state`` dict the caller persists between runs; unchanged
-sessions are skipped without parsing.
+Extensibility model:
+- A consumer subclasses ``SessionConsumer`` and implements ``begin`` (load its
+  own state/dedup sets), ``visit`` (accumulate from one ``SessionVisit``), and
+  ``commit`` (persist, return how many new records it wrote).
+- Consumers register via ``register_consumer`` (usually at module import).
+- ``SessionMiner.mine(consumers)`` drives the full lifecycle over a single pass.
+- ``mine_registered(state)`` runs every registered consumer in one pass and
+  returns ``{consumer.name: new_count}``.
+
+The miner owns the per-file mtime watermark inside a ``state`` dict the caller
+persists between runs; unchanged sessions are skipped without parsing. Each
+consumer owns its own derived state separately.
 """
 from __future__ import annotations
 
 import json
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Iterable
 
 from paths import bc_home
 from render_tree_hydrate import event_rows_by_msg_id_with_orphans
@@ -31,6 +39,49 @@ class SessionVisit:
     data: dict
     messages: list
     events_by_msg_id: dict
+
+
+class SessionConsumer(ABC):
+    """Extension hook: derive one artifact stream from changed sessions.
+
+    The miner calls ``begin`` once before the pass, ``visit`` per changed
+    session, and ``commit`` once after. ``visit`` must be order-independent
+    enough to tolerate sessions arriving in glob order; consumers sort their own
+    output in ``commit``.
+    """
+
+    name: str = "consumer"
+
+    @abstractmethod
+    def begin(self) -> None: ...
+
+    @abstractmethod
+    def visit(self, visit: SessionVisit) -> None: ...
+
+    @abstractmethod
+    def commit(self) -> int: ...
+
+
+_CONSUMERS: list[type[SessionConsumer]] = []
+
+
+def register_consumer(consumer_cls: type[SessionConsumer]) -> type[SessionConsumer]:
+    """Register a consumer class for ``mine_registered`` discovery.
+
+    A class (not an instance) so each mining pass gets a fresh consumer and
+    per-pass accumulation state cannot leak across runs.
+    """
+    _CONSUMERS.append(consumer_cls)
+    return consumer_cls
+
+
+def registered_consumers() -> list[type[SessionConsumer]]:
+    return list(_CONSUMERS)
+
+
+def clear_consumers() -> None:
+    """Test helper: reset the registry between tests."""
+    _CONSUMERS.clear()
 
 
 def sessions_dir() -> Path:
@@ -54,8 +105,7 @@ class SessionMiner:
     ``state`` maps ``<session.json name> -> {"mtime": float}``; the miner writes
     the new watermark into it after each visit is consumed, so persisting
     ``state`` between runs makes every pass delta-only. ``scanned_count`` is the
-    total session files examined (changed or not), preserving the legacy
-    scanner's reporting semantics.
+    total session files examined (changed or not).
     """
 
     def __init__(self, state: dict, *, root: Path | None = None) -> None:
@@ -63,7 +113,7 @@ class SessionMiner:
         self._root = root or sessions_dir()
         self.scanned_count = 0
 
-    def __iter__(self) -> Iterator[SessionVisit]:
+    def __iter__(self) -> Iterable[SessionVisit]:
         if not self._root.exists():
             return
         for session_json in self._root.glob("*.json"):
@@ -93,13 +143,23 @@ class SessionMiner:
             )
             self._state[key] = {"mtime": current_mtime}
 
-    def mine(self, *consumers: Callable[[SessionVisit], None]) -> int:
-        """One pass fanning each changed session out to every consumer.
+    def mine(self, consumers: list[SessionConsumer]) -> dict[str, int]:
+        """One pass: begin all consumers, visit each changed session, commit all.
 
-        Returns ``scanned_count``. Each session is parsed once regardless of how
-        many consumers are registered.
+        Returns ``{consumer.name: new_count}``. Each session is parsed once
+        regardless of how many consumers run.
         """
+        for consumer in consumers:
+            consumer.begin()
         for visit in self:
             for consumer in consumers:
-                consumer(visit)
-        return self.scanned_count
+                consumer.visit(visit)
+        return {consumer.name: consumer.commit() for consumer in consumers}
+
+
+def mine_registered(state: dict) -> dict[str, int]:
+    """Run every registered consumer against changed sessions in one pass."""
+    classes = registered_consumers()
+    if not classes:
+        return {}
+    return SessionMiner(state).mine([cls() for cls in classes])
