@@ -1692,6 +1692,11 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert "sessions.list.virtual.cached_first_page" in route_source
     assert "_remote_sessions_for_sidebar_cached(nid)" in route_source
     assert "deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions" in route_source
+    assert "projected_first_page_sessions" in route_source
+    assert "sessions.list.projected_first_page_merge" in route_source
+    assert route_source.index("sessions.list.projected_first_page_merge") < route_source.index(
+        'with perf.timed("sessions.list.filter_sort")'
+    )
     assert "_sessions_list_response(\n                    json.dumps(" in route_source
 
 

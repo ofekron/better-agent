@@ -4043,7 +4043,7 @@ def _can_page_default_updated_at_with_virtual(
 
 def _merge_updated_at_page(
     local_sessions: list[dict],
-    virtual_sessions: list[dict],
+    secondary_sessions: list[dict],
     *,
     offset: int,
     limit: int,
@@ -4053,16 +4053,16 @@ def _merge_updated_at_page(
     local_index = 0
     virtual_index = 0
     end = offset + limit
-    while local_index < len(local_sessions) or virtual_index < len(virtual_sessions):
+    while local_index < len(local_sessions) or virtual_index < len(secondary_sessions):
         if local_index >= len(local_sessions):
-            session = virtual_sessions[virtual_index]
+            session = secondary_sessions[virtual_index]
             virtual_index += 1
-        elif virtual_index >= len(virtual_sessions):
+        elif virtual_index >= len(secondary_sessions):
             session = local_sessions[local_index]
             local_index += 1
         else:
             local_session = local_sessions[local_index]
-            virtual_session = virtual_sessions[virtual_index]
+            virtual_session = secondary_sessions[virtual_index]
             if (
                 session_store.timestamp_sort_value(local_session.get("updated_at"))
                 >= session_store.timestamp_sort_value(virtual_session.get("updated_at"))
@@ -4444,6 +4444,8 @@ async def get_sessions(
     handled_remote_sessions = False
     deferred_sidebar_projection = False
     local_total: int | None = None
+    local_page_candidates: list[dict] | None = None
+    projected_first_page_sessions: list[dict] = []
     can_page_remote_local_order = _can_page_local_summary_order(
         search_query=search_query,
         folder_view=effective_folder_view,
@@ -4456,6 +4458,21 @@ async def get_sessions(
         tag_ids=filters["tag_ids"],
         modes=filters["modes"],
         sources=filters["sources"],
+    )
+    default_projected_first_page = _can_page_default_updated_at_with_virtual(
+        search_query=search_query,
+        project_path=project_path,
+        show_archived=show_archived,
+        file_edit_mode=file_edit_mode,
+        folder_ids=filters["folder_ids"],
+        folder_view=effective_folder_view,
+        tag_ids=filters["tag_ids"],
+        provider_ids=filters["provider_ids"],
+        model_ids=filters["model_ids"],
+        modes=filters["modes"],
+        sources=filters["sources"],
+        sort_by=effective_sort_by,
+        status_sort=effective_status_sort,
     )
     if search_query:
         with perf.timed("sessions.list.search_scores"):
@@ -4489,6 +4506,7 @@ async def get_sessions(
                     sources=filters["sources"],
                     content_scores=content_scores,
                 )
+                local_page_candidates = out
         else:
             with perf.timed("sessions.list.local"):
                 out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
@@ -4517,6 +4535,7 @@ async def get_sessions(
                     ]
                     if virtual_sidebar_sessions:
                         out.extend(virtual_sidebar_sessions)
+                        projected_first_page_sessions.extend(virtual_sidebar_sessions)
                         appended_virtual_sessions = True
                     local_total += virtual_total
             with perf.timed("sessions.list.remote.cached_first_page"):
@@ -4531,6 +4550,7 @@ async def get_sessions(
                         rs.setdefault("unread_count", 0)
                         rs.setdefault("monitoring_state", "idle")
                         out.append(rs)
+                        projected_first_page_sessions.append(rs)
                         appended_remote_sessions = True
                     local_total += len(remote)
             handled_remote_sessions = True
@@ -4613,11 +4633,47 @@ async def get_sessions(
                     rs.setdefault("unread_count", 0)
                     rs.setdefault("monitoring_state", "idle")
                     out.append(rs)
+                    projected_first_page_sessions.append(rs)
                     appended_remote_sessions = True
                 if local_total is not None:
                     local_total += len(remote)
         except Exception:
             logger.debug("get_sessions: node merge failed", exc_info=True)
+
+    if (
+        default_projected_first_page
+        and local_page_candidates is not None
+        and projected_first_page_sessions
+        and local_total is not None
+    ):
+        end = offset + limit
+        with perf.timed("sessions.list.projected_first_page_merge"):
+            projected_first_page_sessions.sort(
+                key=lambda session: session_store.timestamp_sort_value(session.get("updated_at")),
+                reverse=True,
+            )
+            page_source, _merged_count = _merge_updated_at_page(
+                local_page_candidates,
+                projected_first_page_sessions,
+                offset=offset,
+                limit=limit,
+            )
+        with perf.timed("sessions.list.page_decorate"):
+            page = await asyncio.to_thread(
+                _decorate_local_sidebar_sessions,
+                page_source,
+                None,
+            )
+        _schedule_session_event_meta_warm(page)
+        return _sessions_list_cache_put(cache_key, {
+            "sessions": page,
+            "offset": offset,
+            "limit": limit,
+            "total": local_total,
+            "has_more": end < local_total,
+            "sort_by": effective_sort_by,
+            "status_sort": effective_status_sort,
+        })
 
     if (
         can_page_remote_local_order
