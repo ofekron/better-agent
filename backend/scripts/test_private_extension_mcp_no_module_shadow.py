@@ -27,7 +27,6 @@ AFFECTED = (
     ("session-bridge", "mcp/server.py"),
     ("provider-config-sync", "mcp/server.py"),
     ("scheduler", "mcp/server.py"),
-    ("testape", "mcp/server.py"),
     ("git", "mcp/worker_server.py", "mcp/client_server.py"),
 )
 
