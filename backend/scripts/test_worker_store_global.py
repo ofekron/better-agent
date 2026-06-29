@@ -157,6 +157,31 @@ def test_worker_count_hot_cache_skips_fingerprint() -> None:
         worker_store.remove_worker("/repo/a", "worker-hot-count")
 
 
+def test_worker_registry_read_cache_is_fingerprinted_and_isolated() -> None:
+    worker_store.upsert_worker("/repo/a", "worker-read-cache", "native", "agent-read-cache")
+    original_read_text = worker_store.Path.read_text
+    calls = 0
+
+    def counted_read_text(path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_read_text(path, *args, **kwargs)
+
+    worker_store.Path.read_text = counted_read_text
+    try:
+        first = worker_store._read()
+        first["workers"].append({"agent_session_id": "mutated"})
+        second = worker_store._read()
+        check(calls == 0, f"hot registry read touched disk: {calls}")
+        check(
+            all(w.get("agent_session_id") != "mutated" for w in second.get("workers", [])),
+            "registry cache leaked caller mutation",
+        )
+    finally:
+        worker_store.Path.read_text = original_read_text
+        worker_store.remove_worker("/repo/a", "worker-read-cache")
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
@@ -165,6 +190,7 @@ def main() -> int:
         test_remove_worker_is_global()
         test_worker_count_neutral_writes_do_not_refresh_session_summaries()
         test_worker_count_hot_cache_skips_fingerprint()
+        test_worker_registry_read_cache_is_fingerprinted_and_isolated()
         print("ALL PASS")
         return 0
     finally:

@@ -64,6 +64,7 @@ import json
 import logging
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -80,6 +81,8 @@ _lock = threading.RLock()
 _worker_count_cache: dict[tuple[str, tuple[int, int]], int] = {}
 _worker_count_cache_until = 0.0
 _WORKER_COUNT_HOT_TTL_SECONDS = 1.0
+_registry_cache_signature: tuple[int, int] | None = None
+_registry_cache: dict | None = None
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -133,9 +136,26 @@ def _read(cwd: str = "") -> dict:
     malformed/legacy/missing files (after a loud log) so a single
     corrupt file doesn't break callers like list_sessions that walk
     every cwd."""
+    global _registry_cache_signature, _registry_cache
     path = _path()
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _registry_cache_signature = None
+        _registry_cache = None
         return _empty()
+    except OSError as e:
+        _registry_cache_signature = None
+        _registry_cache = None
+        logger.error(
+            "worker_store: failed to read %s (%s) — returning empty registry. "
+            "Delete the file to start fresh.",
+            path, e,
+        )
+        return _empty()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if _registry_cache_signature == signature and _registry_cache is not None:
+        return deepcopy(_registry_cache)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -163,7 +183,9 @@ def _read(cwd: str = "") -> dict:
     raw.setdefault("workers", [])
     raw.setdefault("forks", {})
     raw.setdefault("pool_queues", {})
-    return raw
+    _registry_cache_signature = signature
+    _registry_cache = deepcopy(raw)
+    return deepcopy(raw)
 
 
 def _write(
@@ -172,8 +194,17 @@ def _write(
     *,
     refresh_worker_summaries: bool = True,
 ) -> None:
-    global _worker_count_cache_until
-    write_json(_path(), registry)
+    global _worker_count_cache_until, _registry_cache_signature, _registry_cache
+    path = _path()
+    write_json(path, registry)
+    try:
+        stat = path.stat()
+    except OSError:
+        _registry_cache_signature = None
+        _registry_cache = None
+    else:
+        _registry_cache_signature = (stat.st_mtime_ns, stat.st_size)
+        _registry_cache = deepcopy(registry)
     with _lock_for():
         _worker_count_cache.clear()
         _worker_count_cache_until = 0.0
