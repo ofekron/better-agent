@@ -63,6 +63,10 @@ _CURSOR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="jsonl-cursor",
 )
+_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="subagent-scan",
+)
 
 
 # ============================================================================
@@ -786,10 +790,13 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         try:
             while not self._stop_event.is_set():
                 self._prune_done_sub_tasks()
-                invalid_meta, direct, workflows = await asyncio.to_thread(
+                loop = asyncio.get_running_loop()
+                known_meta_files = frozenset(self._known_meta_files)
+                invalid_meta, direct, workflows = await loop.run_in_executor(
+                    _SUBAGENT_SCAN_EXECUTOR,
                     self._scan_subagent_files,
                     sub_dir,
-                    frozenset(self._known_meta_files),
+                    known_meta_files,
                 )
                 self._apply_subagent_scan(invalid_meta, direct, workflows)
                 await asyncio.sleep(self._SUB_DIR_POLL_INTERVAL)

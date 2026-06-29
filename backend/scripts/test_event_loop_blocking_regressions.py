@@ -104,10 +104,13 @@ def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
 
 def test_subagent_watcher_scans_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    assert "_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(" in source
+    assert 'thread_name_prefix="subagent-scan"' in source
     watch_start = source.index("async def _watch_subagents(")
     watch_end = source.index("def _scan_subagent_files(", watch_start)
     watch_source = source[watch_start:watch_end]
-    assert "await asyncio.to_thread(\n                    self._scan_subagent_files" in watch_source
+    assert "await loop.run_in_executor(\n                    _SUBAGENT_SCAN_EXECUTOR" in watch_source
+    assert "await asyncio.to_thread(\n                    self._scan_subagent_files" not in watch_source
     assert ".exists()" not in watch_source
     assert ".glob(" not in watch_source
     assert ".iterdir(" not in watch_source
