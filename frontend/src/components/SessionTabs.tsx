@@ -1,4 +1,4 @@
-import { useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import type { Provider, Session } from "../types";
@@ -14,8 +14,8 @@ interface Props {
   sortField: string;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  onCloseOthers: (id: string) => void;
   onToggleTopbarPin: (id: string, pinned: boolean) => void;
-  onMeasuredCapacityChange?: (capacity: number) => void;
 }
 
 export function SessionTabs({
@@ -25,8 +25,8 @@ export function SessionTabs({
   sortField,
   onSelect,
   onClose,
+  onCloseOthers,
   onToggleTopbarPin,
-  onMeasuredCapacityChange,
 }: Props) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -36,34 +36,6 @@ export function SessionTabs({
   const activeRef = useRef<HTMLButtonElement>(null);
   const prevFirstIdRef = useRef<string | null>(null);
   const prevIdsRef = useRef<Set<string>>(new Set());
-
-  const measureCapacity = useCallback(() => {
-    const root = scrollRef.current;
-    if (!root || !onMeasuredCapacityChange || sessions.length === 0) return;
-    const available = root.clientWidth || root.getBoundingClientRect().width;
-    if (available <= 0) return;
-    const tabs = Array.from(root.querySelectorAll<HTMLElement>(".session-tab-wrapper"));
-    let used = 0;
-    let capacity = 0;
-    for (const tab of tabs) {
-      const width = tab.getBoundingClientRect().width;
-      if (width <= 0) continue;
-      if (capacity > 0 && used + width > available + 1) break;
-      used += width;
-      capacity += 1;
-    }
-    onMeasuredCapacityChange(Math.max(1, Math.min(capacity, sessions.length)));
-  }, [onMeasuredCapacityChange, sessions.length]);
-
-  useLayoutEffect(() => {
-    measureCapacity();
-  }, [measureCapacity, sessions]);
-
-  useEffect(() => {
-    if (!onMeasuredCapacityChange) return;
-    window.addEventListener("resize", measureCapacity);
-    return () => window.removeEventListener("resize", measureCapacity);
-  }, [measureCapacity, onMeasuredCapacityChange]);
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({
@@ -152,6 +124,20 @@ export function SessionTabs({
             >
               <Icon name="pin" size={13} />
             </button>
+            {sessions.length > 1 && (
+              <button
+                type="button"
+                className="session-tab-close-others"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCloseOthers(s.id);
+                }}
+                title={t("session.closeOtherTabsTitle")}
+                aria-label={t("session.closeOtherTabsTitle")}
+              >
+                <Icon name="x-circle" size={13} />
+              </button>
+            )}
             {!topbarPinned && (
               <button
                 type="button"
@@ -160,7 +146,8 @@ export function SessionTabs({
                   e.stopPropagation();
                   onClose(s.id);
                 }}
-                title="Close tab"
+                title={t("session.closeTabTitle")}
+                aria-label={t("session.closeTabTitle")}
               >
                 ×
               </button>

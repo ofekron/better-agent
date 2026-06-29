@@ -10,10 +10,10 @@ describe("open session record restore fetches", () => {
     expect(source).toContain("openSessionRecordFetchesRef.current.delete(id)");
 
     const effectStart = source.indexOf("const idsToFetch = openSessionIds.filter(");
-    const effectEnd = source.indexOf("const [visibleOpenTabCapacity", effectStart);
+    const effectEnd = source.indexOf("const handleCloseTab", effectStart);
     const effectSource = source.slice(effectStart, effectEnd);
     expect(effectSource.indexOf("openSessionRecordFetchesRef.current.add(id)")).toBeLessThan(
-      effectSource.indexOf("fetch(`${API}/api/sessions/${encodeURIComponent(id)}`"),
+      effectSource.indexOf('fetch(`${API}/api/sessions/summaries?${params}`'),
     );
     expect(effectSource).toContain(".finally(() => {");
   });

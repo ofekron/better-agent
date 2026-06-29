@@ -2441,7 +2441,8 @@ body {
   display: none;
 }
 
-.session-tab-close {
+.session-tab-close,
+.session-tab-close-others {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2485,7 +2486,8 @@ body {
   opacity: 1;
 }
 
-.session-tab-close:hover {
+.session-tab-close:hover,
+.session-tab-close-others:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
@@ -2503,7 +2505,8 @@ body {
   .session-tab-provider-model {
     font-size: calc(9px * var(--app-font-scale));
   }
-  .session-tab-close {
+  .session-tab-close,
+  .session-tab-close-others {
     width: 20px;
     height: 20px;
     font-size: calc(14px * var(--app-font-scale));

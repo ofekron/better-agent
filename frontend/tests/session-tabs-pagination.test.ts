@@ -65,7 +65,7 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
-  it("hides open-session tabs for the Assistant session", async () => {
+  it("keeps session tabs visible for active and Assistant sessions", async () => {
     const assistant = makeSession({
       id: "assistant-session",
       name: "Assistant",
@@ -79,11 +79,33 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions: [assistant, work] } });
 
     await h.selectSession(work.id);
-    expect(h.$(".session-tabs")?.textContent ?? "").not.toContain("Work");
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Work");
 
     await h.selectSession(assistant.id);
-    expect(h.$(".session-tabs")).toBeNull();
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Assistant");
 
+    h.unmount();
+  }, 10000);
+
+  it("does not cap saved open session tabs", async () => {
+    const sessions = Array.from({ length: 20 }, (_, i) =>
+      makeSession({
+        id: `sess-${i + 1}`,
+        name: `Session ${i + 1}`,
+        cwd: "/tmp/project-a",
+      }),
+    );
+    window.history.pushState(null, "", "/s/sess-1");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(sessions.map((session) => session.id)),
+    );
+    const h = await renderApp({ seed: { sessions } });
+
+    expect(
+      await waitFor(h, () => h.$$(".session-tab-wrapper").length === 20),
+    ).toBe(true);
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Session 20");
     h.unmount();
   }, 10000);
 
@@ -126,7 +148,7 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
-  it("hides the selected session and keeps switched-away tab content live", async () => {
+  it("keeps selected and switched-away tab content live", async () => {
     const first = makeSession({
       id: "first-session",
       name: "First live name",
@@ -171,10 +193,36 @@ describe("session tabs with paged sessions", () => {
         return (
           tabsText.includes("First live name") &&
           tabsText.includes("new-model") &&
-          !tabsText.includes("Second live name")
+          tabsText.includes("Second live name")
         );
       }),
     ).toBe(true);
+    h.unmount();
+  }, 10000);
+
+  it("closes other tabs relative to a tab", async () => {
+    const sessions = ["One", "Two", "Three"].map((name, i) =>
+      makeSession({
+        id: `sess-${i + 1}`,
+        name,
+        cwd: "/tmp/project-a",
+      }),
+    );
+    window.history.pushState(null, "", "/s/sess-1");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(sessions.map((session) => session.id)),
+    );
+    const h = await renderApp({ seed: { sessions } });
+
+    expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 3)).toBe(true);
+    await h.click('[data-tab-movement-key="sess-2"] .session-tab-close-others');
+
+    expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 1)).toBe(true);
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Two");
+    expect(window.location.pathname).toBe("/s/sess-2");
+    expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
+      .toEqual(["sess-2"]);
     h.unmount();
   }, 10000);
 
