@@ -158,6 +158,12 @@ def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
 def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
     now = time.monotonic()
     root_key = str(root)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+        if cached is not None:
+            ts, _fingerprint, index = cached
+            if now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+                return index
     candidates = _recent_state_candidates(root)
     if not candidates:
         return {}

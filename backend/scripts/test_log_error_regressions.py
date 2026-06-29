@@ -338,6 +338,56 @@ def test_jsonl_path_targets_run_state_by_sid(failures: list[str]) -> None:
         shutil.rmtree(claude_home, ignore_errors=True)
 
 
+def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-cache-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    original_candidates = helpers._recent_state_candidates
+    calls = {"candidates": 0}
+
+    def counted_candidates(*args, **kwargs):
+        calls["candidates"] += 1
+        return original_candidates(*args, **kwargs)
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for sid in ("agent-a", "agent-b"):
+            run_dir = runs / sid
+            run_dir.mkdir()
+            jsonl = run_dir / "session_events.jsonl"
+            jsonl.write_text("{}\n", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps({"session_id": sid, "jsonl_path": str(jsonl)}),
+                encoding="utf-8",
+            )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        helpers._recent_state_candidates = counted_candidates  # type: ignore[assignment]
+
+        first = helpers.compute_jsonl_path("/tmp", "agent-a")
+        second = helpers.compute_jsonl_path("/tmp", "agent-b")
+        check(first is not None and second is not None, "jsonl helper resolves cached run-state sids", failures)
+        check(calls["candidates"] == 1, "jsonl helper reuses recent run-state index", failures)
+    finally:
+        helpers._recent_state_candidates = original_candidates  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        helpers._RUN_STATE_RECENT_INDEX = None
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
 def main() -> int:
     failures: list[str] = []
     try:
@@ -349,6 +399,7 @@ def main() -> int:
         test_jsonl_path_negative_cache(failures)
         test_jsonl_path_indexes_multiple_misses(failures)
         test_jsonl_path_targets_run_state_by_sid(failures)
+        test_jsonl_path_reuses_recent_run_state_index(failures)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
