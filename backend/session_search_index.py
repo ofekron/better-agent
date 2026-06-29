@@ -235,7 +235,7 @@ def search(
                 if max_wait_seconds is not None:
                     threading.Thread(
                         target=_run_search_cache_fill,
-                        args=(cache_key, q, limit, event),
+                        args=(cache_key, q, limit, max_wait_seconds, event),
                         name="session-search-cache-fill",
                         daemon=True,
                     ).start()
@@ -272,6 +272,7 @@ def _run_search_cache_fill(
     cache_key: tuple[str, int],
     query: str,
     limit: int,
+    max_wait_seconds: float | None,
     event: threading.Event,
 ) -> None:
     try:
@@ -279,7 +280,12 @@ def _run_search_cache_fill(
         if conn is None:
             scores: list[tuple[str, int]] = []
         else:
-            scores = _candidate_scores(conn, query, limit)
+            deadline = (
+                time.monotonic() + max(0.0, max_wait_seconds)
+                if max_wait_seconds is not None
+                else None
+            )
+            scores = _candidate_scores(conn, query, limit, deadline=deadline)
         with _search_cache_lock:
             _search_cache[cache_key] = (_index_generation, time.monotonic(), scores)
             if len(_search_cache) > _SEARCH_CACHE_MAX:
@@ -330,22 +336,41 @@ def rebuild_from_disk() -> None:
         _rebuild_lock.release()
 
 
-def _candidate_scores(conn: sqlite3.Connection, query: str, limit: int) -> list[tuple[str, int]]:
-    if len(query) < 3:
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+def _candidate_scores(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int,
+    *,
+    deadline: float | None = None,
+) -> list[tuple[str, int]]:
+    if deadline is not None:
+        conn.set_progress_handler(
+            lambda: 1 if time.monotonic() >= deadline else 0,
+            1000,
+        )
+    try:
+        if len(query) < 3:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            return conn.execute(
+                "SELECT session_id, COUNT(*) AS score FROM session_event_fts "
+                "WHERE lower(text) LIKE ? ESCAPE '\\' "
+                "GROUP BY session_id ORDER BY score DESC LIMIT ?",
+                (f"%{escaped.lower()}%", limit),
+            ).fetchall()
         return conn.execute(
-            "SELECT session_id, COUNT(*) AS score FROM session_event_fts "
-            "WHERE lower(text) LIKE ? ESCAPE '\\' "
-            "GROUP BY session_id ORDER BY score DESC LIMIT ?",
-            (f"%{escaped.lower()}%", limit),
+            "SELECT session_id, COUNT(*) AS score FROM ("
+            "SELECT session_id FROM session_event_fts WHERE text MATCH ? "
+            "LIMIT ?"
+            ") GROUP BY session_id ORDER BY score DESC LIMIT ?",
+            (_match_literal(query), _MATCHED_ROW_SCAN_LIMIT, limit),
         ).fetchall()
-    return conn.execute(
-        "SELECT session_id, COUNT(*) AS score FROM ("
-        "SELECT session_id FROM session_event_fts WHERE text MATCH ? "
-        "LIMIT ?"
-        ") GROUP BY session_id ORDER BY score DESC LIMIT ?",
-        (_match_literal(query), _MATCHED_ROW_SCAN_LIMIT, limit),
-    ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if deadline is not None and "interrupted" in str(exc).lower():
+            return []
+        raise
+    finally:
+        if deadline is not None:
+            conn.set_progress_handler(None, 0)
 
 
 def _match_literal(query: str) -> str:

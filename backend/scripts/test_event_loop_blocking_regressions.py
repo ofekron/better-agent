@@ -154,6 +154,26 @@ def test_session_content_search_aggregates_in_sqlite() -> None:
     assert "lower().count" not in search_source
 
 
+def test_bounded_session_content_search_stops_sqlite_scan() -> None:
+    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
+    search_start = source.index("def search(")
+    search_end = source.index("def has_indexed_rows(", search_start)
+    search_source = source[search_start:search_end]
+    fill_start = source.index("def _run_search_cache_fill(")
+    fill_end = source.index("def has_indexed_rows(", fill_start)
+    fill_source = source[fill_start:fill_end]
+    candidate_start = source.index("def _candidate_scores(")
+    candidate_end = source.index("def _match_literal(", candidate_start)
+    candidate_source = source[candidate_start:candidate_end]
+    assert "args=(cache_key, q, limit, max_wait_seconds, event)" in search_source
+    assert "deadline = (" in fill_source
+    assert "_candidate_scores(conn, query, limit, deadline=deadline)" in fill_source
+    assert "conn.set_progress_handler(" in candidate_source
+    assert "time.monotonic() >= deadline" in candidate_source
+    assert "conn.set_progress_handler(None, 0)" in candidate_source
+    assert "interrupted" in candidate_source
+
+
 def test_session_content_search_uses_readonly_connection_without_writer_lock() -> None:
     source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
     search_start = source.index("def search(")
