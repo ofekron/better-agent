@@ -396,6 +396,16 @@ def test_startup_defers_requirement_and_project_match_warmers() -> None:
     assert "_ensure_project_match_warm_task()" in source
 
 
+def test_startup_defers_shortcut_http_prewarm() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "shortcut_picker.prewarm_http_stack" in startup_source
+    assert "await asyncio.to_thread(shortcut_picker.prewarm_http_stack)" not in startup_source
+    assert "_fire_and_forget(asyncio.to_thread(shortcut_picker.prewarm_http_stack))" in startup_source
+
+
 def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     local_start = source.index("def _local_session_summaries_for_sidebar()")
