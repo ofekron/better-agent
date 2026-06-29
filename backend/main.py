@@ -6321,7 +6321,10 @@ def _session_detail_snapshot_sync(
     detail_cache_key = None
     if include_cache_key:
         built = session_manager.get_root_tree_stubbed_with_cache_key(
-            session_id, msg_limit=msg_limit, exchange_count=exchange_count,
+            session_id,
+            msg_limit=msg_limit,
+            exchange_count=exchange_count,
+            known_root_id=root_id if isinstance(root_id, str) else None,
         )
         if built is None:
             tree = None
@@ -6451,11 +6454,18 @@ def _session_detail_cached_key_still_current(
 ) -> bool:
     if len(key) != 6 or key[0] != session_id:
         return False
-    root_id = session_manager._root_id_for(session_id)
+    cached_tree_key = key[1]
+    root_id = (
+        cached_tree_key[0]
+        if isinstance(cached_tree_key, tuple)
+        and cached_tree_key
+        and isinstance(cached_tree_key[0], str)
+        else None
+    )
     if not isinstance(root_id, str):
         return False
-    tree_key = session_manager.root_tree_stub_cache_key(
-        session_id,
+    tree_key = session_manager.root_tree_stub_cache_key_for_root(
+        root_id,
         msg_limit=msg_limit,
         exchange_count=exchange_count,
     )
