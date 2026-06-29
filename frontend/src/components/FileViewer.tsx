@@ -15,6 +15,7 @@ import {
   type CommentSelection,
   type SubmittedComment,
 } from "./FileCommentBar";
+import Icon from "./Icon";
 import { ProgressButton } from "../progress/ProgressButton";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
@@ -188,6 +189,71 @@ async function fetchViewedTextFile(
   };
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
+    ta.style.width = "1px";
+    ta.style.height = "1px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch {
+      // best effort
+    }
+    document.body.removeChild(ta);
+  }
+}
+
+const CLIPBOARD_STYLE_PROPS = [
+  "background-color",
+  "border",
+  "border-collapse",
+  "color",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+  "line-height",
+  "padding",
+  "text-decoration",
+  "white-space",
+];
+
+function selectionHtmlWithInlineStyles(container: HTMLElement, range: Range): string {
+  const wrapper = document.createElement("div");
+  wrapper.appendChild(range.cloneContents());
+  const staging = document.createElement("div");
+  staging.className = container.className;
+  staging.style.position = "fixed";
+  staging.style.left = "-10000px";
+  staging.style.top = "0";
+  staging.appendChild(wrapper);
+  document.body.appendChild(staging);
+  try {
+    wrapper.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      const computed = window.getComputedStyle(el);
+      CLIPBOARD_STYLE_PROPS.forEach((prop) => {
+        const value = computed.getPropertyValue(prop);
+        if (value) el.style.setProperty(prop, value);
+      });
+    });
+    return wrapper.innerHTML;
+  } finally {
+    document.body.removeChild(staging);
+  }
+}
+
 export function FileViewer({
   filePath,
   diffBefore,
@@ -211,6 +277,7 @@ export function FileViewer({
   const [rawVersion, setRawVersion] = useState(0);
   const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
   const [hasDraft, setHasDraft] = useState(false);
+  const [copiedOriginal, setCopiedOriginal] = useState(false);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
   const latestDiffOpId = filePath ? `file:latest-diff:${filePath}` : "file:latest-diff:none";
@@ -233,6 +300,7 @@ export function FileViewer({
   // we switch into a raw Monaco editor. Edits auto-save after 1s of idle.
   const [mdEditing, setMdEditing] = useState(false);
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyResetRef = useRef<number | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
   // Mirror `dirty` into a ref so the load-effect cleanup (whose closure
@@ -246,6 +314,12 @@ export function FileViewer({
   dirtyRef.current = dirty;
   const loadedIdentityRef = useRef<FileIdentity | null>(loadedIdentity);
   loadedIdentityRef.current = loadedIdentity;
+
+  useEffect(() => {
+    return () => {
+      if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    };
+  }, []);
 
   const flushDraftAt = useCallback(async (path: string) => {
     try {
@@ -403,6 +477,16 @@ export function FileViewer({
     if (filePath && dirtyRef.current) await flushDraftAt(filePath);
     setMdEditing(false);
   }, [filePath, flushDraftAt]);
+
+  const copyOriginalContent = useCallback(async () => {
+    await copyTextToClipboard(contentRef.current);
+    setCopiedOriginal(true);
+    if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => {
+      setCopiedOriginal(false);
+      copyResetRef.current = null;
+    }, 1200);
+  }, []);
 
   // Apply / clear the focus highlight whenever the target range, the loaded
   // content, or the mounted editor changes. Monaco can't decorate lines that
@@ -688,6 +772,26 @@ export function FileViewer({
     // different DOM node) or the file path changes.
   }, [onAddFileTag, kind, filePath]);
 
+  useEffect(() => {
+    const el = renderedContainerRef.current;
+    if (!el) return;
+
+    const handler = (event: ClipboardEvent) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) return;
+      const text = selection.toString();
+      if (!text.trim()) return;
+      event.preventDefault();
+      event.clipboardData?.setData("text/plain", text);
+      event.clipboardData?.setData("text/html", selectionHtmlWithInlineStyles(el, range));
+    };
+
+    document.addEventListener("copy", handler, true);
+    return () => document.removeEventListener("copy", handler, true);
+  }, [kind, filePath, content, mdEditing, isDiffMode]);
+
   const handleSubmitComment = useCallback(
     async ({ selection, comment }: SubmittedComment) => {
       if (!onAddFileTag || !filePath) return;
@@ -760,6 +864,7 @@ export function FileViewer({
   // Diff mode always stays in Monaco — side-by-side diff is only meaningful for source.
   const showMonaco = isDiffMode || kind === "code" || kind === "json";
   const canSaveViewedContent = !isDiffMode && !showLatestDiff && (showMonaco || kind === "markdown");
+  const canCopyOriginalContent = !isDiffMode && !showLatestDiff && kind !== "pdf" && kind !== "video";
   const hasUnsavedOriginalChanges = dirty || hasDraft;
   const synced = !stale && !hasUnsavedOriginalChanges && !showLatestDiff;
   const rawUrl = `${API}/api/file/raw?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}&_v=${rawVersion}`;
@@ -834,6 +939,17 @@ export function FileViewer({
             >
               {t("fileViewer.save")}
             </ProgressButton>
+          )}
+          {canCopyOriginalContent && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => void copyOriginalContent()}
+              title={t("fileViewer.copyOriginalTitle")}
+            >
+              <Icon name="clipboard" size={13} />
+              {copiedOriginal ? t("fileViewer.copied") : t("fileViewer.copyOriginal")}
+            </button>
           )}
           {!isDiffMode && kind === "markdown" && mdEditing && (
             <button
