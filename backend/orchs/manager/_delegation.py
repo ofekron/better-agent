@@ -284,6 +284,13 @@ async def run_delegation(
             or "primary"
         )
         if worker_creation_policy == "approve":
+            effective_provider_id = provider_id
+            if not effective_provider_id:
+                effective_provider = await asyncio.to_thread(
+                    coordinator.provider_for_session,
+                    app_session_id,
+                )
+                effective_provider_id = effective_provider.id
             approved = await spawn_approved_worker(
                 coordinator,
                 cwd=cwd,
@@ -294,7 +301,7 @@ async def run_delegation(
                 cancel_event=cancel_event,
                 delegation_id=delegation_id,
                 app_session_id=app_session_id,
-                provider_id=provider_id or coordinator.provider_for_session(app_session_id).id,
+                provider_id=effective_provider_id,
                 node_id=effective_node_id,
             )
         else:
@@ -387,7 +394,10 @@ async def run_delegation(
         worker_session.get("name") or worker_description or t("session.untitled_worker")
     )
     if run_mode != "direct" and hasattr(coordinator, "provider_for_session"):
-        fork_provider = coordinator.provider_for_session(worker_session_id)
+        fork_provider = await asyncio.to_thread(
+            coordinator.provider_for_session,
+            worker_session_id,
+        )
         if fork_provider is not None and not getattr(fork_provider, "supports_fork", True):
             return delegate_error_payload(
                 worker_session_id,
@@ -729,7 +739,11 @@ async def run_delegation_locked(
     worker_backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
     worker_internal_token = coordinator.internal_token
 
-    provider = coordinator.provider_for_run(worker_agent_session_id, provider_id)
+    provider = await asyncio.to_thread(
+        coordinator.provider_for_run,
+        worker_agent_session_id,
+        provider_id,
+    )
     provider_run_config = worker_session.get("provider_run_config") or None
     capability_contexts = worker_session.get("capability_contexts") or None
     reasoning_effort = reasoning_effort or worker_session.get("reasoning_effort")

@@ -74,6 +74,25 @@ def test_delegation_locked_reuses_worker_session_snapshot() -> None:
     assert "reasoning_effort = worker_session.get(\"reasoning_effort\")" in locked_source
 
 
+def test_async_provider_resolution_runs_off_loop() -> None:
+    delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    run_start = delegation_source.index("async def run_delegation(")
+    locked_start = delegation_source.index("async def run_delegation_locked(")
+    run_source = delegation_source[run_start:locked_start]
+    locked_source = delegation_source[locked_start:]
+    assert "await asyncio.to_thread(\n                    coordinator.provider_for_session" in run_source
+    assert "coordinator.provider_for_session(worker_session_id)" not in run_source
+    assert "coordinator.provider_for_session,\n            worker_session_id" in run_source
+    assert "coordinator.provider_for_run(worker_agent_session_id, provider_id)" not in locked_source
+    assert "coordinator.provider_for_run,\n        worker_agent_session_id" in locked_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")
+    route_end = main_source.index("@app.post(\"/api/internal/headless-run\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)" in route_source
+
+
 def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
     start = source.index("def prepare_provider_event_for_journal(")
