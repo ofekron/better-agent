@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import os
 import threading
 import time
 import uuid
@@ -20,6 +21,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Awaitable, Callable, Optional, Union
 
 import perf
@@ -45,6 +47,23 @@ RENDER_EVENT_TYPES = frozenset({
 # sole copy of PRIMARY content and must keep rendering.
 FORK_BACKUP_SOURCE = "fork_backup"
 _event_journal_loop: Optional[asyncio.AbstractEventLoop] = None
+_SESSIONS_DIR_CACHE: tuple[tuple[str | None, str | None, str | None], Path] | None = None
+
+
+def _sessions_dir():
+    global _SESSIONS_DIR_CACHE
+    key = (
+        os.environ.get("BETTER_AGENT_HOME"),
+        os.environ.get("BETTER_CLAUDE_HOME"),
+        os.environ.get("BETTER_AGENT_TEST_MODE"),
+    )
+    cached = _SESSIONS_DIR_CACHE
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    from paths import ba_home
+    sessions_dir = ba_home() / "sessions"
+    _SESSIONS_DIR_CACHE = (key, sessions_dir)
+    return sessions_dir
 
 @dataclass(frozen=True)
 class MessageOwnership:
@@ -1443,9 +1462,7 @@ class EventJournalReader:
         context_id: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> list[dict]:
-        from paths import ba_home
-
-        path = ba_home() / "sessions" / session_id / "events.jsonl"
+        path = _sessions_dir() / session_id / "events.jsonl"
         if not path.exists() or byte_end <= byte_start:
             return []
         events: list[dict] = []
@@ -1519,9 +1536,7 @@ class EventJournalReader:
     def _read_appended_entries(
         self, session_id: str, byte_offset: int,
     ) -> tuple[list[dict], int]:
-        from paths import ba_home
-
-        path = ba_home() / "sessions" / session_id / "events.jsonl"
+        path = _sessions_dir() / session_id / "events.jsonl"
         if not path.exists():
             return [], byte_offset
         if path.stat().st_size < byte_offset:
