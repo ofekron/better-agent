@@ -2086,12 +2086,14 @@ def test_session_detail_has_split_perf_timers() -> None:
     miss_cache_source = route_source[miss_cache_start:miss_cache_end]
     assert "_session_event_meta(" not in miss_cache_source
     assert "_session_event_file_fingerprint(" not in miss_cache_source
-    assert "return _json_bytes_response(tree)" in route_source
+    assert "return await _json_bytes_response_async(tree)" in route_source
     json_response_start = source.index("def _json_bytes_response(")
     json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
     json_response_source = source[json_response_start:json_response_end]
     assert "separators=(\",\", \":\")" in json_response_source
     assert "Response(content=content, media_type=\"application/json\")" in json_response_source
+    assert "async def _json_bytes_response_async(" in json_response_source
+    assert "content = await asyncio.to_thread(" in json_response_source
     for timer in (
         "sessions.detail.root_id",
         "sessions.detail.event_meta",
@@ -2852,7 +2854,8 @@ def test_session_detail_response_bytes_are_cached() -> None:
     assert "if cached_full_key is not None:" in route_source
     assert "_session_reconcile_snapshot_and_schedule" in route_source
     assert "include_cache_key=True" in route_source
-    assert "_session_detail_cache_put(cache_key, tree)" in route_source
+    assert "await _session_detail_cache_put_async(cache_key, tree)" in route_source
+    assert "def _session_detail_cache_put_async(" in source
 
 
 def test_stubbed_tree_cache_covers_broad_session_loads() -> None:
