@@ -95,7 +95,7 @@ _sessions_list_response_cache: dict[
     tuple[float, bytes],
 ] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 0.75
-_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.25
+_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 
