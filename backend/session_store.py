@@ -156,6 +156,8 @@ _index_lock = threading.Lock()
 _index_fingerprint: Optional[tuple[int, int, int]] = None
 _index_build_lock = threading.Lock()
 _negative_root_resolve_cache: dict[str, tuple[int, int, int]] = {}
+_negative_root_resolve_until: dict[str, float] = {}
+_NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 
 # ── Summary index ─────────────────────────────────────────────────────
 #
@@ -1453,7 +1455,9 @@ def _index_tree(
         _root_forks[rid] = current
         if file_signature is not None:
             _root_index_signatures[rid] = file_signature
-        _negative_root_resolve_cache.clear()
+        if topology_changed or force:
+            _negative_root_resolve_cache.clear()
+            _negative_root_resolve_until.clear()
         return topology_changed
 
 
@@ -1466,6 +1470,7 @@ def _index_set(fork_id: str, root_id: str) -> None:
         _index_loaded = True
         _index_fingerprint = fp
         _negative_root_resolve_cache.clear()
+        _negative_root_resolve_until.clear()
 
 
 def _index_pop(sid: str) -> None:
@@ -1479,6 +1484,7 @@ def _index_pop(sid: str) -> None:
                     _root_forks.pop(root_id, None)
                     _root_index_signatures.pop(root_id, None)
         _negative_root_resolve_cache.clear()
+        _negative_root_resolve_until.clear()
 
 
 # Sidecar files share the sessions dir and the `.json` extension but are
@@ -1857,6 +1863,7 @@ def _install_index_snapshot(
     _root_index_signatures.update(root_signatures)
     _index_fingerprint = fp
     _negative_root_resolve_cache.clear()
+    _negative_root_resolve_until.clear()
 
 
 def _refresh_index(
@@ -1934,6 +1941,10 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     _ensure_index()
     if sid in _fork_index:
         return _fork_index[sid]
+    now = time.monotonic()
+    with _index_lock:
+        if _negative_root_resolve_until.get(sid, 0.0) > now:
+            return None
     live_fp = _dir_fingerprint()
     with _index_lock:
         if _negative_root_resolve_cache.get(sid) == live_fp:
@@ -1947,6 +1958,9 @@ def _resolve_root_id(sid: str) -> Optional[str]:
         return sid
     with _index_lock:
         _negative_root_resolve_cache[sid] = live_fp
+        _negative_root_resolve_until[sid] = (
+            time.monotonic() + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
+        )
     return None
 
 
