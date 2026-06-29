@@ -3839,6 +3839,48 @@ def _filter_sessions_for_list_preserving_order(
     ]
 
 
+def _filter_page_for_list_preserving_order(
+    sessions: list[dict],
+    *,
+    offset: int,
+    limit: int,
+    project_path: str | None,
+    search: str | None,
+    show_archived: bool,
+    file_edit_mode: bool | None,
+    folder_ids: set[str],
+    tag_ids: set[str],
+    provider_ids: set[str],
+    model_ids: set[str],
+    modes: set[str],
+    sources: set[str],
+    content_scores: dict[str, int],
+) -> tuple[list[dict], int]:
+    page: list[dict] = []
+    total = 0
+    end = offset + limit
+    for session in sessions:
+        if not _session_matches_list_filters(
+            session,
+            project_path=project_path,
+            search=search,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            tag_ids=tag_ids,
+            provider_ids=provider_ids,
+            model_ids=model_ids,
+            modes=modes,
+            sources=sources,
+            content_scores=content_scores,
+        ):
+            continue
+        if offset <= total < end:
+            page.append(session)
+        total += 1
+    return page, total
+
+
 def _can_preserve_summary_order(
     *,
     search_query: str,
@@ -3944,8 +3986,10 @@ def _build_local_sessions_page_for_list(
             sort_by=sort_by,
             status_sort=status_sort,
         ):
-            out = _filter_sessions_for_list_preserving_order(
+            page_source, total = _filter_page_for_list_preserving_order(
                 out,
+                offset=offset,
+                limit=limit,
                 project_path=project_path,
                 search=search,
                 show_archived=show_archived,
@@ -3958,6 +4002,9 @@ def _build_local_sessions_page_for_list(
                 sources=sources,
                 content_scores=content_scores,
             )
+            with perf.timed("sessions.list.page_decorate"):
+                page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
+            return page, total
         else:
             out = _filter_sort_sessions_for_list(
                 out,
