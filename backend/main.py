@@ -12260,6 +12260,56 @@ def _find_worker_by_agent_session_id(agent_session_id: str) -> dict | None:
     return None
 
 
+def _provision_parent_session_id(body: dict, spec: dict) -> str:
+    parent_id = str(
+        spec.get("parent_session_id")
+        or body.get("parent_session_id")
+        or body.get("app_session_id")
+        or ""
+    ).strip()
+    if parent_id:
+        return parent_id
+    team_id = str((spec.get("team_instance_id") or body.get("team_instance_id") or "")).strip()
+    if not team_id:
+        return ""
+    import team_store
+
+    team = team_store.get(team_id)
+    return str((team or {}).get("root_session_id") or "").strip()
+
+
+def _worker_working_mode_meta(parent_session_id: str, body: dict, spec: dict, key: str) -> dict:
+    from stores import worker_store as _ws
+
+    meta = {
+        "parent_session_id": parent_session_id,
+        "role_key": key,
+    }
+    team_id = str((spec.get("team_instance_id") or body.get("team_instance_id") or "")).strip()
+    if team_id:
+        meta["team_instance_id"] = team_id
+    tags = _ws.normalize_tags(spec.get("tags"))
+    if tags:
+        meta["pool_tags"] = tags
+    return meta
+
+
+def _mark_worker_under_parent(worker_session_id: str, parent_session_id: str, body: dict, spec: dict, key: str) -> None:
+    worker_sid = str(worker_session_id or "").strip()
+    parent_sid = str(parent_session_id or "").strip()
+    if not worker_sid or not parent_sid or worker_sid == parent_sid:
+        return
+    if not session_manager.get_lite(parent_sid):
+        raise HTTPException(status_code=400, detail="parent_session_id does not exist")
+    import working_mode
+
+    working_mode.mark_working_mode(
+        worker_sid,
+        mode="worker_pool",
+        meta=_worker_working_mode_meta(parent_sid, body, spec, key),
+    )
+
+
 async def _provision_workers_from_body(body: dict):
     import team_store
     from stores import worker_store as _ws
@@ -12286,6 +12336,7 @@ async def _provision_workers_from_body(body: dict):
             if not worker_cwd:
                 raise HTTPException(status_code=400, detail=t("error.cwd_required"))
             name = f"worker:{key}"
+            parent_session_id = _provision_parent_session_id(body, spec)
             async with _provision_lock(name, worker_cwd):
                 existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
                 if existing:
@@ -12310,7 +12361,21 @@ async def _provision_workers_from_body(body: dict):
                                 role_key=existing.get("role_key") or key,
                                 tags=merged_tags,
                             )
-                    result = {**existing, "created": False, "role_key": key, "registry_cwd": existing_cwd}
+                    await asyncio.to_thread(
+                        _mark_worker_under_parent,
+                        existing["agent_session_id"],
+                        parent_session_id,
+                        body,
+                        spec,
+                        key,
+                    )
+                    result = {
+                        **existing,
+                        "created": False,
+                        "role_key": key,
+                        "registry_cwd": existing_cwd,
+                        "parent_session_id": parent_session_id or None,
+                    }
                     _register_provisioned_team_member(team_store, body, spec, result, key)
                     results.append(result)
                     continue
@@ -12338,7 +12403,21 @@ async def _provision_workers_from_body(body: dict):
                 else:
                     created = await _create_worker_from_body(create_body, broadcast=False)
                 created_any = True
-                result = {**created, "created": True, "role_key": key, "registry_cwd": created.get("cwd") or worker_cwd}
+                await asyncio.to_thread(
+                    _mark_worker_under_parent,
+                    created["agent_session_id"],
+                    parent_session_id,
+                    body,
+                    spec,
+                    key,
+                )
+                result = {
+                    **created,
+                    "created": True,
+                    "role_key": key,
+                    "registry_cwd": created.get("cwd") or worker_cwd,
+                    "parent_session_id": parent_session_id or None,
+                }
                 _register_provisioned_team_member(team_store, body, spec, result, key)
                 results.append(result)
     finally:

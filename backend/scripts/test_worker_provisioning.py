@@ -285,6 +285,52 @@ def test_pool_workers_receive_peer_context_in_provision_prompt():
         assert "Use mssg(target_session_id, message)" in prompt
 
 
+def test_pool_worker_provisioning_hides_router_owned_workers_from_sidebar():
+    main.coordinator._init_target_agent_session = _fake_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    router = main.session_manager.create(
+        name="pool-router",
+        cwd="/tmp/router-owned-pool",
+        orchestration_mode="team",
+        user_initiated=True,
+    )
+
+    response = _post_team_ui_provision(client, {
+        "cwd": "/tmp/router-owned-pool",
+        "app_session_id": router["id"],
+        "workers": [
+            {
+                "role_key": "testape",
+                "orchestration_mode": "native",
+                "tags": ["testape-router-owned"],
+            },
+        ],
+    })
+
+    assert response.status_code == 200, response.text
+    worker = response.json()["workers"][0]
+    assert worker["parent_session_id"] == router["id"]
+
+    worker_session = main.session_manager.get(worker["agent_session_id"])
+    assert worker_session["working_mode"] == "worker_pool"
+    assert worker_session["working_mode_meta"]["parent_session_id"] == router["id"]
+    assert worker_session["working_mode_meta"]["pool_tags"] == ["testape-router-owned"]
+
+    visible_ids = {session["id"] for session in main._local_session_summaries_for_sidebar()}
+    assert router["id"] in visible_ids
+    assert worker["agent_session_id"] not in visible_ids
+
+    listed = client.post(
+        "/api/internal/workers/list",
+        json={"cwd": "/tmp/router-owned-pool"},
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert listed.status_code == 200, listed.text
+    pools = {pool["tag"]: pool for pool in listed.json()["pools"]}
+    assert pools["testape-router-owned"]["workers"][0]["agent_session_id"] == worker["agent_session_id"]
+
+
 def test_existing_named_worker_backfills_pool_tags():
     main.coordinator._init_target_agent_session = _fake_init_target_agent_session
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
@@ -793,6 +839,7 @@ if __name__ == "__main__":
     test_provision_workers_allows_per_worker_cwd()
     test_worker_list_projects_pools_from_tags()
     test_pool_workers_receive_peer_context_in_provision_prompt()
+    test_pool_worker_provisioning_hides_router_owned_workers_from_sidebar()
     test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
     test_worker_pool_dispatch_failure_requeues_without_blocking_later_items()
