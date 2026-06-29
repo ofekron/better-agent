@@ -79,7 +79,6 @@ _INTERNAL_KINDS = {
     "native_event_appended",
     "native_event_replaced",
     "native_events_set",
-    "running_content_updated",
     "streaming_set",
     "stopped_at_set",
     "processed_lines_advanced",
@@ -245,6 +244,16 @@ class SessionWSBroadcaster:
                 "data": {
                     "app_session_id": sid,
                     "messages": [change.get("msg")],
+                },
+            })
+            return
+        if kind == "running_content_updated":
+            self._dispatch({
+                "type": "message_content_updated",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "content": change.get("content") or "",
                 },
             })
             return

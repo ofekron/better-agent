@@ -290,6 +290,9 @@ def _run() -> bool:
     results.append(
         ("`message_auto_retry_changed` in allowlist",
          "message_auto_retry_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_content_updated` in allowlist",
+         "message_content_updated" in ALLOWLIST, "missing"))
 
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:

@@ -1667,6 +1667,31 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  const applyMessageContent = useCallback(
+    (sessionId: string, msgId: string, content: string) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          const idx = msgs.findIndex((m) => m.id === msgId);
+          if (idx === -1) return node;
+          if ((msgs[idx].content ?? "") === content) return node;
+          const next: ChatMessage = {
+            ...msgs[idx],
+            content,
+            isStale: false,
+            isDetached: false,
+          };
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    []
+  );
+
   /** Stamp the user's pick (`chosen_session_id`) on an assistant message in
    * response to `message_ask_choice_changed` WS frames — keeps the chosen
    * picker row highlighted across reloads / tabs / previous turns. */
@@ -2347,6 +2372,7 @@ export function useSession(authStatus?: string) {
     applyMessageRecovering,
     applyMessageRetrying,
     applyMessageAutoRetry,
+    applyMessageContent,
     applyMessageAskResult,
     applyMessageAskChoice,
     processingByRoot,
