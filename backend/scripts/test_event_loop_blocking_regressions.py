@@ -82,6 +82,15 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     assert "sess = session_manager.get_lite(self.app_session_id)" not in source
 
 
+def test_gemini_polling_tailer_reads_file_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    start = source.index("class GeminiJsonlTailer")
+    end = source.index("class OwnedClaudeJsonlTailer", start)
+    gemini_source = source[start:end]
+    assert "new_lines = await asyncio.to_thread(self._read_new_lines)" in gemini_source
+    assert "new_lines = self._read_new_lines()" not in gemini_source
+
+
 def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
     assert "_SESSIONS_DIR = bc_home() / \"sessions\"" in source
@@ -3075,6 +3084,7 @@ if __name__ == "__main__":
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
     test_provider_context_runtime_discovery_runs_off_loop()
+    test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_user_prefs_uses_cached_path_for_hot_reads()
