@@ -468,6 +468,58 @@ def main() -> int:
         bg.join()
         check(concurrent_results["slow"][0] == 200, "concurrent slow route also completes")
 
+        async def _check_get_coalescing() -> None:
+            calls = 0
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            original = extension_backend_loader._invoke_backend  # type: ignore[attr-defined]
+
+            async def fake_invoke(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                entered.set()
+                await release.wait()
+                from fastapi.responses import Response
+                return Response(content=b'{"ok":true}', media_type="application/json")
+
+            extension_backend_loader._GET_INFLIGHT.clear()  # type: ignore[attr-defined]
+            extension_backend_loader._invoke_backend = fake_invoke  # type: ignore[attr-defined]
+            spec = {"extension_id": "ofek.backend"}
+            try:
+                task1 = asyncio.create_task(
+                    extension_backend_loader._invoke_backend_get_coalesced(  # type: ignore[attr-defined]
+                        spec,
+                        method="GET",
+                        path="workers",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                )
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                task2 = asyncio.create_task(
+                    extension_backend_loader._invoke_backend_get_coalesced(  # type: ignore[attr-defined]
+                        spec,
+                        method="GET",
+                        path="workers",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                )
+                release.set()
+                r1, r2 = await asyncio.gather(task1, task2)
+            finally:
+                extension_backend_loader._invoke_backend = original  # type: ignore[attr-defined]
+                extension_backend_loader._GET_INFLIGHT.clear()  # type: ignore[attr-defined]
+            check(calls == 1, "duplicate in-flight extension GET invokes backend once")
+            check(r1 is not r2, "duplicate in-flight extension GET returns independent responses")
+            check(r1.body == r2.body == b'{"ok":true}', "duplicate in-flight extension GET shares response body")
+
+        asyncio.run(_check_get_coalescing())
+
         response = client.get("/api/extensions/frontend-entrypoints")
         check(response.status_code == 200, "frontend entrypoint catalog returns")
         entrypoints = response.json()["entrypoints"]

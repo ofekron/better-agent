@@ -185,6 +185,11 @@ _PERSISTENT_PROCS: dict[str, _BackendProc] = {}
 _PROCS_GUARD = threading.Lock()
 _SPEC_CACHE_GUARD = threading.Lock()
 _SPEC_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_GET_INFLIGHT_GUARD = threading.Lock()
+_GET_INFLIGHT: dict[
+    tuple[str, str, str, tuple[tuple[str, str], ...], str],
+    tuple[asyncio.AbstractEventLoop, asyncio.Task],
+] = {}
 
 
 def backend_entrypoint_spec_cached(extension_id: str) -> dict[str, Any] | None:
@@ -475,19 +480,89 @@ async def dispatch_extension_backend_request(
         if method in _METHODS_WITH_REQUEST_BODY
         else b""
     )
-    return await _invoke_backend(
+    query_b64 = (
+        base64.b64encode(request.scope.get("query_string", b"")).decode("ascii")
+        if request.scope.get("query_string")
+        else _EMPTY_B64
+    )
+    safe_headers = _safe_request_headers(request)
+    base_url = str(request.base_url).rstrip("/")
+    if method != "GET" or body:
+        return await _invoke_backend(
+            spec,
+            method=method,
+            path=path,
+            body_bytes=body,
+            query_b64=query_b64,
+            safe_headers=safe_headers,
+            base_url=base_url,
+        )
+    return await _invoke_backend_get_coalesced(
         spec,
         method=method,
         path=path,
         body_bytes=body,
-        query_b64=(
-            base64.b64encode(request.scope.get("query_string", b"")).decode("ascii")
-            if request.scope.get("query_string")
-            else _EMPTY_B64
-        ),
-        safe_headers=_safe_request_headers(request),
-        base_url=str(request.base_url).rstrip("/"),
+        query_b64=query_b64,
+        safe_headers=safe_headers,
+        base_url=base_url,
     )
+
+
+def _clone_response(response: Response) -> Response:
+    return Response(
+        content=response.body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+
+
+async def _invoke_backend_get_coalesced(
+    spec: dict[str, Any],
+    *,
+    method: str,
+    path: str,
+    body_bytes: bytes,
+    query_b64: str,
+    safe_headers: list[tuple[str, str]],
+    base_url: str,
+) -> Response:
+    loop = asyncio.get_running_loop()
+    key = (
+        str(spec["extension_id"]),
+        path,
+        query_b64,
+        tuple(safe_headers),
+        base_url,
+    )
+    with _GET_INFLIGHT_GUARD:
+        existing = _GET_INFLIGHT.get(key)
+        if existing is not None and existing[0] is loop and not existing[1].done():
+            task = existing[1]
+            owner = False
+        else:
+            task = loop.create_task(
+                _invoke_backend(
+                    spec,
+                    method=method,
+                    path=path,
+                    body_bytes=body_bytes,
+                    query_b64=query_b64,
+                    safe_headers=safe_headers,
+                    base_url=base_url,
+                )
+            )
+            _GET_INFLIGHT[key] = (loop, task)
+            owner = True
+    try:
+        response = await task
+        return response if owner else _clone_response(response)
+    finally:
+        if owner:
+            with _GET_INFLIGHT_GUARD:
+                current = _GET_INFLIGHT.get(key)
+                if current is not None and current[1] is task:
+                    _GET_INFLIGHT.pop(key, None)
 
 
 async def invoke_extension_backend(
