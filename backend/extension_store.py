@@ -3845,6 +3845,9 @@ def uninstall(extension_id: str) -> None:
     record = data["extensions"].pop(extension_id, None)
     if not record:
         raise ExtensionError("Extension not installed")
+    if extension_id == BUILTIN_ASSISTANT_EXTENSION_ID:
+        import assistant_ui
+        assistant_ui.cleanup_singleton()
     _evict_extension_backend(extension_id)
     extension_instructions.clear_all_blocks(record)
     extension_applied_config.clear_for_uninstall(record)

@@ -139,6 +139,20 @@ def _write_state(data: dict) -> None:
     tmp.replace(path)
 
 
+def cleanup_singleton() -> None:
+    with _LOCK:
+        state = _read_state()
+        sid = state.get("session_id")
+        sess = session_manager.get(sid) if sid else None
+        if (
+            sess is not None
+            and sess.get("source") == "extension"
+            and sess.get("name") == "Assistant"
+        ):
+            session_manager.delete(sess["id"])
+        _state_path().unlink(missing_ok=True)
+
+
 def _caps_hash(caps: list[dict]) -> str:
     raw = json.dumps(caps, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
