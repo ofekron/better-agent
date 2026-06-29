@@ -458,6 +458,37 @@ def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
     assert "runtime_not_ready_message(" in readiness_source
 
 
+def test_models_catalog_uses_fingerprinted_in_process_cache() -> None:
+    source = (ROOT / "models.py").read_text(encoding="utf-8")
+    assert "_cache_by_path: dict[Path, tuple[tuple[int, int], dict]] = {}" in source
+
+    read_start = source.index("def _read_cache(")
+    read_end = source.index("def _update_cache(", read_start)
+    read_source = source[read_start:read_end]
+    assert "fingerprint = (stat.st_mtime_ns, stat.st_size)" in read_source
+    assert "cached = _cache_by_path.get(path)" in read_source
+    assert "return copy.deepcopy(cached[1])" in read_source
+    assert "_cache_by_path[path] = (fingerprint, copy.deepcopy(data))" in read_source
+
+    update_start = source.index("def _update_cache(")
+    update_end = source.index("def _merge_retired(", update_start)
+    update_source = source[update_start:update_end]
+    assert "_cache_by_path[path] = ((stat.st_mtime_ns, stat.st_size), copy.deepcopy(cur))" in update_source
+
+    helper_start = source.index("def _read_catalog_models(")
+    helper_end = source.index("def _models_for(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "-> tuple[list[str], list[str], bool, dict | None]:" in helper_source
+    assert "return models, cached_retired, has_cache, cached" in helper_source
+
+    catalog_start = source.index("def models_catalog(")
+    catalog_end = source.index("async def refresh_one(", catalog_start)
+    catalog_source = source[catalog_start:catalog_end]
+    assert "models, retired, has_cache, cached = _read_catalog_models(rec)" in catalog_source
+    after_helper = catalog_source.split("models, retired, has_cache, cached = _read_catalog_models(rec)", 1)[1]
+    assert "_read_cache(" not in after_helper
+
+
 def test_connected_session_list_pages_virtual_candidates() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     connected_start = source.index("    if connected:")
@@ -2362,6 +2393,7 @@ if __name__ == "__main__":
     test_message_hydration_reuses_full_scan_cache()
     test_read_events_collects_page_without_filtered_copies()
     test_written_journal_projection_avoids_full_event_list_copy()
+    test_models_catalog_uses_fingerprinted_in_process_cache()
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()

@@ -38,10 +38,12 @@ retired model) call `available_models_including_retired()` explicitly.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -78,6 +80,8 @@ REFRESH_THRESHOLD_SECONDS = 86400  # 24h — overdue check in refresh_all_due
 # providers added after boot. Single-event-loop + no-await read-check-
 # write makes the lazy path safe; eager pre-warm is belt+suspenders.
 _refresh_locks: dict[str, asyncio.Lock] = {}
+_cache_lock = threading.Lock()
+_cache_by_path: dict[Path, tuple[tuple[int, int], dict]] = {}
 
 
 def _lock_for(pid: str) -> asyncio.Lock:
@@ -97,8 +101,17 @@ def _read_cache(pid: str) -> Optional[dict]:
     """Returns parsed cache dict or None on missing/corrupt/wrong-schema.
     On corruption: logs WARNING and unlinks the file (no silent overwrite)."""
     path = _models_cache_path(pid)
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _cache_lock:
+        cached = _cache_by_path.get(path)
+        if cached is not None and cached[0] == fingerprint:
+            return copy.deepcopy(cached[1])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -108,6 +121,8 @@ def _read_cache(pid: str) -> Optional[dict]:
             pid, e,
         )
         path.unlink(missing_ok=True)
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
     if data.get("schema") != SCHEMA_VERSION or not isinstance(data.get("models"), list):
         logger.warning(
@@ -116,10 +131,14 @@ def _read_cache(pid: str) -> Optional[dict]:
             pid, data.get("schema"), type(data.get("models")).__name__,
         )
         path.unlink(missing_ok=True)
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
         return None
     data.setdefault("retired", [])
     data.setdefault("last_refreshed_at", 0.0)
     data.setdefault("last_fetch_state", "ok")
+    with _cache_lock:
+        _cache_by_path[path] = (fingerprint, copy.deepcopy(data))
     return data
 
 
@@ -146,7 +165,16 @@ def _update_cache(
         cur["last_fetch_state"] = last_fetch_state
     cur["last_refreshed_at"] = time.time()
     cur["schema"] = SCHEMA_VERSION
-    write_json(_models_cache_path(pid), cur)
+    path = _models_cache_path(pid)
+    write_json(path, cur)
+    try:
+        stat = path.stat()
+    except OSError:
+        with _cache_lock:
+            _cache_by_path.pop(path, None)
+    else:
+        with _cache_lock:
+            _cache_by_path[path] = ((stat.st_mtime_ns, stat.st_size), copy.deepcopy(cur))
 
 
 def _merge_retired(
@@ -411,9 +439,9 @@ def _static_cold_start(provider: dict) -> list[str]:
     return []
 
 
-def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
+def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, dict | None]:
     """Single source of truth for `_models_for` + `models_catalog`.
-    Returns `(active_models, retired_ids, has_cache)`.
+    Returns `(active_models, retired_ids, has_cache, cache_record)`.
 
     Semantics:
     - Cache present → use cache. For subscription Claude, also union
@@ -442,7 +470,7 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool]:
     else:
         models = static_seed
 
-    return models, cached_retired, has_cache
+    return models, cached_retired, has_cache, cached
 
 
 def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
@@ -451,7 +479,7 @@ def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     in so the selector is never empty before/without a successful fetch (e.g.
     a fresh openai provider whose first /models fetch hasn't run yet)."""
     custom = list(provider.get("custom_models") or [])
-    models, retired_ids, _has_cache = _read_catalog_models(provider)
+    models, retired_ids, _has_cache, _cached = _read_catalog_models(provider)
     if include_retired:
         models = models + retired_ids
     default_model = provider.get("default_model") or ""
@@ -526,8 +554,7 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
             "last_refreshed_at": 0.0,
         }
     custom = list(rec.get("custom_models") or [])
-    models, retired, has_cache = _read_catalog_models(rec)
-    cached = _read_cache(rec["id"]) if has_cache else None
+    models, retired, has_cache, cached = _read_catalog_models(rec)
 
     if cached is not None:
         state = cached.get("last_fetch_state") or "ok"
