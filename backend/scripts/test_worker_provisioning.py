@@ -247,6 +247,44 @@ def test_worker_list_projects_pools_from_tags():
     assert len(pools["build"]["workers"]) == 1
 
 
+def test_pool_workers_receive_peer_context_in_provision_prompt():
+    init_prompts = {}
+
+    async def fake_init_with_prompt(*, bc_session, provision_prompt, **_kwargs):
+        init_prompts[bc_session["name"]] = provision_prompt
+        return f"agent-{bc_session['id']}"
+
+    main.coordinator._init_target_agent_session = fake_init_with_prompt
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    client = _client()
+    response = _post_team_ui_provision(client, {
+        "cwd": "/tmp/pool-context",
+        "workers": [
+            {
+                "role_key": "review-a",
+                "description": "First reviewer",
+                "orchestration_mode": "native",
+                "tags": ["review"],
+            },
+            {
+                "role_key": "review-b",
+                "description": "Second reviewer",
+                "orchestration_mode": "native",
+                "tags": ["review"],
+            },
+        ],
+    })
+
+    assert response.status_code == 200, response.text
+    assert set(init_prompts) == {"worker:review-a", "worker:review-b"}
+    for prompt in init_prompts.values():
+        assert "<worker_pool>" in prompt
+        assert 'name="worker:review-a"' in prompt
+        assert 'name="worker:review-b"' in prompt
+        assert 'tags="review"' in prompt
+        assert "Use mssg(target_session_id, message)" in prompt
+
+
 def test_existing_named_worker_backfills_pool_tags():
     main.coordinator._init_target_agent_session = _fake_init_target_agent_session
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
@@ -657,6 +695,7 @@ if __name__ == "__main__":
     test_provision_workers_remains_idempotent_after_session_title_changes()
     test_provision_workers_allows_per_worker_cwd()
     test_worker_list_projects_pools_from_tags()
+    test_pool_workers_receive_peer_context_in_provision_prompt()
     test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
     test_internal_provision_workers_requires_internal_token()

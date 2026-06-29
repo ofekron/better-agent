@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+from html import escape
 
 # Build version: first 5 chars of git HEAD SHA.
 try:
@@ -45,6 +46,7 @@ import hook_store
 from event_shape import extract_output_text, strip_synthetic_events
 from paths import ba_home
 from i18n import t
+from provisioning.prompts import render_prompt
 from reasoning_effort import normalize_reasoning_effort
 from user_msg_lifecycle import emit_queued, new_lifecycle_msg_id, queued_payload
 import session_store
@@ -11842,6 +11844,99 @@ def _provision_lock(name: str, cwd: str) -> asyncio.Lock:
     return _PROVISION_LOCKS.setdefault(f"{name}\0{cwd}", asyncio.Lock())
 
 
+def _pool_worker_specs_for_prompt(specs: list, default_cwd: str) -> list[dict]:
+    out: list[dict] = []
+    for raw in specs:
+        if not isinstance(raw, dict):
+            continue
+        tags = _normalize_pool_context_tags(raw.get("tags"))
+        if not tags:
+            continue
+        key = str(raw.get("role_key") or raw.get("description") or "").strip()
+        if not key:
+            continue
+        out.append({
+            "name": f"worker:{key}",
+            "description": str(raw.get("description") or f"worker:{key}").strip(),
+            "cwd": str(raw.get("cwd") or default_cwd).strip(),
+            "orchestration_mode": str(raw.get("orchestration_mode") or "native").strip(),
+            "tags": tags,
+        })
+    return out
+
+
+def _normalize_pool_context_tags(value) -> list[str]:
+    from stores import worker_store as _ws
+
+    return _ws.normalize_tags(value)
+
+
+def _pool_worker_context_for_prompt(*, body: dict, bc_session_id: str, description: str) -> str:
+    tags = _normalize_pool_context_tags(body.get("tags"))
+    if not tags:
+        return ""
+    peers_by_name: dict[str, dict] = {}
+    for worker in body.get("pool_worker_specs") or []:
+        if not set(tags).intersection(_normalize_pool_context_tags(worker.get("tags"))):
+            continue
+        peers_by_name[str(worker.get("name") or "")] = worker
+    from stores import worker_store as _ws
+
+    for worker in _ws.list_workers(""):
+        worker_tags = _normalize_pool_context_tags(worker.get("tags"))
+        if not set(tags).intersection(worker_tags):
+            continue
+        name = str(worker.get("name") or worker.get("agent_session_id") or "").strip()
+        if not name:
+            continue
+        peers_by_name[name] = {
+            "name": name,
+            "description": name,
+            "cwd": str(worker.get("cwd") or "").strip(),
+            "orchestration_mode": str(worker.get("orchestration_mode") or "native").strip(),
+            "tags": worker_tags,
+            "agent_session_id": str(worker.get("agent_session_id") or "").strip(),
+        }
+    lines = [
+        "<worker_pool>",
+        f"<self session_id=\"{escape(bc_session_id, quote=True)}\" "
+        f"description=\"{escape(description, quote=True)}\" "
+        f"tags=\"{escape(', '.join(tags), quote=True)}\" />",
+        "<peers>",
+    ]
+    for peer in sorted(peers_by_name.values(), key=lambda item: str(item.get("name") or "")):
+        lines.append(
+            "<peer "
+            f"name=\"{escape(str(peer.get('name') or ''), quote=True)}\" "
+            f"session_id=\"{escape(str(peer.get('agent_session_id') or ''), quote=True)}\" "
+            f"cwd=\"{escape(str(peer.get('cwd') or ''), quote=True)}\" "
+            f"mode=\"{escape(str(peer.get('orchestration_mode') or 'native'), quote=True)}\" "
+            f"tags=\"{escape(', '.join(_normalize_pool_context_tags(peer.get('tags'))), quote=True)}\" "
+            f"description=\"{escape(str(peer.get('description') or ''), quote=True)}\" "
+            "/>"
+        )
+    lines.extend([
+        "</peers>",
+        "<messaging>Use mssg(target_session_id, message) to coordinate with pool peers that have a session_id.</messaging>",
+        "</worker_pool>",
+    ])
+    return "\n".join(lines)
+
+
+def _worker_provision_prompt_for_body(*, body: dict, bc_session_id: str, description: str) -> str:
+    base = _api_optional_provision_prompt(body.get("provision_prompt"))
+    if base is None:
+        base = render_prompt("worker_prep.md", {"description": description})
+    pool_context = _pool_worker_context_for_prompt(
+        body=body,
+        bc_session_id=bc_session_id,
+        description=description,
+    )
+    if not pool_context:
+        return base
+    return f"{base}\n\n{pool_context}"
+
+
 @app.post("/api/internal/worker-pools/enqueue")
 async def internal_enqueue_worker_pool_prompt(
     body: dict = Body(default={}),
@@ -11979,6 +12074,7 @@ async def _provision_workers_from_body(body: dict):
         raise HTTPException(status_code=400, detail="workers must be a list")
     results = []
     created_any = False
+    pool_worker_specs = _pool_worker_specs_for_prompt(specs, cwd)
     try:
         for raw in specs:
             spec = raw if isinstance(raw, dict) else {}
@@ -12031,6 +12127,7 @@ async def _provision_workers_from_body(body: dict):
                     "bare_config": bool(spec.get("bare_config", body_bare)),
                     "provision_prompt": spec.get("provision_prompt"),
                     "capability_contexts": spec.get("capability_contexts"),
+                    "pool_worker_specs": pool_worker_specs,
                 }
                 if create_body["bare_config"]:
                     created = await asyncio.to_thread(
@@ -12214,7 +12311,11 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         init_sid = await coordinator._init_target_agent_session(
             bc_session=bc, model=model, cwd=cwd,
             description=description, cancel_event=cancel_event,
-            provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
+            provision_prompt=_worker_provision_prompt_for_body(
+                body=body,
+                bc_session_id=bc["id"],
+                description=description,
+            ),
         )
     except Exception as e:
         await asyncio.to_thread(session_manager.delete, bc["id"])
@@ -12300,7 +12401,11 @@ async def internal_register_existing_session_as_worker(
             init_sid = await coordinator._init_target_agent_session(
                 bc_session=bc, model=model,
                 cwd=worker_cwd, description=bc.get("name") or "", cancel_event=cancel_event,
-                provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
+                provision_prompt=_worker_provision_prompt_for_body(
+                    body=body,
+                    bc_session_id=bc_sid,
+                    description=bc.get("name") or "",
+                ),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=t("error.init_turn_failed", e=str(e)))
