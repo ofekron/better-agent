@@ -1734,6 +1734,11 @@ def test_session_detail_response_bytes_are_cached() -> None:
     assert "_session_detail_cache_put(cache_key, tree)" in route_source
 
 
+def test_stubbed_tree_cache_covers_broad_session_loads() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert "self._tree_stub_cache_max = 256" in source
+
+
 def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     finalize_start = source.index("async def _finalize_when_done(")
@@ -1982,6 +1987,7 @@ if __name__ == "__main__":
     test_session_organization_refresh_is_coalesced_background_work()
     test_get_session_strips_synthetic_events_off_loop()
     test_session_detail_response_bytes_are_cached()
+    test_stubbed_tree_cache_covers_broad_session_loads()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()
