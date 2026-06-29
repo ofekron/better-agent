@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import tempfile
+import sys
+from unittest import mock
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def test_hook_runner_loads_config_off_loop() -> None:
@@ -349,6 +354,35 @@ def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
     flush_end = source.index("    def attach_recovered_run(", flush_start)
     flush_source = source[flush_start:flush_end]
     assert "await asyncio.to_thread(self._write_backend_state, rs)" in flush_source
+
+
+def test_jsonl_line_count_uses_fingerprint_cache() -> None:
+    import orchs.jsonl_helpers as helpers
+
+    original_open = Path.open
+    open_calls = 0
+
+    def counting_open(self, *args, **kwargs):
+        nonlocal open_calls
+        open_calls += 1
+        return original_open(self, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "session.jsonl"
+        path.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
+        helpers._JSONL_LINE_COUNT_CACHE.clear()  # type: ignore[attr-defined]
+
+        first = helpers.count_jsonl_lines(path)
+        with mock.patch.object(Path, "open", counting_open):
+            second = helpers.count_jsonl_lines(path)
+        path.write_text('{"a":1}\n{"a":2}\n{"a":3}\n', encoding="utf-8")
+        with mock.patch.object(Path, "open", counting_open):
+            third = helpers.count_jsonl_lines(path)
+
+    assert first == 2
+    assert second == 2
+    assert third == 3
+    assert open_calls == 1
 
 
 def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:

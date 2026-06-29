@@ -29,6 +29,8 @@ _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
 _CLAUDE_PATH_INDEX_LOCK = threading.Lock()
 _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _RUN_STATE_RECENT_INDEX: tuple[str, float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]] | None = None
+_JSONL_LINE_COUNT_LOCK = threading.Lock()
+_JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
 
 
 def _claude_projects_dir() -> Path:
@@ -340,13 +342,24 @@ def compute_jsonl_read_path(
 
 
 def count_jsonl_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
     try:
-        with path.open("rb") as f:
-            return sum(1 for _ in f)
+        stat = path.stat()
     except OSError:
         return 0
+    fingerprint = (int(stat.st_mtime_ns), int(stat.st_size), int(getattr(stat, "st_ino", 0)))
+    key = str(path)
+    with _JSONL_LINE_COUNT_LOCK:
+        cached = _JSONL_LINE_COUNT_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+    try:
+        with path.open("rb") as f:
+            count = sum(1 for _ in f)
+    except OSError:
+        return 0
+    with _JSONL_LINE_COUNT_LOCK:
+        _JSONL_LINE_COUNT_CACHE[key] = (fingerprint, count)
+    return count
 
 
 def jsonl_byte_size(path: Optional[Path]) -> int:
