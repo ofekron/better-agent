@@ -56,8 +56,8 @@ def _install_stubs(*, picker_returns, caller_in_flight=True, target_busy=False):
     )
     session_bridge._target_busy = lambda sid: target_busy  # type: ignore
 
-    async def _fake_run(target_sid, prompt, run_mode, **_kwargs):
-        calls["run"].append((target_sid, prompt, run_mode))
+    async def _fake_run(target_sid, prompt, run_mode, **kwargs):
+        calls["run"].append((target_sid, prompt, run_mode, kwargs))
         return {"session_id": target_sid, "run_mode": run_mode,
                 "final_message": "done", "turn_id": "t1"}
 
@@ -111,6 +111,26 @@ async def _run_tests():
         run_mode="continue", approval="auto")
     check(len(calls["picker"]) == 1, "continue always picker-gated even with flag ON")
     user_prefs.set_cross_session_delegate_auto(False)
+
+    # 4a. continue-mode can carry explicit model selectors into the run.
+    calls = _install_stubs(picker_returns="sess-A")
+    await session_bridge.delegate(
+        caller_sid="caller",
+        target_sid="sess-A",
+        prompt="p",
+        run_mode="continue",
+        approval="require",
+        provider_id="provider-1",
+        model="model-1",
+        reasoning_effort="high",
+    )
+    run_kwargs = calls["run"][0][3]
+    check(
+        run_kwargs.get("provider_id") == "provider-1"
+        and run_kwargs.get("model") == "model-1"
+        and run_kwargs.get("reasoning_effort") == "high",
+        "session-bridge continue passes explicit model selectors",
+    )
 
     # 4b. auto + fork to a registered worker → direct run without enabling
     # broad cross-session auto delegation.
