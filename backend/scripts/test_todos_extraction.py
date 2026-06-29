@@ -1099,7 +1099,6 @@ def test_hydration_skips_irrelevant_rows_before_projection() -> bool:
 
 def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
     from event_ingester import event_ingester
-    import session_local_projection
 
     sid, _msg = _mk_session("native")
     todos = [{"content": "Cached", "status": "in_progress", "activeForm": "c"}]
@@ -1109,33 +1108,36 @@ def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
         event_type="agent_message", data=event["data"],
         source="test_cache", run_id=None, msg_id=None,
     )
-
-    original_project = session_local_projection.project_event_fields
-    calls = {"n": 0}
-
-    def counting_project(*args, **kwargs):
-        calls["n"] += 1
-        return original_project(*args, **kwargs)
+    session_manager.flush_pending_persists()
 
     rid = session_manager._root_id_for(sid)
+    original_apply_cached = session_manager._apply_cached_todo_projection
+    cache_hits = {"n": 0}
+
+    def counting_apply_cached(root, projected):
+        if root.get("id") == rid:
+            cache_hits["n"] += 1
+        return original_apply_cached(root, projected)
 
     def evict() -> None:
         with session_manager._lock_for_root(rid):
             session_manager._roots.pop(rid, None)
             session_manager._event_hydrated_roots.discard(rid)
 
-    session_local_projection.project_event_fields = counting_project
+    session_manager._apply_cached_todo_projection = counting_apply_cached
     try:
         evict()
         with session_manager._lock_for_root(rid):
             first = session_manager._load_root(sid) or {}
-        first_calls = calls["n"]
+        cache_after_first = session_manager._todo_projection_cache.get(rid)
+        session_manager.flush_pending_persists()
+        cache_hits["n"] = 0
         evict()
         with session_manager._lock_for_root(rid):
             second = session_manager._load_root(sid) or {}
-        second_calls = calls["n"] - first_calls
+        second_hits = cache_hits["n"]
     finally:
-        session_local_projection.project_event_fields = original_project
+        session_manager._apply_cached_todo_projection = original_apply_cached
 
     if first.get("current_todos") != todos:
         print(f"  expected first load todos, got {first.get('current_todos')}")
@@ -1143,11 +1145,11 @@ def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
     if second.get("current_todos") != todos:
         print(f"  expected cached second load todos, got {second.get('current_todos')}")
         return False
-    if first_calls != 1:
-        print(f"  expected first load to project once, got {first_calls}")
+    if cache_after_first is None or cache_after_first[0] is None:
+        print(f"  expected first load to seed projection cache, got {cache_after_first}")
         return False
-    if second_calls != 0:
-        print(f"  expected cached second load to skip projection, got {second_calls}")
+    if second_hits != 1:
+        print(f"  expected cached second load to apply cached projection once, got {second_hits}")
         return False
     return True
 
@@ -1443,6 +1445,31 @@ def test_get_current_todos_snapshot_returns_copy() -> bool:
     fresh = session_manager.get(sid).get("current_todos") or []
     if len(fresh) != 1:
         print(f"  snapshot append leaked into session: {fresh}")
+        return False
+    return True
+
+
+def test_sidebar_summary_includes_current_todos_and_tasks() -> bool:
+    sid, _msg = _mk_session("native")
+    todos = [
+        {"content": "Trace marker source", "status": "in_progress", "activeForm": "trace"},
+        {"content": "Patch summary payload", "status": "pending", "activeForm": "patch"},
+    ]
+    tasks = [
+        {"task_id": "task-1", "content": "Verify sidebar payload", "status": "pending"},
+    ]
+    session_manager.set_current_todos(sid, todos)
+    session_manager.set_current_tasks(sid, tasks)
+
+    summary = next((item for item in session_manager.list() if item.get("id") == sid), None)
+    if not summary:
+        print("  session missing from sidebar summary list")
+        return False
+    if summary.get("current_todos") != todos:
+        print(f"  summary current_todos missing/stale: {summary.get('current_todos')}")
+        return False
+    if summary.get("current_tasks") != tasks:
+        print(f"  summary current_tasks missing/stale: {summary.get('current_tasks')}")
         return False
     return True
 
@@ -2373,6 +2400,7 @@ TESTS = [
     ("run_turn gate covers every non-empty user prompt",
         test_run_turn_gate_covers_every_user_prompt),
     ("get_current_todos_snapshot returns copy", test_get_current_todos_snapshot_returns_copy),
+    ("sidebar summary includes current todos/tasks", test_sidebar_summary_includes_current_todos_and_tasks),
     ("Codex todo_list: first incomplete → in_progress", test_codex_todo_list_first_incomplete_is_in_progress),
     ("Codex todo_list: completed then first incomplete", test_codex_todo_list_completed_then_first_incomplete),
     ("Codex todo_list: all completed → no in_progress", test_codex_todo_list_all_completed_no_in_progress),

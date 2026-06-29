@@ -193,7 +193,7 @@ _summary_projection_repair_running = False
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
-_SUMMARY_INDEX_CACHE_VERSION = 1
+_SUMMARY_INDEX_CACHE_VERSION = 2
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
 # the inner lock of a cycle. The build runs under THIS lock — never under
@@ -237,8 +237,6 @@ def _replace_summary_projection_field(
 ) -> None:
     global _summary_index_version
     with _summary_index_lock:
-        if not _summary_index_loaded:
-            return
         summary = _summary_index.get(session_id)
         if summary is None or summary.get(field) == value:
             return
@@ -378,6 +376,8 @@ def _build_summary_for_root(
         "worker_count": _worker_summary_count(),
         "requirement_tags": requirement_tags,
         "markers": markers,
+        "current_todos": list(root.get("current_todos") or []),
+        "current_tasks": list(root.get("current_tasks") or []),
         "pinned": bool(root.get("pinned", False)),
         "topbar_pinned": bool(root.get("topbar_pinned", False)),
         "topbar_pinned_at": root.get("topbar_pinned_at"),
@@ -1032,6 +1032,7 @@ def _load_summary_index_cache(
         and isinstance(summary, dict)
         and summary.get("id") == sid
         and "last_seen_event_uid" in summary
+        and _summary_has_current_projections(summary)
     }
     root_ids = set(fingerprint.get("roots") or {})
     if set(clean) | skipped_root_ids != root_ids:
@@ -1084,6 +1085,10 @@ def _touch_summary_file_current(root_id: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def _summary_has_current_projections(summary: dict) -> bool:
+    return "current_todos" in summary and "current_tasks" in summary
 
 
 def _sanitize_summary(summary: dict) -> tuple[dict, bool]:
@@ -1227,6 +1232,8 @@ def _do_build_summary_index_unsafe() -> None:
                 if summary_mtime >= session_mtime:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
+                        if not _summary_has_current_projections(summary):
+                            continue
                         summary, cleaned = _sanitize_summary(summary)
                         seen_cursors = read_seen_cursors(sid) if sid in seen_cursor_ids else {}
                         if sid in seen_cursors:
