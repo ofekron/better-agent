@@ -1560,9 +1560,12 @@ def _dir_fingerprint() -> tuple[int, int, int]:
     return (count, max_mtime, total_size)
 
 
-def _build_index_snapshot() -> tuple[tuple[int, int, int], dict[str, str], dict[str, set[str]], dict[str, tuple[int, int]]]:
+def _build_index_snapshot(
+    fp: Optional[tuple[int, int, int]] = None,
+) -> tuple[tuple[int, int, int], dict[str, str], dict[str, set[str]], dict[str, tuple[int, int]]]:
     """Build a fork-index snapshot without holding `_index_lock`."""
-    fp = _dir_fingerprint()
+    if fp is None:
+        fp = _dir_fingerprint()
     cached = _load_index_sidecar(fp)
     if cached is not None:
         return cached
@@ -1856,7 +1859,9 @@ def _install_index_snapshot(
     _negative_root_resolve_cache.clear()
 
 
-def _refresh_index() -> None:
+def _refresh_index(
+    live_fp: Optional[tuple[int, int, int]] = None,
+) -> tuple[int, int, int]:
     """Re-scan the sessions directory and rebuild the fork index.
     Used as a fallback when `_resolve_root_id` misses on a sid that
     might exist on disk (created by another process — CLI vs.
@@ -1870,25 +1875,29 @@ def _refresh_index() -> None:
     otherwise re-parse the whole multi-hundred-MB sessions dir once
     per miss."""
     _ensure_dir()
-    live_fp = _dir_fingerprint()
+    if live_fp is None:
+        live_fp = _dir_fingerprint()
     with _index_lock:
         if _index_fingerprint is not None and live_fp == _index_fingerprint:
-            return
+            return live_fp
     with _index_build_lock:
         with _index_lock:
             if _index_fingerprint is not None and live_fp == _index_fingerprint:
-                return
+                return live_fp
         for _ in range(2):
             with perf.timed("store.session.index.refresh.build"):
-                fp, fork_index, root_forks, root_signatures = _build_index_snapshot()
-            if _dir_fingerprint() != fp:
+                fp, fork_index, root_forks, root_signatures = _build_index_snapshot(live_fp)
+            latest_fp = _dir_fingerprint()
+            if latest_fp != fp:
+                live_fp = latest_fp
                 continue
             with _index_lock:
                 if _index_fingerprint is not None and _index_fingerprint == fp:
-                    return
+                    return fp
                 _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
             _write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)
-            return
+            return fp
+    return live_fp
 
 
 def _ensure_index() -> None:
@@ -1931,13 +1940,13 @@ def _resolve_root_id(sid: str) -> Optional[str]:
             return None
     # Miss: another process may have minted this sid. Refresh and
     # retry once. Idempotent — no-op if our cache was already current.
-    _refresh_index()
+    live_fp = _refresh_index(live_fp)
     if sid in _fork_index:
         return _fork_index[sid]
     if (_sessions_dir() / f"{sid}.json").exists():
         return sid
     with _index_lock:
-        _negative_root_resolve_cache[sid] = _dir_fingerprint()
+        _negative_root_resolve_cache[sid] = live_fp
     return None
 
 
