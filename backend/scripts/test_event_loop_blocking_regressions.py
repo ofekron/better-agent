@@ -1087,6 +1087,29 @@ def test_summary_index_skips_empty_projection_scan() -> None:
     assert "summary_items = list(_summary_index.items())" not in build_source
 
 
+def test_summary_index_validates_missing_summary_before_provider_context() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    build_start = source.index("def _do_build_summary_index_unsafe()")
+    build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
+    build_source = source[build_start:build_end]
+    assert "provider_ctx: Optional[dict] = None" in build_source
+    parse_idx = build_source.index("raw = json.loads(fpath.read_text")
+    validate_idx = build_source.index("if not isinstance(raw, dict) or \"id\" not in raw:")
+    provider_idx = build_source.index("provider_ctx = _provider_backfill_context()")
+    migrate_idx = build_source.index("data = _migrate_session(raw, provider_ctx)")
+    assert parse_idx < validate_idx < provider_idx < migrate_idx
+
+
+def test_session_store_sessions_dir_is_cached() -> None:
+    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "_SESSIONS_DIR = ba_home() / \"sessions\"" in source
+    sessions_dir_start = source.index("def _sessions_dir()")
+    sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
+    sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
+    assert "return _SESSIONS_DIR" in sessions_dir_source
+    assert "ba_home()" not in sessions_dir_source
+
+
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
@@ -1486,6 +1509,8 @@ if __name__ == "__main__":
     test_summary_worker_count_uses_count_projection()
     test_summary_sidecar_stat_only_for_unchanged_summary()
     test_summary_index_skips_empty_projection_scan()
+    test_summary_index_validates_missing_summary_before_provider_context()
+    test_session_store_sessions_dir_is_cached()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_project_match_rebuild_skips_unchanged_session_state()
     test_stubbed_tree_cache_key_does_not_scan_message_events()
