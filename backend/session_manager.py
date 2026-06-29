@@ -288,7 +288,7 @@ class SessionManager:
             tuple[str, int, Optional[int], tuple, int],
             dict,
         ] = collections.OrderedDict()
-        self._tree_stub_cache_max = 32
+        self._tree_stub_cache_max = 256
         self._todo_projection_cache: collections.OrderedDict[
             str,
             tuple[tuple[int, int] | None, dict[str, tuple[list, list]]],
