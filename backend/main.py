@@ -98,6 +98,8 @@ _SESSION_EVENT_META_GLOBAL_WARM_LIMIT = 250
 _SESSION_EVENT_META_GLOBAL_WARM_BATCH = 4
 _SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS = 30.0
 _SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS = 0.25
+_SESSION_DETAIL_WARM_MSG_LIMIT = 50
+_SESSION_DETAIL_WARM_EXCHANGE_COUNT = 3
 _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes],
@@ -272,11 +274,20 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
         try:
             _session_event_meta(root_id)
             summaries = session_store.get_session_summaries_by_ids([root_id])
-            if not summaries:
+            if not summaries or int(summaries[0].get("message_count") or 0) > 0:
                 event_ingester.message_event_summaries(root_id)
-                continue
-            if int(summaries[0].get("message_count") or 0) > 0:
-                event_ingester.message_event_summaries(root_id)
+                tree = _session_detail_snapshot_sync(
+                    root_id,
+                    msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
+                    exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
+                )
+                cache_key = _session_detail_response_cache_key_sync(
+                    root_id,
+                    msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
+                    exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
+                )
+                if cache_key is not None and tree is not None:
+                    _session_detail_cache_put(cache_key, tree)
         except Exception:
             logger.debug("session detail projection warm failed for %s", root_id, exc_info=True)
 

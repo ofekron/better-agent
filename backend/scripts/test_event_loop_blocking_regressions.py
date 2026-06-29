@@ -1138,7 +1138,12 @@ def test_event_projections_warm_in_background() -> None:
     assert "_session_event_meta(root_id)" in detail_warm_source
     assert "session_store.get_session_summaries_by_ids([root_id])" in detail_warm_source
     assert "message_count" in detail_warm_source
+    assert "if not summaries or int(summaries[0].get(\"message_count\") or 0) > 0:" in detail_warm_source
     assert "event_ingester.message_event_summaries(root_id)" in detail_warm_source
+    assert "_session_detail_response_cache_key_sync(" in detail_warm_source
+    assert "_session_detail_snapshot_sync(" in detail_warm_source
+    assert "_session_detail_cache_put(cache_key, tree)" in detail_warm_source
+    assert "_SESSION_DETAIL_WARM_EXCHANGE_COUNT" in detail_warm_source
     roots_start = source.index("def _session_event_projection_warm_roots(")
     roots_end = source.index("async def _warm_session_event_projections()", roots_start)
     roots_source = source[roots_start:roots_end]
