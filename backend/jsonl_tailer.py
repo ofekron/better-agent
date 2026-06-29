@@ -786,9 +786,12 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         try:
             while not self._stop_event.is_set():
                 self._prune_done_sub_tasks()
-                if sub_dir.exists():
-                    self._poll_direct_subagents(sub_dir)
-                    self._poll_workflow_subagents(sub_dir)
+                invalid_meta, direct, workflows = await asyncio.to_thread(
+                    self._scan_subagent_files,
+                    sub_dir,
+                    frozenset(self._known_meta_files),
+                )
+                self._apply_subagent_scan(invalid_meta, direct, workflows)
                 await asyncio.sleep(self._SUB_DIR_POLL_INTERVAL)
         except asyncio.CancelledError:
             raise
@@ -797,11 +800,24 @@ class ClaudeJsonlTailer(JsonlEventTailer):
                 "ClaudeJsonlTailer: subagent watcher crashed for %s", self.path,
             )
 
-    def _poll_direct_subagents(self, sub_dir: Path) -> None:
-        """Scan `subagents/agent-*.meta.json` for Agent/Task subagents."""
+    def _scan_subagent_files(
+        self,
+        sub_dir: Path,
+        known_meta_files: frozenset[str],
+    ) -> tuple[
+        list[str],
+        list[tuple[str, Path, dict]],
+        list[tuple[Path, list[tuple[str, Path]]]],
+    ]:
+        invalid_meta: list[str] = []
+        direct: list[tuple[str, Path, dict]] = []
+        workflows: list[tuple[Path, list[tuple[str, Path]]]] = []
+        if not sub_dir.exists():
+            return invalid_meta, direct, workflows
+
         for meta_path in sub_dir.glob("agent-*.meta.json"):
             key = str(meta_path)
-            if key in self._known_meta_files:
+            if key in known_meta_files:
                 continue
             agent_id = meta_path.name[
                 len("agent-") : -len(".meta.json")
@@ -812,68 +828,77 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
-                logger.exception(
-                    "ClaudeJsonlTailer: failed to read subagent meta %s",
-                    meta_path,
-                )
-                self._known_meta_files.add(key)
+                invalid_meta.append(key)
+                continue
+            direct.append((agent_id, jsonl_path, meta))
+
+        wf_base = sub_dir / "workflows"
+        if not wf_base.exists():
+            return invalid_meta, direct, workflows
+        for wf_path in sorted(wf_base.iterdir()):
+            if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
+                continue
+            agents: list[tuple[str, Path]] = []
+            for meta_path in wf_path.glob("agent-*.meta.json"):
+                key = str(meta_path)
+                if key in known_meta_files:
+                    continue
+                agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
+                jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
+                if not jsonl_path.exists():
+                    continue
+                agents.append((agent_id, jsonl_path))
+            workflows.append((wf_path, agents))
+        return invalid_meta, direct, workflows
+
+    def _apply_subagent_scan(
+        self,
+        invalid_meta: list[str],
+        direct: list[tuple[str, Path, dict]],
+        workflows: list[tuple[Path, list[tuple[str, Path]]]],
+    ) -> None:
+        for key in invalid_meta:
+            logger.warning(
+                "ClaudeJsonlTailer: failed to read subagent meta %s",
+                key,
+            )
+            self._known_meta_files.add(key)
+        for agent_id, jsonl_path, meta in direct:
+            key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
+            if key in self._known_meta_files:
                 continue
             parent_tuid = self.subagent_registry.claim(
                 meta.get("agentType", "") or "",
                 meta.get("description", "") or "",
             )
             if parent_tuid is None:
-                # Race: parent tailer hasn't seen the matching
-                # Agent tool_use yet. Retry next tick. Don't
-                # mark seen.
                 continue
-            self._spawn_sub_tailer(agent_id, jsonl_path, parent_tuid, meta.get("agentType"))
-
-    def _poll_workflow_subagents(self, sub_dir: Path) -> None:
-        """Scan `subagents/workflows/wf_<id>/` for Workflow subagents.
-
-        Workflow agents use a different binding: the directory name
-        ``wf_<run_id>`` maps to a pending Workflow tool_use via FIFO
-        claim. All agents under that directory inherit the same
-        parent_tool_use_id.
-        """
-        wf_base = sub_dir / "workflows"
-        if not wf_base.exists():
-            return
-        for wf_path in sorted(wf_base.iterdir()):
-            if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
-                continue
-            wf_key = str(wf_path)
-            if wf_key in self._known_workflow_dirs:
-                # Already bound — but new agents may have appeared.
-                self._scan_wf_agents(wf_path)
-                continue
-            run_id = wf_path.name
-            parent_tuid = self.subagent_registry.claim_workflow(run_id)
-            if parent_tuid is None:
-                # No pending Workflow tool_use yet. Retry next tick.
-                continue
-            self._known_workflow_dirs.add(wf_key)
-            logger.info(
-                "ClaudeJsonlTailer: bound workflow %s to tool_use_id=%s",
-                run_id, parent_tuid,
+            self._spawn_sub_tailer(
+                agent_id, jsonl_path, parent_tuid, meta.get("agentType"),
             )
-            self._scan_wf_agents(wf_path)
 
-    def _scan_wf_agents(self, wf_path: Path) -> None:
-        """Spawn sub-tailers for any undiscovered agents under a workflow dir."""
-        parent_tuid = self.subagent_registry.get_workflow_parent(wf_path.name)
-        if not parent_tuid:
-            return
-        for meta_path in wf_path.glob("agent-*.meta.json"):
-            key = str(meta_path)
-            if key in self._known_meta_files:
+        for wf_path, agents in workflows:
+            wf_key = str(wf_path)
+            run_id = wf_path.name
+            if wf_key not in self._known_workflow_dirs:
+                parent_tuid = self.subagent_registry.claim_workflow(run_id)
+                if parent_tuid is None:
+                    continue
+                self._known_workflow_dirs.add(wf_key)
+                logger.info(
+                    "ClaudeJsonlTailer: bound workflow %s to tool_use_id=%s",
+                    run_id, parent_tuid,
+                )
+            parent_tuid = self.subagent_registry.get_workflow_parent(run_id)
+            if not parent_tuid:
                 continue
-            agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
-            jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
-            if not jsonl_path.exists():
-                continue
-            self._spawn_sub_tailer(agent_id, jsonl_path, parent_tuid, "workflow-subagent")
+            for agent_id, jsonl_path in agents:
+                key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
+                if key in self._known_meta_files:
+                    continue
+                self._spawn_sub_tailer(
+                    agent_id, jsonl_path, parent_tuid, "workflow-subagent",
+                )
 
     def _spawn_sub_tailer(
         self, agent_id: str, jsonl_path: Path, parent_tuid: str, agent_type: str,

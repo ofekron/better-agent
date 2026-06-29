@@ -49,6 +49,18 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
 
 
+def test_subagent_watcher_scans_files_off_loop() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    watch_start = source.index("async def _watch_subagents(")
+    watch_end = source.index("def _scan_subagent_files(", watch_start)
+    watch_source = source[watch_start:watch_end]
+    assert "await asyncio.to_thread(\n                    self._scan_subagent_files" in watch_source
+    assert ".exists()" not in watch_source
+    assert ".glob(" not in watch_source
+    assert ".iterdir(" not in watch_source
+    assert ".read_text(" not in watch_source
+
+
 def test_delegation_locked_reuses_worker_session_snapshot() -> None:
     source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
     locked_start = source.index("async def run_delegation_locked(")
@@ -1347,6 +1359,7 @@ if __name__ == "__main__":
     test_wire_tailer_gap_fill_reads_journal_off_loop()
     test_jsonl_dispatch_reads_session_lite_off_loop()
     test_jsonl_fallback_followers_poll_files_off_loop()
+    test_subagent_watcher_scans_files_off_loop()
     test_delegation_locked_reuses_worker_session_snapshot()
     test_jsonl_dispatch_ingests_orphans_off_loop()
     test_wire_tailer_subscribe_resolves_root_off_loop()
