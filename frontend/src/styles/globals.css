@@ -3220,6 +3220,18 @@ body {
   animation: pulse 2s ease-in-out infinite;
 }
 
+/* Degraded-persistence warning: localStorage write failed (quota /
+ * private mode), so offline buffering is no longer durable. Amber, not
+ * the neutral purple "queued" color, because action may be required. */
+.offline-banner--warn {
+  background: rgba(243, 156, 18, 0.14);
+  color: #e67e22;
+}
+
+.offline-banner--warn .offline-banner-dot {
+  background: #e67e22;
+}
+
 .error-block {
   display: flex;
   flex-direction: column;
