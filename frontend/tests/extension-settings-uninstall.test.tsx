@@ -126,6 +126,60 @@ describe("ExtensionUiSettingsSection uninstall", () => {
     });
   });
 
+  it("shows disabled installed extensions and toggles extension enabled state", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            {
+              enabled: false,
+              manifest: {
+                id: "ofek.disabled-extension",
+                entrypoints: {},
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/ofek.disabled-extension/config")) {
+        return jsonResponse({
+          name: "Disabled Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      if (url.endsWith("/api/extensions/ofek.disabled-extension/enabled") && init?.method === "PATCH") {
+        return jsonResponse({ extension: { enabled: true } });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Disabled Extension")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Disabled/ }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringMatching(/\/api\/extensions\/ofek\.disabled-extension\/enabled$/),
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+    });
+  });
+
   it("shows harness additions on extension items", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);

@@ -41,6 +41,7 @@ from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
+_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
 
 
 def _copy_jsonish(value: Any) -> Any:
@@ -222,6 +223,7 @@ class SessionManager:
         self._event_hydrated_roots: set[str] = set()
         # Any sid (root or fork) → its root_id. Maintained alongside _roots.
         self._node_root_id: dict[str, str] = {}
+        self._node_root_missing_until: dict[str, float] = {}
         # Per-node `kind`, populated in `_index_root` and DELIBERATELY
         # NOT cleared on LRU eviction (one short string per sid — tiny,
         # bounded by lifetime session count). Lets `recompute_state`'s
@@ -956,9 +958,17 @@ class SessionManager:
         rid = self._node_root_id.get(sid)
         if rid is not None:
             return rid
+        now = time.monotonic()
+        if self._node_root_missing_until.get(sid, 0.0) > now:
+            return None
         rid = session_store._resolve_root_id(sid)
         if rid is not None:
             self._node_root_id[sid] = rid
+            self._node_root_missing_until.pop(sid, None)
+        else:
+            self._node_root_missing_until[sid] = (
+                now + _NEGATIVE_NODE_ROOT_TTL_SECONDS
+            )
         return rid
 
     def _lock_for_root(self, root_id: str) -> threading.RLock:
@@ -975,9 +985,11 @@ class SessionManager:
         value if already present."""
         rid = root["id"]
         self._node_root_id[rid] = rid
+        self._node_root_missing_until.pop(rid, None)
         self._kind_by_sid[rid] = root.get("kind")
         for fork in session_store._walk_forks(root):
             self._node_root_id[fork["id"]] = rid
+            self._node_root_missing_until.pop(fork["id"], None)
             self._kind_by_sid[fork["id"]] = fork.get("kind")
 
     def _ensure_root_loaded(self, rid: str) -> Optional[dict]:

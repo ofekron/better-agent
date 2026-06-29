@@ -23,6 +23,8 @@ def _reset_index() -> None:
     session_store._index_refresh_global_attempt_until = 0.0  # type: ignore[attr-defined]
     session_store._index_loaded = False  # type: ignore[attr-defined]
     session_store._index_fingerprint = None  # type: ignore[attr-defined]
+    session_manager._node_root_id.clear()  # type: ignore[attr-defined]
+    session_manager._node_root_missing_until.clear()  # type: ignore[attr-defined]
 
 
 def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
@@ -53,6 +55,26 @@ def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
         session_store._refresh_index = original_refresh  # type: ignore[attr-defined]
 
 
+def test_session_manager_unknown_sid_resolution_is_negative_cached() -> None:
+    _reset_index()
+    calls = 0
+    original_resolve = session_store._resolve_root_id  # type: ignore[attr-defined]
+
+    def counted_resolve(sid: str) -> str | None:
+        nonlocal calls
+        calls += 1
+        return original_resolve(sid)
+
+    session_store._resolve_root_id = counted_resolve  # type: ignore[attr-defined]
+    try:
+        assert session_manager._root_id_for("missing-sid") is None  # type: ignore[attr-defined]
+        assert session_manager._root_id_for("missing-sid") is None  # type: ignore[attr-defined]
+        assert calls == 1
+    finally:
+        session_store._resolve_root_id = original_resolve  # type: ignore[attr-defined]
+
+
 if __name__ == "__main__":
     test_unknown_sid_resolution_is_negative_cached_until_dir_changes()
+    test_session_manager_unknown_sid_resolution_is_negative_cached()
     print("PASS root resolve negative cache")

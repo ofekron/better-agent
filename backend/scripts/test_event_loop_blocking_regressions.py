@@ -768,8 +768,16 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     end = source.index("    def _lock_for_root(", start)
     helper_source = source[start:end]
     assert "rid = self._node_root_id.get(sid)" in helper_source
+    assert "self._node_root_missing_until.get(sid, 0.0) > now" in helper_source
     assert "rid = session_store._resolve_root_id(sid)" in helper_source
     assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
+    assert "self._node_root_missing_until[sid] = (" in helper_source
+    assert "_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0" in source
+    index_start = source.index("    def _index_root(")
+    index_end = source.index("    def _ensure_root_loaded(", index_start)
+    index_source = source[index_start:index_end]
+    assert "self._node_root_missing_until.pop(rid, None)" in index_source
+    assert "self._node_root_missing_until.pop(fork[\"id\"], None)" in index_source
 
 
 def test_unknown_root_resolution_uses_global_negative_throttle() -> None:

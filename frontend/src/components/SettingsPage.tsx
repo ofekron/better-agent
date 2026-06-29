@@ -785,6 +785,7 @@ interface ExtensionConfigRow {
   id: string;
   name: string;
   required: boolean;
+  enabled: boolean;
   harnessDelivery: "native" | "runtime";
   hasQuickButton: boolean;
   hasPage: boolean;
@@ -971,9 +972,9 @@ export function ExtensionUiSettingsSection() {
           .filter((p) => (p.node_id || "primary") === "primary" && p.path)
           .map((p) => ({ path: p.path, name: p.name })),
       );
-      const active = records.filter((r) => r.enabled !== false && r.manifest?.id);
+      const installed = records.filter((r) => r.manifest?.id);
       const configs: ExtensionConfigRow[] = [];
-      for (const record of active) {
+      for (const record of installed) {
         const id = record.manifest!.id;
         // Instruction sections: new "instructions" field, falling back to the
         // legacy "provider_capabilities" field (treated as global-level).
@@ -1002,6 +1003,7 @@ export function ExtensionUiSettingsSection() {
             id,
             name: cfg.name || id,
             required: cfg.required === true,
+            enabled: record.enabled !== false,
             harnessDelivery: cfg.harness_delivery === "runtime" ? "runtime" : "native",
             hasQuickButton: Boolean(cfg.has_quick_button),
             hasPage: Boolean(cfg.has_page),
@@ -1046,7 +1048,10 @@ export function ExtensionUiSettingsSection() {
         await fetch(`${API}${path}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify(body),
+        }).then((res) => {
+          if (!res.ok) throw new Error("patch failed");
         });
       } catch {
         if (onError) void refresh();
@@ -1065,6 +1070,18 @@ export function ExtensionUiSettingsSection() {
         ),
       );
       void patch(`/api/extensions/${encodeURIComponent(id)}/ui-settings`, { [surface]: next });
+    },
+    [patch],
+  );
+
+  const toggleExtension = useCallback(
+    (id: string, next: boolean) => {
+      setRows((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: next } : r)));
+      void patch(
+        `/api/extensions/${encodeURIComponent(id)}/enabled`,
+        { enabled: next },
+        () => setRows((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: !next } : r))),
+      );
     },
     [patch],
   );
@@ -1191,23 +1208,34 @@ export function ExtensionUiSettingsSection() {
     <div className="extension-ui-settings">
       {error && <div className="settings-error">{error}</div>}
       {rows.map((row) => (
-        <div key={row.id} className="extension-ui-settings-row">
+        <div key={row.id} className={`extension-ui-settings-row${row.enabled ? "" : " is-disabled"}`}>
           <div className="extension-ui-settings-header">
             <div className="extension-ui-settings-title">
               <div className="extension-ui-settings-name">{row.name}</div>
               <div className="extension-ui-settings-id">{row.id}</div>
             </div>
-            {!row.required && (
-              <button
-                type="button"
-                className="btn-danger extension-ui-settings-uninstall"
-                disabled={deletingIds.has(row.id)}
-                onClick={() => void uninstallExtension(row.id, row.name)}
-              >
-                <Icon name="trash" size={13} />
-                {deletingIds.has(row.id) ? t("settings.extensionsUninstalling") : t("settings.extensionsUninstall")}
-              </button>
-            )}
+            <div className="extension-ui-settings-header-actions">
+              <label className="extension-ui-settings-toggle extension-ui-settings-main-toggle">
+                <input
+                  type="checkbox"
+                  checked={row.enabled}
+                  disabled={row.required}
+                  onChange={(e) => toggleExtension(row.id, e.target.checked)}
+                />
+                {row.enabled ? t("settings.extensionsEnabled") : t("settings.extensionsDisabled")}
+              </label>
+              {!row.required && (
+                <button
+                  type="button"
+                  className="btn-danger extension-ui-settings-uninstall"
+                  disabled={deletingIds.has(row.id)}
+                  onClick={() => void uninstallExtension(row.id, row.name)}
+                >
+                  <Icon name="trash" size={13} />
+                  {deletingIds.has(row.id) ? t("settings.extensionsUninstalling") : t("settings.extensionsUninstall")}
+                </button>
+              )}
+            </div>
           </div>
           <div className="extension-ui-settings-groups">
             <ExtensionConfigGroup
