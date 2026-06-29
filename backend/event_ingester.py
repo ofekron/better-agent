@@ -1194,17 +1194,21 @@ class EventIngester:
                     populate_cache=populate,
                 )
                 self._full_scan_cache[root_id] = (file_size, all_entries)
-            # Filter in memory.
-            filtered = all_entries
-            if after_seq > 0:
-                filtered = [e for e in filtered if e.get("seq", 0) > after_seq]
-            if sid_filter:
-                filtered = [e for e in filtered if e.get("sid") == sid_filter]
-            if msg_id_filter:
-                filtered = [e for e in filtered if e.get("msg_id") == msg_id_filter]
-            total = len(filtered)
-            has_more = total > limit
-            return filtered[:limit], total, has_more
+            out: list[dict] = []
+            total = 0
+            page_limit = max(limit, 0)
+            for entry in all_entries:
+                if after_seq > 0 and entry.get("seq", 0) <= after_seq:
+                    continue
+                if sid_filter and entry.get("sid") != sid_filter:
+                    continue
+                if msg_id_filter and entry.get("msg_id") != msg_id_filter:
+                    continue
+                total += 1
+                if len(out) < page_limit:
+                    out.append(entry)
+            has_more = total > page_limit
+            return out, total, has_more
 
     def _extend_full_scan(
         self, path: Path, start_byte: int, all_entries: list[dict],

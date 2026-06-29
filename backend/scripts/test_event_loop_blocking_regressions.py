@@ -1199,6 +1199,17 @@ def test_message_hydration_reuses_full_scan_cache() -> None:
     assert "self._read_raw_range(" in owned_source
 
 
+def test_read_events_collects_page_without_filtered_copies() -> None:
+    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    start = source.index("    @perf.timed_fn(\"ingest.read_events\")")
+    end = source.index("    def _extend_full_scan(", start)
+    read_source = source[start:end]
+    assert "out: list[dict] = []" in read_source
+    assert "if len(out) < page_limit:" in read_source
+    assert "return out, total, has_more" in read_source
+    assert "filtered = [e for e in filtered" not in read_source
+
+
 def test_metadata_session_search_uses_metadata_version_cache() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_metadata_search_cache" in source
@@ -2338,6 +2349,7 @@ if __name__ == "__main__":
     test_tree_stub_cache_key_reads_render_seq_once()
     test_event_summary_scan_reuses_full_scan_cache()
     test_message_hydration_reuses_full_scan_cache()
+    test_read_events_collects_page_without_filtered_copies()
     test_written_journal_projection_avoids_full_event_list_copy()
     test_sidebar_summary_omits_worker_refs()
     test_summary_worker_count_uses_count_projection()
