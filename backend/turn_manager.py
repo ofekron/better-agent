@@ -1633,14 +1633,11 @@ class TurnManager:
         bt_enabled = bool((_session_rec or {}).get("browser_harness_enabled", False))
         reasoning_effort = (_session_rec or {}).get("reasoning_effort")
 
-        backend_url: Optional[str] = None
-        internal_token: Optional[str] = None
-        if mode == "manager" or supervised or bt_enabled or user_initiated:
-            from env_compat import get_env
-            backend_url = (_session_rec or {}).get("backend_url") or get_env(
-                "BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"
-            )
-            internal_token = self._c.internal_token
+        from env_compat import get_env
+        backend_url: Optional[str] = (_session_rec or {}).get("backend_url") or get_env(
+            "BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"
+        )
+        internal_token: Optional[str] = self._c.internal_token
 
         provider = self._c.provider_for_session(primary_session_id or app_session_id)
         provider_kind = getattr(provider, "KIND", "")
