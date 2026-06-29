@@ -628,6 +628,8 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     assert 'sort_by == "last_user_prompt_at"' in route_source
     assert "sessions.list.local_order_page" in route_source
     assert "sessions.list.virtual_count" in route_source
+    assert "if default_virtual_page:" in route_source
+    assert "limit=max(offset + limit, 1)" in route_source
     assert route_source.index("sessions.list.local_order_page") < route_source.index(
         'sessions.list.local"):'
     )

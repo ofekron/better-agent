@@ -4163,16 +4163,33 @@ def _build_local_sessions_page_for_list(
         with perf.timed("sessions.list.search_local"):
             out = _local_session_summaries_by_ids_for_sidebar(list(content_scores))
     else:
-        with perf.timed("sessions.list.local"):
-            out = _local_session_summaries_for_sidebar()
         if may_include_virtual:
             with perf.timed("sessions.list.virtual"):
                 if default_virtual_page:
+                    with perf.timed("sessions.list.local_order_page"):
+                        out, local_total = _local_session_page_for_sidebar_preserving_order(
+                            sort_by=sort_by,
+                            offset=0,
+                            limit=max(offset + limit, 1),
+                            project_path=project_path,
+                            search=search,
+                            show_archived=show_archived,
+                            file_edit_mode=file_edit_mode,
+                            folder_ids=folder_ids,
+                            tag_ids=tag_ids,
+                            provider_ids=provider_ids,
+                            model_ids=model_ids,
+                            modes=modes,
+                            sources=sources,
+                            content_scores=content_scores,
+                        )
                     virtual_sessions, virtual_total = virtual_session_store.list_recent(
                         max(offset + limit, 1),
                         exclude_id=session_search.ASK_SINGLETON_ID,
                     )
                 else:
+                    with perf.timed("sessions.list.local"):
+                        out = _local_session_summaries_for_sidebar()
                     virtual_sessions = virtual_session_store.list_all()
                     virtual_total = len([
                         session for session in virtual_sessions
@@ -4185,16 +4202,13 @@ def _build_local_sessions_page_for_list(
             ]
             if default_virtual_page:
                 with perf.timed("sessions.list.default_virtual_merge"):
-                    page_source, local_total = _merge_updated_at_page(
+                    page_source, _merged_count = _merge_updated_at_page(
                         out,
                         virtual_sidebar_sessions,
                         offset=offset,
                         limit=limit,
                     )
-                total = local_total + max(
-                    virtual_total - len(virtual_sidebar_sessions),
-                    0,
-                )
+                total = local_total + virtual_total
                 with perf.timed("sessions.list.page_decorate"):
                     page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
                 return page, total
@@ -4202,6 +4216,8 @@ def _build_local_sessions_page_for_list(
                 out.extend(virtual_sidebar_sessions)
                 appended_virtual_sessions = True
         else:
+            with perf.timed("sessions.list.local"):
+                out = _local_session_summaries_for_sidebar()
             perf.record("sessions.list.virtual.skipped", 1.0)
     with perf.timed("sessions.list.filter_sort"):
         if _can_preserve_summary_order(
