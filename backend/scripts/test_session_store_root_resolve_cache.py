@@ -19,6 +19,8 @@ def _reset_index() -> None:
     session_store._root_forks.clear()  # type: ignore[attr-defined]
     session_store._root_index_signatures.clear()  # type: ignore[attr-defined]
     session_store._negative_root_resolve_cache.clear()  # type: ignore[attr-defined]
+    session_store._index_refresh_attempt_until.clear()  # type: ignore[attr-defined]
+    session_store._index_refresh_global_attempt_until = 0.0  # type: ignore[attr-defined]
     session_store._index_loaded = False  # type: ignore[attr-defined]
     session_store._index_fingerprint = None  # type: ignore[attr-defined]
 

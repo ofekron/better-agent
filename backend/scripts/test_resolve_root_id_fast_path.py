@@ -30,6 +30,8 @@ def _reset_home() -> None:
     session_store._fork_index.clear()
     session_store._root_forks.clear()
     session_store._root_index_signatures.clear()
+    session_store._index_refresh_attempt_until.clear()
+    session_store._index_refresh_global_attempt_until = 0.0
     session_store._index_loaded = False
     session_store._index_fingerprint = None
     session_store._summary_index.clear()
@@ -383,6 +385,52 @@ def test_missing_sid_refresh_reuses_fingerprint() -> bool:
     return ok
 
 
+def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+
+    original_build = session_store._build_index_snapshot
+    original_fingerprint = session_store._dir_fingerprint
+    calls = 0
+    calls_lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def tracking_build(live_fp=None):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.02)
+        return original_build(live_fp)
+
+    def unstable_fingerprint():
+        fp = original_fingerprint()
+        return (fp[0], fp[1] + time.time_ns(), fp[2])
+
+    def resolve() -> None:
+        barrier.wait()
+        if session_store._resolve_root_id("missing-fork") is not None:
+            raise AssertionError("missing fork resolved")
+
+    session_store._build_index_snapshot = tracking_build
+    session_store._dir_fingerprint = unstable_fingerprint
+    try:
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        session_store._build_index_snapshot = original_build
+        session_store._dir_fingerprint = original_fingerprint
+
+    ok = calls <= 3
+    print(
+        f"{PASS if ok else FAIL} concurrent missing sid refresh attempts singleflight"
+        f"{'' if ok else ' calls=' + repr(calls)}"
+    )
+    return ok
+
+
 def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -566,6 +614,7 @@ def main() -> int:
             test_index_sidecar_write_happens_outside_index_lock(),
             test_fork_index_scan_avoids_path_glob(),
             test_missing_sid_refresh_reuses_fingerprint(),
+            test_concurrent_missing_sid_refresh_attempts_singleflight(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),
