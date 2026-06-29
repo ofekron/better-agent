@@ -320,6 +320,38 @@ def test_index_sidecar_write_happens_outside_index_lock() -> bool:
     return ok
 
 
+def test_fork_index_scan_avoids_path_glob() -> bool:
+    _reset_home()
+    fork = {
+        **_record("child-fork"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+    }
+    _write(_record("target-root", forks=[fork]))
+    _write_summary("target-root", 1, fork_ids=["child-fork"])
+
+    original_glob = Path.glob
+    calls = 0
+
+    def fail_glob(self, pattern):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("fork-index scan used Path.glob")
+
+    Path.glob = fail_glob
+    try:
+        resolved = session_store._resolve_root_id("child-fork")
+    finally:
+        Path.glob = original_glob
+
+    ok = resolved == "target-root" and calls == 0
+    print(
+        f"{PASS if ok else FAIL} fork-index scan avoids Path.glob"
+        f"{'' if ok else ' calls=' + repr(calls)}"
+    )
+    return ok
+
+
 def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -501,6 +533,7 @@ def main() -> int:
             test_fresh_fork_summary_builds_index_without_root_parse(),
             test_fork_index_sidecar_builds_index_without_root_or_summary_parse(),
             test_index_sidecar_write_happens_outside_index_lock(),
+            test_fork_index_scan_avoids_path_glob(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),

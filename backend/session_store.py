@@ -1500,9 +1500,15 @@ def _is_sidecar_json(name: str) -> bool:
 
 def _session_json_files() -> Iterator[Path]:
     """Yield session root JSON files, excluding sidecars."""
-    for p in _sessions_dir().glob("*.json"):
-        if not _is_sidecar_json(p.name):
-            yield p
+    try:
+        with os.scandir(_sessions_dir()) as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(".json") or _is_sidecar_json(name):
+                    continue
+                yield Path(entry.path)
+    except OSError:
+        return
 
 
 def _fork_index_path() -> Path:
