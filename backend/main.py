@@ -56,6 +56,7 @@ import virtual_session_store
 import perf
 import provider_setup
 import user_input_store
+import file_panel_drafts
 
 # Resolved once at import time — stable for the process lifetime.
 _GIT_HASH: str | None = None
@@ -3436,6 +3437,33 @@ async def get_file_metadata(
     node_id: str = Query("primary"),
 ):
     return await _file_op(node_id, "get_file_metadata", {"path": path})
+
+
+@app.get("/api/file/draft")
+async def get_file_draft(
+    path: str = Query(...),
+    node_id: str = Query("primary"),
+):
+    return file_panel_drafts.read_draft(path, node_id)
+
+
+@app.post("/api/file/draft")
+async def save_file_draft(body: dict):
+    node_id = body.get("node_id") or "primary"
+    return file_panel_drafts.write_draft(
+        path=body["path"],
+        node_id=node_id,
+        content=body["content"],
+        base_identity=body.get("base_identity"),
+    )
+
+
+@app.delete("/api/file/draft")
+async def delete_file_draft(
+    path: str = Query(...),
+    node_id: str = Query("primary"),
+):
+    return file_panel_drafts.delete_draft(path, node_id)
 
 
 @app.get("/api/file/raw")
