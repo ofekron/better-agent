@@ -136,6 +136,27 @@ def test_worker_count_neutral_writes_do_not_refresh_session_summaries() -> None:
         session_store._refresh_all_worker_summaries = original
 
 
+def test_worker_count_hot_cache_skips_fingerprint() -> None:
+    worker_store.upsert_worker("/repo/a", "worker-hot-count", "native", "agent-hot")
+    calls = 0
+    original_fingerprint = worker_store._file_fingerprint
+
+    def counted_fingerprint():
+        nonlocal calls
+        calls += 1
+        return original_fingerprint()
+
+    worker_store._file_fingerprint = counted_fingerprint
+    try:
+        first = worker_store.worker_count("")
+        second = worker_store.worker_count("")
+        check(first == second, "hot worker count changed")
+        check(calls == 1, f"hot worker count re-fingerprinted registry: {calls}")
+    finally:
+        worker_store._file_fingerprint = original_fingerprint
+        worker_store.remove_worker("/repo/a", "worker-hot-count")
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
@@ -143,6 +164,7 @@ def main() -> int:
         test_session_fork_store_uses_neutral_session_keyword()
         test_remove_worker_is_global()
         test_worker_count_neutral_writes_do_not_refresh_session_summaries()
+        test_worker_count_hot_cache_skips_fingerprint()
         print("ALL PASS")
         return 0
     finally:

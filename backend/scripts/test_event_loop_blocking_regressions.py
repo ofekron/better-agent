@@ -1186,6 +1186,8 @@ def test_summary_worker_count_uses_count_projection() -> None:
 
     worker_source = (ROOT / "stores" / "worker_store.py").read_text(encoding="utf-8")
     assert "_worker_count_cache" in worker_source
+    assert "_WORKER_COUNT_HOT_TTL_SECONDS" in worker_source
+    assert "now < _worker_count_cache_until" in worker_source
     assert "def worker_count(" in worker_source
     assert "_worker_count_cache.clear()" in worker_source
 

@@ -63,6 +63,7 @@ manually if you have stale state.
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -77,6 +78,8 @@ from paths import ba_home
 
 _lock = threading.RLock()
 _worker_count_cache: dict[tuple[str, tuple[int, int]], int] = {}
+_worker_count_cache_until = 0.0
+_WORKER_COUNT_HOT_TTL_SECONDS = 1.0
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -169,9 +172,11 @@ def _write(
     *,
     refresh_worker_summaries: bool = True,
 ) -> None:
+    global _worker_count_cache_until
     write_json(_path(), registry)
     with _lock_for():
         _worker_count_cache.clear()
+        _worker_count_cache_until = 0.0
     if refresh_worker_summaries:
         from session_store import _refresh_all_worker_summaries
         _refresh_all_worker_summaries()
@@ -196,11 +201,18 @@ def list_workers(cwd: str) -> list[dict]:
 
 
 def worker_count(cwd: str = "") -> int:
-    fingerprint = _file_fingerprint()
-    key = (cwd, fingerprint)
+    global _worker_count_cache_until
+    now = time.monotonic()
     with _lock_for():
+        if now < _worker_count_cache_until:
+            for (cached_cwd, _fingerprint), cached in _worker_count_cache.items():
+                if cached_cwd == cwd:
+                    return cached
+        fingerprint = _file_fingerprint()
+        key = (cwd, fingerprint)
         cached = _worker_count_cache.get(key)
         if cached is not None:
+            _worker_count_cache_until = now + _WORKER_COUNT_HOT_TTL_SECONDS
             return cached
         workers = _read().get("workers", [])
         if cwd:
@@ -209,6 +221,7 @@ def worker_count(cwd: str = "") -> int:
             count = len(workers)
         _worker_count_cache.clear()
         _worker_count_cache[key] = count
+        _worker_count_cache_until = now + _WORKER_COUNT_HOT_TTL_SECONDS
         return count
 
 
