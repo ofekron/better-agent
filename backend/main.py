@@ -13536,31 +13536,10 @@ async def websocket_chat(websocket: WebSocket):
                                     else:
                                         new_replay.append(m)
                                 replay_msgs = new_replay
-                            # Stale-tree debug: log replay details
-                            sub_rid = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
-                            sub_gen = session_manager._reconcile_gen.get(sub_rid, 0) if sub_rid else 0
-                            sub_dirty = await asyncio.to_thread(
-                                session_manager.is_reconcile_dirty,
-                                sub_rid,
-                            ) if sub_rid else False
-                            replay_asst = [m for m in replay_msgs if m.get("role") == "assistant"]
-                            last_asst_evts = replay_asst[-1].get("events") if replay_asst else None
-                            last_asst_stub = replay_asst[-1].get("stub") if replay_asst else None
-                            has_inflight = in_flight is not None
                             replay_post_ms = (time.perf_counter() - replay_post_start) * 1000
                             replay_build_ms = replay_delta_ms + replay_post_ms
                             perf.record("ws.replay.delta", replay_delta_ms)
                             perf.record("ws.replay.post", replay_post_ms)
-                            logger.info(
-                                "WS replay %s: since_seq=%d next_seq=%d msgs=%d "
-                                "inflight=%s gen=%d dirty=%s last_asst_evts=%s "
-                                "last_asst_stub=%s build=%.1fms delta=%.1fms post=%.1fms",
-                                sub_sid[:8], since_seq, delta["next_seq"], len(replay_msgs),
-                                has_inflight, sub_gen, sub_dirty,
-                                len(last_asst_evts) if last_asst_evts else None,
-                                last_asst_stub.get("event_count") if last_asst_stub else None,
-                                replay_build_ms, replay_delta_ms, replay_post_ms,
-                            )
                             send_start = time.perf_counter()
                             await ws_callback({
                                 "type": "messages_replay",
@@ -13572,7 +13551,38 @@ async def websocket_chat(websocket: WebSocket):
                                 },
                             })
                             send_ms = (time.perf_counter() - send_start) * 1000
-                            if replay_build_ms >= 20 or send_ms >= 20:
+                            if logger.isEnabledFor(logging.DEBUG):
+                                sub_rid = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
+                                sub_gen = session_manager._reconcile_gen.get(sub_rid, 0) if sub_rid else 0
+                                sub_dirty = await asyncio.to_thread(
+                                    session_manager.is_reconcile_dirty,
+                                    sub_rid,
+                                ) if sub_rid else False
+                                replay_asst = [
+                                    m for m in replay_msgs
+                                    if m.get("role") == "assistant"
+                                ]
+                                last_asst_evts = replay_asst[-1].get("events") if replay_asst else None
+                                last_asst_stub = replay_asst[-1].get("stub") if replay_asst else None
+                                logger.debug(
+                                    "WS replay %s: since_seq=%d next_seq=%d msgs=%d "
+                                    "inflight=%s gen=%d dirty=%s last_asst_evts=%s "
+                                    "last_asst_stub=%s build=%.1fms delta=%.1fms post=%.1fms send=%.1fms",
+                                    sub_sid[:8],
+                                    since_seq,
+                                    delta["next_seq"],
+                                    len(replay_msgs),
+                                    in_flight is not None,
+                                    sub_gen,
+                                    sub_dirty,
+                                    len(last_asst_evts) if last_asst_evts else None,
+                                    last_asst_stub.get("event_count") if last_asst_stub else None,
+                                    replay_build_ms,
+                                    replay_delta_ms,
+                                    replay_post_ms,
+                                    send_ms,
+                                )
+                            elif replay_build_ms >= 100 or send_ms >= 100:
                                 logger.info(
                                     "WS replay %s timings build=%.1fms send=%.1fms",
                                     sub_sid[:8], replay_build_ms, send_ms,
