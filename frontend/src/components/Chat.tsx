@@ -423,6 +423,8 @@ interface Props {
   onQueuedToNote?: (text: string) => void;
   /** Cross-project session tabs. */
   openSessions?: Session[];
+  /** Whether the open-session tabs bar is shown. */
+  sessionTabsVisible?: boolean;
   /** Active tabs sort field — its timestamp shows on each tab. */
   sessionTabsSort?: string;
   providers?: Provider[];
@@ -529,6 +531,7 @@ export function Chat({
   onRemoveNextTurnCapability,
   onQueuedToNote,
   openSessions = [],
+  sessionTabsVisible = true,
   sessionTabsSort = "last_opened_at",
   providers = [],
   onCloseTab,
@@ -1139,7 +1142,7 @@ export function Chat({
       data-testid="chat-container"
       data-session-running={sessionRunning ? "true" : "false"}
     >
-      {openSessions.length > 0 && onSelectTab && onCloseTab && onCloseOtherTabs && onToggleTopbarPin && (
+      {sessionTabsVisible && openSessions.length > 0 && onSelectTab && onCloseTab && onCloseOtherTabs && onToggleTopbarPin && (
         <SessionTabs
           sessions={openSessions}
           providers={providers ?? []}

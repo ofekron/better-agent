@@ -35,6 +35,7 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_STATUS_SORT = False
 DEFAULT_SESSION_TABS_STATUS_SORT = False
+DEFAULT_SESSION_TABS_VISIBLE = True
 DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
 DEFAULT_CROSS_SESSION_DELEGATE_AUTO = False
@@ -379,6 +380,19 @@ def set_session_tabs_sort(value: str) -> SessionTabsSort:
     return value
 
 
+def get_session_tabs_visible() -> bool:
+    return _bool_pref(_load(), "sessions_tabs_visible", DEFAULT_SESSION_TABS_VISIBLE)
+
+
+def set_session_tabs_visible(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid sessions_tabs_visible: {enabled!r}")
+    prefs = _load()
+    prefs["sessions_tabs_visible"] = enabled
+    _save(prefs)
+    return enabled
+
+
 def get_voice_close_on_background() -> bool:
     """Whether vocal mode auto-closes when the app goes to the background.
     Default ON: the mic stops listening and vocal mode disables itself on
@@ -536,6 +550,11 @@ def get_all() -> dict:
             prefs,
             "sessions_tabs_status_sort",
             DEFAULT_SESSION_TABS_STATUS_SORT,
+        ),
+        "sessions_tabs_visible": _bool_pref(
+            prefs,
+            "sessions_tabs_visible",
+            DEFAULT_SESSION_TABS_VISIBLE,
         ),
         "voice_close_on_background": _bool_pref(
             prefs,

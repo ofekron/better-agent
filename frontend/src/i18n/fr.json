@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "Approuver automatiquement la délégation inter-sessions (fork uniquement)",
   "settings.crossSessionDelegateAutoHint": "Lorsque activé, delegate_to_session peut forker une autre session et s'exécuter sans le sélecteur de confirmation. Le mode Continue demande toujours. Désactivé par défaut.",
   "settings.contextStrategy": "Stratégie de fenêtre de contexte",
+  "settings.sessionTabsVisible": "Afficher la barre d’onglets des sessions",
   "settings.sessionTabsSort": "Ordre des onglets de session",
   "settings.contextStrategyNative": "Compactage automatique (par défaut)",
   "settings.contextStrategyContinuation": "Démarrer une nouvelle session avec recall",

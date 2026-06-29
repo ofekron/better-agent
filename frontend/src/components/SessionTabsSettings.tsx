@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
+import { eventBus } from "../lib/eventBus";
 
 const SORT_VALUES = ["updated_at", "last_user_prompt_at", "last_opened_at"] as const;
 type SortValue = (typeof SORT_VALUES)[number];
@@ -15,6 +16,7 @@ export function SessionTabsSettings() {
   const { t } = useTranslation();
   const [sort, setSort] = useState<SortValue>("last_opened_at");
   const [statusSort, setStatusSort] = useState(false);
+  const [visible, setVisible] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -24,9 +26,11 @@ export function SessionTabsSettings() {
       .then((data: {
         sessions_tabs_sort?: unknown;
         sessions_tabs_status_sort?: unknown;
+        sessions_tabs_visible?: unknown;
       }) => {
         setSort(normalize(data.sessions_tabs_sort));
         if (typeof data.sessions_tabs_status_sort === "boolean") setStatusSort(data.sessions_tabs_status_sort);
+        if (typeof data.sessions_tabs_visible === "boolean") setVisible(data.sessions_tabs_visible);
       })
       .catch(() => {});
   }, []);
@@ -48,15 +52,28 @@ export function SessionTabsSettings() {
       setSaving(false);
     }
     apply();
+    eventBus.publish("user_prefs_changed", body);
   };
 
   return (
     <div className="context-strategy-setting">
       <label className="context-strategy-row">
+        <span>{t("settings.sessionTabsVisible")}</span>
+        <input
+          type="checkbox"
+          checked={visible}
+          disabled={saving}
+          onChange={(e) => void patch(
+            { sessions_tabs_visible: e.target.checked },
+            () => setVisible(e.target.checked),
+          )}
+        />
+      </label>
+      <label className="context-strategy-row">
         <span>{t("settings.sessionTabsSort")}</span>
         <Select<SortValue>
           value={sort}
-          disabled={saving}
+          disabled={saving || !visible}
           onChange={(v) => {
             const next = normalize(v);
             void patch({ sessions_tabs_sort: next }, () => setSort(next));
@@ -73,7 +90,7 @@ export function SessionTabsSettings() {
         <input
           type="checkbox"
           checked={statusSort}
-          disabled={saving}
+          disabled={saving || !visible}
           onChange={(e) => void patch(
             { sessions_tabs_status_sort: e.target.checked },
             () => setStatusSort(e.target.checked),

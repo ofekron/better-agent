@@ -268,6 +268,7 @@
   "settings.crossSessionDelegateAuto": "क्रॉस-सत्र प्रतिनिधिमंडल स्वतः-स्वीकृत (केवल फ़ोर्क)",
   "settings.crossSessionDelegateAutoHint": "चालू होने पर, delegate_to_session पुष्टि पिकर के बिना किसी अन्य सत्र को फ़ोर्क (शाखा) कर सकता है और चला सकता है। Continue-mode हमेशा पूछता है। डिफ़ॉल्ट रूप से बंद।",
   "settings.contextStrategy": "संदर्भ विंडो रणनीति",
+  "settings.sessionTabsVisible": "सत्र टैब बार दिखाएँ",
   "settings.sessionTabsSort": "सत्र टैब क्रम",
   "settings.contextStrategyNative": "स्वतः कॉम्पैक्ट (डिफ़ॉल्ट)",
   "settings.contextStrategyContinuation": "रिकॉल के साथ नया सत्र आरंभ करें",

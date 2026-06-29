@@ -131,6 +131,29 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("hides session tabs when the user preference is off", async () => {
+    const session = makeSession({
+      id: "work-session",
+      name: "Work",
+      cwd: "/tmp/project-a",
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    await h.selectSession(session.id);
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Work");
+
+    h.emit({
+      type: "user_prefs_changed",
+      data: {
+        sessions_tabs_visible: false,
+      },
+    });
+    await h.flush();
+
+    expect(h.$(".session-tabs")).toBeNull();
+    h.unmount();
+  }, 10000);
+
   it("does not cap saved open session tabs", async () => {
     const sessions = Array.from({ length: 20 }, (_, i) =>
       makeSession({
