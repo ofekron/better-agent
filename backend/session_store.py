@@ -173,6 +173,7 @@ _index_refresh_global_attempt_until = 0.0
 _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 _DIR_FINGERPRINT_CACHE_TTL_SECONDS = 0.10
 _dir_fingerprint_cache: tuple[float, tuple[int, int, int]] | None = None
+_dir_fingerprint_cache_lock = threading.Lock()
 
 # ── Summary index ─────────────────────────────────────────────────────
 #
@@ -1712,9 +1713,14 @@ def _dir_fingerprint_cached() -> tuple[int, int, int]:
     cached = _dir_fingerprint_cache
     if cached is not None and now - cached[0] <= _DIR_FINGERPRINT_CACHE_TTL_SECONDS:
         return cached[1]
-    fingerprint = _dir_fingerprint()
-    _dir_fingerprint_cache = (now, fingerprint)
-    return fingerprint
+    with _dir_fingerprint_cache_lock:
+        now = time.monotonic()
+        cached = _dir_fingerprint_cache
+        if cached is not None and now - cached[0] <= _DIR_FINGERPRINT_CACHE_TTL_SECONDS:
+            return cached[1]
+        fingerprint = _dir_fingerprint()
+        _dir_fingerprint_cache = (now, fingerprint)
+        return fingerprint
 
 
 def _build_index_snapshot(
