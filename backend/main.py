@@ -11438,8 +11438,11 @@ async def internal_list_pending_nodes(
 
     Secrets never leave the server — only the display fingerprint does."""
     import node_link
+    pending = node_link.public_pending_nodes_cached()
+    if pending is None:
+        pending = await asyncio.to_thread(node_link.public_pending_nodes)
     return {
-        "pending_nodes": await asyncio.to_thread(node_link.public_pending_nodes),
+        "pending_nodes": pending,
     }
 
 

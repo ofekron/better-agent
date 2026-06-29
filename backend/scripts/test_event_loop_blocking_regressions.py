@@ -785,6 +785,7 @@ def test_pending_node_polling_uses_public_projection_cache() -> None:
     route_start = main_source.index("async def internal_list_pending_nodes(")
     route_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", route_start)
     route_source = main_source[route_start:route_end]
+    assert "node_link.public_pending_nodes_cached()" in route_source
     assert "await asyncio.to_thread(node_link.public_pending_nodes)" in route_source
     assert "pending_node_registrations.list_pending()" not in route_source
 
@@ -792,6 +793,7 @@ def test_pending_node_polling_uses_public_projection_cache() -> None:
     dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
     dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
     dispatch_source = extension_source[dispatch_start:dispatch_end]
+    assert "node_link.public_pending_nodes_cached()" in dispatch_source
     assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
 
 
@@ -805,8 +807,8 @@ def test_machine_node_snapshot_reads_are_off_loop() -> None:
     pending_source = main_source[pending_start:pending_end]
     assert "await asyncio.to_thread(node_store.snapshot)" in list_source
     assert "node_store.snapshot()" not in list_source
+    assert "node_link.public_pending_nodes_cached()" in pending_source
     assert "await asyncio.to_thread(node_link.public_pending_nodes)" in pending_source
-    assert "node_link.public_pending_nodes()" not in pending_source
 
     extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
     dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
@@ -814,8 +816,8 @@ def test_machine_node_snapshot_reads_are_off_loop() -> None:
     dispatch_source = extension_source[dispatch_start:dispatch_end]
     assert "await asyncio.to_thread(node_store.snapshot)" in dispatch_source
     assert "node_store.snapshot()" not in dispatch_source
+    assert "node_link.public_pending_nodes_cached()" in dispatch_source
     assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
-    assert "node_link.public_pending_nodes()" not in dispatch_source
     assert "await asyncio.to_thread(_local_node_id_or_primary)" in dispatch_source
 
 

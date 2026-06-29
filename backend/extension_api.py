@@ -236,8 +236,11 @@ async def _dispatch_machine_nodes_core_backend(
         return JSONResponse(await asyncio.to_thread(node_store.snapshot))
     if request.method == "GET" and path == "pending_nodes":
         import node_link
+        pending = node_link.public_pending_nodes_cached()
+        if pending is None:
+            pending = await asyncio.to_thread(node_link.public_pending_nodes)
         return JSONResponse({
-            "pending_nodes": await asyncio.to_thread(node_link.public_pending_nodes),
+            "pending_nodes": pending,
         })
     if request.method == "GET" and path == "local_node_id":
         def _local_node_id_or_primary() -> str:
