@@ -250,7 +250,12 @@ def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
     for root_id in root_ids:
         try:
             _session_event_meta(root_id)
-            event_ingester.message_event_summaries(root_id)
+            summaries = session_store.get_session_summaries_by_ids([root_id])
+            if not summaries:
+                event_ingester.message_event_summaries(root_id)
+                continue
+            if int(summaries[0].get("message_count") or 0) > 0:
+                event_ingester.message_event_summaries(root_id)
         except Exception:
             logger.debug("session detail projection warm failed for %s", root_id, exc_info=True)
 
