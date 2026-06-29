@@ -1348,6 +1348,7 @@ class Coordinator:
         provider_id: str = "",
         reasoning_effort: str = "",
         sub_session: bool = True,
+        run_mode: str = "direct",
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -1374,8 +1375,13 @@ class Coordinator:
             if reasoning_effort != ""
             else caller_session.get("reasoning_effort")
         )
+        if run_mode not in ("direct", "fork"):
+            raise ValueError("run_mode must be direct or fork")
+        if run_mode == "fork" and not target_session_id:
+            raise ValueError("run_mode=fork requires target_session_id")
         target: Optional[str] = target_session_id or None
         created = False
+        forked_from: Optional[str] = None
 
         # Resolve the target session.
         if not target:
@@ -1409,6 +1415,20 @@ class Coordinator:
                         sub_session=sub_session,
                     )
                     created = True
+
+        if run_mode == "fork":
+            try:
+                fork = await asyncio.to_thread(
+                    session_manager.fork,
+                    target,
+                    user_initiated=False,
+                    kind="delegate_task_fork",
+                )
+            except KeyError as exc:
+                raise ValueError("target_session_id does not exist") from exc
+            target = fork["id"]
+            forked_from = target_session_id
+            created = True
 
         # Approval gate (manual / always_new_approve) — reuses pending_approvals
         # + approval_waiters + the existing /api/pending_approvals/{id}/approve|deny.
@@ -1466,6 +1486,8 @@ class Coordinator:
         return {
             "success": True,
             "target_session_id": target,
+            "forked_from_session_id": forked_from,
+            "run_mode": run_mode,
             "created_session": created,
             "created_sub_session": bool(
                 created_target and created_target.get("kind") == "sub_session"
