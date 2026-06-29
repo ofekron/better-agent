@@ -621,6 +621,14 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     assert route_source.index("sessions.list.local_order_page") < route_source.index(
         'sessions.list.local"):'
     )
+    connected_start = source.index("async def get_sessions(")
+    connected_end = source.index("@app.post(\"/api/sessions/search-content\")", connected_start)
+    connected_source = source[connected_start:connected_end]
+    assert "sessions.list.remote.local_order_candidates" in connected_source
+    assert "can_page_remote_local_order" in connected_source
+    assert connected_source.index("sessions.list.remote.local_order_candidates") < connected_source.index(
+        'sessions.list.local"):'
+    )
 
 
 def test_session_list_skips_impossible_virtual_filters() -> None:

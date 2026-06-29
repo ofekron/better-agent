@@ -4375,6 +4375,20 @@ async def get_sessions(
 
     content_scores: dict[str, int] = {}
     appended_virtual_sessions = False
+    local_total: int | None = None
+    can_page_remote_local_order = _can_page_local_summary_order(
+        search_query=search_query,
+        folder_view=effective_folder_view,
+        sort_by=effective_sort_by,
+        status_sort=effective_status_sort,
+    )
+    may_include_virtual = _session_filters_may_include_virtual(
+        file_edit_mode=file_edit_mode,
+        folder_ids=filters["folder_ids"],
+        tag_ids=filters["tag_ids"],
+        modes=filters["modes"],
+        sources=filters["sources"],
+    )
     if search_query:
         with perf.timed("sessions.list.search_scores"):
             content_scores = await _sidebar_search_scores(
@@ -4388,17 +4402,42 @@ async def get_sessions(
                 list(content_scores),
             )
     else:
-        with perf.timed("sessions.list.local"):
-            out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
-        if _session_filters_may_include_virtual(
-            file_edit_mode=file_edit_mode,
-            folder_ids=filters["folder_ids"],
-            tag_ids=filters["tag_ids"],
-            modes=filters["modes"],
-            sources=filters["sources"],
-        ):
+        if can_page_remote_local_order:
+            with perf.timed("sessions.list.remote.local_order_candidates"):
+                out, local_total = await asyncio.to_thread(
+                    _local_session_page_for_sidebar_preserving_order,
+                    sort_by=effective_sort_by,
+                    offset=0,
+                    limit=max(offset + limit, 1),
+                    project_path=project_path,
+                    search=search,
+                    show_archived=show_archived,
+                    file_edit_mode=file_edit_mode,
+                    folder_ids=filters["folder_ids"],
+                    tag_ids=filters["tag_ids"],
+                    provider_ids=filters["provider_ids"],
+                    model_ids=filters["model_ids"],
+                    modes=filters["modes"],
+                    sources=filters["sources"],
+                    content_scores=content_scores,
+                )
+        else:
+            with perf.timed("sessions.list.local"):
+                out = await asyncio.to_thread(_local_session_summaries_for_sidebar)
+        if may_include_virtual:
             with perf.timed("sessions.list.virtual"):
-                virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
+                if can_page_remote_local_order and effective_sort_by == "last_user_prompt_at":
+                    virtual_sessions, virtual_total = await asyncio.to_thread(
+                        virtual_session_store.list_recent,
+                        1,
+                        exclude_id=session_search.ASK_SINGLETON_ID,
+                    )
+                else:
+                    virtual_sessions = await asyncio.to_thread(virtual_session_store.list_all)
+                    virtual_total = len([
+                        session for session in virtual_sessions
+                        if session.get("id") != session_search.ASK_SINGLETON_ID
+                    ])
             virtual_sidebar_sessions = [
                 session
                 for session in virtual_sessions
@@ -4407,6 +4446,8 @@ async def get_sessions(
             if virtual_sidebar_sessions:
                 out.extend(virtual_sidebar_sessions)
                 appended_virtual_sessions = True
+            if local_total is not None:
+                local_total += virtual_total
         else:
             perf.record("sessions.list.virtual.skipped", 1.0)
 
@@ -4433,6 +4474,8 @@ async def get_sessions(
                 rs.setdefault("unread_count", 0)
                 rs.setdefault("monitoring_state", "idle")
                 out.append(rs)
+            if local_total is not None:
+                local_total += len(remote)
     except Exception:
         logger.debug("get_sessions: node merge failed", exc_info=True)
 
@@ -4442,7 +4485,27 @@ async def get_sessions(
         else None
     )
     with perf.timed("sessions.list.filter_sort"):
-        if _can_preserve_summary_order(
+        if can_page_remote_local_order:
+            out = await asyncio.to_thread(
+                _filter_sort_sessions_for_list,
+                out,
+                project_path=project_path,
+                search=search,
+                show_archived=show_archived,
+                file_edit_mode=file_edit_mode,
+                folder_ids=filters["folder_ids"],
+                folder_view=effective_folder_view,
+                tag_ids=filters["tag_ids"],
+                provider_ids=filters["provider_ids"],
+                model_ids=filters["model_ids"],
+                modes=filters["modes"],
+                sources=filters["sources"],
+                content_scores=content_scores,
+                sort_by=effective_sort_by,
+                status_sort=effective_status_sort,
+                state_snapshot=state_snapshot,
+            )
+        elif _can_preserve_summary_order(
             search_query=search_query,
             appended_virtual_sessions=appended_virtual_sessions,
             folder_view=effective_folder_view,
@@ -4484,7 +4547,7 @@ async def get_sessions(
                 status_sort=effective_status_sort,
                 state_snapshot=state_snapshot,
             )
-    total = len(out)
+    total = local_total if local_total is not None else len(out)
     end = offset + limit
     with perf.timed("sessions.list.page_decorate"):
         page = await asyncio.to_thread(
