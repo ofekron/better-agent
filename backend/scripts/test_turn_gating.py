@@ -62,6 +62,9 @@ class _StubCoordinator:
         self.hard_cancelled.append(run_id)
         return True
 
+    def provider_for_run(self, sid: str, provider_id=None):
+        return self.provider_for_session(sid)
+
     async def broadcast_session(
         self, *args, **kwargs,
     ) -> None:
