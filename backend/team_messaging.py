@@ -20,10 +20,6 @@ def validate_message_route(
     sender_session_id: str,
     target_session_id: str,
 ) -> tuple[dict, dict]:
-    if not session_manager.exists(sender_session_id):
-        raise ValueError("sender_session_id does not exist")
-    if not session_manager.exists(target_session_id):
-        raise ValueError("target_session_id does not exist")
     sender = session_manager.get_lite(sender_session_id)
     target = session_manager.get_lite(target_session_id)
     if not sender:
