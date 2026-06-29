@@ -105,7 +105,7 @@ _SESSION_DETAIL_WARM_MSG_LIMIT = 50
 _SESSION_DETAIL_WARM_EXCHANGE_COUNT = None
 _sessions_list_response_cache: dict[
     tuple,
-    tuple[float, bytes],
+    tuple[float, bytes, tuple[str, ...], tuple],
 ] = {}
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
@@ -474,11 +474,32 @@ def _session_detail_simple_cache_key_from_full(
     return None
 
 
+def _sessions_list_transient_fingerprint(session_ids: list[str]) -> tuple:
+    if not session_ids:
+        return ()
+    running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
+    unread_by_sid = session_manager.unread_counts_snapshot()
+    pending_input_by_sid = user_input_store.pending_counts_by_session()
+    return tuple(
+        (
+            sid,
+            sid in running_sids,
+            monitoring_by_sid.get(sid, "stopped"),
+            unread_by_sid.get(sid, 0),
+            pending_input_by_sid.get(sid, 0),
+        )
+        for sid in session_ids
+    )
+
+
 def _sessions_list_cache_get(key: tuple) -> Response | None:
     cached = _sessions_list_response_cache.get(key)
     if cached is None:
         return None
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
+        _sessions_list_response_cache.pop(key, None)
+        return None
+    if cached[3] != _sessions_list_transient_fingerprint(list(cached[2])):
         _sessions_list_response_cache.pop(key, None)
         return None
     return _sessions_list_response(cached[1])
@@ -497,7 +518,17 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    _sessions_list_response_cache[key] = (time.monotonic(), content)
+    session_ids = tuple(
+        str(session.get("id") or "")
+        for session in value.get("sessions", [])
+        if isinstance(session, dict) and session.get("id")
+    )
+    _sessions_list_response_cache[key] = (
+        time.monotonic(),
+        content,
+        session_ids,
+        _sessions_list_transient_fingerprint(list(session_ids)),
+    )
     return _sessions_list_response(content)
 
 
@@ -509,14 +540,6 @@ def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> 
             content_generation = session_search_index.generation()
         return (session_store.search_metadata_version(), content_generation)
     return (session_store.summary_version(), virtual_session_store.version_token())
-
-
-def _sessions_list_transient_state_version() -> tuple[int, int, int]:
-    return (
-        coordinator.turn_manager.cached_state_version(),
-        session_manager.unread_counts_version(),
-        user_input_store.pending_counts_version_loaded(),
-    )
 
 
 def _session_list_user_prefs() -> tuple[bool, str, bool]:
@@ -4005,7 +4028,6 @@ async def get_sessions(
         connected_version,
         connected,
         _sessions_list_cache_version(search_query, effective_search_fields),
-        _sessions_list_transient_state_version(),
     )
     cached_response = _sessions_list_cache_get(cache_key)
     if cached_response is not None:
