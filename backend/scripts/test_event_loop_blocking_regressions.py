@@ -856,17 +856,17 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     cache_start = source.index("def _sessions_list_cache_get(")
     cache_end = source.index("_GIT_STATUS_TTL_SECONDS", cache_start)
     cache_source = source[cache_start:cache_end]
-    assert "tuple[float, bytes, tuple[str, ...], tuple]" in source
+    assert "tuple[float, bytes, tuple[int, int, int]]" in source
     assert "return _sessions_list_response(cached[1])" in cache_source
     assert "json.dumps(" in cache_source
     assert "copy.deepcopy" not in cache_source
     assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
-    assert "def _sessions_list_transient_fingerprint(session_ids: list[str])" in source
-    assert "coordinator.turn_manager.cached_state_snapshot()" in source
-    assert "session_manager.unread_counts_snapshot()" in source
-    assert "user_input_store.pending_counts_by_session()" in source
-    assert "cached[3] != _sessions_list_transient_fingerprint(list(cached[2]))" in cache_source
-    assert "_sessions_list_transient_state_version" not in source
+    assert "def _sessions_list_transient_fingerprint(" not in source
+    assert "def _sessions_list_transient_state_version()" in source
+    assert "coordinator.turn_manager.cached_state_version()" in source
+    assert "session_manager.unread_counts_version()" in source
+    assert "user_input_store.pending_counts_version_loaded()" in source
+    assert "cached[2] != _sessions_list_transient_state_version()" in cache_source
 
 
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
