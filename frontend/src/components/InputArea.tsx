@@ -754,7 +754,9 @@ export function InputArea({
           style={{ display: "none" }}
           onChange={handleAttachmentChange}
         />
-        {composerActionModules.map((module) => (
+        {/* Composer-action modules (e.g. composer-fill) render inline on
+            desktop; on mobile they move into the ⋯ overflow menu below. */}
+        {!compactActionMenus && composerActionModules.map((module) => (
           <ExtensionModuleSlot
             key={`${module.extension_id}:${module.id}`}
             module={module}
@@ -826,6 +828,24 @@ export function InputArea({
                   {overflowPanelNode}
                 </div>
               ) : null}
+              {/* On mobile, composer-action modules (e.g. composer-fill) live
+                  here rather than inline. Same context as the inline slot plus
+                  closeMenu so a picked suggestion can also dismiss the menu. */}
+              {compactActionMenus && composerActionModules.map((module) => (
+                <ExtensionModuleSlot
+                  key={`${module.extension_id}:${module.id}`}
+                  module={module}
+                  className="extension-module-slot--composer-actions"
+                  context={{
+                    sessionId,
+                    draft: localDraft,
+                    onInsertText: insertDraftText,
+                    disabled,
+                    isStreaming: _isStreaming,
+                    closeMenu: () => setMenuOpen(false),
+                  }}
+                />
+              ))}
               {compactActionMenus && steerIsPrimary && (
                 <button
                   className="overflow-menu-item"
