@@ -39,7 +39,9 @@ import random
 import threading
 import time as _time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Awaitable, Callable, Literal, Optional
 
 from continuation import is_context_overflow_error
@@ -72,6 +74,11 @@ from turn_helpers import (
 from user_msg_lifecycle import emit_sent
 
 logger = logging.getLogger(__name__)
+
+_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="stream-event-apply",
+)
 
 
 # Bridged direct-WS framing types. Mirrors `_BRIDGE_EVENT_TYPES` in
@@ -1028,6 +1035,35 @@ class TurnManager:
             write_journal=write_journal,
         )
 
+    def _apply_provider_stream_event_sync(
+        self,
+        *,
+        app_session_id: str,
+        persist_to: str,
+        msg_id: str,
+        event_dict: dict,
+        manager_sid_holder: dict,
+        workers_list: list[dict],
+        user_msg: Optional[dict],
+        run_id: str,
+    ) -> dict:
+        with session_manager.message_batch(
+            persist_to,
+            msg_id,
+            hydrate_events=False,
+        ) as (_node, live_msg):
+            self._apply_event_to_assistant_msg(
+                app_session_id,
+                event_dict,
+                live_msg,
+                manager_sid_holder,
+                workers_list,
+                user_msg=user_msg,
+                run_id=run_id,
+                write_journal=False,
+            )
+            return live_msg
+
     async def _publish_provider_stream_event(
         self,
         *,
@@ -1213,24 +1249,23 @@ class TurnManager:
                         run_id=turn_run_id,
                     )
                     msg_id = msg.get("id")
-                    with session_manager.message_batch(
-                        persist_to,
-                        msg_id,
-                        hydrate_events=False,
-                    ) as (_node, live_msg):
-                        if live_msg is not msg:
-                            assistant_msg_holder[0] = live_msg
-                            msg = live_msg
-                        self._apply_event_to_assistant_msg(
-                            app_session_id,
-                            event_dict,
-                            msg,
-                            manager_sid_holder,
-                            workers_list,
+                    loop = asyncio.get_running_loop()
+                    live_msg = await loop.run_in_executor(
+                        _STREAM_EVENT_APPLY_EXECUTOR,
+                        partial(
+                            self._apply_provider_stream_event_sync,
+                            app_session_id=app_session_id,
+                            persist_to=persist_to,
+                            msg_id=msg_id,
+                            event_dict=event_dict,
+                            manager_sid_holder=manager_sid_holder,
+                            workers_list=workers_list,
                             user_msg=user_msg,
                             run_id=turn_run_id,
-                            write_journal=False,
-                        )
+                        ),
+                    )
+                    if live_msg is not msg:
+                        assistant_msg_holder[0] = live_msg
                 self._run_state_touch(app_session_id)
             except Exception as exc:
                 from event_journal import EventJournalWriteError
