@@ -115,6 +115,7 @@ _sessions_list_response_cache: dict[
     tuple[float, bytes, tuple[int, int, int]],
 ] = {}
 _sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
+_sidebar_decorated_cache: dict[tuple, dict] = {}
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
 _remote_sessions_refresh_tasks: set[str] = set()
@@ -135,6 +136,7 @@ _SESSION_LIST_SEARCH_MIN_CANDIDATES = 200
 _SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08
 _SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50
 _SIDEBAR_PAYLOAD_CACHE_MAX = 4096
+_SIDEBAR_DECORATED_CACHE_MAX = 1024
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
 _HOT_PATH_EXECUTOR = ThreadPoolExecutor(
@@ -2637,6 +2639,28 @@ def _decorate_local_sidebar_sessions(
             if not sid:
                 local.append(sidebar_session)
                 continue
+            running = sid in running_sids
+            monitoring_state = monitoring_by_sid.get(sid, "stopped")
+            unread_count = unread_by_sid.get(sid, 0)
+            pending_user_input_count = pending_input_by_sid.get(sid, 0)
+            has_error = bool(s.get("unseen_error"))
+            file_path = f"{sessions_dir}/{sid}.json"
+            decorated_cache_key = (
+                id(s),
+                sid,
+                running,
+                monitoring_state,
+                unread_count,
+                pending_user_input_count,
+                has_error,
+                file_path,
+            )
+            cached_decorated = _sidebar_decorated_cache.get(decorated_cache_key)
+            if cached_decorated is not None:
+                perf.record("sessions.list.local.decorate.row_cache.hit", 1.0)
+                local.append(cached_decorated)
+                continue
+            perf.record("sessions.list.local.decorate.row_cache.miss", 1.0)
             # Enrich with transient running flag + lazy-hydrated unread.
             # `peek_unread_count` returns None on cache miss — we surface
             # 0 in that case so the sidebar renders immediately.
@@ -2644,15 +2668,19 @@ def _decorate_local_sidebar_sessions(
             # the background-tick cache — no os.kill PID probing on the
             # event loop. Cache is refreshed every 2 s by the background
             # tick thread; stale by up to 2 s, acceptable for badges.
-            local.append({
+            decorated = {
                 **sidebar_session,
-                "is_running": sid in running_sids,
-                "monitoring_state": monitoring_by_sid.get(sid, "stopped"),
-                "unread_count": unread_by_sid.get(sid, 0),
-                "pending_user_input_count": pending_input_by_sid.get(sid, 0),
-                "has_error": bool(s.get("unseen_error")),
+                "is_running": running,
+                "monitoring_state": monitoring_state,
+                "unread_count": unread_count,
+                "pending_user_input_count": pending_user_input_count,
+                "has_error": has_error,
                 "file_path": f"{sessions_dir}/{sid}.json",
-            })
+            }
+            if len(_sidebar_decorated_cache) >= _SIDEBAR_DECORATED_CACHE_MAX:
+                _sidebar_decorated_cache.pop(next(iter(_sidebar_decorated_cache)), None)
+            _sidebar_decorated_cache[decorated_cache_key] = decorated
+            local.append(decorated)
     return local
 
 
