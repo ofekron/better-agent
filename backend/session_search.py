@@ -281,19 +281,28 @@ def _search_candidates(
             row for row in rows
             if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)
         ]
-    scored: list[tuple[int, dict, str]] = []
+    metadata_scored: list[tuple[int, dict, str]] = []
     for row in rows:
         score = _candidate_score(row, tokens)
-        snippet = ""
-        if score <= 0:
-            sid = str(row.get("id") or "")
-            session = session_store.get_session(sid)
-            if isinstance(session, dict):
-                snippet = _session_snippet(session, tokens)
-            if snippet:
-                score = 2
         if score > 0:
-            scored.append((score, row, snippet))
+            metadata_scored.append((score, row, ""))
+    scored = metadata_scored
+    if len(metadata_scored) < limit:
+        content_scores: dict[str, int] = {}
+        try:
+            import session_search_index
+            content_scores = {
+                str(item.get("session_id")): int(item.get("score") or 0)
+                for item in session_search_index.search(query, limit=max(len(rows), limit))
+                if item.get("session_id")
+            }
+        except Exception:
+            logger.debug("_search_candidates: content index lookup failed", exc_info=True)
+        metadata_ids = {str(row.get("id") or "") for _, row, _ in metadata_scored}
+        for row in rows:
+            sid = str(row.get("id") or "")
+            if sid not in metadata_ids and content_scores.get(sid, 0) > 0:
+                scored.append((2, row, ""))
     scored.sort(
         key=lambda item: (
             item[0],
