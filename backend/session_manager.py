@@ -1729,6 +1729,19 @@ class SessionManager:
                 return None
             return node.get(field)
 
+    def get_fields(self, sid: str, fields: set[str] | tuple[str, ...] | list[str]) -> dict:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return {}
+        with self._lock_for_root(rid):
+            root = self._load_root(sid, hydrate_events=False)
+            if root is None:
+                return {}
+            node = session_store._find_in_tree(root, sid)
+            if node is None:
+                return {}
+            return {field: copy.deepcopy(node.get(field)) for field in fields}
+
     def get_file_ref_context(self, sid: str) -> tuple[str | None, str]:
         rid = self._root_id_for(sid)
         if rid is None:
