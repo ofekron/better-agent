@@ -3705,7 +3705,7 @@ async def get_sessions(
         offset,
         limit,
         project_path,
-        search,
+        search_query,
         show_archived,
         file_edit_mode,
         tuple(sorted(filters["folder_ids"])),

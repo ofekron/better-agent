@@ -755,6 +755,11 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = main_source[route_start:route_end]
     assert "_sessions_list_cache_version(search_query)" in route_source
+    cache_start = route_source.index("cache_key = (")
+    cache_end = route_source.index(")", cache_start)
+    cache_source = route_source[cache_start:cache_end]
+    assert "search_query" in cache_source
+    assert "\n        search,\n" not in cache_source
     assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
     assert "tuple(sorted(effective_search_fields))" in route_source
 
