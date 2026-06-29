@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ _STUB_NON_RENDER_TYPES = frozenset({
     "worker_prep_complete",
     "worker_prep_cancelled",
 })
+_MAX_OPEN_APPEND_HANDLES = 64
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -72,7 +74,7 @@ class EventIngester:
     # go stale — same constraint that already applied before caching
     # was added.
     def __init__(self) -> None:
-        self._handles: dict[str, tuple[Path, Any]] = {}
+        self._handles: OrderedDict[str, tuple[Path, Any]] = OrderedDict()
         self._seq: dict[str, int] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
@@ -136,19 +138,45 @@ class EventIngester:
 
     def _open_append_handle(self, root_id: str, path: Path) -> Any:
         fh = open(path, "a", encoding="utf-8")
-        self._handles[root_id] = (path, fh)
+        with self._guard:
+            self._handles[root_id] = (path, fh)
+            self._handles.move_to_end(root_id)
+        self._prune_append_handles(exclude_root_id=root_id)
         return fh
 
     def _close_handle_locked(self, root_id: str) -> None:
-        pair = self._handles.pop(root_id, None)
+        with self._guard:
+            pair = self._handles.pop(root_id, None)
         if not pair:
             return
         _, fh = pair
         fh.close()
 
+    def _prune_append_handles(self, *, exclude_root_id: str) -> None:
+        while True:
+            with self._guard:
+                if len(self._handles) <= _MAX_OPEN_APPEND_HANDLES:
+                    return
+                victim_id = next(
+                    (rid for rid in self._handles if rid != exclude_root_id),
+                    None,
+                )
+                if victim_id is None:
+                    return
+            victim_lock = self._locks.get(victim_id)
+            if victim_lock is None or not victim_lock.acquire(blocking=False):
+                return
+            try:
+                self._close_handle_locked(victim_id)
+            finally:
+                victim_lock.release()
+
     def _ensure_open(self, root_id: str) -> tuple[Path, Any]:
-        if root_id in self._handles:
-            return self._handles[root_id]
+        with self._guard:
+            cached = self._handles.get(root_id)
+            if cached is not None:
+                self._handles.move_to_end(root_id)
+                return cached
         root_dir = self._root_dir(root_id)
         root_dir.mkdir(parents=True, exist_ok=True)
         path = self._events_path(root_id)
@@ -437,57 +465,54 @@ class EventIngester:
             # in-memory entry, so any uid we added beforehand would be
             # silently wiped (leading to a duplicate on restart).
             path, fh = self._ensure_open(root_id)
+            # Dedup: orchestrator and session_watcher can both emit the
+            # same claude event. Skip if we've already seen it ONLY if
+            # the data is identical. If data changed, it's an
+            # update/delta (e.g. Gemini streaming).
+            #
+            # Primary key: UUID from the event data. Fallback when no
+            # UUID (e.g. pr-link, future metadata events): hash the
+            # entire data payload — identical events from dual writers
+            # (SDK callback + jsonl tailer) collapse to one row.
+            uid = self._extract_uuid(data)
+            seen = self._seen_uuids.setdefault(root_id, set())
+            uids_only = self._seen_uids_only.setdefault(root_id, set())
+            # `dedupe_by_uid_only=True` path: skip when the uid is
+            # already on any row regardless of data shape. Used by
+            # `_v7_to_v8_migrate` to avoid re-ingesting events the
+            # live `apply_event` already wrote — the snapshot's
+            # normalized inner agent_message shape differs from the
+            # live outer manager_event wrapper, so the default
+            # `uid:sha256(data)` dedup misses and produces duplicate
+            # rows (measured: 4346 dup rows on session 4ddbd4d7
+            # before this gate).
+            if dedupe_by_uid_only and uid and uid in uids_only:
+                return -1
             try:
-                # Dedup: orchestrator and session_watcher can both emit the
-                # same claude event. Skip if we've already seen it ONLY if
-                # the data is identical. If data changed, it's an
-                # update/delta (e.g. Gemini streaming).
-                #
-                # Primary key: UUID from the event data. Fallback when no
-                # UUID (e.g. pr-link, future metadata events): hash the
-                # entire data payload — identical events from dual writers
-                # (SDK callback + jsonl tailer) collapse to one row.
-                uid = self._extract_uuid(data)
-                seen = self._seen_uuids.setdefault(root_id, set())
-                uids_only = self._seen_uids_only.setdefault(root_id, set())
-                # `dedupe_by_uid_only=True` path: skip when the uid is
-                # already on any row regardless of data shape. Used by
-                # `_v7_to_v8_migrate` to avoid re-ingesting events the
-                # live `apply_event` already wrote — the snapshot's
-                # normalized inner agent_message shape differs from the
-                # live outer manager_event wrapper, so the default
-                # `uid:sha256(data)` dedup misses and produces duplicate
-                # rows (measured: 4346 dup rows on session 4ddbd4d7
-                # before this gate).
-                if dedupe_by_uid_only and uid and uid in uids_only:
-                    return -1
-                try:
-                    payload = json.dumps(data, sort_keys=True).encode()
-                    raw_hash = hashlib.sha256(payload).hexdigest()
-                except (TypeError, ValueError):
-                    raw_hash = str(hash(str(data)))
-                data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
+                payload = json.dumps(data, sort_keys=True).encode()
+                raw_hash = hashlib.sha256(payload).hexdigest()
+            except (TypeError, ValueError):
+                raw_hash = str(hash(str(data)))
+            data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
 
-                if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
-                    return -1
-                seen.add(data_hash)
-                if uid:
-                    uids_only.add(uid)
+            if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
+                return -1
+            seen.add(data_hash)
+            if uid:
+                uids_only.add(uid)
 
-                seq = self._seq[root_id] + 1
-                self._seq[root_id] = seq
-                self._emit(
-                    fh, root_id, seq, sid, event_type, data, source,
-                    run_id, msg_id, cwd, assume_exists,
-                )
-                # Durable fence: a caller that observes a returned seq has
-                # the guarantee that the line is on disk past kernel buffers.
-                # OSError/IOError propagate so the tailer's
-                # "don't advance cursor on dispatch failure" rule kicks in.
-                fh.flush()
-                os.fsync(fh.fileno())
-            finally:
-                self._close_handle_locked(root_id)
+            seq = self._seq[root_id] + 1
+            self._seq[root_id] = seq
+            self._emit(
+                fh, root_id, seq, sid, event_type, data, source,
+                run_id, msg_id, cwd, assume_exists,
+            )
+            # Durable fence: a caller that observes a returned seq has
+            # the guarantee that the line is on disk past kernel buffers.
+            # OSError/IOError propagate so the tailer's
+            # "don't advance cursor on dispatch failure" rule kicks in.
+            fh.flush()
+            os.fsync(fh.fileno())
 
         # Orphan-event signal: a `msg_id=None` line for a sid whose
         # latest assistant msg is already finalized arrives AFTER the
@@ -551,40 +576,37 @@ class EventIngester:
         lock = self._locks.setdefault(root_id, threading.Lock())
         with lock:
             path, fh = self._ensure_open(root_id)
-            try:
-                seqs: list[int] = []
-                uids_only = self._seen_uids_only.setdefault(root_id, set())
-                for sid, event_type, data, source, run_id, msg_id in events:
-                    uid = self._extract_uuid(data)
-                    seen = self._seen_uuids.setdefault(root_id, set())
-                    try:
-                        payload = json.dumps(data, sort_keys=True).encode()
-                        raw_hash = hashlib.sha256(payload).hexdigest()
-                    except (TypeError, ValueError):
-                        raw_hash = str(hash(str(data)))
-                    data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
+            seqs: list[int] = []
+            uids_only = self._seen_uids_only.setdefault(root_id, set())
+            for sid, event_type, data, source, run_id, msg_id in events:
+                uid = self._extract_uuid(data)
+                seen = self._seen_uuids.setdefault(root_id, set())
+                try:
+                    payload = json.dumps(data, sort_keys=True).encode()
+                    raw_hash = hashlib.sha256(payload).hexdigest()
+                except (TypeError, ValueError):
+                    raw_hash = str(hash(str(data)))
+                data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
 
-                    if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
-                        seqs.append(-1)
-                        continue
-                    seen.add(data_hash)
-                    # Keep `_seen_uids_only` in sync so future
-                    # `dedupe_by_uid_only=True` callers see batch-written
-                    # rows. Single-ingest does this at the same site.
-                    if uid:
-                        uids_only.add(uid)
+                if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
+                    seqs.append(-1)
+                    continue
+                seen.add(data_hash)
+                # Keep `_seen_uids_only` in sync so future
+                # `dedupe_by_uid_only=True` callers see batch-written
+                # rows. Single-ingest does this at the same site.
+                if uid:
+                    uids_only.add(uid)
 
-                    seq = self._seq[root_id] + 1
-                    self._seq[root_id] = seq
-                    seqs.append(seq)
-                    self._emit(
-                        fh, root_id, seq, sid, event_type, data, source,
-                        run_id, msg_id, cwd, assume_exists,
-                    )
-                fh.flush()
-                os.fsync(fh.fileno())
-            finally:
-                self._close_handle_locked(root_id)
+                seq = self._seq[root_id] + 1
+                self._seq[root_id] = seq
+                seqs.append(seq)
+                self._emit(
+                    fh, root_id, seq, sid, event_type, data, source,
+                    run_id, msg_id, cwd, assume_exists,
+                )
+            fh.flush()
+            os.fsync(fh.fileno())
         return seqs
 
     def cursor(self, root_id: str) -> int:
