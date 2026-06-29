@@ -1643,6 +1643,7 @@ class ProviderPayload(BaseModel):
     config_dir: str = ""
     custom_models: list[str] = []
     default_model: str = ""
+    runner: str = ""
     default_reasoning_effort: str = ""
     default_permission: dict = {}
     capabilities: dict[str, bool] | None = None
@@ -1658,6 +1659,7 @@ class ProviderPatch(BaseModel):
     config_dir: str | None = None
     custom_models: list[str] | None = None
     default_model: str | None = None
+    runner: str | None = None
     default_reasoning_effort: str | None = None
     default_permission: dict | None = None
     capabilities: dict[str, bool] | None = None
@@ -5030,6 +5032,58 @@ async def get_sessions(
         offset=offset,
         limit=limit,
     )
+    if search_query and _can_page_local_search_scores(
+        project_path=project_path,
+        show_archived=show_archived,
+        file_edit_mode=file_edit_mode,
+        folder_ids=filters["folder_ids"],
+        folder_view=effective_folder_view,
+        tag_ids=filters["tag_ids"],
+        provider_ids=filters["provider_ids"],
+        model_ids=filters["model_ids"],
+        modes=filters["modes"],
+        sources=filters["sources"],
+        sort_by=effective_sort_by,
+        status_sort=effective_status_sort,
+        connected=(),
+    ):
+        page_source, total, content_scores = await _run_hot_path(
+            "sessions.list.search_local_page.worker",
+            _build_local_search_page_for_sidebar,
+            offset=offset,
+            limit=limit,
+            search_query=search_query,
+            search_fields=search_fields,
+            sort_by=effective_sort_by,
+            folder_view=effective_folder_view,
+        )
+        state_snapshot = None
+        with perf.timed("sessions.list.page_decorate"):
+            page = await _run_hot_path(
+                "sessions.list.page_decorate.worker",
+                _decorate_local_sidebar_sessions,
+                page_source,
+                state_snapshot,
+            )
+        if content_scores:
+            page = [
+                {**session, "search_score": content_scores.get(str(session.get("id") or ""), 0)}
+                for session in page
+            ]
+        _schedule_session_event_meta_warm(page)
+        return _sessions_list_response_maybe_cache(
+            cache_key,
+            {
+                "sessions": page,
+                "offset": offset,
+                "limit": limit,
+                "total": total,
+                "has_more": offset + limit < total,
+                "sort_by": effective_sort_by,
+                "status_sort": effective_status_sort,
+            },
+            cache_response=cache_response,
+        )
     if not connected:
         page, total = await _run_hot_path(
             "sessions.list.local_page_thread",
@@ -6464,13 +6518,23 @@ async def get_session_summaries(ids: str = Query("")):
         perf.record("sessions.summaries.response_cache.hit", 1.0)
         return cached_response
     perf.record("sessions.summaries.response_cache.miss", 1.0)
+    summaries = await asyncio.to_thread(
+        _local_session_summaries_by_ids_for_sidebar,
+        requested_ids,
+    )
+    by_id = {str(session.get("id")): session for session in summaries if session.get("id")}
+    ordered = [by_id[sid] for sid in requested_ids if sid in by_id]
     page = await _run_hot_path(
         "sessions.summaries.decorate.worker",
         _decorate_local_sidebar_sessions,
         ordered,
         None,
     )
-    return _session_summaries_cache_put(cache_key, {"sessions": page})
+    final_cache_key = (
+        tuple(requested_ids),
+        session_store.summary_index_version(),
+    )
+    return _session_summaries_cache_put(final_cache_key, {"sessions": page})
 
 
 @app.get("/api/sessions/{session_id}/stats")

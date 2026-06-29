@@ -2575,6 +2575,10 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     assert "cache_response = not (" not in route_source
     assert "session_store.SEARCH_FIELD_CONTENT in effective_search_fields" in route_source
     assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
+    assert "sessions.list.search_local_page.worker" in route_source
+    assert route_source.index("sessions.list.search_local_page.worker") < route_source.index(
+        "with perf.timed(\"sessions.list.remote\")"
+    )
 
 
 def test_startup_warms_virtual_session_summaries_off_loop() -> None:
