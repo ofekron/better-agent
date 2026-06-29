@@ -39,6 +39,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_search  # noqa: E402
+import session_search_index  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -64,6 +65,9 @@ def _reset_home() -> None:
         session_store._summary_index_loaded = False  # type: ignore[attr-defined]
         session_store._summary_index_version = 0  # type: ignore[attr-defined]
         session_store._summary_sorted_cache_version = -1  # type: ignore[attr-defined]
+    with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
+        session_search_index._search_cache.clear()  # type: ignore[attr-defined]
+        session_search_index._search_inflight.clear()  # type: ignore[attr-defined]
 
 
 def _write_session(
@@ -363,14 +367,57 @@ def test_search_candidates_include_later_message_snippets() -> bool:
             {"role": "assistant", "content": "needle appeared later in the transcript"},
         ],
     )
-    candidates = session_search._search_candidates("needle")
-    if [candidate.get("id") for candidate in candidates] != ["later-1"]:
-        print(f"{FAIL} later snippet candidate ids: {candidates!r}")
-        return False
-    if candidates[0].get("matching_snippet") != "needle appeared later in the transcript":
-        print(f"{FAIL} later snippet payload: {candidates[0]!r}")
-        return False
+    original_search = session_search_index.search
+    session_search_index.search = lambda *a, **kw: [{"session_id": "later-1", "score": 1}]  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle")
+        if [candidate.get("id") for candidate in candidates] != ["later-1"]:
+            print(f"{FAIL} later snippet candidate ids: {candidates!r}")
+            return False
+        if candidates[0].get("matching_snippet") != "needle appeared later in the transcript":
+            print(f"{FAIL} later snippet payload: {candidates[0]!r}")
+            return False
+    finally:
+        session_search_index.search = original_search  # type: ignore[assignment]
     print(f"{PASS} backend candidate collection finds later transcript snippets")
+    return True
+
+
+def test_search_candidates_avoid_full_session_scan_for_content_matches() -> bool:
+    _reset_home()
+    for idx in range(50):
+        _write_session(
+            sid=f"bulk-{idx}",
+            name=f"unrelated {idx}",
+            messages=[
+                {"role": "user", "content": "plain prompt"},
+                {"role": "assistant", "content": "needle appears here" if idx == 7 else "other text"},
+            ],
+            updated_at=f"2026-05-01T00:00:{idx:02d}",
+        )
+    get_calls = 0
+    original_get = session_store.get_session
+    original_search = session_search_index.search
+
+    def counted_get(sid: str):
+        nonlocal get_calls
+        get_calls += 1
+        return original_get(sid)
+
+    session_store.get_session = counted_get  # type: ignore[assignment]
+    session_search_index.search = lambda *a, **kw: [{"session_id": "bulk-7", "score": 1}]  # type: ignore[assignment]
+    try:
+        candidates = session_search._search_candidates("needle", limit=5)
+    finally:
+        session_store.get_session = original_get  # type: ignore[assignment]
+        session_search_index.search = original_search  # type: ignore[assignment]
+    if [candidate.get("id") for candidate in candidates] != ["bulk-7"]:
+        print(f"{FAIL} content-index candidate ids: {candidates!r}")
+        return False
+    if get_calls > 5:
+        print(f"{FAIL} content-index candidate search loaded too many sessions: {get_calls}")
+        return False
+    print(f"{PASS} content candidate search avoids full session hydration scan")
     return True
 
 
@@ -738,6 +785,7 @@ def main_run() -> int:
         test_run_search_sessions_uses_provisioned_worker,
         test_search_worker_instructions_wrap_bounded_candidates,
         test_search_candidates_include_later_message_snippets,
+        test_search_candidates_avoid_full_session_scan_for_content_matches,
         test_run_search_sessions_worker_parse_failed,
         test_run_search_sessions_worker_timeout,
         test_run_search_sessions_short_circuits_empty_candidates,
