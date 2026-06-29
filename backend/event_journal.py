@@ -1248,6 +1248,26 @@ class EventJournalReader:
         worker_id: Optional[str] = None,
         delegate_id: Optional[str] = None,
     ) -> list[dict]:
+        cached = self._ensure_message_cache(
+            session_id,
+            message_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
+        if cached is None:
+            return []
+        return list(cached.events[:limit])
+
+    def _ensure_message_cache(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        fork_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        delegate_id: Optional[str] = None,
+    ) -> Optional[_MessageCacheEntry]:
         context_id = self._context_id(
             session_id,
             fork_id=fork_id,
@@ -1260,7 +1280,7 @@ class EventJournalReader:
         )
         summary = summaries.get(message_id)
         if not summary:
-            return []
+            return None
         resolutions = event_ingester.ownership_resolutions(session_id)
         res_version = len(resolutions)
         key = (session_id, context_id, message_id)
@@ -1311,7 +1331,7 @@ class EventJournalReader:
             self._message_cache.move_to_end(key)
             while len(self._message_cache) > self._message_cache_size:
                 self._message_cache.popitem(last=False)
-            return list(cached.events[:limit])
+            return cached
 
     def read_message_frontend_events(
         self,
@@ -1322,27 +1342,18 @@ class EventJournalReader:
         worker_id: Optional[str] = None,
         delegate_id: Optional[str] = None,
     ) -> list[dict]:
-        self.read_message_events(
+        cached = self._ensure_message_cache(
             session_id,
             message_id,
             fork_id=fork_id,
             worker_id=worker_id,
             delegate_id=delegate_id,
         )
-        context_id = self._context_id(
-            session_id,
-            fork_id=fork_id,
-            worker_id=worker_id,
-            delegate_id=delegate_id,
-        )
-        key = (session_id, context_id, message_id)
+        if cached is None:
+            return []
         with self._message_cache_lock:
-            cached = self._message_cache.get(key)
-            if cached is None:
-                return []
             if cached.frontend_events is None:
                 cached.frontend_events = self._to_frontend_events(cached.events)
-            self._message_cache.move_to_end(key)
             return list(cached.frontend_events)
 
     def _read_owned_range(
