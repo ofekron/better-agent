@@ -5960,6 +5960,25 @@ button.run-badge-clickable:focus-visible {
   background: var(--border);
   border-color: var(--border);
 }
+.queued-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.queued-icon-btn:hover {
+  color: var(--fg);
+  background: var(--border);
+  border-color: var(--border);
+}
 /* When the queued prompt contains inline-tag comments, switch to
    column layout so the cards and the user text each get their own row. */
 .queued-prompt-actions {

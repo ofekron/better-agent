@@ -111,6 +111,7 @@ import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
 import type { FileEditingState } from "./types/fileEditing";
 import { mergeTagsIntoPrompt } from "./utils/inlineTagsPrompt";
+import { applyQueuedInlineTags } from "./utils/queuedPreview";
 import { buildOpenFilesPreamble } from "./utils/openFilesPreamble";
 import { patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
 import { appendPendingUnlessAcked } from "./utils/pendingMessages";
@@ -2093,6 +2094,26 @@ function AppMain({
     },
     [getNode, setQueuedForSession],
   );
+  const appendTagsToLatestQueuedPrompt = useCallback(
+    (sessionId: string, tagsToAppend: import("./types/inlineTag").InlineTag[]) => {
+      if (tagsToAppend.length === 0) return false;
+      const localQueued = queuedBySession[sessionId];
+      const base = localQueued && localQueued.length > 0 ? localQueued : persistedQueuedPrompts;
+      const latest = base[base.length - 1] ?? null;
+      if (!latest) return false;
+      const nextPreview = applyQueuedInlineTags(latest.preview, tagsToAppend);
+      const sent = sendUpdateQueued(sessionId, latest.id, nextPreview);
+      if (!sent) return false;
+      setQueuedForSession(sessionId, (prev) => {
+        const current = prev.length > 0 ? prev : base;
+        return current.map((item) =>
+          item.id === latest.id ? { ...item, preview: nextPreview } : item,
+        );
+      }, "comment_merge");
+      return true;
+    },
+    [persistedQueuedPrompts, queuedBySession, sendUpdateQueued, setQueuedForSession],
+  );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
   // tabs bar can be hidden and its order chosen from Settings.
@@ -2310,13 +2331,16 @@ function AppMain({
   const handleAddTag = useCallback(
     (text: string, comment: string, messageId: string) => {
       if (!currentSession) return;
-      const tag = {
+      const tag: import("./types/inlineTag").InlineTag = {
         id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         messageId,
         selectedText: text,
         comment,
         timestamp: new Date().toISOString(),
       };
+      if (appendTagsToLatestQueuedPrompt(currentSession.id, [tag])) {
+        return;
+      }
       applySessionMetadata(currentSession.id, (session) => ({
         inline_tags: [...(session.inline_tags ?? []), tag],
       }));
@@ -2332,7 +2356,7 @@ function AppMain({
         },
       ).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, appendTagsToLatestQueuedPrompt, applySessionMetadata, clientId]
   );
   const handleRemoveTag = useCallback(
     (id: string) => {
@@ -2623,7 +2647,7 @@ function AppMain({
         fileAnchor.startCol = anchor.startCol;
         fileAnchor.endCol = anchor.endCol;
       }
-      const tag = {
+      const tag: import("./types/inlineTag").InlineTag = {
         id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         messageId: `__file__${anchor.filePath}`,
         selectedText: anchor.selectedText ?? "",
@@ -2631,6 +2655,9 @@ function AppMain({
         timestamp: new Date().toISOString(),
         fileAnchor,
       };
+      if (appendTagsToLatestQueuedPrompt(currentSession.id, [tag])) {
+        return;
+      }
       applySessionMetadata(currentSession.id, (session) => ({
         inline_tags: [...(session.inline_tags ?? []), tag],
       }));
@@ -2644,7 +2671,7 @@ function AppMain({
         },
       ).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, appendTagsToLatestQueuedPrompt, applySessionMetadata, clientId]
   );
 
   const handleStartFileDiscussion = useCallback(
@@ -3841,23 +3868,38 @@ function AppMain({
       let filePayloads: FilePayload[] = effFiles.map(toFilePayload);
 
       const sessionTags = currentSession.inline_tags ?? [];
-      const withTags = mergeTagsIntoPrompt(prompt, sessionTags);
-
-      const openFileSnapshots = rightPanelVisible
-        ? (currentSession.open_file_panels ?? []).map((p) => {
-            const h = openFileEditorsRef.current.get(p.path);
-            return {
-              path: p.path,
-              visible: h?.getVisibleRange() ?? null,
-              caret: h?.getCaretPosition() ?? null,
-              selection: h?.getSelection() ?? null,
-            };
-          })
-        : [];
-      const openFilesPreamble = buildOpenFilesPreamble(openFileSnapshots);
-      const finalPrompt = openFilesPreamble
-        ? `${openFilesPreamble}\n${withTags}`
-        : withTags;
+      const queuedBase = queuedBySession[currentSession.id]?.length
+        ? queuedBySession[currentSession.id]!
+        : persistedQueuedPrompts;
+      const latestQueued = queuedBase[queuedBase.length - 1] ?? null;
+      const mergeIntoQueued = sendMode === "queue" && sessionTags.length > 0 && latestQueued;
+      if (mergeIntoQueued) {
+        sendMode = "alter";
+      }
+      let finalPrompt: string;
+      if (mergeIntoQueued) {
+        const queuedWithTags = applyQueuedInlineTags(latestQueued.preview, sessionTags);
+        finalPrompt = prompt.trim()
+          ? `${queuedWithTags}\n\n${prompt.trim()}`
+          : queuedWithTags;
+      } else {
+        const withTags = mergeTagsIntoPrompt(prompt, sessionTags);
+        const openFileSnapshots = rightPanelVisible
+          ? (currentSession.open_file_panels ?? []).map((p) => {
+              const h = openFileEditorsRef.current.get(p.path);
+              return {
+                path: p.path,
+                visible: h?.getVisibleRange() ?? null,
+                caret: h?.getCaretPosition() ?? null,
+                selection: h?.getSelection() ?? null,
+              };
+            })
+          : [];
+        const openFilesPreamble = buildOpenFilesPreamble(openFileSnapshots);
+        finalPrompt = openFilesPreamble
+          ? `${openFilesPreamble}\n${withTags}`
+          : withTags;
+      }
 
       const sendForm = { prompt: finalPrompt };
       // client_id so the backend can echo it back when the queued message
@@ -4023,7 +4065,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user

@@ -243,4 +243,16 @@ describe("InputArea queued prompt promote action", () => {
       "1 comment · 1 image · 1 file",
     );
   });
+
+  it("opens queued prompt editing from the explicit edit button", () => {
+    const onQueuedTextEdit = vi.fn();
+    renderInputArea(true, "", { onQueuedTextEdit });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit queued prompt" }));
+
+    const editor = screen.getByDisplayValue("queued work");
+    fireEvent.change(editor, { target: { value: "edited queued work" } });
+    fireEvent.blur(editor);
+    expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work");
+  });
 });
