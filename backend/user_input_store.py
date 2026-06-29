@@ -161,6 +161,11 @@ def pending_counts_version() -> int:
         return _PENDING_COUNTS_VERSION
 
 
+def pending_counts_version_loaded() -> int:
+    with _LOCK:
+        return _PENDING_COUNTS_VERSION
+
+
 def get_request(request_id: str) -> dict[str, Any] | None:
     with _LOCK:
         req = _read_locked()["requests"].get(request_id)
