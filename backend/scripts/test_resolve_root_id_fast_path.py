@@ -24,6 +24,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _reset_home() -> None:
+    session_store._index_sidecar_write_queue.join()
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
@@ -311,6 +312,7 @@ def test_index_sidecar_write_happens_outside_index_lock() -> bool:
     session_store._write_index_sidecar = tracking_write
     try:
         resolved = session_store._resolve_root_id("child-fork")
+        session_store._index_sidecar_write_queue.join()
     finally:
         session_store._write_index_sidecar = original_write
 
@@ -431,6 +433,46 @@ def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
     return ok
 
 
+def test_concurrent_dir_fingerprint_cache_singleflights() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+
+    original_fingerprint = session_store._dir_fingerprint
+    session_store._dir_fingerprint_cache = None
+    calls = 0
+    calls_lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def slow_fingerprint():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.02)
+        return original_fingerprint()
+
+    def fingerprint() -> None:
+        barrier.wait()
+        session_store._dir_fingerprint_cached()
+
+    session_store._dir_fingerprint = slow_fingerprint
+    try:
+        threads = [threading.Thread(target=fingerprint) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        session_store._dir_fingerprint = original_fingerprint
+        session_store._dir_fingerprint_cache = None
+
+    ok = calls == 1
+    print(
+        f"{PASS if ok else FAIL} concurrent dir fingerprint cache singleflights"
+        f"{'' if ok else ' calls=' + repr(calls)}"
+    )
+    return ok
+
+
 def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -481,6 +523,7 @@ def test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write() -
     _write(root)
     _write_summary("target-root", 0)
     session_store._ensure_index()
+    session_store._index_sidecar_write_queue.join()
     sidecar = Path(_TMP_HOME) / "sessions" / ".fork-index.json"
     before = sidecar.stat().st_mtime_ns
 
@@ -615,6 +658,7 @@ def main() -> int:
             test_fork_index_scan_avoids_path_glob(),
             test_missing_sid_refresh_reuses_fingerprint(),
             test_concurrent_missing_sid_refresh_attempts_singleflight(),
+            test_concurrent_dir_fingerprint_cache_singleflights(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),
