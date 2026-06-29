@@ -18,20 +18,21 @@ _lock = threading.Lock()
 _counts_loaded = False
 _unseen_counts: dict[str, int] = {}
 _total_unseen_count = 0
+_counts_version = 0
 
 
 def _updates_dir() -> Path:
     return ba_home() / "project_updates"
 
 
-def _project_path(project_id: str) -> Path:
+def _project_path(project_id: str, *, create_dir: bool = True) -> Path:
     d = _updates_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    if create_dir:
+        d.mkdir(parents=True, exist_ok=True)
     return d / f"{project_id}.jsonl"
 
 
-def _read_entries_locked(project_id: str) -> list[dict]:
-    path = _project_path(project_id)
+def _read_entries_path_locked(path: Path) -> list[dict]:
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -47,6 +48,10 @@ def _read_entries_locked(project_id: str) -> list[dict]:
     return entries
 
 
+def _read_entries_locked(project_id: str) -> list[dict]:
+    return _read_entries_path_locked(_project_path(project_id, create_dir=False))
+
+
 def _ensure_counts_locked() -> None:
     global _counts_loaded, _total_unseen_count
     if _counts_loaded:
@@ -57,7 +62,7 @@ def _ensure_counts_locked() -> None:
     if d.exists():
         for path in d.glob("*.jsonl"):
             count = 0
-            for entry in _read_entries_locked(path.stem):
+            for entry in _read_entries_path_locked(path):
                 if not entry.get("seen"):
                     count += 1
             if count:
@@ -68,14 +73,18 @@ def _ensure_counts_locked() -> None:
 
 
 def _set_count_locked(project_id: str, count: int) -> None:
-    global _total_unseen_count
+    global _total_unseen_count, _counts_version
     previous = _unseen_counts.get(project_id, 0)
+    if count == previous:
+        return
     if count > 0:
         _unseen_counts[project_id] = count
         _total_unseen_count += count - previous
+        _counts_version += 1
         return
     _unseen_counts.pop(project_id, None)
     _total_unseen_count -= previous
+    _counts_version += 1
 
 
 def append(project_id: str, text: str) -> dict:
@@ -137,6 +146,11 @@ def peek_total_unseen() -> int | None:
         if not _counts_loaded:
             return None
         return _total_unseen_count
+
+
+def version_token() -> int:
+    with _lock:
+        return _counts_version
 
 
 def mark_seen(project_id: str, entry_ids: list[str]) -> int:
