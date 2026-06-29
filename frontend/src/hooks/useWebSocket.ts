@@ -324,6 +324,11 @@ interface UseWebSocketOptions {
     msgId: string,
     content: string
   ) => void;
+  onMessageContinuationChanged?: (
+    appSessionId: string,
+    msgId: string,
+    chainDepth: number | null
+  ) => void;
   /** Per-turn picker payload (`ask_result`) stamped on an assistant
    * message — drives the inline session picker rendered below that turn. */
   onMessageAskResultChanged?: (
@@ -445,6 +450,9 @@ export function useWebSocket(
   const onMessageContentUpdatedRef = useRef(
     options.onMessageContentUpdated
   );
+  const onMessageContinuationChangedRef = useRef(
+    options.onMessageContinuationChanged
+  );
   const onMessageAskResultChangedRef = useRef(
     options.onMessageAskResultChanged
   );
@@ -493,6 +501,7 @@ export function useWebSocket(
     onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
     onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
     onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
+    onMessageContinuationChangedRef.current = options.onMessageContinuationChanged;
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
     onSessionProcessingRef.current = options.onSessionProcessing;
@@ -536,6 +545,7 @@ export function useWebSocket(
     options.onMessageRetryingChanged,
     options.onMessageAutoRetryChanged,
     options.onMessageContentUpdated,
+    options.onMessageContinuationChanged,
     options.onMessageAskResultChanged,
     options.onMessageAskChoiceChanged,
     options.onSessionProcessing,
@@ -1149,6 +1159,20 @@ export function useWebSocket(
               d.session_id,
               d.msg_id,
               d.content ?? ""
+            );
+          }
+        }
+        if (event.type === "message_continuation_changed") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            chain_depth: number | null;
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageContinuationChangedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.chain_depth ?? null
             );
           }
         }

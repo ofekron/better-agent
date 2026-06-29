@@ -95,6 +95,7 @@ _INTERNAL_KINDS = {
     "msg_transient_attempt_set",
     "continuation_requested_set",
     "continuation_requested_cleared",
+    "continuation_chain_set",
 }
 
 
@@ -311,6 +312,16 @@ class SessionWSBroadcaster:
                     "session_id": sid,
                     "msg_id": change.get("msg_id"),
                     "auto_retry": change.get("auto_retry"),
+                },
+            })
+            return
+        if kind == "msg_continuation_set":
+            self._dispatch({
+                "type": "message_continuation_changed",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "chain_depth": change.get("chain_depth"),
                 },
             })
             return

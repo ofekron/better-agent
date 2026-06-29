@@ -584,6 +584,31 @@ def test_broadcaster_maps_running_content_to_message_delta() -> bool:
     return ok
 
 
+def test_broadcaster_maps_continuation_to_message_delta() -> bool:
+    _reset_home()
+    from session_ws_broadcaster import SessionWSBroadcaster
+    captured: list[dict] = []
+
+    class FakeCoord: pass
+
+    bcast = SessionWSBroadcaster(FakeCoord())
+    bcast._dispatch = lambda payload: captured.append(payload)
+    bcast.on_change(
+        "sid",
+        {"kind": "msg_continuation_set", "msg_id": "msg-1", "chain_depth": 2},
+    )
+
+    ok = (
+        len(captured) == 1
+        and captured[0]["type"] == "message_continuation_changed"
+        and captured[0]["data"]["session_id"] == "sid"
+        and captured[0]["data"]["msg_id"] == "msg-1"
+        and captured[0]["data"]["chain_depth"] == 2
+    )
+    print(f"{PASS if ok else FAIL} broadcaster maps continuation state to message update")
+    return ok
+
+
 def test_broadcaster_maps_message_appends_to_delta() -> bool:
     _reset_home()
     from session_ws_broadcaster import SessionWSBroadcaster
@@ -973,6 +998,7 @@ def main_runner() -> int:
         test_dispatch_raw_annotates_app_session_id,
         test_broadcaster_drops_unknown_kinds,
         test_broadcaster_maps_running_content_to_message_delta,
+        test_broadcaster_maps_continuation_to_message_delta,
         test_broadcaster_maps_message_appends_to_delta,
         test_broadcaster_maps_renamed_to_session_renamed,
         test_broadcaster_maps_deleted_to_session_deleted,
