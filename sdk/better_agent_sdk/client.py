@@ -950,9 +950,10 @@ class Client:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        mode: str = "wait_and_grab_last_mssg_in_turn",
         timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
-        """Send a message to one session, worker, or worker pool and block."""
+        """Send a message to one session, worker, or worker pool via ask mode."""
         return self._post(
             "/api/internal/ask",
             {
@@ -962,6 +963,7 @@ class Client:
                 "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": ask_id,
+                "mode": mode,
                 "provider_id": provider_id,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
@@ -980,36 +982,9 @@ class Client:
         model: str = "",
         reasoning_effort: str = "",
     ) -> dict[str, Any]:
-        """Send a joined message to one session, worker, or worker pool."""
+        """Send a fire-and-forget message to one session, worker, or worker pool."""
         return self._post(
             "/api/internal/mssg",
-            {
-                "sender_session_id": self.app_session_id,
-                "target_session_id": target_session_id,
-                "target_worker_id": target_worker_id,
-                "target_worker_pool": target_worker_pool,
-                "message": message,
-                "provider_id": provider_id,
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-            },
-            timeout=30.0,
-        )
-
-    def async_(
-        self,
-        target_session_id: str = "",
-        message: str = "",
-        *,
-        target_worker_id: str = "",
-        target_worker_pool: str = "",
-        provider_id: str = "",
-        model: str = "",
-        reasoning_effort: str = "",
-    ) -> dict[str, Any]:
-        """Send a detached message to one session, worker, or worker pool."""
-        return self._post(
-            "/api/internal/async-communicate",
             {
                 "sender_session_id": self.app_session_id,
                 "target_session_id": target_session_id,

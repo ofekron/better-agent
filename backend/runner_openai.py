@@ -48,8 +48,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    normalize_ask_mode,
+)
 from orchestration_tool_descriptions import (
-    ASYNC_DESCRIPTION as _ASYNC_DESCRIPTION,
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
@@ -796,6 +800,13 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "target_worker_pool": {"type": "string"},
         "message": {"type": "string"},
         "run_mode": {"type": "string", "enum": ["direct", "fork"]},
+        "mode": {
+            "type": "string",
+            "enum": [
+                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+            ],
+        },
         "worker_description": {"type": "string"},
         "worker_registry_cwd": {"type": "string"},
         "ephemeral": {"type": "boolean"},
@@ -806,7 +817,6 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
-    "async",
     "create_session",
     "create_sub_session",
     "delegate_task",
@@ -815,7 +825,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
 })
 
 _ORCHESTRATION_TOOL_NAMES = frozenset({
-    "mssg", "async", "ask", "delegate_task", "create_session",
+    "mssg", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
     "open_file_panel", "request_user_input", "start_file_discussion",
 })
@@ -913,12 +923,6 @@ def _tool_schemas_for_run(
         if mssg_sender_session_id:
             if "mssg" not in disabled:
                 schemas.append(_function_tool_schema("mssg", _MSSG_DESCRIPTION, _MSSG_INPUT_SCHEMA))
-            if "async" not in disabled:
-                schemas.append(_function_tool_schema(
-                    "async",
-                    _ASYNC_DESCRIPTION,
-                    _MSSG_INPUT_SCHEMA,
-                ))
             if "ask" not in disabled:
                 schemas.append(_function_tool_schema("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA))
         if "delegate_task" not in disabled:
@@ -1172,35 +1176,6 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
-    async def async_(params: dict) -> str:
-        args = _args(params)
-        target_session_id = str(args.get("target_session_id") or "").strip()
-        target_worker_id = str(args.get("target_worker_id") or "").strip()
-        target_worker_pool = str(args.get("target_worker_pool") or "").strip()
-        message = str(args.get("message") or "").strip()
-        if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
-            return _dynamic_tool_text_result("one target and message are required", success=False)
-        try:
-            result = await asyncio.to_thread(
-                _post_loopback_sync,
-                {
-                    "sender_session_id": mssg_sender_session_id,
-                    "target_session_id": target_session_id,
-                    "target_worker_id": target_worker_id,
-                    "target_worker_pool": target_worker_pool,
-                    "message": message,
-                },
-                backend_url=backend_url,
-                internal_token=internal_token,
-                url_path="/api/internal/async-communicate",
-                timeout_s=30.0,
-            )
-        except Exception as e:
-            logger.exception("async dynamic tool handler failed")
-            return _dynamic_tool_text_result(f"async failed: {e}", success=False)
-        is_error = bool(result.get("error")) or result.get("success") is False
-        return _dynamic_tool_json_result(result, success=not is_error)
-
     async def ask(params: dict) -> str:
         args = _args(params)
         target_session_id = str(args.get("target_session_id") or "").strip()
@@ -1208,10 +1183,16 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         message = str(args.get("message") or "").strip()
         run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
+        try:
+            mode = normalize_ask_mode(args.get("mode"))
+        except ValueError as exc:
+            return _dynamic_tool_text_result(str(exc), success=False)
         if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
             return _dynamic_tool_text_result("one target and message are required", success=False)
         if run_mode not in ("direct", "fork"):
             return _dynamic_tool_text_result("run_mode must be 'direct' or 'fork'", success=False)
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+            return _dynamic_tool_text_result("async ask mode requires run_mode='direct'", success=False)
         ephemeral = bool(args.get("ephemeral"))
         if ephemeral and run_mode != "fork":
             return _dynamic_tool_text_result("ephemeral is only valid for run_mode='fork'", success=False)
@@ -1242,6 +1223,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
                 "target_worker_pool": target_worker_pool,
                 "message": message,
                 "ask_id": f"ask_{uuid.uuid4().hex[:10]}",
+                "mode": mode,
             }
             url_path = "/api/internal/ask"
         try:
@@ -1251,7 +1233,7 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path=url_path,
-                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+                timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
             )
         except Exception as e:
             logger.exception("ask dynamic tool handler failed")
@@ -1444,8 +1426,6 @@ def _build_loopback_tool_handlers(inputs: dict, *, cwd: str, model: str) -> dict
     if mssg_sender_session_id:
         if "mssg" not in disabled:
             handlers["mssg"] = mssg
-        if "async" not in disabled:
-            handlers["async"] = async_
         if "ask" not in disabled:
             handlers["ask"] = ask
     if "delegate_task" not in disabled:

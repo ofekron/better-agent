@@ -185,7 +185,6 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
         ("/api/internal/ask", {}),
         ("/api/internal/ask-fork", {}),
         ("/api/internal/mssg", {}),
-        ("/api/internal/async-communicate", {}),
         ("/api/internal/delegate-task", {}),
     ]:
         response = client.post(

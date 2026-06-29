@@ -58,7 +58,6 @@ def _worker_events(worker: dict) -> list:
 # would desync the positional match.
 _DELEGATION_TOOL_SHORT_NAMES = frozenset({
     "ask",
-    "async",
     "mssg",
     "delegate_task",
     "create_session",
@@ -106,8 +105,8 @@ def _panel_matches_tool(short: str, worker: dict) -> bool:
     if short == "create_session":
         return kind == "session_created"
     if short == "ask":
-        return run_mode in ("team_ask", "fork")
-    if short in ("mssg", "async", "delegate_task"):
+        return run_mode in ("team_ask", "fork", "team_message")
+    if short in ("mssg", "delegate_task"):
         return run_mode == "team_message"
     return False
 
