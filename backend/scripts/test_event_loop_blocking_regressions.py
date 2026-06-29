@@ -272,6 +272,25 @@ def test_recovery_dispatch_skips_reconciled_runs_before_owner_read() -> None:
     assert "marker_matches_current(" in recover_source[marker_idx:backend_state_idx]
 
 
+def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
+    runs_source = (ROOT / "runs_dir.py").read_text(encoding="utf-8")
+    assert "def iter_run_dirs(run_id_filter: Optional[set[str]] = None)" in runs_source
+    assert "for run_id in run_id_filter:" in runs_source
+
+    for filename in (
+        "provider_claude.py",
+        "provider_codex.py",
+        "provider_gemini.py",
+        "provider_openai.py",
+    ):
+        source = (ROOT / filename).read_text(encoding="utf-8")
+        start = source.index("    def recover_in_flight(")
+        end = source.index("    # ------------------------------------------------------------------", start)
+        recover_source = source[start:end]
+        assert "iter_run_dirs(run_id_filter)" in recover_source
+        assert "child.name not in run_id_filter" not in recover_source
+
+
 def test_session_fork_index_refresh_is_root_scoped() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     start = source.index("def _index_tree(")
@@ -1580,6 +1599,7 @@ if __name__ == "__main__":
     test_event_ingester_indexes_search_outside_root_lock()
     test_private_extension_reconcile_skips_current_smoked_install()
     test_pending_node_polling_uses_public_projection_cache()
+    test_filtered_provider_recovery_does_not_rescan_all_runs()
     test_machine_node_snapshot_reads_are_off_loop()
     test_pending_approval_listing_uses_cached_projection_off_loop()
     test_project_update_counts_batch_uses_single_store_call()
