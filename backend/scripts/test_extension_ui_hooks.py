@@ -95,6 +95,12 @@ def _seed_store_with_marketplace() -> None:
         ),
         encoding="utf-8",
     )
+    # Raw write_text bypasses the store's _write_store_unlocked, which always
+    # refreshes the fingerprint cache and drops the projection cache. Mirror it
+    # here so the sub-0.5s store_fingerprint() TTL can't serve a stale ui_hooks
+    # projection (or stale ui-settings) from a prior test into the next one.
+    extension_store._refresh_store_fingerprint_cache()  # type: ignore[attr-defined]
+    extension_store._clear_projection_cache()  # type: ignore[attr-defined]
     _configure_project_structure_runtime()
     _configure_ask_runtime()
 
@@ -130,7 +136,59 @@ def _enable_builtin_ui_extensions() -> None:
         {
             "name": "Ask",
             "surfaces": ["backend_feature", "frontend_feature"],
-            "entrypoints": {},
+            "entrypoints": {
+                "quick_button": {
+                    "label": "Ask",
+                    "icon": "sparkles",
+                    "action": {
+                        "type": "navigate",
+                        "path": "/s/virtual:ofek-dev.ask:ask",
+                    },
+                },
+            },
+            "permissions": {"session_state": True},
+        },
+    )
+
+
+_ASK_QUICK_BUTTON_ACTION = {
+    "type": "navigate",
+    "path": "/s/virtual:ofek-dev.ask:ask",
+}
+
+
+def _install_active_assistant() -> None:
+    """Install + enable the Assistant superseder so its quick button replaces
+    Ask's. Active (installed+enabled+entitled) is all the supersede gate needs;
+    a configured internal-LLM task additionally makes Assistant's own button
+    runtime-ready so it surfaces in ui_hooks()."""
+    if extension_store.BUILTIN_ASSISTANT_EXTENSION_ID is None:
+        raise AssertionError("private registry missing Assistant id")
+    provider = config_store.list_providers()["providers"][0]
+    assignments = config_store.get_internal_llm_assignments()
+    assignments["assistant"] = {
+        "provider_id": provider["id"],
+        "model": provider["default_model"],
+        "reasoning_effort": provider.get("default_reasoning_effort") or "",
+    }
+    config_store.set_internal_llm_assignments(assignments)
+    _install_ui_hook_extension(
+        extension_store.BUILTIN_ASSISTANT_EXTENSION_ID,
+        {
+            "name": "Assistant",
+            "surfaces": ["backend_feature", "frontend_feature"],
+            "entrypoints": {
+                "quick_button": {
+                    "label": "Assistant",
+                    "icon": "assistant-start",
+                    "action": {
+                        "type": "ensure",
+                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_ASSISTANT_EXTENSION_ID}/backend/assistant/ensure",
+                        "path_template": "/s/{id}",
+                        "id_field": "id",
+                    },
+                },
+            },
             "permissions": {"session_state": True},
         },
     )
@@ -279,11 +337,75 @@ def test_ui_hooks_surfaces_project_structure_page() -> None:
     assert page["badge"] == {
         "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
     }
+    # Assistant is not installed by _enable_builtin_ui_extensions, so Ask's quick
+    # button is NOT superseded and surfaces normally.
     quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID]
-    assert quick_buttons == []
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["action"] == _ASK_QUICK_BUTTON_ACTION
 
 
-def test_builtin_ask_has_no_toolbar_entrypoint() -> None:
+def test_ask_quick_button_superseded_by_active_assistant() -> None:
+    # Ask ships a quick button again; it is hidden only while the Assistant
+    # superseder is installed+enabled, and returns when Assistant is disabled or
+    # uninstalled (as long as Ask itself stays installed+enabled).
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+
+    def ask_buttons() -> list:
+        return [
+            q for q in extension_store.ui_hooks()["quick_buttons"]
+            if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
+        ]
+
+    def assistant_buttons() -> list:
+        return [
+            q for q in extension_store.ui_hooks()["quick_buttons"]
+            if q["extension_id"] == extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+        ]
+
+    # Assistant absent -> Ask button shows.
+    assert len(ask_buttons()) == 1
+
+    # Assistant installed + enabled -> Ask suppressed, Assistant shows.
+    _install_active_assistant()
+    assert ask_buttons() == []
+    assert len(assistant_buttons()) == 1
+
+    # Assistant disabled -> Ask returns, Assistant gone.
+    extension_store.set_enabled(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID, False)
+    assert len(ask_buttons()) == 1
+    assert assistant_buttons() == []
+
+    # Assistant re-enabled -> Ask suppressed again.
+    extension_store.set_enabled(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID, True)
+    assert ask_buttons() == []
+
+    # Assistant uninstalled -> Ask returns.
+    import sys as _sys
+    import types as _types
+    if "assistant_ui" not in _sys.modules:
+        _stub = _types.ModuleType("assistant_ui")
+        _stub.cleanup_singleton = lambda: None  # type: ignore[attr-defined]
+        _sys.modules["assistant_ui"] = _stub
+    extension_store.uninstall(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID)
+    assert len(ask_buttons()) == 1
+
+
+def test_ask_quick_button_hidden_when_ask_ui_toggle_off() -> None:
+    # The supersede gate is independent of Ask's own ui-settings toggle: with
+    # Assistant absent, disabling Ask's quick_button surface still hides it.
+    _seed_store_with_marketplace()
+    _enable_builtin_ui_extensions()
+    extension_store.set_ui_settings(
+        extension_store.BUILTIN_ASK_EXTENSION_ID, quick_button_enabled=False
+    )
+    assert [
+        q for q in extension_store.ui_hooks()["quick_buttons"]
+        if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
+    ] == []
+
+
+def test_builtin_ask_ships_quick_button() -> None:
     manifest_path = (
         Path(__file__).resolve().parents[2]
         / "extensions"
@@ -293,7 +415,12 @@ def test_builtin_ask_has_no_toolbar_entrypoint() -> None:
     entrypoints = extension_store.validate_manifest(
         json.loads(manifest_path.read_text(encoding="utf-8"))
     )["entrypoints"]
-    assert entrypoints["quick_button"] == {}
+    assert entrypoints["quick_button"]["label"] == "Ask"
+    assert entrypoints["quick_button"]["icon"] == "sparkles"
+    assert entrypoints["quick_button"]["action"] == {
+        "type": "navigate",
+        "path": "/s/virtual:ofek-dev.ask:ask",
+    }
     assert [
         module
         for module in entrypoints["frontend_modules"]
@@ -328,13 +455,17 @@ def test_builtin_ask_backend_entrypoint_is_mounted() -> None:
 
 
 def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
-    # First-party builtins surface their UI hooks once seeded + runtime-ready,
-    # except Ask's toolbar entry, which is intentionally hidden in favor of the
-    # Assistant quick action.
+    # First-party builtins surface their UI hooks once seeded + runtime-ready.
+    # On a fresh reconcile the Assistant superseder is not active, so Ask's
+    # quick button surfaces; it is hidden only while Assistant is installed +
+    # enabled (covered by test_ask_quick_button_superseded_by_active_assistant).
     _seed_store_with_marketplace()
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     hooks = extension_store.ui_hooks()
-    assert not [
+    assert not extension_store.is_extension_active(
+        extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+    ), "Assistant must be inactive on a fresh reconcile for this assertion to hold"
+    assert [
         q for q in hooks["quick_buttons"]
         if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
     ]
