@@ -132,6 +132,11 @@ def _canonical_tool_arguments(tool_name: str, raw_arguments: str) -> str:
         return raw_arguments
     return json.dumps(_canonical_tool_input(tool_name, parsed), ensure_ascii=False)
 
+
+def _is_zai_base_url(base_url: str) -> bool:
+    host = urllib.parse.urlparse(str(base_url or "")).netloc.lower()
+    return host == "api.z.ai" or host.endswith(".z.ai")
+
 # Detached runners can outlive backend restarts/token rotations. Prefer the
 # spawn-time token for normal requests, but on a 403 retry once with the current
 # disk token. mtime caching keeps steady-state loopback calls cheap.
@@ -499,11 +504,14 @@ class EventEmitter:
             return text
         return None
 
-    def close_thinking(self) -> None:
+    def close_thinking(self) -> Optional[str]:
         if self._thinking_uuid is not None:
             self._parent = self._thinking_uuid
+            thinking = "".join(self._thinking_buf)
             self._thinking_uuid = None
             self._thinking_buf = []
+            return thinking
+        return None
 
     def finalize_tool_calls(self) -> list[dict]:
         """Close all open tool_use blocks (advance parent to the last), return
@@ -2035,11 +2043,19 @@ async def _stream_chat(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    if reasoning_effort and reasoning_effort != "none":
+    is_zai = _is_zai_base_url(base_url)
+    if is_zai:
+        payload["thinking"] = {
+            "type": "disabled" if reasoning_effort == "none" else "enabled",
+            "clear_thinking": False,
+        }
+    elif reasoning_effort and reasoning_effort != "none":
         payload["reasoning_effort"] = reasoning_effort
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+        if is_zai:
+            payload["tool_stream"] = True
         # Incremental history persistence trims an unbalanced trailing
         # assistant-tool block so every on-disk snapshot is resumable. Keep
         # provider rounds single-tool so that trimming is atomic: a restart can
@@ -2217,7 +2233,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             steer_offset, steered = _drain_steer_messages(run_dir, steer_offset, messages)
             if steered:
                 _persist_history()
-            finish_reason, tool_calls, asst_text, chunk_usage = await _one_round(
+            finish_reason, tool_calls, asst_text, asst_reasoning, chunk_usage = await _one_round(
                 base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
                 reasoning_effort=reasoning_effort,
             )
@@ -2241,6 +2257,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             # persisted as an invalid null-content message that 400s on resume.
             if tool_calls or asst_text is not None:
                 asst_msg: dict = {"role": "assistant", "content": asst_text}
+                if asst_reasoning:
+                    asst_msg["reasoning_content"] = asst_reasoning
                 if tool_calls:
                     asst_msg["tool_calls"] = [
                         {"id": c["id"], "type": "function",
@@ -2328,9 +2346,10 @@ async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
     emitter: EventEmitter, run_dir: Path, tool_schemas: list[dict] = TOOL_SCHEMAS,
     reasoning_effort: Optional[str] = None,
-) -> tuple[Optional[str], list[dict], Optional[str], Optional[dict]]:
+) -> tuple[Optional[str], list[dict], Optional[str], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
-    Returns (finish_reason, finalized_tool_calls, assistant_text, usage)."""
+    Returns (finish_reason, finalized_tool_calls, assistant_text,
+    reasoning_content, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
     async for chunk in _stream_chat(
@@ -2361,10 +2380,10 @@ async def _one_round(
                 idx, tc.get("id"), fn.get("name"), fn.get("arguments"),
             )
 
-    emitter.close_thinking()
+    thinking = emitter.close_thinking()
     text = emitter.close_text()
     tool_calls = emitter.finalize_tool_calls()
-    return finish_reason, tool_calls, text, usage
+    return finish_reason, tool_calls, text, thinking, usage
 
 
 async def _dispatch_tool(
