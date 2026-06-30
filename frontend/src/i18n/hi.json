@@ -88,6 +88,8 @@
   "chat.chatButton": "चैट",
   "chat.rawJsonButton": "Raw JSON",
   "chat.treeButton": "ट्री",
+  "chat.enableRearrangerButton": "रीअरेंजर चालू करें",
+  "chat.disableRearrangerButton": "रीअरेंजर बंद करें",
   "chat.loadingOlderMessages": "पुराने संदेश लोड हो रहे हैं...",
   "chat.loadOlderMessages": "पुराने संदेश लोड करें",
   "chat.rootEvents": "असंलग्नक ईवेंट",

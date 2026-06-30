@@ -88,6 +88,8 @@
   "chat.chatButton": "Chat",
   "chat.rawJsonButton": "JSON grezzo",
   "chat.treeButton": "Albero",
+  "chat.enableRearrangerButton": "Attiva riordinatore",
+  "chat.disableRearrangerButton": "Disattiva riordinatore",
   "chat.loadingOlderMessages": "Caricamento messaggi precedenti...",
   "chat.loadOlderMessages": "Carica messaggi precedenti",
   "chat.rootEvents": "Eventi non collegati",

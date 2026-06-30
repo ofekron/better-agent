@@ -88,6 +88,8 @@
   "chat.chatButton": "محادثة",
   "chat.rawJsonButton": "JSON الخام",
   "chat.treeButton": "شجرة",
+  "chat.enableRearrangerButton": "تفعيل إعادة الترتيب",
+  "chat.disableRearrangerButton": "تعطيل إعادة الترتيب",
   "chat.loadingOlderMessages": "جارٍ تحميل الرسائل الأقدم...",
   "chat.loadOlderMessages": "تحميل الرسائل الأقدم",
   "chat.rootEvents": "أحداث غير ملحقة",

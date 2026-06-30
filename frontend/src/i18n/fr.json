@@ -88,6 +88,8 @@
   "chat.chatButton": "Chat",
   "chat.rawJsonButton": "JSON brut",
   "chat.treeButton": "Arbre",
+  "chat.enableRearrangerButton": "Activer le réorganiseur",
+  "chat.disableRearrangerButton": "Désactiver le réorganiseur",
   "chat.loadingOlderMessages": "Chargement des messages plus anciens...",
   "chat.loadOlderMessages": "Charger les messages plus anciens",
   "chat.rootEvents": "Événements non rattachés",

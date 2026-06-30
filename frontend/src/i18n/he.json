@@ -87,6 +87,8 @@
   "chat.chatButton": "צ'אט",
   "chat.rawJsonButton": "JSON גולמי",
   "chat.treeButton": "עץ",
+  "chat.enableRearrangerButton": "הפעל מסדר",
+  "chat.disableRearrangerButton": "כבה מסדר",
   "chat.loadingOlderMessages": "טוען הודעות ישנות...",
   "chat.loadOlderMessages": "טען הודעות ישנות",
   "chat.rootEvents": "אירועים לא משויכים",

@@ -88,6 +88,8 @@
   "chat.chatButton": "チャット",
   "chat.rawJsonButton": "生 JSON",
   "chat.treeButton": "ツリー",
+  "chat.enableRearrangerButton": "再配置を有効にする",
+  "chat.disableRearrangerButton": "再配置を無効にする",
   "chat.loadingOlderMessages": "過去のメッセージを読み込み中...",
   "chat.loadOlderMessages": "過去のメッセージを読み込む",
   "chat.rootEvents": "未所属のイベント",

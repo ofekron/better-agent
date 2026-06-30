@@ -674,9 +674,10 @@ describe("message rendering", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
+    await h.click(".chat-toolbar-overflow-trigger");
     const labels = Array.from(h.$$(".raw-toggle")).map((b) => b.textContent);
-    expect(labels).toContain("Trace");
-    expect(labels).toContain("Raw JSON");
+    expect(labels).toContain("chat.traceButton");
+    expect(labels).toContain("chat.rawJsonButton");
     h.unmount();
   });
 

@@ -88,6 +88,8 @@
   "chat.chatButton": "Чат",
   "chat.rawJsonButton": "Сырой JSON",
   "chat.treeButton": "Дерево",
+  "chat.enableRearrangerButton": "Включить перестроение",
+  "chat.disableRearrangerButton": "Отключить перестроение",
   "chat.loadingOlderMessages": "Загрузка старых сообщений...",
   "chat.loadOlderMessages": "Загрузить старые сообщения",
   "chat.rootEvents": "Непривязанные события",
