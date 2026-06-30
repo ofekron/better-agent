@@ -127,6 +127,7 @@ import {
   type UiSelectionSnapshot,
 } from "./utils/uiSelection";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
+import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import {
   handleWSEvent as progressHandleWSEvent,
@@ -2014,9 +2015,22 @@ function AppMain({
     if (!connected || offlineFlushRunningRef.current) return;
     offlineFlushRunningRef.current = true;
     void (async () => {
+      // Sessions whose queued `create_session` PERMANENTLY failed this pass.
+      // Prompts that target them are skipped (kept in the durable backlog,
+      // retried next tick) instead of racing a session that does not exist —
+      // so one poison create can't strand or hard-fail unrelated work.
+      const failedCreateSessionIds = new Set<string>();
       try {
         for (const entry of offlineQueue.getAll()) {
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
+          if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
+            logPromptSend("offline_flush_skip_dependent", {
+              type: entry.type,
+              app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
+              client_id: entry.clientId,
+            }, "warn");
+            continue;
+          }
           logPromptSend("offline_flush_attempt", {
             type: entry.type,
             app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
@@ -2025,21 +2039,64 @@ function AppMain({
           });
           if (entry.type === "create_session") {
             const queued = entry.session;
-            await createSession({
-              name: queued.name,
-              model: queued.model,
-              cwd: queued.cwd,
-              orchestrationMode: queued.orchestration_mode,
-              browserHarnessEnabled: queued.browser_harness_enabled,
-              providerId: queued.provider_id,
-              browserHarnessHeadless: queued.browser_harness_headless,
-              nodeId: queued.node_id,
-              reasoningEffort: queued.reasoning_effort,
-              permission: queued.permission,
-              clientSessionId: queued.id,
-              capabilityContexts: entry.capabilityContexts,
-              folderId: queued.folder_id,
-            });
+            try {
+              await createSession({
+                name: queued.name,
+                model: queued.model,
+                cwd: queued.cwd,
+                orchestrationMode: queued.orchestration_mode,
+                browserHarnessEnabled: queued.browser_harness_enabled,
+                providerId: queued.provider_id,
+                browserHarnessHeadless: queued.browser_harness_headless,
+                nodeId: queued.node_id,
+                reasoningEffort: queued.reasoning_effort,
+                permission: queued.permission,
+                clientSessionId: queued.id,
+                capabilityContexts: entry.capabilityContexts,
+                folderId: queued.folder_id,
+              });
+            } catch (createErr) {
+              // Per-entry error handling so one queued create can't strand the
+              // whole backlog (the loop's outer catch would abort every later
+              // action too). The durable backlog entry is KEPT in every branch
+              // — nothing is dropped, so no user intent is lost.
+              const outcome = outcomeForCreateError(createErr, queued.id);
+              logPromptSend("offline_flush_create_error", {
+                type: entry.type,
+                app_session_id: queued.id,
+                client_id: entry.clientId,
+                kind: outcome.stop ? "transient" : "permanent",
+                error: createErr instanceof Error ? createErr.message : String(createErr),
+              }, outcome.stop ? "warn" : "error");
+              if (outcome.stop) {
+                // Transient (network/abort/5xx): pause the entire drain and
+                // retry the whole backlog on the next tick. Returning here
+                // preserves strict action order — we never dispatch a later
+                // action ahead of this earlier one that is merely waiting on
+                // the network.
+                return;
+              }
+              // Permanent (4xx the backend rejected on its merits): surface it
+              // on the optimistic bubble instead of silently dropping it, and
+              // skip prompts that depend on this session for the rest of this
+              // pass. The entry stays in the durable backlog so a self-healing
+              // state (e.g. team-not-ready right after boot) recovers on a
+              // later tick.
+              failedCreateSessionIds.add(queued.id);
+              setPendingForSession(queued.id, (prev) =>
+                prev.map((m) =>
+                  m.id === entry.clientId
+                    ? {
+                        ...m,
+                        status: "error" as const,
+                        errorText:
+                          createErr instanceof Error ? createErr.message : String(createErr),
+                      }
+                    : m
+                ),
+              );
+              continue;
+            }
             const images = entry.images?.length ? entry.images : undefined;
             const offlineFiles = entry.files?.length ? entry.files : undefined;
             if (entry.prompt) {
