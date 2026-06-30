@@ -1,9 +1,9 @@
 /**
- * A user message carries `source` only when it was injected programmatically
+ * A turn-initiating message carries `source` only when it was injected programmatically
  * (supervisor verdict, worker delegation, mssg/ask team message, scheduler,
- * agent-board, another session, …) — a genuine user-typed prompt has no
+ * agent-board, another session, …) — a genuine user-typed turn has no
  * `source`. Map a known source to its display icon+label; for any unknown
- * injected source, humanize the raw string. A source-bearing message must
+ * injected source, humanize the raw string. A source-bearing turn initiator must
  * NEVER render as "User".
  */
 const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string }> = {
@@ -27,8 +27,8 @@ function humanizeSource(source: string): string {
     .join(" ");
 }
 
-/** Header icon+label for a user message, by its injection `source`. */
-export function userMessageHeader(source?: string): { icon: string; label: string } {
+/** Header icon+label for a turn initiator, by its injection `source`. */
+export function turnMessageHeader(source?: string): { icon: string; label: string } {
   if (!source) return { icon: "\u{1F464}", label: "User" };
   if (INJECTED_SOURCE_LABELS[source]) return INJECTED_SOURCE_LABELS[source];
   // Group source families like "supervisor.await_user" under the base label.

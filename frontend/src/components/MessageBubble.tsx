@@ -1,7 +1,7 @@
 import { Fragment, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { messageGroupPropsEqual } from "./messageGroupPropsEqual";
+import { turnGroupPropsEqual } from "./turnGroupPropsEqual";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
-import { userMessageHeader } from "../lib/userMessageHeader";
+import { turnMessageHeader } from "../lib/turnMessageHeader";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownPreview from "@uiw/react-markdown-preview";
@@ -1914,7 +1914,7 @@ function renderEntityBlock(
    * blocks always render with the wrapper regardless of this flag. */
   flattenManager: boolean = false,
   orchestrationMode?: OrchestrationMode,
-  userMessageId?: string,
+  initiatorMessageId?: string,
   sessionId?: string,
 ): ReactNode {
   const color = colorMap?.get(block.entityId);
@@ -1927,7 +1927,7 @@ function renderEntityBlock(
   if (flattenManager && block.entityType === "manager") {
     return (
       <div className="timeline-block-body" key={key}>
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, userMessageId, undefined, sessionId)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId)}
       </div>
     );
   }
@@ -1953,7 +1953,7 @@ function renderEntityBlock(
         events={filteredEvents}
         onFileClick={onFileClick}
         onViewDiff={onViewDiff}
-        parentMessageId={userMessageId}
+        parentMessageId={initiatorMessageId}
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(block.panelKind)}
@@ -1973,7 +1973,7 @@ function renderEntityBlock(
         <span style={{ color }}>{block.entityLabel}</span>
       </div>
       <div className="timeline-block-body">
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, userMessageId, undefined, sessionId)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId)}
       </div>
     </div>
   );
@@ -1989,7 +1989,7 @@ function renderTimeline(
   workerDefaultOpen = false,
   flattenManager = false,
   orchestrationMode?: OrchestrationMode,
-  userMessageId?: string,
+  initiatorMessageId?: string,
   sessionId?: string,
 ): ReactNode[] {
   // Worker preparation events (one-time context-loading run on a fresh
@@ -2060,13 +2060,13 @@ function renderTimeline(
     return [
       ...prepBlocks,
       ...entityBlocks.map((b, i) =>
-        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, userMessageId, sessionId)
+        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId)
       ),
     ];
   }
   return [
     ...prepBlocks,
-    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpen, userMessageId, sessionId),
+    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpen, initiatorMessageId, sessionId),
   ];
 }
 
@@ -2108,7 +2108,7 @@ function renderManagerStreamLegacy(
   onFileClick?: (p: string, focus?: FileFocus) => void,
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
   _workerDefaultOpen = false,
-  userMessageId?: string,
+  initiatorMessageId?: string,
   sessionId?: string,
 ): ReactNode[] {
   const { flat, toolResultById } = flattenClaudeMessages(managerEvents);
@@ -2121,7 +2121,7 @@ function renderManagerStreamLegacy(
       onViewDiff,
       false,
       toolResultById,
-      userMessageId,
+      initiatorMessageId,
       undefined,
       sessionId,
     );
@@ -2157,7 +2157,7 @@ function renderManagerStreamLegacy(
               events={filteredEvents}
               onFileClick={onFileClick}
               onViewDiff={onViewDiff}
-              parentMessageId={userMessageId}
+              parentMessageId={initiatorMessageId}
               parentTargetId={anchorId}
               sessionId={sessionId}
               created={isCreationPanelKind(worker.panel_kind)}
@@ -2165,7 +2165,7 @@ function renderManagerStreamLegacy(
           );
           rendered.push(wrapWithTs(block, `delegate-${worker.delegation_id}`, g.event._ts, {
             targetId: toolUseId ? `tu-${toolUseId}` : undefined,
-            parentId: userMessageId ? `msg-${userMessageId}` : undefined,
+            parentId: initiatorMessageId ? `msg-${initiatorMessageId}` : undefined,
           }));
           return;
         }
@@ -2182,13 +2182,13 @@ function renderManagerStreamLegacy(
             toolResultById={toolResultById}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
-            parentMessageId={userMessageId}
+            parentMessageId={initiatorMessageId}
             sessionId={sessionId}
           />
         );
         rendered.push(wrapWithTs(node, `agent-${i}`, g.event._ts, {
           targetId: toolUseId ? `tu-${toolUseId}` : undefined,
-          parentId: userMessageId ? `msg-${userMessageId}` : undefined,
+          parentId: initiatorMessageId ? `msg-${initiatorMessageId}` : undefined,
         }));
         return;
       }
@@ -2206,7 +2206,7 @@ function renderManagerStreamLegacy(
       );
       rendered.push(wrapWithTs(toolNode, `tool-${i}`, g.event._ts, {
         targetId: toolUseId ? `tu-${toolUseId}` : undefined,
-        parentId: userMessageId ? `msg-${userMessageId}` : undefined,
+        parentId: initiatorMessageId ? `msg-${initiatorMessageId}` : undefined,
       }));
       return;
     }
@@ -2219,7 +2219,7 @@ function renderManagerStreamLegacy(
         {
           parentId: ptuid
             ? `tu-${ptuid}`
-            : userMessageId ? `msg-${userMessageId}` : undefined,
+            : initiatorMessageId ? `msg-${initiatorMessageId}` : undefined,
         },
       ),
     );
@@ -2243,7 +2243,7 @@ function renderManagerStreamLegacy(
         events={filteredEvents}
         onFileClick={onFileClick}
         onViewDiff={onViewDiff}
-        parentMessageId={userMessageId}
+        parentMessageId={initiatorMessageId}
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(w.panel_kind)}
@@ -2280,8 +2280,8 @@ const AssistantMessage = memo(function AssistantMessage({
    * events emitted by the supervised paired worker. */
   relabelManagerAsWorker = false,
   loadPhase,
-  /** Id of the parent user message — level-0 events jump to this. */
-  userMessageId,
+  /** Id of the parent turn initiator — level-0 events jump to this. */
+  initiatorMessageId,
 }: {
   message: ChatMessage;
   /** Session id used to build the lazy event-fetch URL for stubbed
@@ -2305,8 +2305,8 @@ const AssistantMessage = memo(function AssistantMessage({
   relabelManagerAsWorker?: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. */
   loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
-  /** Id of the parent user message — level-0 events jump to this. */
-  userMessageId?: string;
+  /** Id of the parent turn initiator — level-0 events jump to this. */
+  initiatorMessageId?: string;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef ?? internalRef;
@@ -2421,7 +2421,7 @@ const AssistantMessage = memo(function AssistantMessage({
     // panels as collapsible blocks.
     flattenPrimaryEntity,
     orchestrationMode,
-    userMessageId,
+    initiatorMessageId,
     sessionId,
   );
 
@@ -2758,23 +2758,24 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
   );
 }
 
-/** A user prompt + its assistant response, collapsible as a unit.
- *  Wrapped in `memo` below so historical groups skip re-render on
- *  per-frame WS streaming updates — those mutate only the in-flight
- *  assistant message (last in the list), leaving every earlier
- *  group's props referentially stable. */
-function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLastGroup = false }: {
-  userMessage: ChatMessage;
-  assistantMessage?: ChatMessage;
-  /** Worker output nested under the supervisor/main message. */
-  workerSubGroups?: { user: ChatMessage; assistant?: ChatMessage }[];
+/** A single turn group: the turn initiator (User/Ask/Message/Provisioning/etc.)
+ *  paired with its assistant response, collapsible as a unit. Wrapped in
+ *  `memo` below so historical turn groups skip re-render on per-frame WS
+ *  streaming updates — those mutate only the in-flight assistant message
+ *  (last in the list), leaving every earlier turn group's props
+ *  referentially stable. */
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
+  initiatorMessage: ChatMessage;
+  responseMessage?: ChatMessage;
+  /** Child turn groups nested under the supervisor/main turn. */
+  childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
-  onRetryStopped?: (assistantMessage: ChatMessage) => void;
-  onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
-  onAlterUserMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
+  onRetryStopped?: (responseMessage: ChatMessage) => void;
+  onContinueRateLimitOnAnotherProvider?: (responseMessage: ChatMessage) => void;
+  onAlterTurnMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
   threadColorMap?: Map<string, string>;
   defaultCollapsed?: boolean;
   expandAllTrigger?: number;
@@ -2802,14 +2803,14 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
   /** True only for the latest visible chat group. When that group auto-collapses
-   * after turn completion, collapse the prompt body but keep the final assistant
+   * after turn completion, collapse the turn initiator body but keep the final assistant
    * message body expanded so the answer remains readable. Historical groups use
    * the compact collapsed preview. */
-  isLastGroup?: boolean;
+  isLatestTurnGroup?: boolean;
 }) {
   const { t } = useTranslation();
-  const assistantContainerRef = useRef<HTMLDivElement>(null);
-  const userContainerRef = useRef<HTMLDivElement>(null);
+  const responseContainerRef = useRef<HTMLDivElement>(null);
+  const initiatorContainerRef = useRef<HTMLDivElement>(null);
   // Outer-most node of this group — used to anchor scroll on its bottom
   // edge when the user toggles collapse, so the box "shoves up" instead
   // of pushing the boxes below it down the viewport.
@@ -2833,11 +2834,11 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     if (!userToggledRef.current) setCollapsed(defaultCollapsed);
   }, [defaultCollapsed]);
   // Split collapse surfaces for the latest group: when a turn finishes, the
-  // prompt body folds away (header arrow flips to ▶) but the final assistant
+  // turn initiator body folds away (header arrow flips to ▶) but the final assistant
   // message body remains expanded so the answer stays readable. Historical
   // groups keep the compact collapsed preview behavior.
-  const userBodyCollapsed = isLastGroup ? collapsed : false;
-  const assistantCollapsed = isLastGroup ? false : collapsed;
+  const initiatorBodyCollapsed = isLatestTurnGroup ? collapsed : false;
+  const responseCollapsed = isLatestTurnGroup ? false : collapsed;
   const toggleCollapsed = () => {
     userToggledRef.current = true;
     const groupEl = groupRef.current;
@@ -2897,35 +2898,35 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
       setCollapsed(false);
     }
   }, [expandAllTrigger]);
-  const hasResponse = !!assistantMessage || !!(workerSubGroups?.some(sg => sg.assistant));
+  const hasResponse = !!responseMessage || !!(childTurnGroups?.some(sg => sg.response));
   // Ask-flow turns are represented entirely by their inline picker footer
-  // (reasoning + matches + actions), rendered by Chat's renderGroupFooter.
+  // (reasoning + matches + actions), rendered by Chat's renderTurnFooter.
   // Their assistant message carries no events and its reasoning already
   // lives in the picker, so rendering the assistant body would duplicate
   // the reasoning and add an empty indented block — suppress it, and make
   // the turn non-expandable. Delegate-approval pickers ride on real turns
   // with their own body, so they are excluded.
   const isAskFlowTurn =
-    !!assistantMessage?.ask_result &&
-    assistantMessage.ask_result.purpose !== "delegate_approval";
+    !!responseMessage?.ask_result &&
+    responseMessage.ask_result.purpose !== "delegate_approval";
   const canExpand = hasResponse && !isAskFlowTurn;
 
   // The last assistant message that carries meaningful content — may be a
-  // supervisor sub-group response rather than the initial assistantMessage.
-  const effectiveAssistant = useMemo(() => {
-    if (workerSubGroups) {
-      for (let i = workerSubGroups.length - 1; i >= 0; i--) {
-        if (workerSubGroups[i].assistant) return workerSubGroups[i].assistant!;
+  // supervisor sub-group response rather than the initial responseMessage.
+  const effectiveResponse = useMemo(() => {
+    if (childTurnGroups) {
+      for (let i = childTurnGroups.length - 1; i >= 0; i--) {
+        if (childTurnGroups[i].response) return childTurnGroups[i].response!;
       }
     }
-    return assistantMessage;
-  }, [assistantMessage, workerSubGroups]);
+    return responseMessage;
+  }, [responseMessage, childTurnGroups]);
 
   // Only build the summary when we're actually going to render it.
   // On expanded groups this saves a full events walk per render.
   const summary = useMemo(() => {
-    if (!assistantCollapsed || !hasResponse) return null;
-    const src = effectiveAssistant;
+    if (!responseCollapsed || !hasResponse) return null;
+    const src = effectiveResponse;
     // Ask-flow turns with no text are represented entirely by their picker
     // footer (error notice / Create-new / Never-mind). Don't render the
     // generic "No output" summary for them.
@@ -2933,12 +2934,12 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
-  }, [assistantCollapsed, hasResponse, effectiveAssistant, orchestrationMode]);
+  }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
 
   // Render the last event fully for collapsed display
   const collapsedLastEvent = useMemo(() => {
-    if (!assistantCollapsed || !hasResponse) return null;
-    const src = effectiveAssistant;
+    if (!responseCollapsed || !hasResponse) return null;
+    const src = effectiveResponse;
     const content = src?.content;
     const events = previewEventsForMessage(src, orchestrationMode);
     if (
@@ -2958,11 +2959,11 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     return preview ?? (() => {
       return null;
     })();
-  }, [assistantCollapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+  }, [responseCollapsed, hasResponse, effectiveResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const collapsedSteerPrompts = useMemo(() => {
-    if (!assistantCollapsed || !hasResponse) return [];
-    const src = effectiveAssistant;
+    if (!responseCollapsed || !hasResponse) return [];
+    const src = effectiveResponse;
     const events = previewEventsForMessage(src, orchestrationMode);
     return events
       .filter((event) => event.type === "steer_prompt")
@@ -2974,23 +2975,23 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
         )
       )
       .filter(Boolean);
-  }, [assistantCollapsed, hasResponse, effectiveAssistant, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+  }, [responseCollapsed, hasResponse, effectiveResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
-  const assistantTags = useMemo(
-    () => (assistantMessage ? tags?.filter((t) => t.messageId === assistantMessage.id) ?? [] : []),
-    [tags, assistantMessage]
+  const responseTags = useMemo(
+    () => (responseMessage ? tags?.filter((t) => t.messageId === responseMessage.id) ?? [] : []),
+    [tags, responseMessage]
   );
-  const assistantOverlays = useMemo(
+  const responseOverlays = useMemo(
     () =>
-      assistantMessage
-        ? advSyncOverlays?.filter((o) => o.message_id === assistantMessage.id) ?? []
+      responseMessage
+        ? advSyncOverlays?.filter((o) => o.message_id === responseMessage.id) ?? []
         : [],
-    [advSyncOverlays, assistantMessage]
+    [advSyncOverlays, responseMessage]
   );
-  const userOverlays = useMemo(
+  const initiatorOverlays = useMemo(
     () =>
-      advSyncOverlays?.filter((o) => o.message_id === userMessage.id) ?? [],
-    [advSyncOverlays, userMessage.id]
+      advSyncOverlays?.filter((o) => o.message_id === initiatorMessage.id) ?? [],
+    [advSyncOverlays, initiatorMessage.id]
   );
   // Bucket runs by target_message_id once per render of this group, then
   // hand each AssistantMessage a stable per-id reference. Inline
@@ -3008,12 +3009,12 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
     }
     return map;
   }, [runs]);
-  const assistantRuns = assistantMessage
-    ? runsByTargetId.get(assistantMessage.id) ?? EMPTY_RUNS
+  const responseRuns = responseMessage
+    ? runsByTargetId.get(responseMessage.id) ?? EMPTY_RUNS
     : EMPTY_RUNS;
-  const collapsedAssistantErrorText =
-    assistantCollapsed && effectiveAssistant?.error
-      ? effectiveAssistant.errorText ?? effectiveAssistant.content
+  const collapsedResponseErrorText =
+    responseCollapsed && effectiveResponse?.error
+      ? effectiveResponse.errorText ?? effectiveResponse.content
       : undefined;
   // Apply overlays directly to the user-message-box body. The
   // AssistantMessage component runs its own effect for assistant
@@ -3022,13 +3023,13 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   // overlays don't currently apply to user messages (tags are
   // assistant-only in this codebase), so the order question is moot.
   useEffect(() => {
-    if (!userContainerRef.current || userOverlays.length === 0) return;
+    if (!initiatorContainerRef.current || initiatorOverlays.length === 0) return;
     let cleanup: (() => void) | undefined;
     const timer = setTimeout(() => {
-      if (!userContainerRef.current || !onAdvSyncClick) return;
+      if (!initiatorContainerRef.current || !onAdvSyncClick) return;
       cleanup = applyAdvSyncOverlays(
-        userContainerRef.current,
-        userOverlays,
+        initiatorContainerRef.current,
+        initiatorOverlays,
         onAdvSyncClick,
       );
     }, 50);
@@ -3036,34 +3037,34 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
       clearTimeout(timer);
       cleanup?.();
     };
-  }, [userOverlays, onAdvSyncClick]);
+  }, [initiatorOverlays, onAdvSyncClick]);
 
-  const isRunning = sessionRunning || isGroupRunning(assistantMessage, runs);
-  const rawUserContent =
-    typeof userMessage.content === "string" ? userMessage.content : "";
+  const isRunning = sessionRunning || isGroupRunning(responseMessage, runs);
+  const rawInitiatorContent =
+    typeof initiatorMessage.content === "string" ? initiatorMessage.content : "";
   const hiddenPrompt =
-    userMessage.role === "user" &&
-    typeof userMessage.cli_prompt === "string" &&
-    userMessage.cli_prompt.length > 0 &&
-    userMessage.cli_prompt !== rawUserContent
-      ? userMessage.cli_prompt
+    initiatorMessage.role === "user" &&
+    typeof initiatorMessage.cli_prompt === "string" &&
+    initiatorMessage.cli_prompt.length > 0 &&
+    initiatorMessage.cli_prompt !== rawInitiatorContent
+      ? initiatorMessage.cli_prompt
       : "";
-  const [isEditingUser, setIsEditingUser] = useState(false);
+  const [isEditingInitiator, setIsEditingInitiator] = useState(false);
   const [showHiddenPrompt, setShowHiddenPrompt] = useState(false);
-  const [userEditDraft, setUserEditDraft] = useState(rawUserContent);
+  const [initiatorEditDraft, setInitiatorEditDraft] = useState(rawInitiatorContent);
   useEffect(() => {
-    if (!isEditingUser) setUserEditDraft(rawUserContent);
-  }, [isEditingUser, rawUserContent]);
-  const submitUserAlter = useCallback(async () => {
-    if (!onAlterUserMessage) return;
-    const next = userEditDraft.trim();
-    if (!next || next === rawUserContent.trim()) {
-      setIsEditingUser(false);
+    if (!isEditingInitiator) setInitiatorEditDraft(rawInitiatorContent);
+  }, [isEditingInitiator, rawInitiatorContent]);
+  const submitInitiatorAlter = useCallback(async () => {
+    if (!onAlterTurnMessage) return;
+    const next = initiatorEditDraft.trim();
+    if (!next || next === rawInitiatorContent.trim()) {
+      setIsEditingInitiator(false);
       return;
     }
-    const sent = await onAlterUserMessage(userMessage, next);
-    if (sent !== false) setIsEditingUser(false);
-  }, [onAlterUserMessage, rawUserContent, userEditDraft, userMessage]);
+    const sent = await onAlterTurnMessage(initiatorMessage, next);
+    if (sent !== false) setIsEditingInitiator(false);
+  }, [onAlterTurnMessage, rawInitiatorContent, initiatorEditDraft, initiatorMessage]);
 
   return (
     <motion.div
@@ -3073,19 +3074,19 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.55, ease: "easeInOut" }}
     >
-      <div className="message-group" ref={groupRef}>
-      {/* Synthetic user stub (id starts with "__synth-") is created by
+      <div className="turn-group" ref={groupRef}>
+      {/* Synthetic turn-initiator stub (id starts with "__synth-") is created by
           the Chat grouping logic when an orphan assistant message has
-          no persisted user prompt. Hide the user box entirely — the
+          no persisted turn initiator. Hide the user box entirely — the
           assistant message renders in its own slot below. */}
-      {!userMessage.id.startsWith("__synth-") && (
+      {!initiatorMessage.id.startsWith("__synth-") && (
       <div
         className="message-box user-message-box"
-        id={`msg-${userMessage.id}`}
-        data-message-id={userMessage.id}
+        id={`msg-${initiatorMessage.id}`}
+        data-message-id={initiatorMessage.id}
         data-testid="user-message"
-        data-status={userMessage.status ?? ""}
-        ref={userContainerRef}
+        data-status={initiatorMessage.status ?? ""}
+        ref={initiatorContainerRef}
       >
         <div className="message-box-header-row">
           <button
@@ -3096,14 +3097,14 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             disabled={!canExpand}
           >
             <span className="collapse-arrow">{collapsed ? "\u25B6" : "\u25BC"}</span>
-            <span className={`message-box-icon${userMessage.source ? " orchestration-icon" : ""}`}>
-              {userMessageHeader(userMessage.source).icon}
+            <span className={`message-box-icon${initiatorMessage.source ? " orchestration-icon" : ""}`}>
+              {turnMessageHeader(initiatorMessage.source).icon}
             </span>
-            <span className={`message-box-label${userMessage.source ? " orchestration-label" : ""}`}>
-              {userMessageHeader(userMessage.source).label}
+            <span className={`message-box-label${initiatorMessage.source ? " orchestration-label" : ""}`}>
+              {turnMessageHeader(initiatorMessage.source).label}
             </span>
           </button>
-          {onAlterUserMessage && (
+          {onAlterTurnMessage && (
             <div className="message-header-actions">
               {hiddenPrompt && (
                 <button
@@ -3120,8 +3121,8 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                 type="button"
                 className="message-header-action-btn alter-user-message-btn"
                 onClick={() => {
-                  setUserEditDraft(rawUserContent);
-                  setIsEditingUser(true);
+                  setInitiatorEditDraft(rawInitiatorContent);
+                  setIsEditingInitiator(true);
                 }}
                 title={t("message.alterTitle")}
               >
@@ -3130,7 +3131,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
               </button>
             </div>
           )}
-          {!onAlterUserMessage && hiddenPrompt && (
+          {!onAlterTurnMessage && hiddenPrompt && (
             <div className="message-header-actions">
               <button
                 type="button"
@@ -3143,13 +3144,13 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
               </button>
             </div>
           )}
-          {userMessage.parent_id && (
+          {initiatorMessage.parent_id && (
             <button
               type="button"
               className="jump-to-parent-inline-btn"
               title="Jump to parent"
               onClick={() => {
-                const el = document.getElementById(`msg-${userMessage.parent_id!}`);
+                const el = document.getElementById(`msg-${initiatorMessage.parent_id!}`);
                 if (el) jumpToParentEl(el);
               }}
             >
@@ -3162,7 +3163,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             className="modal-overlay hidden-prompt-modal-overlay"
             role="dialog"
             aria-modal="true"
-            aria-labelledby={`hidden-prompt-title-${userMessage.id}`}
+            aria-labelledby={`hidden-prompt-title-${initiatorMessage.id}`}
             onClick={() => setShowHiddenPrompt(false)}
           >
             <div
@@ -3170,7 +3171,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
               onClick={(event) => event.stopPropagation()}
             >
               <div className="modal-header">
-                <h2 id={`hidden-prompt-title-${userMessage.id}`}>Full prompt</h2>
+                <h2 id={`hidden-prompt-title-${initiatorMessage.id}`}>Full prompt</h2>
                 <button
                   type="button"
                   className="modal-close"
@@ -3186,27 +3187,27 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             </div>
           </div>
         )}
-        {!userBodyCollapsed && (() => {
-          const hasArtificial = hasArtificialSections(rawUserContent);
+        {!initiatorBodyCollapsed && (() => {
+          const hasArtificial = hasArtificialSections(rawInitiatorContent);
           return (
             <div className="message-box-body">
-              <UserImages images={userMessage.images} sessionId={sessionId} />
-              <UserFiles files={userMessage.files} />
-              {isEditingUser ? (
+              <UserImages images={initiatorMessage.images} sessionId={sessionId} />
+              <UserFiles files={initiatorMessage.files} />
+              {isEditingInitiator ? (
                 <div className="alter-user-message-editor">
                   <textarea
                     className="alter-user-message-textarea"
-                    value={userEditDraft}
-                    rows={Math.min(10, Math.max(3, userEditDraft.split("\n").length))}
-                    onChange={(event) => setUserEditDraft(event.target.value)}
+                    value={initiatorEditDraft}
+                    rows={Math.min(10, Math.max(3, initiatorEditDraft.split("\n").length))}
+                    onChange={(event) => setInitiatorEditDraft(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
-                        setUserEditDraft(rawUserContent);
-                        setIsEditingUser(false);
+                        setInitiatorEditDraft(rawInitiatorContent);
+                        setIsEditingInitiator(false);
                       }
                       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                         event.preventDefault();
-                        void submitUserAlter();
+                        void submitInitiatorAlter();
                       }
                     }}
                   />
@@ -3215,8 +3216,8 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                       type="button"
                       className="alter-user-message-cancel"
                       onClick={() => {
-                        setUserEditDraft(rawUserContent);
-                        setIsEditingUser(false);
+                        setInitiatorEditDraft(rawInitiatorContent);
+                        setIsEditingInitiator(false);
                       }}
                     >
                       {t("message.cancelAlterButton")}
@@ -3224,8 +3225,8 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                     <button
                       type="button"
                       className="alter-user-message-save"
-                      onClick={() => void submitUserAlter()}
-                      disabled={!userEditDraft.trim()}
+                      onClick={() => void submitInitiatorAlter()}
+                      disabled={!initiatorEditDraft.trim()}
                     >
                       {t("message.saveAlterButton")}
                     </button>
@@ -3233,7 +3234,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                 </div>
               ) : hasArtificial ? (
                 <UserContentSegments
-                  segments={parseArtificialSections(rawUserContent)}
+                  segments={parseArtificialSections(rawInitiatorContent)}
                   onFileClick={onFileClick}
                 />
               ) : (
@@ -3242,16 +3243,16 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                   components={markdownLinkifyComponents(onFileClick)}
                   urlTransform={(url) => url}
                 >
-                  {rawUserContent}
+                  {rawInitiatorContent}
                 </ReactMarkdown>
               )}
               <MessageStatus
-                status={isRunning ? undefined : userMessage.status}
-                errorText={userMessage.errorText}
-                onRetry={onRetry ? () => onRetry(userMessage) : undefined}
+                status={isRunning ? undefined : initiatorMessage.status}
+                errorText={initiatorMessage.errorText}
+                onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
               />
               {(() => {
-                const ts = fmtTime(userMessage.timestamp);
+                const ts = fmtTime(initiatorMessage.timestamp);
                 if (!ts) return null;
                 return (
                   <div className="message-box-footer">
@@ -3278,26 +3279,26 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
         })()}
       </div>
       )}
-      {assistantCollapsed && !isAskFlowTurn && (collapsedAssistantErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveAssistant?.stopped_at) && (
+      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at) && (
         <div
-          className="message-group-children"
-          data-message-id={effectiveAssistant?.id ?? userMessage.id}
+          className="turn-group-children"
+          data-message-id={effectiveResponse?.id ?? initiatorMessage.id}
         >
-          {collapsedAssistantErrorText && (
+          {collapsedResponseErrorText && (
             <>
               <MessageStatus
                 status="error"
-                errorText={collapsedAssistantErrorText}
+                errorText={collapsedResponseErrorText}
                 onRetry={
-                  effectiveAssistant && onRetryStopped
-                    ? () => onRetryStopped(effectiveAssistant)
+                  effectiveResponse && onRetryStopped
+                    ? () => onRetryStopped(effectiveResponse)
                     : onRetry
-                      ? () => onRetry(userMessage)
+                      ? () => onRetry(initiatorMessage)
                       : undefined
                 }
               />
               {(() => {
-                const ts = fmtTime(effectiveAssistant?.timestamp);
+                const ts = fmtTime(effectiveResponse?.timestamp);
                 if (!ts) return null;
                 return (
                   <div className="message-box-footer">
@@ -3316,62 +3317,62 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
           ) : summary ? (
             <div className="collapse-summary">{summary}</div>
           ) : null}
-          {effectiveAssistant?.stopped_at && (
+          {effectiveResponse?.stopped_at && (
             <StoppedIndicator
-              stoppedAt={effectiveAssistant.stopped_at}
-              interrupted={!!effectiveAssistant.interrupted_by_msg_id}
+              stoppedAt={effectiveResponse.stopped_at}
+              interrupted={!!effectiveResponse.interrupted_by_msg_id}
               onRetry={
-                onRetryStopped ? () => onRetryStopped(effectiveAssistant) : undefined
+                onRetryStopped ? () => onRetryStopped(effectiveResponse) : undefined
               }
             />
           )}
         </div>
       )}
-      {!assistantCollapsed && !isAskFlowTurn && (assistantMessage || (workerSubGroups && workerSubGroups.length > 0)) && (
-        <div className="message-group-children">
-          {assistantMessage && (
+      {!responseCollapsed && !isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
+        <div className="turn-group-children">
+          {responseMessage && (
             <AssistantMessage
-              message={assistantMessage}
+              message={responseMessage}
               sessionId={sessionId}
               onFileClick={onFileClick}
               onViewDiff={onViewDiff}
-              onRetry={onRetry ? () => onRetry(userMessage) : undefined}
+              onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
               onRetryStopped={
-                onRetryStopped ? () => onRetryStopped(assistantMessage) : undefined
+                onRetryStopped ? () => onRetryStopped(responseMessage) : undefined
               }
               onContinueRateLimitOnAnotherProvider={
-                assistantMessage.retrying_until && onContinueRateLimitOnAnotherProvider
-                  ? () => onContinueRateLimitOnAnotherProvider(assistantMessage)
+                responseMessage.retrying_until && onContinueRateLimitOnAnotherProvider
+                  ? () => onContinueRateLimitOnAnotherProvider(responseMessage)
                   : undefined
               }
               threadColorMap={threadColorMap}
-              tags={assistantTags.length > 0 ? assistantTags : undefined}
+              tags={responseTags.length > 0 ? responseTags : undefined}
               advSyncOverlays={
-                assistantOverlays.length > 0 ? assistantOverlays : undefined
+                responseOverlays.length > 0 ? responseOverlays : undefined
               }
               onAdvSyncClick={onAdvSyncClick}
               orchestrationMode={orchestrationMode}
-              containerRef={assistantContainerRef}
+              containerRef={responseContainerRef}
               relabelManagerAsWorker={false}
-              runs={assistantRuns}
+              runs={responseRuns}
               loadPhase={loadPhase ?? undefined}
-              userMessageId={userMessage.id}
+              initiatorMessageId={initiatorMessage.id}
             />
           )}
-          {workerSubGroups?.map((sg) => (
-              <div key={sg.user.id} className="worker-sub-group">
-                <div className="worker-instruction" data-message-id={sg.user.id}>
+          {childTurnGroups?.map((sg) => (
+              <div key={sg.initiator.id} className="worker-sub-group">
+                <div className="worker-instruction" data-message-id={sg.initiator.id}>
                   <span className="worker-tag">Worker</span>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>
-                    {sg.user.content}
+                    {sg.initiator.content}
                   </ReactMarkdown>
-                  {sg.user.parent_id && (
+                  {sg.initiator.parent_id && (
                     <button
                       type="button"
                       className="jump-to-parent-btn"
                       title="Jump to parent"
                       onClick={() => {
-                        const el = document.getElementById(`msg-${sg.user.parent_id!}`);
+                        const el = document.getElementById(`msg-${sg.initiator.parent_id!}`);
                         if (el) jumpToParentEl(el);
                       }}
                     >
@@ -3379,17 +3380,17 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
                     </button>
                   )}
                 </div>
-                {sg.assistant && (
+                {sg.response && (
                   <AssistantMessage
-                    message={sg.assistant}
+                    message={sg.response}
                     sessionId={sessionId}
                     onFileClick={onFileClick}
                     onViewDiff={onViewDiff}
                     threadColorMap={threadColorMap}
                     orchestrationMode={orchestrationMode}
                     relabelManagerAsWorker
-                    runs={runsByTargetId.get(sg.assistant.id) ?? EMPTY_RUNS}
-                    userMessageId={sg.user.id}
+                    runs={runsByTargetId.get(sg.response.id) ?? EMPTY_RUNS}
+                    initiatorMessageId={sg.initiator.id}
                   />
                 )}
               </div>
@@ -3401,7 +3402,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   );
 }
 
-export const MessageGroup = memo(MessageGroupImpl, messageGroupPropsEqual);
+export const TurnGroup = memo(TurnGroupImpl, turnGroupPropsEqual);
 
 /** Render a list of segments produced by `parseArtificialSections`.
  *  Text segments → ReactMarkdown. Tag segments → ArtificialSectionChip,
@@ -3634,10 +3635,10 @@ export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onR
         {message.source && (
           <div className="message-box-header standalone-user-source">
             <span className="message-box-icon orchestration-icon">
-              {userMessageHeader(message.source).icon}
+              {turnMessageHeader(message.source).icon}
             </span>
             <span className="message-box-label orchestration-label">
-              {userMessageHeader(message.source).label}
+              {turnMessageHeader(message.source).label}
             </span>
           </div>
         )}

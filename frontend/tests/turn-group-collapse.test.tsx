@@ -3,13 +3,13 @@ import { act, fireEvent, render, cleanup, screen, waitFor, within } from "@testi
 import React from "react";
 import "../src/i18n";
 import { Chat } from "../src/components/Chat";
-import { MessageGroup } from "../src/components/MessageBubble";
+import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { renderApp } from "./harness";
 
 afterEach(cleanup);
 
-describe("MessageGroup collapsed interrupted indicator", () => {
+describe("TurnGroup collapsed interrupted indicator", () => {
   it("collapses the latest completed chat group", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
@@ -91,7 +91,7 @@ describe("MessageGroup collapsed interrupted indicator", () => {
         />,
       );
 
-      const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".message-group");
+      const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
       expect(firstGroup).not.toBeNull();
       expect(firstGroup!.querySelector('.user-message-box > .message-box-body')).not.toBeNull();
       expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
@@ -103,11 +103,11 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("keeps the latest assistant body expanded when manually collapsed", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
-        assistantMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
         defaultCollapsed={false}
-        isLastGroup
+        isLatestTurnGroup
         orchestrationMode="manager"
       />,
     );
@@ -265,9 +265,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
     });
 
     const { container } = render(
-      <MessageGroup
-        userMessage={userMessage}
-        assistantMessage={assistantMessage}
+      <TurnGroup
+        initiatorMessage={userMessage}
+        responseMessage={assistantMessage}
         defaultCollapsed
         orchestrationMode="manager"
       />,
@@ -283,9 +283,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("shows assistant failures when the group is collapsed", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "",
           error: true,
@@ -305,9 +305,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("prefers finalized assistant content over Bash event tails in collapsed preview", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "Final TLDR visible to user",
           stub: {
@@ -375,9 +375,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("renders escaped unicode bullet separators as bullets", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "review" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "before\n\\u2022 \\u2022 \\u2022\nafter",
         })}
@@ -391,9 +391,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("renders escaped unicode bullets inside sub-session panels as bullets", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "review" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           workers: [
             {
@@ -428,9 +428,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("renders creation-only sub-session panels without an empty expand toggle", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "review" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           workers: [
             {
@@ -458,9 +458,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("renders collapsed sub-agent ellipsis as bullets", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "review" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           events: [
             {
@@ -495,10 +495,10 @@ describe("MessageGroup collapsed interrupted indicator", () => {
   it("edits and submits an alter from the user message bubble", async () => {
     const onAlterUserMessage = vi.fn(() => true);
     render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "old prompt" })}
-        assistantMessage={makeAssistantMsg({ id: "a1", content: "done" })}
-        onAlterUserMessage={onAlterUserMessage}
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "old prompt" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "done" })}
+        onAlterTurnMessage={onAlterUserMessage}
         orchestrationMode="manager"
       />,
     );
@@ -549,9 +549,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("shows 'Stopped' (not Interrupted) when stopped without an interrupting message", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "partial",
           stopped_at: new Date("2024-01-01T10:00:00Z").toISOString(),
@@ -569,9 +569,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("renders no stopped indicator for a collapsed group that completed normally", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1" })}
-        assistantMessage={makeAssistantMsg({ id: "a1", content: "done" })}
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "done" })}
         defaultCollapsed
         orchestrationMode="manager"
       />,
@@ -582,9 +582,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("shows steer prompts when the group is collapsed", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "start work" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "start work" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           content: "final answer after steer",
           events: [
@@ -626,9 +626,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
   it("uses nested child output as the collapsed final preview", () => {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "delegate work" })}
-        assistantMessage={makeAssistantMsg({
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "delegate work" })}
+        responseMessage={makeAssistantMsg({
           id: "a1",
           events: [
             {
@@ -688,9 +688,9 @@ describe("MessageGroup collapsed interrupted indicator", () => {
 
     try {
       const { container } = render(
-        <MessageGroup
-          userMessage={makeUserMsg({ id: "u1", content: "expensive history" })}
-          assistantMessage={makeAssistantMsg({
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "expensive history" })}
+          responseMessage={makeAssistantMsg({
             id: "a1",
             content: "stale fallback content",
             events: [],

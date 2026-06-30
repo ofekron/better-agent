@@ -199,7 +199,7 @@ function queuedPromptToBanner(prompt: QueuedPrompt): QueuedBannerState {
 
 // Frozen module-level empty arrays so the no-data branches of props
 // passed into <Chat> hand referentially-stable values across renders.
-// A fresh `[]` per render would invalidate `memo(MessageGroup)` and
+// A fresh `[]` per render would invalidate `memo(TurnGroup)` and
 // the renderedGroups useMemo inside Chat on every parent re-render.
 const EMPTY_MSGS: readonly ChatMessage[] = Object.freeze([]);
 const EMPTY_RUNS_PROP: readonly import("./types").RunInfo[] = Object.freeze([]);
@@ -2429,7 +2429,7 @@ function AppMain({
   // filter) so cross-project matches surface. We dim ProjectTabs to
   // signal that selecting a project won't narrow the results.
   const [aiSearchActive, setAiSearchActive] = useState(false);
-  // Memoized (not mapped per render) so memo(MessageGroup)'s shallow
+  // Memoized (not mapped per render) so memo(TurnGroup)'s shallow
   // compare keeps working across per-WS-frame parent re-renders; the
   // frozen module-level singleton keeps the empty case reference-stable.
   // `displayNumber` is the 1-based footnote number shown in the comments
@@ -6342,7 +6342,7 @@ function AppMain({
           // Ask-singleton view: the regular <Chat> rendered for the
           // singleton. The greeting box is injected as the chat's header
           // slot; the inline session picker is injected PER TURN via
-          // `renderGroupFooter` (each ask turn carries its own
+          // `renderTurnFooter` (each ask turn carries its own
           // `ask_result` on its assistant message), so previous turns keep
           // their picker + chosen highlight. The user's RAW prompt is the
           // persisted user_msg.content (the index+contract wrapper goes to
@@ -6421,15 +6421,15 @@ function AppMain({
             >
             <Chat
               headerNode={headerNode}
-              getGroupClassName={(g) => {
+              getTurnGroupClassName={(g) => {
                 if (!isAskView) return undefined;
-                const ar = g.assistantMessage?.ask_result;
-                const isResolved = ar?.resolved || g.assistantMessage?.chosen_session_id;
+                const ar = g.responseMessage?.ask_result;
+                const isResolved = ar?.resolved || g.responseMessage?.chosen_session_id;
                 return isResolved ? "ask-group ask-group--resolved" : "ask-group";
               }}
-              renderGroupFooter={(g) => {
-                const ar = g.assistantMessage?.ask_result;
-                if (!ar || !g.assistantMessage) return null;
+              renderTurnFooter={(g) => {
+                const ar = g.responseMessage?.ask_result;
+                if (!ar || !g.responseMessage) return null;
                 // Delegate-approval picker: renders in ANY session when a
                 // session-bridge delegation is awaiting the user's pick.
                 if (ar.purpose === "delegate_approval") {
@@ -6444,7 +6444,7 @@ function AppMain({
                         module={module}
                         context={{
                           askResult: ar,
-                          chosenSessionId: g.assistantMessage?.chosen_session_id ?? null,
+                          chosenSessionId: g.responseMessage?.chosen_session_id ?? null,
                           allSessions: sessions,
                           onView: handleAskView,
                           onChoose: (picked: Session) => resolveDelegation(delegationId, picked.id),
@@ -6465,25 +6465,25 @@ function AppMain({
                       module={module}
                       context={{
                         askResult: ar,
-                        chosenSessionId: g.assistantMessage?.chosen_session_id ?? null,
+                        chosenSessionId: g.responseMessage?.chosen_session_id ?? null,
                         allSessions: sessions,
                         onView: handleAskView,
                         onChoose: (picked: Session) =>
                           handleAskChoose(
                             picked,
-                            resolveAskPrompt(g.userMessage.content, ar.prompt_preview),
-                            g.userMessage.images ?? [],
-                            g.assistantMessage!.id,
+                            resolveAskPrompt(g.initiatorMessage.content, ar.prompt_preview),
+                            g.initiatorMessage.images ?? [],
+                            g.responseMessage!.id,
                           ),
                         onCreateNew: () =>
                           handleAskCreateNew(
-                            resolveAskPrompt(g.userMessage.content, ar.prompt_preview),
-                            g.userMessage.images ?? [],
+                            resolveAskPrompt(g.initiatorMessage.content, ar.prompt_preview),
+                            g.initiatorMessage.images ?? [],
                             ar.proposed_project_path || undefined,
                             ar.proposed_project_node_id || undefined,
-                            g.assistantMessage!.id,
+                            g.responseMessage!.id,
                           ),
-                        onDismiss: () => handleAskDismiss(g.assistantMessage!.id),
+                        onDismiss: () => handleAskDismiss(g.responseMessage!.id),
                       }}
                     />
                   ))

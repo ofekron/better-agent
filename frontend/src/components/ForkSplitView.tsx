@@ -8,7 +8,7 @@ import type {
   RunInfo,
   Session,
 } from "../types";
-import { MessageGroup } from "./MessageBubble";
+import { TurnGroup } from "./MessageBubble";
 import { buildThreadColorMap } from "../threadColors";
 import { useOpProgress } from "../progress/store";
 import { useViewport } from "../hooks/useViewport";
@@ -64,7 +64,7 @@ interface Props {
  *   button. Closing a fork freezes it (no focus, no new prompts) but
  *   keeps the pane visible.
  *
- * Each pane uses `MessageGroup` (the same rich renderer Chat uses)
+ * Each pane uses `TurnGroup` (the same rich renderer Chat uses)
  * so tool calls, thinking blocks, run badges, etc. stay intact in
  * every pane regardless of nesting depth.
  */
@@ -648,48 +648,48 @@ function MessageList({
 }) {
   const all = useMemo(() => mergeMessagesSorted(messages, pending), [messages, pending]);
   const groups = useMemo(() => {
-    const out: { user: ChatMessage; assistant?: ChatMessage }[] = [];
+    const out: { initiator: ChatMessage; response?: ChatMessage }[] = [];
     for (let i = 0; i < all.length; i++) {
       const msg = all[i];
       if (msg.role === "user") {
         const next = all[i + 1];
         if (next && next.role === "assistant") {
-          out.push({ user: msg, assistant: next });
+          out.push({ initiator: msg, response: next });
           i++;
         } else {
-          out.push({ user: msg });
+          out.push({ initiator: msg });
         }
       }
     }
     return out;
   }, [all]);
-  const lastGroupIdx = groups.length - 1;
+  const lastTurnGroupIdx = groups.length - 1;
   return (
     <>
       {groups.map((g, idx) => {
-        const groupRuns = runs.filter((r) => {
-          if (r.target_message_id === g.user.id) return true;
-          if (g.assistant && r.target_message_id === g.assistant.id) return true;
-          if (isUnanchoredRun(r) && !g.assistant && idx === lastGroupIdx) {
+        const turnRuns = runs.filter((r) => {
+          if (r.target_message_id === g.initiator.id) return true;
+          if (g.response && r.target_message_id === g.response.id) return true;
+          if (isUnanchoredRun(r) && !g.response && idx === lastTurnGroupIdx) {
             return true;
           }
           return false;
         });
         return (
-          <MessageGroup
-            key={g.user.id}
-            userMessage={g.user}
-            assistantMessage={g.assistant}
+          <TurnGroup
+            key={g.initiator.id}
+            initiatorMessage={g.initiator}
+            responseMessage={g.response}
             sessionId={sessionId}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
             onRetry={onRetry}
             onRetryStopped={onRetryStopped}
             threadColorMap={threadColorMap}
-            defaultCollapsed={!!g.assistant && !g.assistant.isStreaming}
-            isLastGroup={idx === lastGroupIdx}
+            defaultCollapsed={!!g.response && !g.response.isStreaming}
+            isLatestTurnGroup={idx === lastTurnGroupIdx}
             orchestrationMode={orchestrationMode}
-            runs={groupRuns}
+            runs={turnRuns}
             scrollEl={scrollEl}
             advSyncOverlays={advSyncOverlays}
             onAdvSyncClick={onAdvSyncClick}
