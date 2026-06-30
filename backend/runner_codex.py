@@ -41,6 +41,7 @@ from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
+from codex_usage import token_usage_from_codex_usage
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
@@ -2766,17 +2767,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         success = True
-                        usage_data = raw_event.get("usage", {})
-                        if usage_data:
-                            total_usage = {
-                                "input_tokens": usage_data.get("input_tokens", 0),
-                                "output_tokens": usage_data.get("output_tokens", 0),
-                                "cache_read_input_tokens": usage_data.get("cached_input_tokens", 0),
-                                "total_tokens": (
-                                    usage_data.get("input_tokens", 0)
-                                    + usage_data.get("output_tokens", 0)
-                                ),
-                            }
+                        total_usage = token_usage_from_codex_usage(raw_event.get("usage")) or {}
                         break
 
                     if event_type == "turn.failed":

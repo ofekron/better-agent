@@ -45,6 +45,7 @@ from runs_dir import (
     runs_root as _runs_root,
 )
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
+from codex_usage import token_usage_from_codex_usage
 
 logger = logging.getLogger(__name__)
 
@@ -60,23 +61,6 @@ CODEX_MODELS = [
     "gpt-5.4",
     "gpt-5.4-mini",
 ]
-
-
-def _token_usage_from_codex_usage(usage_data: Any) -> Optional[dict[str, int]]:
-    if not isinstance(usage_data, dict) or not usage_data:
-        return None
-    def _token_count(key: str) -> int:
-        value = usage_data.get(key)
-        return value if type(value) is int and value >= 0 else 0
-
-    input_tokens = _token_count("input_tokens")
-    output_tokens = _token_count("output_tokens")
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_input_tokens": _token_count("cached_input_tokens"),
-        "total_tokens": input_tokens + output_tokens,
-    }
 
 
 def _run_start_byte(bs: dict, rs_disk: dict) -> int:
@@ -137,7 +121,7 @@ def _read_codex_rollout_complete(
                         "success": True,
                         "session_id": session_id,
                         "error": None,
-                        "token_usage": _token_usage_from_codex_usage(event.get("usage")),
+                        "token_usage": token_usage_from_codex_usage(event.get("usage")),
                         "finished_at": datetime.now().isoformat(),
                     }
                 elif event_type == "turn.failed":
