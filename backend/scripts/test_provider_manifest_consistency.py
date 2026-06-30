@@ -94,6 +94,7 @@ def test_runner_choices_are_valid():
             assert pm.runner_module_for(kind) == "runner_openai", kind
     assert pm.default_runner_for("claude") == "native"
     assert pm.default_runner_for("openai") == "better_agent_runner"
+    assert pm.runner_choices_for("fugu") == ("native", "better_agent_runner")
 
 
 def test_provider_runner_round_trips():
@@ -118,6 +119,44 @@ def test_provider_runner_round_trips():
     })
     assert claude["runner"] == "native"
     assert claude["runner_options"] == ["native"]
+
+    fugu_native = config_store.add_provider({
+        "name": "Fugu native",
+        "kind": "fugu",
+        "mode": "subscription",
+        "default_model": "fugu",
+    })
+    assert fugu_native["runner"] == "native"
+    assert fugu_native["runner_options"] == ["native", "better_agent_runner"]
+
+    fugu_ba = config_store.add_provider({
+        "name": "Fugu BA",
+        "kind": "fugu",
+        "mode": "api_key",
+        "base_url": "https://api.sakana.ai/v1",
+        "default_model": "fugu",
+        "runner": "better_agent_runner",
+    })
+    assert fugu_ba["kind"] == "fugu"
+    assert fugu_ba["runner"] == "better_agent_runner"
+    assert fugu_ba["runner_options"] == ["native", "better_agent_runner"]
+    assert fugu_ba["permission_options"] == {"mode": ["default", "bypassPermissions"]}
+    assert fugu_ba["reasoning_effort_options"] == ["high", "xhigh"]
+
+    import provider
+    assert provider._provider_runtime_kind({"kind": "fugu", "runner": "better_agent_runner"}) == "openai"
+
+    try:
+        config_store.add_provider({
+            "name": "Invalid Fugu BA",
+            "kind": "fugu",
+            "mode": "subscription",
+            "runner": "better_agent_runner",
+        })
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("fugu Better Agent runner must require api_key mode")
 
 
 if __name__ == "__main__":

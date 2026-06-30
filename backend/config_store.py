@@ -341,10 +341,23 @@ OPENAI_SUBSCRIPTION_UNSUPPORTED = (
 )
 
 
-def _reject_unsupported_provider_config(kind: str, mode: str) -> None:
+def _runtime_kind_for_provider(provider: dict) -> str:
+    if str(provider.get("runner") or "").strip() == "better_agent_runner":
+        return "openai"
+    return provider.get("kind", "claude")
+
+
+def _runtime_kind_for_config(kind: str, runner: object) -> str:
+    if str(runner or "").strip() == "better_agent_runner":
+        return "openai"
+    return kind
+
+
+def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
+    runtime_kind = _runtime_kind_for_config(kind, runner)
     if kind == "gemini" and mode == "subscription":
         raise ValueError(GEMINI_SUBSCRIPTION_UNSUPPORTED)
-    if kind == "openai" and mode == "subscription":
+    if runtime_kind == "openai" and mode == "subscription":
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
 
 
@@ -745,6 +758,7 @@ def _strip(provider: dict) -> dict:
     """Public view of a provider: includes has_api_key and the full
     capability matrix. Never the api_key itself."""
     kind = provider.get("kind", "claude")
+    runtime_kind = _runtime_kind_for_provider(provider)
     caps = _capabilities_for(provider)
     # Effort options only exist where the (possibly overridden) capability
     # says reasoning effort is supported.
@@ -756,9 +770,9 @@ def _strip(provider: dict) -> dict:
     default_effort = clean_default_reasoning_effort_for_provider(
         provider, provider.get("default_reasoning_effort")
     )
-    permission_options = _kind_permission_options(kind)
+    permission_options = _kind_permission_options(runtime_kind)
     default_perm = (
-        _clean_default_permission(kind, provider.get("default_permission"))
+        _clean_default_permission(runtime_kind, provider.get("default_permission"))
         if permission_options
         else {}
     )
@@ -840,7 +854,7 @@ def _capabilities_for(provider: dict) -> dict[str, bool]:
     """Resolved capability matrix for a provider record: kind defaults with
     the per-provider `capabilities` overrides applied on top. Kind is the
     default, not the only decider."""
-    caps = _kind_capabilities(provider.get("kind", "claude"))
+    caps = _kind_capabilities(_runtime_kind_for_provider(provider))
     caps.update(_clean_capabilities(provider.get("capabilities")))
     return caps
 
@@ -866,7 +880,7 @@ def _normalized_base_url(value: object) -> str:
 
 
 def _is_sakana_fugu_api(provider: dict) -> bool:
-    if provider.get("kind") != "openai":
+    if _runtime_kind_for_provider(provider) != "openai":
         return False
     return _normalized_base_url(provider.get("base_url")) in SAKANA_FUGU_API_BASE_URLS
 
@@ -874,7 +888,7 @@ def _is_sakana_fugu_api(provider: dict) -> bool:
 def reasoning_effort_options_for_provider(provider: dict) -> list[str]:
     if _is_sakana_fugu_api(provider):
         return list(SAKANA_FUGU_REASONING_EFFORTS)
-    return _kind_reasoning_effort_options(provider.get("kind", "claude"))
+    return _kind_reasoning_effort_options(_runtime_kind_for_provider(provider))
 
 
 def _kind_default_reasoning_effort(kind: str) -> str:
@@ -894,7 +908,7 @@ def _kind_default_reasoning_effort(kind: str) -> str:
 def _provider_default_reasoning_effort(provider: dict) -> str:
     if _is_sakana_fugu_api(provider):
         return SAKANA_FUGU_REASONING_EFFORTS[0]
-    return _kind_default_reasoning_effort(provider.get("kind", "claude"))
+    return _kind_default_reasoning_effort(_runtime_kind_for_provider(provider))
 
 
 def _clean_default_reasoning_effort(kind: str, value: object) -> str:
@@ -1023,7 +1037,8 @@ def add_provider(payload: dict) -> dict:
     if mode not in ("subscription", "api_key"):
         mode = "subscription"
     kind = (payload.get("kind") or "claude").strip()
-    _reject_unsupported_provider_config(kind, mode)
+    runner = _clean_runner(kind, payload.get("runner"))
+    _reject_unsupported_provider_config(kind, mode, runner)
     provider = {
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
@@ -1033,8 +1048,11 @@ def add_provider(payload: dict) -> dict:
         "config_dir": (payload.get("config_dir") or "").strip(),
         "custom_models": list(payload.get("custom_models") or []),
         "default_model": (payload.get("default_model") or "").strip(),
-        "runner": _clean_runner(kind, payload.get("runner")),
-        "default_permission": _clean_default_permission(kind, payload.get("default_permission")),
+        "runner": runner,
+        "default_permission": _clean_default_permission(
+            _runtime_kind_for_config(kind, runner),
+            payload.get("default_permission"),
+        ),
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
     }
@@ -1067,10 +1085,6 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         target["kind"] = (payload.get("kind") or "claude").strip()
     if "mode" in payload and payload["mode"] in ("subscription", "api_key"):
         target["mode"] = payload["mode"]
-    _reject_unsupported_provider_config(
-        target.get("kind", "claude"),
-        target.get("mode", "subscription"),
-    )
     if "base_url" in payload:
         target["base_url"] = (payload.get("base_url") or "").strip()
     if "config_dir" in payload:
@@ -1082,21 +1096,26 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
             target.get("kind", "claude"),
             payload.get("runner", target.get("runner")),
         )
+    _reject_unsupported_provider_config(
+        target.get("kind", "claude"),
+        target.get("mode", "subscription"),
+        target.get("runner"),
+    )
     if "default_reasoning_effort" in payload:
         target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
             target, payload.get("default_reasoning_effort")
         )
-    elif "kind" in payload or "base_url" in payload:
+    elif "kind" in payload or "base_url" in payload or "runner" in payload:
         target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
             target, target.get("default_reasoning_effort")
         )
     if "default_permission" in payload:
         target["default_permission"] = _clean_default_permission(
-            target.get("kind", "claude"), payload.get("default_permission")
+            _runtime_kind_for_provider(target), payload.get("default_permission")
         )
-    elif "kind" in payload:
+    elif "kind" in payload or "runner" in payload:
         target["default_permission"] = _clean_default_permission(
-            target.get("kind", "claude"), target.get("default_permission")
+            _runtime_kind_for_provider(target), target.get("default_permission")
         )
     if "custom_models" in payload and isinstance(payload["custom_models"], list):
         target["custom_models"] = list(payload["custom_models"])

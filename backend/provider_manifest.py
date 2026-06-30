@@ -81,6 +81,7 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner_codex", recovery_family="claude",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
+        runner_choices=("native", "better_agent_runner"),
     ),
     "openai": ProviderSpec(
         kind="openai", module="provider_openai", cls="OpenAIProvider",

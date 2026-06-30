@@ -143,7 +143,9 @@ interface Template {
 const REASONING_EFFORT_OPTIONS: Record<string, ReasoningEffort[]> = {
   claude: ["low", "medium", "high", "xhigh"],
   codex: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  fugu: ["high", "xhigh"],
 };
+const SAKANA_FUGU_API_BASE_URL = "https://api.sakana.ai/v1";
 
 function effortOptionsForKind(kind: string): ReasoningEffort[] {
   return REASONING_EFFORT_OPTIONS[kind] ?? [];
@@ -2381,7 +2383,12 @@ function permissionOptionsForKind(kind: string): Record<string, string[]> {
 
 function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
   if (saved?.length) return saved;
+  if (kind === "fugu") return ["native", "better_agent_runner"];
   return kind === "openai" ? ["better_agent_runner"] : ["native"];
+}
+
+function runtimeKindForRunner(kind: string, runner: Provider["runner"]): string {
+  return runner === "better_agent_runner" ? "openai" : kind;
 }
 
 // Capability keys overridable per provider (kind gives the default; these
@@ -2425,17 +2432,20 @@ function ProviderForm({
   const { t } = useTranslation();
   const [name, setName] = useState(initial.name);
   const [kind] = useState(initial.kind || "claude");
-  const modes = availableModesForForm(kind, mode, initial.mode);
-  const [mode_, setMode] = useState<Provider["mode"]>(initial.mode);
   const runnerOptions = runnerOptionsForKind(kind, initial.runner_options);
   const initialRunner = initial.runner ?? runnerOptions[0];
   const [runner, setRunner] = useState<Provider["runner"]>(
     runnerOptions.includes(initialRunner) ? initialRunner : runnerOptions[0],
   );
+  const runtimeKind = runtimeKindForRunner(kind, runner);
+  const modes = availableModesForForm(runtimeKind, mode, initial.mode);
+  const [mode_, setMode] = useState<Provider["mode"]>(
+    modes.includes(initial.mode) ? initial.mode : modes[0],
+  );
   const [baseUrl, setBaseUrl] = useState(initial.base_url);
   const [configDir, setConfigDir] = useState(initial.config_dir);
   const configDirCopy = configDirCopyForKind(kind);
-  const apiEnvCopy = apiEnvCopyForKind(kind);
+  const apiEnvCopy = apiEnvCopyForKind(runtimeKind);
   const [defaultModel, setDefaultModel] = useState(initial.default_model);
   const effortOptions = effortOptionsForKind(kind);
   const initialEffort =
@@ -2444,7 +2454,7 @@ function ProviderForm({
       : defaultEffortForKind(kind);
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | "">(initialEffort);
-  const permissionOptions = permissionOptionsForKind(kind);
+  const permissionOptions = permissionOptionsForKind(runtimeKind);
   const seedPermission = (): Permission => {
     const opts = permissionOptions;
     const saved = initial.default_permission;
@@ -2452,7 +2462,7 @@ function ProviderForm({
     for (const axis of Object.keys(opts)) {
       const allowed = opts[axis];
       const v = saved?.[axis];
-      out[axis] = v && allowed.includes(v) ? v : PERMISSION_DEFAULTS[kind]?.[axis] ?? allowed[0];
+      out[axis] = v && allowed.includes(v) ? v : PERMISSION_DEFAULTS[runtimeKind]?.[axis] ?? allowed[0];
     }
     return out;
   };
@@ -2477,6 +2487,26 @@ function ProviderForm({
       ]),
     ) as Record<string, CapState>,
   );
+
+  useEffect(() => {
+    if (!modes.includes(mode_)) {
+      setMode(modes[0]);
+    }
+    if (kind === "fugu" && runner === "better_agent_runner") {
+      if (mode_ !== "api_key") setMode("api_key");
+      if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
+      if (!defaultModel) setDefaultModel("fugu");
+    }
+  }, [baseUrl, defaultModel, kind, mode_, modes, runner]);
+
+  const updateRunner = (next: Provider["runner"]) => {
+    setRunner(next);
+    if (kind === "fugu" && next === "better_agent_runner") {
+      setMode("api_key");
+      if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
+      if (!defaultModel) setDefaultModel("fugu");
+    }
+  };
 
   // Edit mode: fetch this provider's model list so the default_model
   // dropdown is populated. Refetch on remount; cheap (cached server-side).
@@ -2584,7 +2614,7 @@ function ProviderForm({
             <label>{t("setup.runnerLabel")}</label>
             <select
               value={runner}
-              onChange={(e) => setRunner(e.target.value as Provider["runner"])}
+              onChange={(e) => updateRunner(e.target.value as Provider["runner"])}
             >
               {runnerOptions.map((option) => (
                 <option key={option} value={option}>
@@ -2626,7 +2656,7 @@ function ProviderForm({
           </div>
         )}
 
-        {showConfigDirForKind(kind) && (
+        {showConfigDirForKind(runtimeKind) && (
           <div className="setup-field">
             <label>{t(configDirCopy.labelKey)}</label>
             <input
