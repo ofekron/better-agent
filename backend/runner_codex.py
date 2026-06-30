@@ -2640,6 +2640,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 tool_handlers=tool_handlers,
                 provider_run_config=provider_run_config,
                 config_overrides=[
+                    *list((inputs or {}).get("codex_config_overrides") or []),
                     *_codex_config_overrides(run_dir, provider_run_config),
                     *_context_strategy_config_overrides(inputs),
                 ],
