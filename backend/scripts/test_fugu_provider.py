@@ -91,10 +91,22 @@ def test_argv_builder_selects_fugu_sakana_overrides() -> None:
         "codex",
         "-c", "model_provider=\"sakana\"",
         "-c", "model=\"fugu-ultra\"",
+        "-c", "features.image_generation=false",
         "-c", "model_reasoning_effort=\"high\"",
         "app-server",
     ], "fugu argv selects Sakana via config overrides before app-server")
     check("-p" not in fugu_argv, "fugu app-server argv never uses unsupported profile flag")
+
+
+def test_fugu_disables_image_generation_tool() -> None:
+    # Sakana's Responses API rejects codex's built-in image_generation tool
+    # type (only `function`/`custom` allowed). Codex enables that feature by
+    # default, so Fugu runs must turn it off via a config override.
+    provider = FuguProvider({"id": "fugu-test", "kind": "fugu"})
+    for model in ("fugu", "fugu-ultra", None, "bogus"):
+        overrides = provider.codex_config_overrides(model=model)
+        check("features.image_generation=false" in overrides,
+              f"fugu overrides disable image_generation for model={model!r}")
     # Global flags still precede the subcommand for generic profile users.
     check(_build_app_server_argv("codex", "other") == ["codex", "-p", "other", "app-server"],
           "arbitrary profile is forwarded")
@@ -162,6 +174,7 @@ def main() -> int:
         test_registry_and_capabilities,
         test_models_catalog,
         test_argv_builder_selects_fugu_sakana_overrides,
+        test_fugu_disables_image_generation_tool,
         test_fetch_uses_codex_with_sakana_overrides,
         test_codex_binary_override_mechanism,
         test_fugu_not_auto_installable,
