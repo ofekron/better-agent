@@ -105,6 +105,7 @@ class _RetryProvider:
         queue = kw["queue"]
         idx = len(self.prompts) - 1
         payload = self.outcomes[idx]
+        context_usage = payload.get("context_usage")
         self._runs[run_id] = type(
             "RunState",
             (),
@@ -119,9 +120,21 @@ class _RetryProvider:
                     "data": {"session_id": payload["session_id"]},
                 })(),
             )
+        if isinstance(context_usage, dict):
+            kw["loop"].call_soon_threadsafe(
+                queue.put_nowait,
+                type("E", (), {
+                    "type": "context_usage",
+                    "data": context_usage,
+                })(),
+            )
+        complete_payload = {
+            k: v for k, v in payload.items()
+            if k != "context_usage"
+        }
         kw["loop"].call_soon_threadsafe(
             queue.put_nowait,
-            type("E", (), {"type": "complete", "data": payload})(),
+            type("E", (), {"type": "complete", "data": complete_payload})(),
         )
 
     def is_running(self, run_id: str) -> bool:
@@ -633,6 +646,77 @@ def test_codex_context_fill_preempts_native_compaction() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
+    print("T7c2 codex context usage persists then preempts next turn")
+    user_prefs.set_context_strategy("continuation")
+    session = session_manager.create(name="codex-usage-preempt", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    provider = _RetryProvider([
+        {
+            "success": True,
+            "session_id": "old-provider-usage",
+            "token_usage": {"input_tokens": 1},
+            "context_usage": {
+                "context_window": 1000,
+                "context_tokens": 950,
+            },
+        },
+        {
+            "success": True,
+            "session_id": "fresh-provider-usage",
+            "token_usage": {"input_tokens": 1},
+        },
+    ])
+    c = _StubCoordinator()
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_e):
+        pass
+
+    async def _first() -> dict:
+        return await tm._drive_cli_run(
+            prompt="fill context",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-codex-usage-1",
+        )
+
+    async def _second() -> dict:
+        return await tm._drive_cli_run(
+            prompt="next turn should preempt",
+            cwd="/tmp",
+            model="sonnet",
+            session_id="old-provider-usage",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-codex-usage-2",
+        )
+
+    first = asyncio.run(_first())
+    after_first = session_manager.get(sid) or {}
+    second = asyncio.run(_second())
+    fresh = session_manager.get(sid) or {}
+    check("first result success", first.get("success") is True)
+    check("context window persisted", after_first.get("context_window") == 1000)
+    check("context tokens persisted", after_first.get("context_tokens") == 950)
+    check("provider spawned twice total", len(provider.prompts) == 2)
+    check("second real spawn is fresh", provider.session_ids[-1] is None)
+    check("chain persisted usage provider sid", fresh.get("continuation_chain") == ["old-provider-usage"])
+    check("runner received usage continuation chain", provider.continuation_chains[-1] == ["old-provider-usage"])
+    check("second result success", second.get("success") is True)
+
+
 def test_lazy_selector_change_continuation() -> None:
     print("T7d lazy selector change continuation")
     session = session_manager.create(name="lazy-selector", cwd="/tmp", model="sonnet", provider_id="prov-a")
@@ -727,6 +811,7 @@ def main() -> int:
     test_rate_limit_wait_can_continue_immediately()
     test_forced_context_overflow_retries_as_fresh_continuation()
     test_codex_context_fill_preempts_native_compaction()
+    test_codex_context_usage_persists_then_preempts_next_turn()
     test_lazy_selector_change_continuation()
     test_wait_for_clear_runs_blocks_then_releases()
     print()

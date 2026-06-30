@@ -782,44 +782,61 @@ class CodexRolloutTailer:
         namespace: str,
         dispatch: Callable[[dict], Any],
         on_cursor_advance: Optional[Callable[[int], None]] = None,
+        on_context_update: Optional[Callable[[Optional[int], Optional[int]], Any]] = None,
     ) -> None:
         self.path = path
         self.namespace = namespace
         self.dispatch = dispatch
         self.on_cursor_advance = on_cursor_advance
+        self.on_context_update = on_context_update
         self.processed_byte = max(0, int(start_byte))
         self._stop_event = asyncio.Event()
+        self._drain_lock = asyncio.Lock()
         self.normalizer = CodexRolloutNormalizer(namespace=self.namespace)
 
     def stop(self) -> None:
         self._stop_event.set()
 
-    async def run(self) -> None:
+    async def drain_available(self) -> bool:
+        async with self._drain_lock:
+            return await self._drain_available_locked()
+
+    async def _drain_available_locked(self) -> bool:
+        emitted = False
         normalizer = self.normalizer
+        try:
+            with self.path.open("rb") as f:
+                f.seek(self.processed_byte)
+                while True:
+                    start = f.tell()
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    if not raw.endswith(b"\n"):
+                        break
+                    before = (normalizer.context_window, normalizer.context_tokens)
+                    for event in normalizer.normalize_line(
+                        raw.decode("utf-8", errors="replace")
+                    ):
+                        await self._dispatch(event)
+                    after = (normalizer.context_window, normalizer.context_tokens)
+                    if after != before and self.on_context_update is not None:
+                        res = self.on_context_update(after[0], after[1])
+                        if inspect.isawaitable(res):
+                            await res
+                    self.processed_byte = f.tell()
+                    emitted = True
+                    if self.on_cursor_advance is not None:
+                        self.on_cursor_advance(self.processed_byte)
+                    if self.processed_byte <= start:
+                        break
+        except OSError:
+            pass
+        return emitted
+
+    async def run(self) -> None:
         while not self._stop_event.is_set():
-            emitted = False
-            try:
-                with self.path.open("rb") as f:
-                    f.seek(self.processed_byte)
-                    while not self._stop_event.is_set():
-                        start = f.tell()
-                        raw = f.readline()
-                        if not raw:
-                            break
-                        if not raw.endswith(b"\n"):
-                            break
-                        for event in normalizer.normalize_line(
-                            raw.decode("utf-8", errors="replace")
-                        ):
-                            await self._dispatch(event)
-                        self.processed_byte = f.tell()
-                        emitted = True
-                        if self.on_cursor_advance is not None:
-                            self.on_cursor_advance(self.processed_byte)
-                        if self.processed_byte <= start:
-                            break
-            except OSError:
-                pass
+            emitted = await self.drain_available()
             if not emitted:
                 sleep_task = asyncio.create_task(asyncio.sleep(self._POLL_INTERVAL))
                 stop_task = asyncio.create_task(self._stop_event.wait())
