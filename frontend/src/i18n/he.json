@@ -108,6 +108,7 @@
   "input.steerTitle": "שלח לתוך תור Codex פעיל",
   "input.interruptSendButton": "הפרע",
   "input.queueSendButton": "תור",
+  "input.sendToNewSession": "שלח לסשן חדש",
   "input.forkButton": "פצל",
   "input.addNote": "שמור כהערה",
   "notes.empty": "אין פתקים עדיין",

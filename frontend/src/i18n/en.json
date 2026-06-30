@@ -109,6 +109,7 @@
   "input.steerTitle": "Send into the active Codex turn",
   "input.interruptSendButton": "Interrupt",
   "input.queueSendButton": "Queue",
+  "input.sendToNewSession": "Send to new session",
   "input.forkButton": "Fork",
   "input.addNote": "Save as note",
   "notes.empty": "No notes yet",

@@ -109,6 +109,7 @@
   "input.steerTitle": "활성 Codex 턴에 주입",
   "input.interruptSendButton": "중단",
   "input.queueSendButton": "대기열",
+  "input.sendToNewSession": "새 세션으로 보내기",
   "input.forkButton": "포크",
   "input.addNote": "노트로 저장",
   "notes.empty": "아직 노트가 없습니다",

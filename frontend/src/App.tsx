@@ -5103,6 +5103,23 @@ function AppMain({
     setNewSessionModalOpen(true);
   }, []);
 
+  const handleSendToNewSession = useCallback(
+    (
+      prompt: string,
+      images: import("./components/InputArea").PastedImage[],
+      files: import("./components/InputArea").FileAttachment[],
+    ) => {
+      if (!currentSession) return false;
+      setInvestigationCtx({ prompt, images, files });
+      setAskProposedProjectPath(undefined);
+      setAskProposedProjectNodeId(undefined);
+      handleDraftClearImmediate(currentSession.id);
+      setNewSessionModalOpen(true);
+      return true;
+    },
+    [currentSession, handleDraftClearImmediate],
+  );
+
   /** Ask entry. Ensure the singleton exists backend-side, then route
    * to its session view. The view auto-detects the singleton id and
    * mounts Ask extension slots. */
@@ -6528,6 +6545,7 @@ function AppMain({
               isStopping={streamBelongsToCurrentSession ? isStopping : false}
               streamingLoadPhase={streamBelongsToCurrentSession ? streamingLoadPhase : null}
               onSend={handleSend}
+              onSendToNewSession={handleSendToNewSession}
               onSteer={currentSessionCanSteer ? handleSteer : undefined}
               onInterrupt={handleInterrupt}
               onAlterUserMessage={handleAlterUserMessage}

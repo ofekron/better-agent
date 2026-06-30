@@ -109,6 +109,7 @@
   "input.steerTitle": "सक्रिय Codex टर्न में भेजें",
   "input.interruptSendButton": "रोकें",
   "input.queueSendButton": "कतार",
+  "input.sendToNewSession": "नए सत्र में भेजें",
   "input.forkButton": "फ़ोर्क (शाखा)",
   "input.addNote": "नोट के रूप में सहेजें",
   "notes.empty": "अभी कोई नोट नहीं",

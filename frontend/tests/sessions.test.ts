@@ -340,6 +340,61 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("opens a prefilled new-session modal from the composer with attachments", async () => {
+    const session = makeSession({ id: "source", messages: [] });
+    const h = await renderApp({
+      seed: {
+        sessions: [session],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(session.id);
+
+    const prompt = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "send elsewhere");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const attach = h.$('.input-row input[type="file"]') as HTMLInputElement;
+    const file = new File(["payload"], "payload.txt", { type: "text/plain" });
+    Object.defineProperty(attach, "files", { value: [file], configurable: true });
+    attach.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(await waitForSelector(h, ".file-preview-item")).not.toBeNull();
+
+    await h.click(".input-overflow-trigger");
+    await h.click('[data-testid="send-to-new-session-btn"]');
+    await h.flush();
+
+    const modalPrompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    expect(modalPrompt.value).toBe("send elsewhere");
+    expect(h.$(".modal-content .file-preview-item .file-preview-name")?.textContent).toBe("payload.txt");
+
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    expect(await waitForSend(h, "send elsewhere")).toEqual(
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "send elsewhere",
+        app_session_id: "sess-2",
+        files: [expect.objectContaining({
+          name: "payload.txt",
+          data: "cGF5bG9hZA==",
+          media_type: "text/plain",
+        })],
+      }),
+    );
+    expect(h.toJSON().input.text).toBe("");
+    h.unmount();
+  });
+
   it("renders selected file attachment on the optimistic user bubble", async () => {
     const session = makeSession({ id: "s-attach", messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });

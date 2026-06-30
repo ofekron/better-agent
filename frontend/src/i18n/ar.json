@@ -109,6 +109,7 @@
   "input.steerTitle": "الإرسال إلى دورة Codex النشطة",
   "input.interruptSendButton": "مقاطعة",
   "input.queueSendButton": "طابور",
+  "input.sendToNewSession": "إرسال إلى جلسة جديدة",
   "input.forkButton": "تفرّع",
   "input.addNote": "حفظ كملاحظة",
   "notes.empty": "لا توجد ملاحظات بعد",
