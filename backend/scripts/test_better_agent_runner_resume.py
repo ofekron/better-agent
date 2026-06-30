@@ -1,4 +1,4 @@
-"""Empirical: does runner_openai resume conversation history on turn 2+?
+"""Empirical: does runner_better_agent resume conversation history on turn 2+?
 
 Drives the real `_run` loop twice against a stubbed Chat Completions server,
 passing the discovered session_id from turn 1 into turn 2. Asserts the stub
@@ -22,7 +22,7 @@ os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
-import runner_openai  # noqa: E402
+import runner_better_agent  # noqa: E402
 
 
 def _sse_lines(*, content: str) -> bytes:
@@ -134,7 +134,7 @@ def _run_turn(stub_port: str, tmp: Path, app_sid: str, resume_sid, prompt: str, 
     }
     inputs.update(overrides)
     rd = _make_run_dir(tmp, inputs)
-    rc = asyncio.run(runner_openai._run(rd, inputs))
+    rc = asyncio.run(runner_better_agent._run(rd, inputs))
     assert rc == 0, f"runner exited {rc}"
     state = json.loads((rd / "state.json").read_text())
     complete = json.loads((rd / "complete.json").read_text())
@@ -142,7 +142,7 @@ def _run_turn(stub_port: str, tmp: Path, app_sid: str, resume_sid, prompt: str, 
     return state["session_id"]
 
 
-def test_openai_runner_resumes_history_across_turns(monkeypatch):
+def test_better_agent_runner_resumes_history_across_turns(monkeypatch):
     # point the runner's httpx calls at our stub via env
     stub = _Stub({0: _sse_lines(content="A1-reply"),
                   1: _sse_lines(content="A2-reply")})
@@ -213,9 +213,9 @@ def test_fork_copies_history_to_isolated_child(monkeypatch):
         assert child_sid and child_sid != parent_sid
         _run_turn(None, tmp, "sid-app-f", parent_sid, "parent-Q2")
         parent_history = json.loads(
-            runner_openai._session_path(parent_sid).read_text())["messages"]
+            runner_better_agent._session_path(parent_sid).read_text())["messages"]
         child_history = json.loads(
-            runner_openai._session_path(child_sid).read_text())["messages"]
+            runner_better_agent._session_path(child_sid).read_text())["messages"]
     finally:
         stub.stop()
 
@@ -272,7 +272,7 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
         )
         return "tool-output"
 
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", steering_bash)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", steering_bash)
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_steer_"))
         inputs = {
@@ -284,7 +284,7 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
         }
         rd = _make_run_dir(tmp, inputs)
         monkeypatch.setenv("OPENAI_TEST_RUN_DIR", str(rd))
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0
         with stub.lock:
             second_messages = stub.requests[1]
@@ -308,8 +308,8 @@ def test_reasoning_only_round_is_not_persisted_as_null(monkeypatch):
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_reason_"))
         sid1 = _run_turn(None, tmp, "sid-app-r", None, "Q-reason")
 
-        # inspect the persisted openai_sessions history directly
-        hist_path = runner_openai._session_path(sid1)
+        # inspect the persisted better_agent_sessions history directly
+        hist_path = runner_better_agent._session_path(sid1)
         history = json.loads(hist_path.read_text())["messages"]
         assert _no_invalid_assistant(history), (
             "persisted history contains an invalid null-content assistant message"
@@ -334,13 +334,13 @@ def test_cancel_after_partial_stream_is_failure(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
 
-    original_feed = runner_openai.EventEmitter.feed_text_delta
+    original_feed = runner_better_agent.EventEmitter.feed_text_delta
 
     def cancelling_feed(self, chunk):
         original_feed(self, chunk)
         Path(self._fp.name).parent.joinpath("cancel").write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(runner_openai.EventEmitter, "feed_text_delta", cancelling_feed)
+    monkeypatch.setattr(runner_better_agent.EventEmitter, "feed_text_delta", cancelling_feed)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_cancel_"))
@@ -352,7 +352,7 @@ def test_cancel_after_partial_stream_is_failure(monkeypatch):
             "backend_url": "", "internal_token": "",
         }
         rd = _make_run_dir(tmp, inputs)
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
     finally:
         stub.stop()
@@ -373,14 +373,14 @@ def test_tool_call_then_text_preserves_both(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
 
     fired = []
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash",
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash",
                         lambda args, cwd: fired.append(args) or "tool-output")
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_tool_"))
         sid1 = _run_turn(None, tmp, "sid-app-t", None, "use-a-tool")
         history = json.loads(
-            runner_openai._session_path(sid1).read_text())["messages"]
+            runner_better_agent._session_path(sid1).read_text())["messages"]
     finally:
         stub.stop()
 
@@ -444,20 +444,20 @@ def test_inflight_turn_persists_context_before_completion(monkeypatch):
         # what a concurrent resume would load right now.
         try:
             disk = json.loads(
-                runner_openai._session_path(sid_preset).read_text()
+                runner_better_agent._session_path(sid_preset).read_text()
             )["messages"]
         except Exception:
             disk = []
         snapshots.append(disk)
         return "tool-output"
 
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", snapshotting_tool)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", snapshotting_tool)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_inflight_"))
         # Pre-seed empty history so _load_history_for_run resumes a known sid,
         # keeping the on-disk path deterministic for the mid-run snapshot.
-        runner_openai._save_history(sid_preset, [])
+        runner_better_agent._save_history(sid_preset, [])
         inputs = {
             "prompt": "important-task", "images": [], "files": [], "cwd": str(tmp),
             "model": "stub-model", "reasoning_effort": None,
@@ -466,7 +466,7 @@ def test_inflight_turn_persists_context_before_completion(monkeypatch):
             "backend_url": "", "internal_token": "",
         }
         rd = _make_run_dir(tmp, inputs)
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0
     finally:
         stub.stop()
@@ -486,7 +486,7 @@ def test_inflight_turn_persists_context_before_completion(monkeypatch):
     assert not any(m.get("tool_calls") for m in mid if m.get("role") == "assistant"), mid
 
     final_history = json.loads(
-        runner_openai._session_path(sid_preset).read_text()
+        runner_better_agent._session_path(sid_preset).read_text()
     )["messages"]
     assert any(
         m.get("tool_calls") for m in final_history if m.get("role") == "assistant"
@@ -524,7 +524,7 @@ def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
         (run_dir / "cancel").write_text("", encoding="utf-8")
         return "tool-output"
 
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", cancelling_tool)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", cancelling_tool)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_mid_"))
@@ -540,14 +540,14 @@ def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
         rd1.mkdir(parents=True, exist_ok=True)
         (rd1 / "input.json").write_text(json.dumps(inputs1), encoding="utf-8")
         monkeypatch.setenv("OPENAI_RESUME_RUN_DIR", str(rd1))
-        rc1 = asyncio.run(runner_openai._run(rd1, inputs1))
+        rc1 = asyncio.run(runner_better_agent._run(rd1, inputs1))
         # turn 1 did not complete normally
         complete1 = json.loads((rd1 / "complete.json").read_text())
         assert rc1 == 1 and complete1["error"] == "cancelled", complete1
 
         # context from the dead turn must already be durable on disk
         mid_disk = json.loads(
-            runner_openai._session_path(sid_preset).read_text())["messages"]
+            runner_better_agent._session_path(sid_preset).read_text())["messages"]
         assert "important-task" in _user_contents(mid_disk), (
             "turn 1 died without leaving its prompt durable (the reported bug)"
         )
@@ -564,7 +564,7 @@ def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
         rd2 = tmp / "run_turn2"
         rd2.mkdir(parents=True, exist_ok=True)
         (rd2 / "input.json").write_text(json.dumps(inputs2), encoding="utf-8")
-        rc2 = asyncio.run(runner_openai._run(rd2, inputs2))
+        rc2 = asyncio.run(runner_better_agent._run(rd2, inputs2))
         assert rc2 == 0
         with stub.lock:
             turn2_req = stub.requests[-1]
@@ -605,16 +605,16 @@ def test_capability_context_excluded_from_durable_history(monkeypatch):
         # only the final one.
         try:
             disk_snapshots.append(json.loads(
-                runner_openai._session_path(sid_preset).read_text())["messages"])
+                runner_better_agent._session_path(sid_preset).read_text())["messages"])
         except Exception:
             disk_snapshots.append([])
         return "tool-output"
 
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", snapshotting_tool)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", snapshotting_tool)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cap_excl_"))
-        runner_openai._save_history(sid_preset, [])
+        runner_better_agent._save_history(sid_preset, [])
         inputs = {
             "prompt": "do-the-thing", "images": [], "files": [], "cwd": str(tmp),
             "model": "stub-model", "reasoning_effort": None,
@@ -626,7 +626,7 @@ def test_capability_context_excluded_from_durable_history(monkeypatch):
             ],
         }
         rd = _make_run_dir(tmp, inputs)
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0
         with stub.lock:
             sent = stub.requests[0]
@@ -640,7 +640,7 @@ def test_capability_context_excluded_from_durable_history(monkeypatch):
 
     # ...but it must NOT be in any persisted snapshot, mid-flight or final.
     final_disk = json.loads(
-        runner_openai._session_path(sid_preset).read_text())["messages"]
+        runner_better_agent._session_path(sid_preset).read_text())["messages"]
     all_persisted = list(disk_snapshots) + [final_disk]
     assert disk_snapshots, "Bash tool never ran; no mid-flight snapshot captured"
     for snap in all_persisted:
@@ -673,7 +673,7 @@ def test_cancel_path_persists_balanced_context(monkeypatch):
             "", encoding="utf-8")
         return "tool-output"
 
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", cancelling_tool)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", cancelling_tool)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cancel_persist_"))
@@ -686,14 +686,14 @@ def test_cancel_path_persists_balanced_context(monkeypatch):
         }
         rd = _make_run_dir(tmp, inputs)
         monkeypatch.setenv("OPENAI_CANCEL_RUN_DIR", str(rd))
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
     finally:
         stub.stop()
 
     assert rc == 1 and complete["error"] == "cancelled", complete
     history = json.loads(
-        runner_openai._session_path(sid_preset).read_text())["messages"]
+        runner_better_agent._session_path(sid_preset).read_text())["messages"]
     assert "cancel-but-keep-context" in _user_contents(history), (
         "cancelled turn lost its prompt — next resume would be blank"
     )
@@ -718,7 +718,7 @@ def test_exception_path_persists_accumulated_context(monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("simulated mid-turn crash")
 
-    monkeypatch.setattr(runner_openai, "_one_round", boom)
+    monkeypatch.setattr(runner_better_agent, "_one_round", boom)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_exc_persist_"))
@@ -730,7 +730,7 @@ def test_exception_path_persists_accumulated_context(monkeypatch):
             "backend_url": "", "internal_token": "",
         }
         rd = _make_run_dir(tmp, inputs)
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
     finally:
         stub.stop()
@@ -738,7 +738,7 @@ def test_exception_path_persists_accumulated_context(monkeypatch):
     assert rc == 1 and complete["success"] is False, complete
     assert "RuntimeError" in str(complete.get("error")), complete
     history = json.loads(
-        runner_openai._session_path(sid_preset).read_text())["messages"]
+        runner_better_agent._session_path(sid_preset).read_text())["messages"]
     assert "keep-me-on-crash" in _user_contents(history), (
         "exception path lost the accumulated context — next resume would be blank"
     )

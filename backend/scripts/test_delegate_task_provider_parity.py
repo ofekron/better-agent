@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import communicate_mcp  # noqa: E402
 import runner  # noqa: E402
 import runner_codex  # noqa: E402
-import runner_openai  # noqa: E402
+import runner_better_agent  # noqa: E402
 
 
 def _delegate_schema_properties(schema: dict) -> dict:
@@ -36,7 +36,7 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
     )
     codex_tool = runner_codex._build_delegate_task_dynamic_tool()
     openai_tool = next(
-        schema for schema in runner_openai._tool_schemas_for_run(
+        schema for schema in runner_better_agent._tool_schemas_for_run(
             inputs={
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -191,15 +191,15 @@ def test_gemini_delegate_task_posts_shared_payload() -> None:
 
 def test_openai_delegate_task_posts_shared_payload() -> None:
     captured: list[tuple[str, dict, float]] = []
-    original_post = runner_openai._post_loopback_sync
+    original_post = runner_better_agent._post_loopback_sync
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload, kwargs["timeout_s"]))
         return {"success": True, "target_session_id": "target-1"}
 
-    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
     try:
-        handlers = runner_openai._build_loopback_tool_handlers(
+        handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -207,7 +207,7 @@ def test_openai_delegate_task_posts_shared_payload() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
-            lock_registry=runner_openai.LockRegistry(),
+            lock_registry=runner_better_agent.LockRegistry(),
         )
         result = asyncio.run(handlers["delegate_task"]({"arguments": {
             "task": "do work",
@@ -218,12 +218,12 @@ def test_openai_delegate_task_posts_shared_payload() -> None:
             "sub_session": False,
         }}))
     finally:
-        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
 
     assert json.loads(result)["success"] is True
     endpoint, payload, timeout = captured[0]
     assert endpoint == "/api/internal/delegate-task"
-    assert timeout == runner_openai.DELEGATE_HTTP_TIMEOUT_S
+    assert timeout == runner_better_agent.DELEGATE_HTTP_TIMEOUT_S
     assert payload["target_session_id"] is None
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"

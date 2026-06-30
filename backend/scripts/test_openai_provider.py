@@ -73,7 +73,7 @@ def test_frozen_dispatch_accepts_openai():
 
 
 def test_event_emitter_shapes():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     with tempfile.TemporaryDirectory() as d:
         emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
         emitter.set_model("glm-5.2")
@@ -99,7 +99,7 @@ def test_event_emitter_shapes():
 
 
 def test_openai_bash_alias_input_ingests_as_canonical_command():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     for alias in ("cmd", "shell_command"):
         with tempfile.TemporaryDirectory() as d:
             emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
@@ -127,7 +127,7 @@ def test_openai_bash_alias_input_ingests_as_canonical_command():
 
 
 def test_openai_bash_alias_input_dispatches_canonical_command():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
 
     for alias in ("cmd", "shell_command"):
         seen = []
@@ -171,7 +171,7 @@ def test_openai_bash_alias_input_dispatches_canonical_command():
 
 
 def test_openai_bash_explicit_command_wins_over_alias():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     raw = {"cmd": "echo alias", "command": "echo canonical"}
     assert runner._canonical_tool_input("Bash", raw) == {
         "command": "echo canonical",
@@ -179,7 +179,7 @@ def test_openai_bash_explicit_command_wins_over_alias():
 
 
 def test_openai_bash_alias_approval_uses_canonical_command():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     approvals = []
 
     def fake_approval(**kwargs):
@@ -232,7 +232,7 @@ def test_openai_bash_alias_approval_uses_canonical_command():
 
 
 def test_bash_tool_scrubs_provider_and_internal_secrets():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     old_env = os.environ.copy()
     os.environ.update({
         "OPENAI_API_KEY": "sk-secret",
@@ -254,7 +254,7 @@ def test_bash_tool_scrubs_provider_and_internal_secrets():
 
 
 def test_openai_loopback_retries_disk_token_after_forbidden():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     token_file = Path(os.environ["BETTER_AGENT_HOME"]) / "internal_token"
     token_file.write_text("disk-token", encoding="utf-8")
     runner._token_cache["token"] = None
@@ -303,7 +303,7 @@ def test_openai_loopback_retries_disk_token_after_forbidden():
 
 
 def test_openai_loopback_recovers_completed_ask_result():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     ask_status_store = _mod("ask_status_store")
     result = {"success": True, "assistant_content": "done"}
     ask_status_store.write_status("ask_done", result=result)
@@ -388,7 +388,7 @@ def test_openai_attach_recovered_run_schedules_bootstrap():
 
 
 def test_tools_path_confinement():
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     with tempfile.TemporaryDirectory() as cwd:
         cwdp = Path(cwd)
         (cwdp / "in.txt").write_text("ok", encoding="utf-8")
@@ -415,7 +415,7 @@ def test_live_turn_against_endpoint():
     if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("OPENAI_BASE_URL"):
         print("skip live openai test (no OPENAI_API_KEY/OPENAI_BASE_URL)")
         return
-    runner = _mod("runner_openai")
+    runner = _mod("runner_better_agent")
     with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as rd:
         (Path(cwd) / "hello.txt").write_text("openai-loop-works", encoding="utf-8")
         inputs = {"prompt": "Use the Read tool to read hello.txt then reply ONLY with its contents.",

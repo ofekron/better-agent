@@ -91,7 +91,7 @@ def test_runner_choices_are_valid():
         assert spec.runner_choices, kind
         assert set(spec.runner_choices).issubset({"native", "better_agent_runner"}), kind
         if spec.runner_choices == ("better_agent_runner",):
-            assert pm.runner_module_for(kind) == "runner_openai", kind
+            assert pm.runner_module_for(kind) == "runner_better_agent", kind
     assert pm.default_runner_for("claude") == "native"
     assert pm.default_runner_for("openai") == "better_agent_runner"
     assert pm.runner_choices_for("fugu") == ("native", "better_agent_runner")
