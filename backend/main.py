@@ -11803,16 +11803,19 @@ async def internal_tasks(
 
 @app.get("/api/sessions/{app_session_id}/background")
 async def get_session_background(app_session_id: str):
-    """Pull snapshot of babysitter state: run_ids of runners lingering
-    to keep this session's background work alive. Live deltas arrive
-    via the `run_lingering` WS event."""
+    """Snapshot of babysitter state: runners lingering to keep this
+    session's background work alive, with enough detail (mode, started_at,
+    prompt) for the strip's "info" expand to show WHAT is running and WHY.
+    Live deltas arrive via the `run_lingering` WS event (run_id + flag
+    only — the frontend refetches this endpoint to fill detail when a new
+    run starts lingering)."""
     if not await _session_exists(app_session_id):
         raise HTTPException(status_code=404, detail="session not found")
     from provider import known_providers
-    run_ids: list[str] = []
+    runs: list[dict] = []
     for prov in known_providers():
-        run_ids.extend(prov.lingering_runs(app_session_id))
-    return {"lingering_run_ids": run_ids}
+        runs.extend(prov.lingering_run_details(app_session_id))
+    return {"runs": runs}
 
 
 @app.post("/api/sessions/{app_session_id}/background/kill")

@@ -16,6 +16,7 @@ import { Capacitor } from "@capacitor/core";
 import { withTokenQuery } from "./bearerAuth";
 import { extId } from "./extensionIds";
 import type {
+  BackgroundRun,
   Schedule,
   SessionFolder,
   SessionOrganizationSnapshot,
@@ -70,10 +71,12 @@ async function _json<T>(res: Response): Promise<T> {
 }
 
 /** Snapshot of runs still babysitter-lingering (background work alive
- * after the turn ended). Push side: `run_lingering` WS frames. */
+ * after the turn ended), with enough detail for the strip's info expand.
+ * Push side: `run_lingering` WS frames (run_id + flag only — refetch
+ * this to fill detail when a new run starts lingering). */
 export async function fetchSessionBackground(
   sessionId: string,
-): Promise<{ lingering_run_ids: string[] }> {
+): Promise<{ runs: BackgroundRun[] }> {
   const res = await fetch(
     `${API}/api/sessions/${encodeURIComponent(sessionId)}/background`,
     { credentials: "include" },

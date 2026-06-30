@@ -9,7 +9,7 @@ import {
   killSessionBackground,
 } from "../api";
 import { eventBus } from "../lib/eventBus";
-import type { Schedule } from "../types";
+import type { BackgroundRun, Schedule } from "../types";
 
 /** Compact strip above the input area surfacing two backend-owned
  * facts about the CURRENTLY VIEWED session (REST snapshot on open,
@@ -20,15 +20,19 @@ import type { Schedule } from "../types";
  * 2. Pending model-created schedules (prompt preview, next fire time,
  *    cancel ✕). No create UI — creation is model-driven.
  *
- * Renders nothing when both surfaces are empty.
+ * The (i) button unfolds a details panel showing WHAT is running and
+ * WHY (each run's originating prompt, mode, started time; each
+ * schedule's created / last-fired / interval). Renders nothing when
+ * both surfaces are empty.
  *
  * Mount with `key={sessionId}` — state is per-session and resets by
  * remounting instead of an in-effect clear. */
 export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
   const { t } = useTranslation();
-  const [lingeringRunIds, setLingeringRunIds] = useState<string[]>([]);
+  const [lingeringRuns, setLingeringRuns] = useState<BackgroundRun[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [killing, setKilling] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [dismissedSignature, setDismissedSignature] = useState<string | null>(
     null,
   );
@@ -36,11 +40,14 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
   useEffect(() => {
     if (!sessionId) return;
     let stale = false;
-    void fetchSessionBackground(sessionId)
-      .then((d) => {
-        if (!stale) setLingeringRunIds(d.lingering_run_ids ?? []);
-      })
-      .catch(() => {});
+    const loadRuns = () => {
+      void fetchSessionBackground(sessionId)
+        .then((d) => {
+          if (!stale) setLingeringRuns(d.runs ?? []);
+        })
+        .catch(() => {});
+    };
+    loadRuns();
     void fetchSessionSchedules(sessionId)
       .then((d) => {
         if (!stale) setSchedules(d.schedules ?? []);
@@ -48,13 +55,13 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
       .catch(() => {});
     const offLinger = eventBus.subscribe("run_lingering", (p) => {
       if (p.app_session_id !== sessionId) return;
-      setLingeringRunIds((prev) =>
-        p.lingering
-          ? prev.includes(p.run_id)
-            ? prev
-            : [...prev, p.run_id]
-          : prev.filter((id) => id !== p.run_id),
-      );
+      if (p.lingering) {
+        // New run started lingering — WS frame carries run_id + flag
+        // only, so refetch to fill the detail the info panel shows.
+        loadRuns();
+      } else {
+        setLingeringRuns((prev) => prev.filter((r) => r.run_id !== p.run_id));
+      }
     });
     const offSched = eventBus.subscribe("schedules_updated", (p) => {
       if (p.app_session_id !== sessionId) return;
@@ -72,8 +79,8 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
     setKilling(true);
     try {
       const r = await killSessionBackground(sessionId);
-      setLingeringRunIds((prev) =>
-        prev.filter((id) => !r.killed_run_ids.includes(id)),
+      setLingeringRuns((prev) =>
+        prev.filter((run) => !r.killed_run_ids.includes(run.run_id)),
       );
     } finally {
       setKilling(false);
@@ -87,25 +94,37 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
   }, []);
 
   const visibleSignature = useMemo(() => {
-    const runPart = lingeringRunIds.slice().sort().join(",");
+    const runPart = lingeringRuns.map((r) => r.run_id).slice().sort().join(",");
     const schedulePart = schedules.map((s) => s.id).sort().join(",");
     return `${runPart}|${schedulePart}`;
-  }, [lingeringRunIds, schedules]);
+  }, [lingeringRuns, schedules]);
 
-  if (lingeringRunIds.length === 0 && schedules.length === 0) return null;
+  if (lingeringRuns.length === 0 && schedules.length === 0) return null;
   if (dismissedSignature === visibleSignature) return null;
 
   return (
     <div className="session-bg-strip" data-testid="session-bg-strip">
-      <button
-        className="session-bg-dismiss"
-        onClick={() => setDismissedSignature(visibleSignature)}
-        title={t("background.dismiss")}
-        aria-label={t("background.dismiss")}
-      >
-        ×
-      </button>
-      {lingeringRunIds.length > 0 && (
+      <div className="session-bg-actions">
+        <button
+          className="session-bg-icon-btn"
+          onClick={() => setExpanded((v) => !v)}
+          title={t("background.info")}
+          aria-label={t("background.info")}
+          aria-expanded={expanded}
+          data-testid="background-info-btn"
+        >
+          <Icon name="info" size={14} />
+        </button>
+        <button
+          className="session-bg-icon-btn session-bg-dismiss"
+          onClick={() => setDismissedSignature(visibleSignature)}
+          title={t("background.dismiss")}
+          aria-label={t("background.dismiss")}
+        >
+          ×
+        </button>
+      </div>
+      {lingeringRuns.length > 0 && (
         <div className="session-bg-bar" data-testid="background-work-bar">
           <span className="session-bg-label">{t("background.running")}</span>
           <button
@@ -139,12 +158,57 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
           ))}
         </div>
       )}
+      {expanded && (
+        <div className="session-bg-details" data-testid="session-bg-details">
+          {lingeringRuns.map((run) => (
+            <div key={run.run_id} className="session-bg-detail-row">
+              <div className="session-bg-detail-prompt">
+                {run.prompt || <span className="session-bg-detail-empty">{run.run_id}</span>}
+              </div>
+              <div className="session-bg-detail-meta">
+                {run.started_at && (
+                  <span>
+                    {t("background.started")}: {formatFireAt(run.started_at)}
+                  </span>
+                )}
+                {run.mode && (
+                  <span>
+                    {t("background.mode")}: {run.mode}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+          {schedules.map((s) => (
+            <div key={s.id} className="session-bg-detail-row">
+              <div className="session-bg-detail-prompt">{s.prompt}</div>
+              <div className="session-bg-detail-meta">
+                {s.created_at && (
+                  <span>
+                    {t("schedules.created")}: {formatFireAt(s.created_at)}
+                  </span>
+                )}
+                <span>
+                  {t("schedules.lastFired")}:{" "}
+                  {s.last_fired_at ? formatFireAt(s.last_fired_at) : t("schedules.neverFired")}
+                </span>
+                {s.kind === "recurring" && s.interval_seconds != null && (
+                  <span>
+                    {t("schedules.interval")}: {formatInterval(s.interval_seconds)}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-/** Compact local-time render of the next fire timestamp — time only
- * when it fires today, day+time otherwise. */
+/** Compact local-time render of a timestamp — time only when it falls
+ * today, day+time otherwise. Used for run started_at and schedule
+ * created / last-fired / next-fire alike. */
 function formatFireAt(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
@@ -157,4 +221,19 @@ function formatFireAt(iso: string): string {
         hour: "2-digit",
         minute: "2-digit",
       });
+}
+
+/** Human interval label for a recurring schedule's seconds value:
+ * 60 -> 1m, 3600 -> 1h, 86400 -> 1d, 7200 -> 2h, etc. */
+function formatInterval(seconds: number): string {
+  if (seconds <= 0) return String(seconds);
+  const units: [number, string][] = [
+    [86400, "d"],
+    [3600, "h"],
+    [60, "m"],
+  ];
+  for (const [secs, label] of units) {
+    if (seconds % secs === 0) return `${seconds / secs}${label}`;
+  }
+  return `${Math.round(seconds / 60)}m`;
 }

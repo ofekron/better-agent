@@ -6444,10 +6444,16 @@ button.run-badge-clickable:focus-visible {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
   min-width: 0;
 }
-.session-bg-dismiss {
+.session-bg-actions {
   position: absolute;
   top: 4px;
   right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  z-index: 1;
+}
+.session-bg-icon-btn {
   width: 24px;
   height: 24px;
   border: none;
@@ -6455,21 +6461,24 @@ button.run-badge-clickable:focus-visible {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
+  font-size: calc(14px * var(--app-font-scale));
   line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.session-bg-dismiss:hover {
+.session-bg-icon-btn:hover {
   background: var(--hover);
   color: var(--fg);
+}
+.session-bg-dismiss {
+  font-size: calc(16px * var(--app-font-scale));
 }
 .session-bg-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 30px 6px 10px;
+  padding: 6px 52px 6px 10px;
   background: var(--hover);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -6488,7 +6497,7 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding-inline-end: 26px;
+  padding-inline-end: 52px;
   min-width: 0;
 }
 .session-schedule-pill {
@@ -6528,16 +6537,51 @@ button.run-badge-clickable:focus-visible {
 .session-schedule-cancel:hover {
   color: var(--fg);
 }
+.session-bg-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: calc(12px * var(--app-font-scale));
+}
+.session-bg-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.session-bg-detail-prompt {
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.35;
+  max-height: 6em;
+  overflow: auto;
+}
+.session-bg-detail-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+.session-bg-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
 :dir(rtl) .session-bg-strip {
   right: auto;
   left: 24px;
 }
-:dir(rtl) .session-bg-dismiss {
+:dir(rtl) .session-bg-actions {
   right: auto;
   left: 4px;
 }
 :dir(rtl) .session-bg-bar {
-  padding: 6px 10px 6px 30px;
+  padding: 6px 10px 6px 52px;
 }
 @media (max-width: 640px) {
   .session-bg-strip {
