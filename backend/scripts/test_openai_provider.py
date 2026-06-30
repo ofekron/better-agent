@@ -98,6 +98,63 @@ def test_event_emitter_shapes():
     assert lines[-1]["parentUuid"] is not None
 
 
+def test_event_emitter_buffers_tool_call_until_arguments_render():
+    runner = _mod("runner_better_agent")
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "ev.jsonl"
+        emitter = runner.EventEmitter(path)
+        emitter.feed_tool_call_delta(0, "call_1", "Bash", None)
+        assert path.read_text() == ""
+        emitter.feed_tool_call_delta(0, None, None, '{"command":')
+        assert path.read_text() == ""
+        emitter.feed_tool_call_delta(0, None, None, ' "pwd"}')
+        emitter.finalize_tool_calls()
+        emitter.close()
+        lines = [json.loads(l) for l in path.read_text().splitlines()]
+
+    tool_uses = [
+        ln for ln in lines
+        if ln["message"]["content"][0].get("type") == "tool_use"
+    ]
+    assert len(tool_uses) == 1, tool_uses
+    assert tool_uses[0]["message"]["content"][0]["input"] == {"command": "pwd"}
+
+
+def test_event_emitter_flushes_no_arg_tool_on_finalize():
+    runner = _mod("runner_better_agent")
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "ev.jsonl"
+        emitter = runner.EventEmitter(path)
+        emitter.feed_tool_call_delta(0, "call_1", "Read", None)
+        assert path.read_text() == ""
+        calls = emitter.finalize_tool_calls()
+        emitter.close()
+        lines = [json.loads(l) for l in path.read_text().splitlines()]
+
+    assert calls == [{"id": "call_1", "name": "Read", "arguments": "{}"}]
+    assert lines[0]["message"]["content"][0]["input"] == {}
+
+
+def test_event_emitter_buffers_tool_call_until_metadata_and_arguments_render():
+    runner = _mod("runner_better_agent")
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "ev.jsonl"
+        emitter = runner.EventEmitter(path)
+        emitter.feed_tool_call_delta(0, None, None, '{"command": "pwd"}')
+        assert path.read_text() == ""
+        emitter.feed_tool_call_delta(0, "call_1", None, None)
+        assert path.read_text() == ""
+        emitter.feed_tool_call_delta(0, None, "Bash", None)
+        emitter.close()
+        lines = [json.loads(l) for l in path.read_text().splitlines()]
+
+    assert len(lines) == 1, lines
+    tool_use = lines[0]["message"]["content"][0]
+    assert tool_use["id"] == "call_1"
+    assert tool_use["name"] == "Bash"
+    assert tool_use["input"] == {"command": "pwd"}
+
+
 def test_openai_bash_alias_input_ingests_as_canonical_command():
     runner = _mod("runner_better_agent")
     for alias in ("cmd", "shell_command"):
