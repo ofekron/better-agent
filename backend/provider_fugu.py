@@ -98,4 +98,9 @@ class FuguProvider(CodexProvider):
         return [
             f"model_provider={toml_literal(self.CODEX_MODEL_PROVIDER)}",
             f"model={toml_literal(selected_model)}",
+            # Codex ships the image_generation tool by default (stable feature),
+            # but Sakana's Responses API only accepts `function`/`custom` tool
+            # types and rejects `image_generation` with an invalid_request_error
+            # on every turn. Disable the feature for Fugu runs.
+            "features.image_generation=false",
         ]
