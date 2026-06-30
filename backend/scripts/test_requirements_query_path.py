@@ -151,8 +151,22 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
 
     prompt = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_provision_prompt({})
+    instructions = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_instructions("session search parse_failed", {
+        "cwd": "/repo",
+        "cwds": [],
+        "all_projects": False,
+        "max_matches": 5,
+    })
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
+    check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
+    check("never pass file paths" in prompt, "processor prompt forbids rg path args")
+    check("Do not pass bare token lists" in prompt, "processor prompt rejects bare token rg args")
+    check("do not require every term to match" in prompt, "processor prompt preserves partial semantic matches")
+    check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
+    check("never file paths" in instructions, "processor instructions forbid rg path args")
+    check("do not pass bare token lists" in instructions, "processor instructions reject bare token rg args")
+    check("do not require every term to match" in instructions, "processor instructions preserve partial semantic matches")
 
 
 def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:

@@ -108,7 +108,15 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
         }
         return (
             "Find the related stored requirements for this request.\n"
-            "Call get_requirements_internal with rg_args derived from request.query. "
+            "Call the get_requirements_internal MCP tool directly. Do not call the get-requirements skill "
+            "or public get_requirements tool from inside this processor.\n"
+            "Build rg_args for ripgrep over a backend-owned corpus: pass search options and patterns only, "
+            "never file paths. For multiple patterns use -e/--regexp for every pattern, for example "
+            "['-i', '-e', 'session search', '-e', 'parse_failed']; do not pass bare token lists like "
+            "['session', 'search', 'parse_failed'].\n"
+            "Use broad key phrases from request.query. Extra query words may be noisy, so do not require "
+            "every term to match. Treat raw matches as candidate requirements and return any match that is "
+            "semantically related to the request or to a concrete failure/tool/provider named in it. "
             "Use cwd/cwds/all_projects/max_matches from the request. "
             "Return only the required JSON object.\n"
             f"<request>\n{json.dumps(request, ensure_ascii=False)}\n</request>"
