@@ -33,6 +33,7 @@ from runner_codex import (
     _normalize_web_search_events,
     _new_uuid,
     _remember_collab_receivers,
+    _response_item_uuid,
     _stable_uuid,
     _web_search_dedupe_key,
     _web_search_item_from_payload,
@@ -295,7 +296,7 @@ def _compact_replacement_history(history: Any) -> list[dict]:
 class CodexRolloutNormalizer:
     def __init__(self, *, namespace: str) -> None:
         self.namespace = namespace or "codex"
-        self.parent_uuid = _new_uuid()
+        self.parent_uuid = _stable_uuid(self.namespace, "root")
         self.started_items: dict[str, str] = {}
         self.response_tool_parents: dict[str, str] = {}
         self.response_tool_names: dict[str, str] = {}
@@ -578,6 +579,7 @@ class CodexRolloutNormalizer:
 
         if payload_type in ("function_call", "custom_tool_call", "tool_search_call"):
             normalized, tool_use_id = _normalize_response_tool_call(payload, self.parent_uuid)
+            normalized["uuid"] = _response_item_uuid(self.parent_uuid, payload, ":tool_use")
             self.response_tool_parents[tool_use_id] = normalized["uuid"]
             content = (normalized.get("message") or {}).get("content")
             if isinstance(content, list) and content and isinstance(content[0], dict):
@@ -597,6 +599,7 @@ class CodexRolloutNormalizer:
             tool_parent = self.response_tool_parents.pop(tool_use_id, self.parent_uuid)
             tool_name = self.response_tool_names.pop(tool_use_id, "")
             normalized, _ = _normalize_response_tool_result(payload, tool_parent)
+            normalized["uuid"] = _response_item_uuid(self.parent_uuid, payload, ":tool_result")
             if tool_use_id in self.response_agent_tool_parents:
                 normalized["codex_spawn_agent_result"] = True
             if tool_name == "wait_agent":
@@ -605,7 +608,22 @@ class CodexRolloutNormalizer:
             return self._push(normalized)
 
         if payload_type == "web_search_call":
-            return self._normalize_web_search_payload(payload)
+            item = _web_search_item_from_payload(payload)
+            call_id = item.get("id", "")
+            search_key = _web_search_dedupe_key(item)
+            if (
+                (call_id and call_id in self.seen_web_search_calls)
+                or search_key in self.seen_web_search_keys
+            ):
+                return []
+            event = _normalize_web_search(item, self.parent_uuid)
+            event["uuid"] = _response_item_uuid(
+                self.parent_uuid, payload, ":web_search",
+            )
+            if call_id:
+                self.seen_web_search_calls.add(call_id)
+            self.seen_web_search_keys.add(search_key)
+            return self._push(event)
 
         return self._push(_normalize_response_item_event(payload, self.parent_uuid))
 
@@ -673,6 +691,15 @@ class CodexRolloutNormalizer:
         item = _attach_collab_parent_from_thread(item, self.collab_thread_parents)
         if item_type == "collab_agent_tool_call":
             _remember_collab_receivers(item, self.collab_thread_parents)
+        item_key = item_id
+        if not item_key:
+            item_key = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+
+        def item_uuid(suffix: str = "") -> str:
+            return _stable_uuid(
+                self.namespace,
+                f"item:{item_type}:{event_type}:{item_key}{suffix}",
+            )
 
         if item_type == "todo_list":
             td = _normalize_todo_list(
@@ -691,9 +718,13 @@ class CodexRolloutNormalizer:
 
         if event_type == "item.completed":
             if item_type == "agent_message":
-                normalized = _normalize_agent_message(item, self.parent_uuid)
+                normalized = _normalize_agent_message(
+                    item, self.parent_uuid, event_uuid=item_uuid(),
+                )
             elif item_type == "reasoning":
-                normalized = _normalize_reasoning(item, self.parent_uuid)
+                normalized = _normalize_reasoning(
+                    item, self.parent_uuid, event_uuid=item_uuid(),
+                )
             elif item_type == "command_execution":
                 tool_use_uuid = self.started_items.pop(item_id, self.parent_uuid)
                 normalized = {
@@ -706,7 +737,7 @@ class CodexRolloutNormalizer:
                             "content": item.get("aggregated_output", "") or "",
                         }],
                     },
-                    "uuid": _new_uuid(),
+                    "uuid": item_uuid(":result"),
                     "parentUuid": tool_use_uuid,
                     "timestamp": datetime.now().isoformat(),
                 }
@@ -725,25 +756,30 @@ class CodexRolloutNormalizer:
                 return out
             elif item_type == "error":
                 normalized = _normalize_error_item(item, self.parent_uuid)
+                normalized["uuid"] = item_uuid()
 
         elif event_type == "item.started":
             if item_type == "command_execution":
                 normalized = _normalize_command_started(item, self.parent_uuid)
                 if normalized:
+                    normalized["uuid"] = item_uuid(":tool_use")
                     self.started_items[item_id] = normalized["uuid"]
             elif item_type == "mcp_tool_call":
                 normalized = _normalize_mcp_tool_started(item, self.parent_uuid)
                 if normalized:
+                    normalized["uuid"] = item_uuid(":tool_use")
                     self.started_items[item_id] = normalized["uuid"]
             elif item_type == "collab_agent_tool_call":
                 normalized = _normalize_collab_agent_started(item, self.parent_uuid)
                 if normalized:
+                    normalized["uuid"] = item_uuid(":tool_use")
                     self.started_items[item_id] = normalized["uuid"]
 
         elif event_type == "item.updated" and item_type == "collab_agent_tool_call":
             if item_id not in self.started_items:
                 normalized = _normalize_collab_agent_started(item, self.parent_uuid)
                 if normalized:
+                    normalized["uuid"] = item_uuid(":tool_use")
                     self.started_items[item_id] = normalized["uuid"]
 
         out.extend(self._push(normalized))
