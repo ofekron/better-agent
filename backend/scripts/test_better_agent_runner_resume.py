@@ -52,6 +52,74 @@ def _reasoning_only_response() -> bytes:
     ])
 
 
+def _cumulative_text_and_reasoning_response() -> bytes:
+    return _sse_chunks([
+        {"choices": [{"delta": {
+            "reasoning_content": "Let",
+            "content": "Hel",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "Let me",
+            "content": "Hello",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "Let me analyze",
+            "content": "Hello world",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3,
+                                  "total_tokens": 8}},
+    ])
+
+
+def _prefix_looking_delta_response() -> bytes:
+    return _sse_chunks([
+        {"choices": [{"delta": {"content": "abc"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": "abcde"}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3,
+                                  "total_tokens": 8}},
+    ])
+
+
+def _normal_delta_text_and_reasoning_response() -> bytes:
+    return _sse_chunks([
+        {"choices": [{"delta": {
+            "reasoning_content": "Let",
+            "content": "Hel",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": " me",
+            "content": "lo",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": " analyze",
+            "content": " world",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3,
+                                  "total_tokens": 8}},
+    ])
+
+
+def _cumulative_tool_args_then_text_response(*, call_idx: int) -> bytes:
+    if call_idx == 0:
+        return _sse_chunks([
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_x", "type": "function",
+                "function": {"name": "Bash", "arguments": "{\"command\""},
+            }]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "{\"command\": \"echo hi\"}"},
+            }]}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2,
+                                      "total_tokens": 7}},
+        ])
+    return _sse_lines(content="after-tool-reply")
+
+
 def _tool_call_then_text_response(*, call_idx: int) -> bytes:
     """call 0: a Bash tool_call; call 1: plain text reply."""
     if call_idx == 0:
@@ -222,6 +290,16 @@ def _no_invalid_assistant(messages) -> bool:
     return True
 
 
+def _event_texts(run_dir: Path, block_type: str, field: str) -> list[str]:
+    values = []
+    for line in (run_dir / "session_events.jsonl").read_text().splitlines():
+        event = json.loads(line)
+        content = event.get("message", {}).get("content") or []
+        if content and content[0].get("type") == block_type:
+            values.append(content[0].get(field) or "")
+    return values
+
+
 def _user_contents(messages):
     return [m.get("content") for m in messages if m.get("role") == "user"]
 
@@ -322,6 +400,180 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
 
     texts = [m.get("content") for m in second_messages if m.get("role") == "user"]
     assert any("please adjust" in str(t) for t in texts), texts
+
+
+def test_zai_cumulative_snapshots_are_normalized_for_events_and_history(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_cumulative_"))
+    inputs = {
+        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+        "model": "stub-model", "reasoning_effort": None,
+        "permission": {"default": "bypass"}, "session_id": None,
+        "mode": "native", "app_session_id": "zai-cumulative-app",
+        "backend_url": "", "internal_token": "",
+    }
+    rd = _make_run_dir(tmp, inputs)
+
+    async def fake_stream(*_args, **_kwargs):
+        for raw in _cumulative_text_and_reasoning_response().split(b"\n\n"):
+            if not raw.startswith(b"data: "):
+                continue
+            payload = raw[len(b"data: "):]
+            if payload == b"[DONE]":
+                return
+            yield json.loads(payload)
+
+    monkeypatch.setattr(runner_better_agent, "_stream_chat", fake_stream)
+    rc = asyncio.run(runner_better_agent._run(rd, inputs))
+    assert rc == 0, f"runner exited {rc}"
+    complete = json.loads((rd / "complete.json").read_text())
+    history = json.loads(
+        runner_better_agent._session_path(complete["session_id"]).read_text()
+    )["messages"]
+
+    assert _event_texts(rd, "thinking", "thinking")[-1] == "Let me analyze"
+    assert _event_texts(rd, "text", "text")[-1] == "Hello world"
+    assistant = [m for m in history if m.get("role") == "assistant"][-1]
+    assert assistant["content"] == "Hello world"
+    assert assistant["reasoning_content"] == "Let me analyze"
+
+
+def test_zai_normal_deltas_still_concatenate(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_delta_"))
+    inputs = {
+        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+        "model": "stub-model", "reasoning_effort": None,
+        "permission": {"default": "bypass"}, "session_id": None,
+        "mode": "native", "app_session_id": "zai-delta-app",
+        "backend_url": "", "internal_token": "",
+    }
+    rd = _make_run_dir(tmp, inputs)
+
+    async def fake_stream(*_args, **_kwargs):
+        for raw in _normal_delta_text_and_reasoning_response().split(b"\n\n"):
+            if not raw.startswith(b"data: "):
+                continue
+            payload = raw[len(b"data: "):]
+            if payload == b"[DONE]":
+                return
+            yield json.loads(payload)
+
+    monkeypatch.setattr(runner_better_agent, "_stream_chat", fake_stream)
+    rc = asyncio.run(runner_better_agent._run(rd, inputs))
+    assert rc == 0, f"runner exited {rc}"
+    complete = json.loads((rd / "complete.json").read_text())
+    history = json.loads(
+        runner_better_agent._session_path(complete["session_id"]).read_text()
+    )["messages"]
+
+    assert _event_texts(rd, "thinking", "thinking")[-1] == "Let me analyze"
+    assert _event_texts(rd, "text", "text")[-1] == "Hello world"
+    assistant = [m for m in history if m.get("role") == "assistant"][-1]
+    assert assistant["content"] == "Hello world"
+    assert assistant["reasoning_content"] == "Let me analyze"
+
+
+def test_zai_cumulative_tool_arguments_are_normalized(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    calls = []
+
+    async def fake_stream(*_args, **_kwargs):
+        response = _cumulative_tool_args_then_text_response(call_idx=len(calls))
+        for raw in response.split(b"\n\n"):
+            if not raw.startswith(b"data: "):
+                continue
+            payload = raw[len(b"data: "):]
+            if payload == b"[DONE]":
+                return
+            yield json.loads(payload)
+
+    def fake_bash(args, _cwd):
+        calls.append(args)
+        return "tool-output"
+
+    monkeypatch.setattr(runner_better_agent, "_stream_chat", fake_stream)
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", fake_bash)
+    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_tool_args_"))
+    inputs = {
+        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+        "model": "stub-model", "reasoning_effort": None,
+        "permission": {"default": "bypass"}, "session_id": None,
+        "mode": "native", "app_session_id": "zai-tool-args-app",
+        "backend_url": "", "internal_token": "",
+    }
+    rd = _make_run_dir(tmp, inputs)
+    rc = asyncio.run(runner_better_agent._run(rd, inputs))
+
+    assert rc == 0, f"runner exited {rc}"
+    assert calls == [{"command": "echo hi"}]
+
+
+def test_non_zai_prefix_looking_deltas_are_not_rewritten(monkeypatch):
+    stub = _Stub({0: _prefix_looking_delta_response()})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_resume_prefix_delta_"))
+        inputs = {
+            "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"default": "bypass"}, "session_id": None,
+            "mode": "native", "app_session_id": "prefix-delta-app",
+            "backend_url": "", "internal_token": "",
+        }
+        rd = _make_run_dir(tmp, inputs)
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
+        assert rc == 0, f"runner exited {rc}"
+        complete = json.loads((rd / "complete.json").read_text())
+        history = json.loads(
+            runner_better_agent._session_path(complete["session_id"]).read_text()
+        )["messages"]
+    finally:
+        stub.stop()
+
+    assert _event_texts(rd, "text", "text")[-1] == "abcabcde"
+    assistant = [m for m in history if m.get("role") == "assistant"][-1]
+    assert assistant["content"] == "abcabcde"
+
+
+def test_zai_non_coding_prefix_looking_deltas_are_not_rewritten(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/paas/v4")
+    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_non_coding_delta_"))
+    inputs = {
+        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+        "model": "stub-model", "reasoning_effort": None,
+        "permission": {"default": "bypass"}, "session_id": None,
+        "mode": "native", "app_session_id": "zai-non-coding-delta-app",
+        "backend_url": "", "internal_token": "",
+    }
+    rd = _make_run_dir(tmp, inputs)
+
+    async def fake_stream(*_args, **_kwargs):
+        for raw in _prefix_looking_delta_response().split(b"\n\n"):
+            if not raw.startswith(b"data: "):
+                continue
+            payload = raw[len(b"data: "):]
+            if payload == b"[DONE]":
+                return
+            yield json.loads(payload)
+
+    monkeypatch.setattr(runner_better_agent, "_stream_chat", fake_stream)
+    rc = asyncio.run(runner_better_agent._run(rd, inputs))
+    assert rc == 0, f"runner exited {rc}"
+    complete = json.loads((rd / "complete.json").read_text())
+    history = json.loads(
+        runner_better_agent._session_path(complete["session_id"]).read_text()
+    )["messages"]
+
+    assert _event_texts(rd, "text", "text")[-1] == "abcabcde"
+    assistant = [m for m in history if m.get("role") == "assistant"][-1]
+    assert assistant["content"] == "abcabcde"
 
 
 def test_reasoning_only_round_is_not_persisted_as_null(monkeypatch):

@@ -137,6 +137,26 @@ def _is_zai_base_url(base_url: str) -> bool:
     host = urllib.parse.urlparse(str(base_url or "")).netloc.lower()
     return host == "api.z.ai" or host.endswith(".z.ai")
 
+
+def _uses_zai_snapshot_streams(base_url: str) -> bool:
+    parsed = urllib.parse.urlparse(str(base_url or ""))
+    path = parsed.path.rstrip("/") + "/"
+    return _is_zai_base_url(base_url) and "/api/coding/paas/" in path
+
+
+class _ZaiSnapshotStream:
+    def __init__(self) -> None:
+        self._last = ""
+
+    def chunk(self, value: str) -> str:
+        if value.startswith(self._last):
+            chunk = value[len(self._last):]
+        else:
+            chunk = value
+        self._last = value
+        return chunk
+
+
 # Detached runners can outlive backend restarts/token rotations. Prefer the
 # spawn-time token for normal requests, but on a 403 retry once with the current
 # disk token. mtime caching keeps steady-state loopback calls cheap.
@@ -2352,6 +2372,10 @@ async def _one_round(
     reasoning_content, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
+    normalize_zai_snapshots = _uses_zai_snapshot_streams(base_url)
+    text_stream = _ZaiSnapshotStream()
+    reasoning_stream = _ZaiSnapshotStream()
+    tool_arg_streams: dict[int, _ZaiSnapshotStream] = {}
     async for chunk in _stream_chat(
         base_url, api_key, model, messages, tool_schemas,
         reasoning_effort=reasoning_effort,
@@ -2369,15 +2393,28 @@ async def _one_round(
             finish_reason = fr
         delta = choice.get("delta") or {}
         if delta.get("content"):
-            emitter.feed_text_delta(delta["content"])
+            text_delta = str(delta["content"])
+            if normalize_zai_snapshots:
+                text_delta = text_stream.chunk(text_delta)
+            if text_delta:
+                emitter.feed_text_delta(text_delta)
         rc = delta.get("reasoning_content")
         if rc:
-            emitter.feed_thinking_delta(rc)
+            reasoning_delta = str(rc)
+            if normalize_zai_snapshots:
+                reasoning_delta = reasoning_stream.chunk(reasoning_delta)
+            if reasoning_delta:
+                emitter.feed_thinking_delta(reasoning_delta)
         for tc in delta.get("tool_calls") or []:
             idx = tc.get("index", 0)
             fn = tc.get("function") or {}
+            args_delta = fn.get("arguments")
+            if normalize_zai_snapshots and args_delta:
+                args_delta = tool_arg_streams.setdefault(
+                    idx, _ZaiSnapshotStream(),
+                ).chunk(str(args_delta))
             emitter.feed_tool_call_delta(
-                idx, tc.get("id"), fn.get("name"), fn.get("arguments"),
+                idx, tc.get("id"), fn.get("name"), args_delta,
             )
 
     thinking = emitter.close_thinking()
