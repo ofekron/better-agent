@@ -18,7 +18,7 @@ import Icon from "./Icon";
 import { applyAdvSyncOverlays } from "../utils/advSyncOverlays";
 import { useMessageDecorations } from "../hooks/useMessageDecorations";
 import type { AdvSyncOverlay } from "../types";
-import { linkifyFilePaths, markdownLinkifyComponents } from "../utils/linkifyFilePaths";
+import { linkifyFilePaths, markdownLinkifyComponents, sessionMarkersToMarkdown } from "../utils/linkifyFilePaths";
 import {
   parseArtificialSections,
   hasArtificialSections,
@@ -252,7 +252,7 @@ function ScaledMarkdown({
   const md = (key: string, text: string) => (
     <MarkdownPreview
       key={key}
-      source={text}
+      source={sessionMarkersToMarkdown(text)}
       wrapperElement={{ "data-color-mode": "dark" }}
       components={components}
       urlTransform={(url) => url}
@@ -660,7 +660,7 @@ function OutputEvent({
           components={mdComponents}
           urlTransform={(url) => url}
         >
-          {friendlyMsg || clean}
+          {sessionMarkersToMarkdown(friendlyMsg || clean)}
         </ReactMarkdown>
       </div>
     );
@@ -3364,7 +3364,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                 <div className="worker-instruction" data-message-id={sg.initiator.id}>
                   <span className="worker-tag">Worker</span>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>
-                    {sg.initiator.content}
+                    {sessionMarkersToMarkdown(sg.initiator.content)}
                   </ReactMarkdown>
                   {sg.initiator.parent_id && (
                     <button
@@ -3601,7 +3601,7 @@ function SyntheticPromptChip({
       </button>
       {expanded && (
         <div className="synthetic-prompt-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>{content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>{sessionMarkersToMarkdown(content)}</ReactMarkdown>
         </div>
       )}
     </div>

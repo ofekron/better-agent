@@ -8,6 +8,7 @@ import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
 import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
 import { mergeIncomingImages } from "../utils/shareAttach";
 import { fileToAttachment } from "../utils/fileAttach";
+import { linkifyFilePaths } from "../utils/linkifyFilePaths";
 import { splitPreview, applyQueuedEdit } from "../utils/queuedPreview";
 import {
   AtMentionDropdown,
@@ -1219,7 +1220,7 @@ function QueuedPromptBanner({
             if (e.key === "Enter" || e.key === " ") setMinimized(false);
           }}
         >
-          {displayText}
+          {linkifyFilePaths(displayText)}
         </span>
         {summaryBits.length > 0 && (
           <span className="queued-attachments-count" data-testid="queued-minimized-summary">
@@ -1415,7 +1416,7 @@ function QueuedPromptBanner({
           if (e.key === "Enter" || e.key === " ") startEditing();
         }}
       >
-        {(hasComments ? userText : preview) || "Edit queued prompt"}
+        {linkifyFilePaths((hasComments ? userText : preview) || "Edit queued prompt")}
       </span>
       <div className="queued-prompt-actions">
         {compactActions ? null : (
