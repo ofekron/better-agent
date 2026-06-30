@@ -72,6 +72,8 @@ logger = logging.getLogger("runner_better_agent")
 
 _BASH_TIMEOUT_S = 120
 _MAX_OUTPUT_CHARS = 40_000
+_MCP_LIST_TIMEOUT_S = 10.0
+_MCP_CALL_TIMEOUT_S = 130.0
 # Safety bound on the agent tool loop. runner_better_agent IS the agent host (no
 # external CLI like claude/codex/gemini to impose its own limits), so it needs
 # an in-process runaway guard. High enough that agentic models (e.g. Sakana
@@ -549,6 +551,38 @@ def _confined_path(cwd: Path, raw: str) -> Path:
     return candidate
 
 
+def _declared_runtime_skill_dirs(cwd: Path) -> set[Path]:
+    try:
+        import runtime_skills
+        skills = runtime_skills._discover_skills(str(cwd))  # type: ignore[attr-defined]
+    except Exception:
+        return set()
+    dirs: set[Path] = set()
+    for skill in skills:
+        raw_dir = str(skill.get("dir") or "").strip()
+        if not raw_dir:
+            continue
+        try:
+            dirs.add(Path(raw_dir).resolve())
+        except Exception:
+            continue
+    return dirs
+
+
+def _readable_path(cwd: Path, raw: str) -> Path:
+    try:
+        return _confined_path(cwd, raw)
+    except PermissionError:
+        pass
+    if not os.path.isabs(raw):
+        raise PermissionError(f"path escapes cwd: {raw}")
+    candidate = Path(raw).resolve()
+    for skill_dir in _declared_runtime_skill_dirs(cwd):
+        if candidate == skill_dir or skill_dir in candidate.parents:
+            return candidate
+    raise PermissionError(f"path escapes cwd: {raw}")
+
+
 def _truncate(text: str) -> str:
     if len(text) <= _MAX_OUTPUT_CHARS:
         return text
@@ -599,7 +633,7 @@ def _tool_bash(args: dict, cwd: Path) -> str:
 def _tool_read(args: dict, cwd: Path) -> str:
     raw = args.get("file_path") or args.get("path") or ""
     try:
-        p = _confined_path(cwd, raw)
+        p = _readable_path(cwd, raw)
     except PermissionError as e:
         return f"Error: {e}"
     if not p.exists():
@@ -1007,6 +1041,200 @@ def _filtered_core_tool_schemas(inputs: dict) -> list[dict]:
         if name.lower() not in blocked:
             out.append(schema)
     return out
+
+
+def _schema_tool_names(schemas: list[dict]) -> set[str]:
+    return {
+        str((schema.get("function") or {}).get("name") or "")
+        for schema in schemas
+        if str((schema.get("function") or {}).get("name") or "")
+    }
+
+
+def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) -> str:
+    if tool_name and tool_name not in used_names and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool_name):
+        used_names.add(tool_name)
+        return tool_name
+    server_part = re.sub(r"[^A-Za-z0-9_]+", "_", server_name).strip("_") or "mcp"
+    tool_part = re.sub(r"[^A-Za-z0-9_]+", "_", tool_name).strip("_") or "tool"
+    base = f"mcp__{server_part}__{tool_part}"[:64].strip("_") or "mcp_tool"
+    candidate = base
+    suffix = 2
+    while candidate in used_names:
+        tail = f"_{suffix}"
+        candidate = f"{base[:64 - len(tail)]}{tail}"
+        suffix += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _extension_mcp_server_configs_for_run(
+    inputs: dict,
+    *,
+    user_facing: bool,
+    bare: bool,
+) -> dict[str, dict[str, Any]]:
+    try:
+        import extension_store
+    except Exception:
+        return {}
+    configs: dict[str, dict[str, Any]] = {}
+    for name, config in extension_store.runtime_mcp_server_configs(
+        inputs, user_facing=user_facing, bare=bare,
+    ).items():
+        configs.setdefault(name, config)
+    for name, config in extension_store.native_mcp_server_configs(
+        inputs, user_facing=user_facing, bare=bare,
+    ).items():
+        if extension_store.is_reserved_mcp_server_name(name):
+            configs[name] = config
+            continue
+        configs.setdefault(name, config)
+    return configs
+
+
+def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
+    return env
+
+
+async def _mcp_json_request(
+    config: dict[str, Any],
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    command = str(config.get("command") or "").strip()
+    if not command:
+        raise RuntimeError("MCP server config missing command")
+    args = [str(arg) for arg in config.get("args") or []]
+    proc = await asyncio.create_subprocess_exec(
+        command,
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=_mcp_subprocess_env(config),
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+
+    async def _send(payload: dict[str, Any]) -> None:
+        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+
+    async def _read_response() -> dict[str, Any]:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+        if not line:
+            raise RuntimeError("MCP server closed stdout")
+        response = json.loads(line.decode("utf-8", "replace"))
+        if response.get("error"):
+            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
+        return response.get("result") or {}
+
+    try:
+        await _send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "better-agent-runner", "version": "1"},
+            },
+        })
+        await _read_response()
+        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
+        return await _read_response()
+    finally:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+
+async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        result = await _mcp_json_request(
+            config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
+        return []
+    tools = result.get("tools") or []
+    return [tool for tool in tools if isinstance(tool, dict)]
+
+
+def _mcp_tool_result_text(result: dict[str, Any]) -> str:
+    if "structuredContent" in result:
+        text = json.dumps(result["structuredContent"], ensure_ascii=False, indent=2)
+    else:
+        parts: list[str] = []
+        for item in result.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            else:
+                parts.append(json.dumps(item, ensure_ascii=False))
+        text = "\n".join(part for part in parts if part)
+    if not text:
+        text = json.dumps(result, ensure_ascii=False)
+    if result.get("isError"):
+        return f"Error: {text}"
+    return _truncate(text)
+
+
+async def _mcp_call_tool(spec: dict[str, Any], args: dict[str, Any]) -> str:
+    result = await _mcp_json_request(
+        spec["config"],
+        "tools/call",
+        {"name": spec["tool_name"], "arguments": args},
+        timeout=_MCP_CALL_TIMEOUT_S,
+    )
+    return _mcp_tool_result_text(result)
+
+
+async def _extension_mcp_tools_for_run(
+    inputs: dict,
+    *,
+    user_facing: bool,
+    bare: bool,
+    used_names: set[str],
+) -> tuple[list[dict], dict[str, dict[str, Any]]]:
+    schemas: list[dict] = []
+    handlers: dict[str, dict[str, Any]] = {}
+    for server_name, config in _extension_mcp_server_configs_for_run(
+        inputs, user_facing=user_facing, bare=bare,
+    ).items():
+        for tool in await _mcp_list_tools(server_name, config):
+            raw_tool_name = str(tool.get("name") or "").strip()
+            if not raw_tool_name:
+                continue
+            chat_tool_name = _mcp_chat_tool_name(server_name, raw_tool_name, used_names)
+            input_schema = tool.get("inputSchema")
+            if not isinstance(input_schema, dict):
+                input_schema = {"type": "object", "properties": {}}
+            schemas.append(_function_tool_schema(
+                chat_tool_name,
+                str(tool.get("description") or f"{server_name} MCP tool {raw_tool_name}"),
+                copy.deepcopy(input_schema),
+            ))
+            handlers[chat_tool_name] = {
+                "server_name": server_name,
+                "tool_name": raw_tool_name,
+                "config": config,
+            }
+    return schemas, handlers
 
 
 def _tool_schemas_for_run(
@@ -1869,6 +2097,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         file_editing_mode=file_editing_mode,
         coordination_enabled=coordination_enabled,
     )
+    extension_mcp_schemas, extension_mcp_handlers = await _extension_mcp_tools_for_run(
+        inputs,
+        user_facing=bool(open_file_panel_enabled and app_session_id),
+        bare=bool(inputs.get("bare_config")),
+        used_names=_schema_tool_names(tool_schemas),
+    )
+    tool_schemas.extend(extension_mcp_schemas)
     lock_registry = LockRegistry()
     loopback_handlers = _build_loopback_tool_handlers(
         inputs, cwd=str(cwd), model=model, lock_registry=lock_registry,
@@ -1933,6 +2168,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         max_loops = _MAX_TOOL_LOOPS
     reasoning_effort = inputs.get("reasoning_effort") or None
     steer_offset = 0
+    run_started = time.monotonic()
 
     try:
         for _ in range(max_loops):
@@ -1999,6 +2235,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     call, cwd, app_session_id, run_dir, bypass,
                     interactive, backend_url, internal_token, emitter,
                     loopback_handlers, lock_registry, coordination_enabled,
+                    extension_mcp_handlers,
                 )
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
@@ -2038,7 +2275,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "success": error is None,
         "session_id": session_id,
         "error": error,
-        "token_usage": {**usage_acc, "duration_ms": None},
+        "token_usage": {**usage_acc, "duration_ms": round((time.monotonic() - run_started) * 1000)},
         "finished_at": _now_iso(),
     }
     _atomic_write_json(run_dir / "terminal.json", complete)
@@ -2096,6 +2333,7 @@ async def _dispatch_tool(
     bypass: bool, interactive: bool, backend_url: str, internal_token: str,
     emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
     lock_registry: LockRegistry, enforce_file_locks: bool,
+    extension_mcp_handlers: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     name = _canonical_tool_name(call["name"])
     try:
@@ -2113,6 +2351,16 @@ async def _dispatch_tool(
             internal_token=internal_token, app_session_id=app_session_id,
             interactive=interactive, emitter=emitter, tool_call_id=call["id"],
         )
+
+    mcp_handler = (extension_mcp_handlers or {}).get(name)
+    if mcp_handler is not None:
+        try:
+            result = await _mcp_call_tool(mcp_handler, args)
+        except Exception as e:
+            logger.exception("extension MCP tool %s failed", name)
+            result = f"Error: {type(e).__name__}: {e}"
+        emitter.emit_tool_result(call["id"], result)
+        return result
 
     # Loopback/orchestration/file-panel tools (ask, mssg, delegate_task,
     # create_worker/create_session/create_sub_session, open_file_panel,
@@ -2286,7 +2534,8 @@ async def _request_approval(
 _SYSTEM_PROMPT = (
     "You are a software engineering agent running inside Better Agent's own "
     "agent loop over an OpenAI Chat Completions endpoint. You have tools: "
-    "Bash, Read, Write, Edit, Grep, Glob. Work in the project cwd. Be concise. "
+    "Bash, Read, Write, Edit, Grep, Glob, and any extension tools attached to "
+    "this run. Work in the project cwd. Be concise. "
     "Use tools to inspect and edit files; do not guess at file contents."
 )
 
