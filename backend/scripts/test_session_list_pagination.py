@@ -868,6 +868,34 @@ def test_new_session_defaults_to_unpinned_but_empty_sorts_first(client: TestClie
     return ok
 
 
+def test_last_opened_sort_repages_after_open_projection(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "opened-old",
+        "2026-06-20T00:00:00+00:00",
+        last_opened_at="2026-06-01T00:00:00+00:00",
+        messages=[{"id": "u-old", "role": "user", "content": "old", "timestamp": "2026-06-20T00:00:00+00:00"}],
+    ))
+    _write(_record_with(
+        "opened-newer",
+        "2026-06-19T00:00:00+00:00",
+        last_opened_at="2026-06-03T00:00:00+00:00",
+        messages=[{"id": "u-newer", "role": "user", "content": "newer", "timestamp": "2026-06-19T00:00:00+00:00"}],
+    ))
+
+    before = client.get("/api/sessions?offset=0&limit=1&sort_by=last_opened_at", headers=HEADERS)
+    session_store.update_last_opened_projection("opened-old", "2026-06-04T00:00:00+00:00")
+    after = client.get("/api/sessions?offset=0&limit=1&sort_by=last_opened_at", headers=HEADERS)
+    if before.status_code != 200 or after.status_code != 200:
+        print(f"{FAIL} /api/sessions last-opened sort status before={before.status_code} after={after.status_code}")
+        return False
+    before_ids = [session["id"] for session in before.json().get("sessions", [])]
+    after_ids = [session["id"] for session in after.json().get("sessions", [])]
+    ok = before_ids == ["opened-newer"] and after_ids == ["opened-old"]
+    print(f"{PASS if ok else FAIL} /api/sessions last-opened projection invalidates paging order")
+    return ok
+
+
 def test_pin_endpoint_unpins_specific_session(client: TestClient) -> bool:
     _reset_home()
     _write(_record("specific", "2026-06-19T00:00:00+00:00", pinned=True))
@@ -1100,6 +1128,7 @@ def main_run() -> int:
         ok = test_warm_metadata_search_scores_only_candidate_rows() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
         ok = test_new_session_defaults_to_unpinned_but_empty_sorts_first(client) and ok
+        ok = test_last_opened_sort_repages_after_open_projection(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok
         ok = test_topbar_pin_endpoint_lists_pinned_sessions(client) and ok
         ok = test_sidebar_strips_heavy_working_mode_meta(client) and ok

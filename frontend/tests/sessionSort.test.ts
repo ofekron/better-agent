@@ -39,15 +39,35 @@ describe("sortSessionsForList", () => {
 
   it("sessions missing the sort field sink to the bottom", () => {
     const sessions = [
-      mk({ id: "no-prompt", updated_at: "2026-06-10T00:00:00Z" }),
+      mk({ id: "no-prompt", updated_at: "2026-06-10T00:00:00Z", message_count: 1 }),
       mk({
         id: "has-prompt",
         updated_at: "2026-01-01T00:00:00Z",
         last_user_prompt_at: "2026-06-01T00:00:00Z",
+        message_count: 1,
       } as Partial<Session> & Pick<Session, "id">),
     ];
     const out = sortSessionsForList(sessions, false, "last_user_prompt_at");
     expect(out.map((s) => s.id)).toEqual(["has-prompt", "no-prompt"]);
+  });
+
+  it("orders by last_opened_at when that is the sort field", () => {
+    const sessions = [
+      mk({
+        id: "opened-older",
+        updated_at: "2026-06-05T00:00:00Z",
+        last_opened_at: "2026-06-01T00:00:00Z",
+        message_count: 1,
+      } as Partial<Session> & Pick<Session, "id">),
+      mk({
+        id: "opened-newer",
+        updated_at: "2026-06-02T00:00:00Z",
+        last_opened_at: "2026-06-04T00:00:00Z",
+        message_count: 1,
+      } as Partial<Session> & Pick<Session, "id">),
+    ];
+    const out = sortSessionsForList(sessions, false, "last_opened_at");
+    expect(out.map((s) => s.id)).toEqual(["opened-newer", "opened-older"]);
   });
 
   it("pinned always wins over the sort field", () => {

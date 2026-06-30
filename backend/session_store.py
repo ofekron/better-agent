@@ -729,7 +729,7 @@ def _summary_sort_key(summary: Optional[dict], sort_by: str) -> tuple[bool, floa
 def _summary_order_changed(before: Optional[dict], after: dict) -> bool:
     if before is None:
         return True
-    sort_fields = ("updated_at", "last_user_prompt_at")
+    sort_fields = ("updated_at", "last_user_prompt_at", "last_opened_at")
     return bool(before.get("pinned", False)) != bool(after.get("pinned", False)) or any(
         timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
         for field in sort_fields
@@ -1095,7 +1095,7 @@ def update_seen_cursor_projection(sid: str, uid: Optional[str]) -> None:
 
 
 def update_last_opened_projection(sid: str, at: str) -> None:
-    global _summary_index_version
+    global _summary_index_version, _summary_order_version
     updated: Optional[dict] = None
     with _summary_index_lock:
         if not _summary_index_loaded:
@@ -1106,6 +1106,7 @@ def update_last_opened_projection(sid: str, at: str) -> None:
         updated = {**summary, "last_opened_at": at}
         _summary_index[sid] = updated
         _summary_index_version += 1
+        _summary_order_version += 1
     try:
         _write_summary_file(sid, updated)
     except Exception:

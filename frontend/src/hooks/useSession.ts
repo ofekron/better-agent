@@ -71,6 +71,7 @@ export type SessionMetadataPatch = {
   messages?: ChatMessage[];
   message_count?: number;
   updated_at?: string;
+  last_user_prompt_at?: string;
   last_opened_at?: string;
   pagination?: Session["pagination"];
   right_panel_open?: boolean;
@@ -679,6 +680,7 @@ export function useSession(authStatus?: string) {
   // causing the backend to flood us with all messages and events).
   const [wsTargetSessionId, setWsTargetSessionId] = useState<string | null>(null);
   const selectRequestIdRef = useRef(0);
+  const selectInFlightIdRef = useRef<string | null>(null);
   // Per-session highest seq we have applied locally. Sent as
   // `since_seq` on every WS subscribe so backend can replay only
   // what's new. Ref so reads are always fresh inside callbacks
@@ -875,10 +877,84 @@ export function useSession(authStatus?: string) {
     return sortSessionsForList(list, folderView, sortBy, rankOf);
   }, []);
 
-  const stampSessionLastOpened = useCallback((sessionId: string, at: string) => {
-    const apply = (session: Session): Session =>
-      session.last_opened_at === at ? session : { ...session, last_opened_at: at };
+  const applySessionPatchEverywhere = useCallback((
+    sessionId: string,
+    patchOrUpdater: SessionMetadataUpdater,
+  ) => {
+    const apply = (session: Session): Session => {
+      const patch =
+        typeof patchOrUpdater === "function"
+          ? patchOrUpdater(session)
+          : patchOrUpdater;
+      const next: Session = { ...session };
+      if (patch.inline_tags !== undefined) next.inline_tags = patch.inline_tags;
+      if (patch.adv_sync_overlays !== undefined)
+        next.adv_sync_overlays = patch.adv_sync_overlays;
+      if (patch.open_file_panels !== undefined)
+        next.open_file_panels = patch.open_file_panels;
+      if (patch.open_config_panels !== undefined)
+        next.open_config_panels = patch.open_config_panels;
+      if (patch.draft_input !== undefined) next.draft_input = patch.draft_input;
+      if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
+      if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;
+      if (patch.fork_closed !== undefined) next.fork_closed = patch.fork_closed;
+      if (patch.model !== undefined) next.model = patch.model;
+      if (patch.reasoning_effort !== undefined) {
+        next.reasoning_effort = patch.reasoning_effort as Session["reasoning_effort"];
+      }
+      if (patch.cwd !== undefined) next.cwd = patch.cwd;
+      if (patch.provider_id !== undefined) next.provider_id = patch.provider_id;
+      if (patch.permission !== undefined) next.permission = patch.permission;
+      if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
+      if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
+      if (patch.pinned !== undefined) next.pinned = patch.pinned;
+      if (patch.topbar_pinned !== undefined) next.topbar_pinned = patch.topbar_pinned;
+      if (patch.topbar_pinned_at !== undefined) next.topbar_pinned_at = patch.topbar_pinned_at;
+      if (patch.archived !== undefined) next.archived = patch.archived;
+      if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
+      if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;
+      if (patch.working_mode_meta !== undefined) next.working_mode_meta = patch.working_mode_meta;
+      if (patch.notes !== undefined) next.notes = patch.notes;
+      if (patch.current_todos !== undefined) next.current_todos = patch.current_todos;
+      if (patch.current_tasks !== undefined) next.current_tasks = patch.current_tasks;
+      if (patch.messages !== undefined) next.messages = patch.messages;
+      if (patch.message_count !== undefined) next.message_count = patch.message_count;
+      if (patch.updated_at !== undefined) next.updated_at = patch.updated_at;
+      if (patch.last_user_prompt_at !== undefined) next.last_user_prompt_at = patch.last_user_prompt_at;
+      if (patch.last_opened_at !== undefined) next.last_opened_at = patch.last_opened_at;
+      if (patch.pagination !== undefined) next.pagination = patch.pagination;
+      if (patch.right_panel_open !== undefined)
+        next.right_panel_open = patch.right_panel_open;
+      if (patch.right_panel_active_tab !== undefined)
+        next.right_panel_active_tab = patch.right_panel_active_tab;
+      const keys = Object.keys(patch) as (keyof SessionMetadataPatch)[];
+      return keys.some(
+        (key) =>
+          (session as unknown as Record<string, unknown>)[key] !==
+          (next as unknown as Record<string, unknown>)[key],
+      ) ? next : session;
+    };
 
+    setSessions((prev) => {
+      let changed = false;
+      const patched = prev
+        .map((s) => {
+          if (s.id !== sessionId) return s;
+          const next = apply(s);
+          if (next !== s) changed = true;
+          return next;
+        })
+        .filter(isSidebarVisibleSession);
+      if (!changed && patched.length === prev.length) return prev;
+      const sorted = sortForList(patched);
+      if (
+        sorted.length === prev.length &&
+        sorted.every((session, index) => session === prev[index])
+      ) {
+        return prev;
+      }
+      return sorted;
+    });
     setCurrentSession((prev) =>
       prev ? updateNodeById(prev, sessionId, apply) : prev
     );
@@ -891,7 +967,11 @@ export function useSession(authStatus?: string) {
         if (updated !== cached) sessionTreeCacheRef.current.set(rootId, updated);
       }
     }
-  }, []);
+  }, [sortForList]);
+
+  const stampSessionLastOpened = useCallback((sessionId: string, at: string) => {
+    applySessionPatchEverywhere(sessionId, { last_opened_at: at });
+  }, [applySessionPatchEverywhere]);
 
   useEffect(() => {
     if (!currentSession || wsTargetSessionId === null) return;
@@ -1076,6 +1156,27 @@ export function useSession(authStatus?: string) {
     );
   }, []);
 
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    setSessions((prev) => {
+      const sorted = sortForList([...prev]);
+      if (
+        sorted.length === prev.length &&
+        sorted.every((session, index) => session === prev[index])
+      ) {
+        return prev;
+      }
+      return sorted;
+    });
+  }, [
+    sessionListFilters.folderView,
+    sessionListFilters.sortBy,
+    sessionListFilters.statusSort,
+    sessionListFilters.search,
+    sessionsLoaded,
+    sortForList,
+  ]);
+
   const createSession = useCallback(
     async (opts: CreateSessionOptions) => {
       const {
@@ -1143,7 +1244,7 @@ export function useSession(authStatus?: string) {
         completeOp("session:create");
       }
     },
-    [fetchSessions]
+    [sortForList]
   );
 
   const addOfflineSession = useCallback((session: Session) => {
@@ -1153,9 +1254,10 @@ export function useSession(authStatus?: string) {
         : sortForList([session, ...prev]),
     );
     selectRequestIdRef.current++;
+    selectInFlightIdRef.current = null;
     setCurrentSession(session);
     setWsTargetSessionId(null);
-  }, []);
+  }, [sortForList]);
 
   const restoreOfflineSession = useCallback((session: Session) => {
     setSessions((prev) =>
@@ -1163,7 +1265,7 @@ export function useSession(authStatus?: string) {
         ? prev
         : sortForList([session, ...prev]),
     );
-  }, []);
+  }, [sortForList]);
 
   const forkSession = useCallback(
     async (parentId: string, name?: string) => {
@@ -1184,6 +1286,7 @@ export function useSession(authStatus?: string) {
       completeOp(opId);
       await fetchSessions();
       selectRequestIdRef.current++;
+      selectInFlightIdRef.current = null;
       // Functional update: the parent session's draft may have changed
       // between the fork POST and this state commit. Since the fork
       // switches focus to the child (new session, empty draft), there's
@@ -1229,6 +1332,8 @@ export function useSession(authStatus?: string) {
   );
 
   const selectSession = useCallback(async (id: string) => {
+    if (selectInFlightIdRef.current === id) return;
+    selectInFlightIdRef.current = id;
     const myReqId = ++selectRequestIdRef.current;
     const opId = `session:select:${id}`;
     startOp(opId);
@@ -1271,13 +1376,20 @@ export function useSession(authStatus?: string) {
     const cur = currentSessionRef.current;
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
     if (cachedTree) {
-      setCurrentSession(cachedTree);
+      const cachedTreeWithOpenedAt = updateNodeById(cachedTree, id, (node) => {
+        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
+        const optimisticMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= optimisticMs) return node;
+        return { ...node, last_opened_at: openedAt };
+      });
+      setCurrentSession(cachedTreeWithOpenedAt);
       const t = openTimingRef.current;
       if (t && t.sid === id) {
         t.restMs = 0;
         armOpenQuietTimer();
       }
       setWsTargetSessionId(id);
+      selectInFlightIdRef.current = null;
       setSessionLoading(false);
       completeOp(opId);
       return;
@@ -1425,10 +1537,13 @@ export function useSession(authStatus?: string) {
     } catch {
       // ignore
     } finally {
+      if (myReqId === selectRequestIdRef.current) {
+        selectInFlightIdRef.current = null;
+      }
       setSessionLoading(false);
       completeOp(opId);
     }
-  }, [cachedSessionTreeFor, stampSessionLastOpened]);
+  }, [cachedSessionTreeFor, exchangePageSize, stampSessionLastOpened]);
 
   const deleteSession = useCallback(
     async (id: string) => {
@@ -2131,10 +2246,14 @@ export function useSession(authStatus?: string) {
         body: JSON.stringify({ archived }),
       });
       setSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? { ...s, archived } : s))
+        sortForList(
+          prev
+            .map((s) => (s.id === sessionId ? { ...s, archived } : s))
+            .filter(isSidebarVisibleSession),
+        )
       );
     },
-    []
+    [sortForList]
   );
 
   const toggleWorkerEligible = useCallback(
@@ -2217,79 +2336,22 @@ export function useSession(authStatus?: string) {
         return updateNodeById(prev, sessionId, apply);
       });
     },
-    []
+    [sortForList]
   );
 
   /** Merge a partial metadata patch ({inline_tags?, draft_input?, fork_closed?})
-   * into the session record. Used both as the optimistic local
-   * updater (typing, tag add/remove) AND as the WS broadcast applier
-   * (cross-tab sync). The two are unified so a single reducer owns
-   * the merge — no skew between optimistic and broadcast paths. */
+   * into every local copy of the session record. Used both as the optimistic
+   * local updater (typing, tag add/remove) AND as the WS broadcast applier
+   * (cross-tab sync). The shared reducer also re-sorts the sidebar list by
+   * the active sort field so frontend-only patches take effect immediately. */
   const applySessionMetadata = useCallback(
     (
       sessionId: string,
       patchOrUpdater: SessionMetadataUpdater
     ) => {
-      const apply = (s: Session): Session => {
-        const patch =
-          typeof patchOrUpdater === "function"
-            ? patchOrUpdater(s)
-            : patchOrUpdater;
-        const next: Session = { ...s };
-        if (patch.inline_tags !== undefined) next.inline_tags = patch.inline_tags;
-        if (patch.adv_sync_overlays !== undefined)
-          next.adv_sync_overlays = patch.adv_sync_overlays;
-        if (patch.open_file_panels !== undefined)
-          next.open_file_panels = patch.open_file_panels;
-        if (patch.open_config_panels !== undefined)
-          next.open_config_panels = patch.open_config_panels;
-        if (patch.draft_input !== undefined) next.draft_input = patch.draft_input;
-        if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
-        if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;
-        if (patch.fork_closed !== undefined) next.fork_closed = patch.fork_closed;
-        if (patch.model !== undefined) next.model = patch.model;
-        if (patch.reasoning_effort !== undefined) {
-          next.reasoning_effort = patch.reasoning_effort as Session["reasoning_effort"];
-        }
-        if (patch.cwd !== undefined) next.cwd = patch.cwd;
-        if (patch.provider_id !== undefined) next.provider_id = patch.provider_id;
-        if (patch.permission !== undefined) next.permission = patch.permission;
-        if (patch.supervisor_enabled !== undefined) next.supervisor_enabled = patch.supervisor_enabled;
-        if (patch.supervisor_custom_prompt !== undefined) next.supervisor_custom_prompt = patch.supervisor_custom_prompt;
-        if (patch.pinned !== undefined) next.pinned = patch.pinned;
-        if (patch.topbar_pinned !== undefined) next.topbar_pinned = patch.topbar_pinned;
-        if (patch.topbar_pinned_at !== undefined) next.topbar_pinned_at = patch.topbar_pinned_at;
-        if (patch.archived !== undefined) next.archived = patch.archived;
-        if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
-        if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;
-        if (patch.working_mode_meta !== undefined) next.working_mode_meta = patch.working_mode_meta;
-        if (patch.notes !== undefined) next.notes = patch.notes;
-        if (patch.current_todos !== undefined) next.current_todos = patch.current_todos;
-        if (patch.current_tasks !== undefined) next.current_tasks = patch.current_tasks;
-        if (patch.messages !== undefined) next.messages = patch.messages;
-        if (patch.message_count !== undefined) next.message_count = patch.message_count;
-        if (patch.updated_at !== undefined) next.updated_at = patch.updated_at;
-        if (patch.last_opened_at !== undefined) next.last_opened_at = patch.last_opened_at;
-        if (patch.pagination !== undefined) next.pagination = patch.pagination;
-        if (patch.right_panel_open !== undefined)
-          next.right_panel_open = patch.right_panel_open;
-        if (patch.right_panel_active_tab !== undefined)
-          next.right_panel_active_tab = patch.right_panel_active_tab;
-        return next;
-      };
-      setSessions((prev) =>
-        sortForList(
-          prev
-            .map((s) => (s.id === sessionId ? apply(s) : s))
-            .filter(isSidebarVisibleSession),
-        )
-      );
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, apply);
-      });
+      applySessionPatchEverywhere(sessionId, patchOrUpdater);
     },
-    []
+    [applySessionPatchEverywhere]
   );
 
   /** Prepend a freshly-born NON-fork session (from a WS
@@ -2304,7 +2366,7 @@ export function useSession(authStatus?: string) {
       if (prev.some((s) => s.id === session.id)) return prev;
       return sortForList([session, ...prev]);
     });
-  }, []);
+  }, [sortForList]);
 
   /** Drop a session by id (from a WS `session_deleted` event). Mirrors
    * the optimistic removal in `deleteSession`, but driven by the WS
@@ -2431,6 +2493,7 @@ export function useSession(authStatus?: string) {
 
   const clearCurrentSession = useCallback(() => {
     selectRequestIdRef.current++;
+    selectInFlightIdRef.current = null;
     setCurrentSession(null);
     setWsTargetSessionId(null);
   }, []);

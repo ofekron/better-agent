@@ -196,6 +196,10 @@ interface UseWebSocketOptions {
       model?: string;
       cwd?: string;
       supervisor_enabled?: boolean;
+      message_count?: number;
+      updated_at?: string;
+      last_user_prompt_at?: string;
+      last_opened_at?: string;
       right_panel_open?: boolean;
       right_panel_active_tab?:
         | "files"
@@ -1233,6 +1237,8 @@ export function useWebSocket(
               current_tasks?: import("../types").TaskItem[];
               messages?: import("../types").ChatMessage[];
               message_count?: number;
+              updated_at?: string;
+              last_user_prompt_at?: string;
               last_opened_at?: string;
               pagination?: import("../types").Session["pagination"];
               worker_creation_policy?: import("../types").WorkerCreationPolicy;
