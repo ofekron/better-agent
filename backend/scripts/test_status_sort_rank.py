@@ -66,6 +66,7 @@ check(
     main._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
 check("rank.hasnew.unread", main._session_status_rank({"id": "new"}, mon, unread) == 4)
+check("rank.running_unread", main._session_status_rank({"id": "run"}, mon, {"run": 3}) == 2)
 check(
     "rank.open_todo",
     main._session_status_rank(
@@ -120,6 +121,14 @@ check(
         mon,
         unread,
     ) == 4,
+)
+check(
+    "rank.precedence.open_todo_over_running_unread",
+    main._session_status_rank(
+        {"id": "run", "current_todos": [{"content": "A", "status": "pending"}]},
+        mon,
+        {"run": 3},
+    ) == 3,
 )
 check(
     "rank.precedence.open_todo_over_running",

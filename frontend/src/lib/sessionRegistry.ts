@@ -971,7 +971,7 @@ export function statusRankOf(s: StatusFields): number {
     (s.pending_user_input_count ?? 0) > 0 ||
     tags.has(MARKER_TAG_NEEDS_DECISION)
   ) return 5;
-  if ((s.unread_count ?? 0) > 0) return 4;
+  if ((s.unread_count ?? 0) > 0 && !RUNNING_STATES.has(state)) return 4;
   if (hasOpenWorkItems(s)) return 3;
   if (RUNNING_STATES.has(state)) return 2;
   if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;

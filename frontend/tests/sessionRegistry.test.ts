@@ -521,12 +521,14 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
     expect(statusRankOf({ pending_user_input_count: 1 })).toBe(5);
     expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(5);
     expect(statusRankOf({ unread_count: 2 })).toBe(4);
+    expect(statusRankOf({ monitoring_state: "active", unread_count: 2 })).toBe(2);
     expect(statusRankOf({ current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
     expect(statusRankOf({ current_tasks: [{ content: "A", status: "in_progress" }] })).toBe(3);
     expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
     expect(statusRankOf({ monitoring_state: "idle" })).toBe(0);
     expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(5);
     expect(statusRankOf({ monitoring_state: "active", current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
+    expect(statusRankOf({ monitoring_state: "active", unread_count: 2, current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
     // classification by TAG, not color — untagged marker is inert
     expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
   });

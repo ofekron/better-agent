@@ -4067,7 +4067,7 @@ def _session_status_rank(
     unread = unread_by_sid.get(sid)
     if unread is None:
         unread = session.get("unread_count", 0)
-    if (unread or 0) > 0:
+    if (unread or 0) > 0 and state not in _RUNNING_STATES:
         return 4
     if _has_open_work_items(session):
         return 3
