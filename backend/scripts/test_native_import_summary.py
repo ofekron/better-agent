@@ -106,6 +106,11 @@ def main() -> None:
         check(all(s.cwd == "/work/proj" for s in full), "hydrate=True must read cwd")
         # Identity fields survive regardless of hydrate.
         check({s.native_id for s in lite} == set(sids), "native_id present without hydrate")
+
+        _make_claude_layout(home, ["s5"], cwd="/outside/proj")
+        scoped = native_import.count_native_sessions([pid], ["/work"])
+        check(scoped["total"] == 4, f"scoped total {scoped['total']} != 4")
+        check(scoped["by_provider"]["claude"]["total"] == 4, "scoped provider total wrong")
     finally:
         config_store.delete_provider(pid)
 

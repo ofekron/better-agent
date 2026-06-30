@@ -50,6 +50,7 @@ logging.getLogger("keyring").setLevel(logging.CRITICAL)
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
 import config_store  # noqa: E402
+import project_store  # noqa: E402
 
 CLAUDE_HOME = Path(_TMP_HOME) / "claude-home"
 os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_HOME)
@@ -719,6 +720,49 @@ def test_ingest_claude_matrix() -> None:
     check(session_store.get_session(root_id) is None, "repair deletes generated imported root")
 
 
+def test_repair_enforces_loaded_project_scope() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        allowed = str(Path(td, "allowed").resolve())
+        outside = str(Path(td, "outside").resolve())
+        generated = str(Path(td, "agents", "agents_workspaces",
+                             "12345678-1234-1234-1234-123456789abc").resolve())
+        project_store.add_project(generated)
+
+        def make_imported(cwd: str) -> str:
+            root = session_manager.create(
+                name="imported",
+                model="sonnet",
+                cwd=cwd,
+                orchestration_mode="native",
+                source="import",
+                user_initiated=True,
+                created_at="2026-01-01T00:00:00",
+            )
+            root["messages"] = [{
+                "id": str(uuid.uuid4()),
+                "role": "user",
+                "content": "real ask",
+                "timestamp": "2026-01-01T00:00:00",
+            }]
+            session_store.write_session_full(
+                root,
+                bump_updated_at=False,
+                preserve_projection_fields=True,
+            )
+            native_import._registry_set(f"test:{root['id']}", root["id"])
+            return root["id"]
+
+        keep_id = make_imported(allowed)
+        drop_id = make_imported(outside)
+        repaired = native_import.repair_imported_roots([allowed])
+        check(repaired["deleted"] >= 1, "repair reports out-of-project deletion")
+        check(repaired["removed_projects"] >= 1, "repair reports generated project removal")
+        check(session_store.get_session(keep_id) is not None, "in-project import kept")
+        check(session_store.get_session(drop_id) is None, "out-of-project import deleted")
+        projects = {p.get("path") for p in project_store.list_projects()}
+        check(generated not in projects, "generated project removed")
+
+
 # --------------------------------------------------------------------------- #
 # J. codex end-to-end ingest (user messages dropped → single turn collapse)
 # --------------------------------------------------------------------------- #
@@ -1115,6 +1159,7 @@ def main() -> None:
     test_enumerate_codex()
     test_registry()
     test_ingest_claude_matrix()
+    test_repair_enforces_loaded_project_scope()
     test_ingest_codex()
     test_enumerate_agy()
     test_enumerate_gemini()
