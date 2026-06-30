@@ -1,6 +1,7 @@
 import { useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
+import { scrollHorizontalItemIntoView } from "src/utils/tabScroll";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
@@ -33,16 +34,14 @@ export function SessionTabs({
   const movementRef = useAnimatedTabMovement<HTMLDivElement>(
     sessions.map((session) => session.id),
   );
-  const activeRef = useRef<HTMLButtonElement>(null);
+  const activeRef = useRef<HTMLDivElement>(null);
   const prevFirstIdRef = useRef<string | null>(null);
   const prevIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    activeRef.current?.scrollIntoView({
-      block: "nearest",
-      inline: "nearest",
-    });
-  }, [currentSessionId]);
+    scrollHorizontalItemIntoView(scrollRef.current, activeRef.current);
+  }, [currentSessionId, sessions]);
+
 
   // Scroll the tabs strip back to the start when a NEW session becomes
   // the first (leftmost) tab. Fires only when the first tab changed to
@@ -81,12 +80,12 @@ export function SessionTabs({
         
         return (
           <div
+            ref={isActive ? activeRef : undefined}
             key={s.id}
             data-tab-movement-key={s.id}
             className={`session-tab-wrapper${isActive ? " active" : ""}${topbarPinned ? " topbar-pinned" : ""}`}
           >
             <button
-              ref={isActive ? activeRef : undefined}
               type="button"
               className="session-tab"
               onClick={() => onSelect(s.id)}

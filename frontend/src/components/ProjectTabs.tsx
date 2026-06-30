@@ -2,6 +2,7 @@ import { useRef, useEffect, useMemo, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
+import { scrollHorizontalItemIntoView } from "src/utils/tabScroll";
 import type { Project } from "../types";
 import { ProjectStatusBadge } from "./ProjectStatusBadge";
 
@@ -41,7 +42,7 @@ export function ProjectTabs({
   const movementRef = useAnimatedTabMovement<HTMLDivElement>(
     projects.map((project) => `${project.node_id || "primary"}::${project.path}`),
   );
-  const activeRef = useRef<HTMLButtonElement>(null);
+  const activeRef = useRef<HTMLDivElement>(null);
   // Which tab's config menu is open, and where to anchor it. `pos` is
   // viewport coordinates so the menu can render `position: fixed` and
   // escape the tabs' horizontal-scroll overflow clip.
@@ -51,13 +52,9 @@ export function ProjectTabs({
   const [selectedProjectKeys, setSelectedProjectKeys] = useState<Set<string>>(() => new Set());
   const [deleting, setDeleting] = useState(false);
 
-  // Scroll the active tab into view on mount and when selection changes.
   useEffect(() => {
-    activeRef.current?.scrollIntoView({
-      block: "nearest",
-      inline: "nearest",
-    });
-  }, [currentPath, currentNodeId]);
+    scrollHorizontalItemIntoView(scrollRef.current, activeRef.current);
+  }, [currentPath, currentNodeId, projects]);
 
   // Close the config menu on outside click or Escape.
   useEffect(() => {
@@ -149,12 +146,12 @@ export function ProjectTabs({
           p.name || p.path.replace(/\/+$/, "").split("/").pop() || p.path;
         return (
           <div
+            ref={isActive ? activeRef : undefined}
             key={key}
             data-tab-movement-key={key}
             className={`project-tab${isActive ? " active" : ""}`}
           >
             <button
-              ref={isActive ? activeRef : undefined}
               type="button"
               className="project-tab-select"
               onClick={() => !disabled && onSelect(p.path, projNode)}
