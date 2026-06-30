@@ -484,6 +484,20 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
     return True
 
 
+def test_worker_parser_uses_last_valid_json_object() -> bool:
+    text = (
+        "I considered this malformed note first: {not json}\n"
+        "{\"ignored\": true}\n"
+        "{\"session_ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
+    )
+    parsed = session_search._parse_worker_result(text)
+    if parsed != {"session_ids": ["live-1"], "reasoning": "matched {brace}"}:
+        print(f"{FAIL} parser last valid object: got {parsed!r}")
+        return False
+    print(f"{PASS} parser accepts final valid JSON object after brace noise")
+    return True
+
+
 def test_run_search_sessions_worker_timeout() -> bool:
     """A dispatch timeout maps to error=timeout."""
     _reset_home()
@@ -977,6 +991,7 @@ def main_run() -> int:
         test_search_candidates_avoid_full_session_scan_for_content_matches,
         test_search_candidates_bound_content_index_wait,
         test_run_search_sessions_worker_parse_failed,
+        test_worker_parser_uses_last_valid_json_object,
         test_run_search_sessions_worker_timeout,
         test_run_search_sessions_short_circuits_empty_candidates,
         test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
