@@ -2163,6 +2163,15 @@ class TurnManager:
                             break
 
                         event: StreamEvent = get_task.result()
+                        if event.type == "context_usage":
+                            context_window = event.data.get("context_window")
+                            context_tokens = event.data.get("context_tokens")
+                            persist_id = primary_session_id or app_session_id
+                            if isinstance(context_window, int) and context_window > 0:
+                                session_manager.set_context_window(persist_id, context_window)
+                            if isinstance(context_tokens, int) and context_tokens >= 0:
+                                session_manager.set_context_tokens(persist_id, context_tokens)
+                            continue
                         event_dict = {"type": event.type, "data": event.data}
                         if not _is_synthetic_event(event_dict):
                             attempt_events.append(event_dict)

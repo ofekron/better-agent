@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[1]
@@ -28,6 +31,7 @@ from runner_codex import (  # noqa: E402
 )
 from codex_native import (  # noqa: E402
     CodexRolloutNormalizer,
+    CodexRolloutTailer,
     codex_subagent_delegation_id,
     codex_subagent_id_from_event,
     codex_subagent_ids_from_event,
@@ -512,6 +516,38 @@ def test_codex_rollout_token_count_captures_context_window_and_fill() -> bool:
     })
     assert normalizer.context_window == 200000
     assert normalizer.context_tokens == 170000
+    return True
+
+
+def test_codex_rollout_tailer_emits_context_updates() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        path.write_text(
+            json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "model_context_window": 200000,
+                    "last_token_usage": {"total_tokens": 180000},
+                }},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        updates: list[tuple[int | None, int | None]] = []
+        rendered: list[dict] = []
+
+        async def _go() -> None:
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+                on_context_update=lambda window, tokens: updates.append((window, tokens)),
+            )
+            await tailer.drain_available()
+
+        asyncio.run(_go())
+    assert updates == [(200000, 180000)]
+    assert rendered == []
     return True
 
 
@@ -1265,6 +1301,10 @@ TESTS = [
     (
         "codex rollout token_count captures context window and fill",
         test_codex_rollout_token_count_captures_context_window_and_fill,
+    ),
+    (
+        "codex rollout tailer emits context updates",
+        test_codex_rollout_tailer_emits_context_updates,
     ),
     (
         "codex rollout assistant text dedup is lossless",

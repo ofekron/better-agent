@@ -599,12 +599,33 @@ class CodexProvider(Provider):
             _rs.processed_byte_offset = n
             self._schedule_backend_state_flush(_rs)
 
+        def _on_context_update(
+            context_window: Optional[int],
+            context_tokens: Optional[int],
+            _rs: RunState = rs,
+        ) -> None:
+            payload = {}
+            if isinstance(context_window, int):
+                payload["context_window"] = context_window
+            if isinstance(context_tokens, int):
+                payload["context_tokens"] = context_tokens
+            if not payload:
+                return
+            try:
+                _rs.queue.put_nowait(StreamEvent("context_usage", payload))
+            except Exception:
+                logger.exception(
+                    "CodexJsonlTailer context update failed for run %s",
+                    _rs.run_id,
+                )
+
         rs.tailer = CodexRolloutTailer(
             path=rs.jsonl_path,
             start_byte=start_byte,
             namespace=session_id,
             dispatch=_dispatch_to_queue,
             on_cursor_advance=_on_cursor,
+            on_context_update=_on_context_update,
         )
         rs.tailer_task = asyncio.get_event_loop().create_task(
             rs.tailer.run(),
@@ -663,6 +684,7 @@ class CodexProvider(Provider):
                     return_exceptions=True,
                 )
             if rs.tailer is not None:
+                await rs.tailer.drain_available()
                 rs.tailer.stop()
             if rs.tailer_task is not None:
                 try:
