@@ -81,6 +81,10 @@ export interface BusEventMap {
     app_session_id: string;
     runs: unknown[];
   };
+  turn_start: {
+    app_session_id?: string;
+    session_id?: string;
+  };
   // The session's schedule list changed; payload IS the snapshot.
   schedules_updated: {
     app_session_id: string;

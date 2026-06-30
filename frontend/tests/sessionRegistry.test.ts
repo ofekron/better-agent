@@ -150,6 +150,26 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(0);
   });
 
+  it("turn_start clears the live error indication for that session", () => {
+    const sid = "sess-error-clear";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_error_changed", {
+      session_id: sid,
+      has_error: true,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(sessionRegistry.getSession(sid).has_error).toBe(true);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(6);
+
+    eventBus.publish("turn_start", { app_session_id: sid });
+
+    expect(sessionRegistry.getSession(sid).has_error).toBe(false);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
+  });
+
   it("session_deleted drops the sid's cached meta", () => {
     const sid = "sess-doomed";
     eventBus.publish("session_created", {
