@@ -267,9 +267,11 @@ class CodexProvider(Provider):
     RUNNER_KIND: ClassVar[str] = "codex"
     # CLI binary the codex runner resolves and spawns in app-server mode.
     CODEX_BINARY: ClassVar[str] = "codex"
-    # Optional codex profile selected via `-p`. Subclasses that target a
-    # config.toml profile (Fugu) set this; everything else reuses `codex`.
+    # Optional Codex profile selected via `-p`. App-server does not support
+    # profiles in current Codex; provider-specific app-server selection should
+    # use CODEX_CONFIG_OVERRIDES instead.
     CODEX_PROFILE: ClassVar[Optional[str]] = None
+    CODEX_CONFIG_OVERRIDES: ClassVar[tuple[str, ...]] = ()
 
     # Codex forks via the app-server `thread/fork`, which branches a
     # previous session's rollout into a new, isolated thread.
@@ -290,6 +292,10 @@ class CodexProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+
+    def codex_config_overrides(self, *, model: Optional[str]) -> list[str]:
+        del model
+        return list(self.CODEX_CONFIG_OVERRIDES)
 
     # ------------------------------------------------------------------
     # Env — minimal for Codex (subscription mode, no API keys)
@@ -390,6 +396,7 @@ class CodexProvider(Provider):
             "provider_kind": self.KIND,
             "codex_binary": self.CODEX_BINARY,
             "codex_profile": self.CODEX_PROFILE,
+            "codex_config_overrides": self.codex_config_overrides(model=model),
             "app_session_id": app_session_id,
             "active_capability_ids": [
                 str(cid)

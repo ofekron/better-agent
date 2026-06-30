@@ -24,21 +24,24 @@ def check(cond: bool, msg: str) -> None:
 
 
 def _make_fake_codex(bin_dir: Path) -> Path:
-    """A fake `codex` that answers `-p fugu debug models` with a JSON catalog."""
+    """A fake `codex` that rejects profiles and accepts Sakana config."""
     codex = bin_dir / "codex"
     payload = json.dumps({"models": [
+        {"slug": "gpt-5.5", "visibility": "show"},
         {"slug": "fugu", "visibility": "show"},
         {"slug": "fugu-ultra", "visibility": "show"},
     ]})
     codex.write_text(
         "#!/usr/bin/env sh\n"
         "set -eu\n"
-        # Only the fugu profile's model catalog is emulated.
-        'if [ "$1" = "-p" ] && [ "$2" = "fugu" ] && [ "$3" = "debug" ] && [ "$4" = "models" ]; then\n'
+        'if [ "${1:-}" = "-p" ]; then\n'
+        "  exit 2\n"
+        "fi\n"
+        'if [ "$1" = "-c" ] && [ "$2" = "model_provider=\\"sakana\\"" ] && [ "$3" = "-c" ] && [ "$4" = "model=\\"fugu\\"" ] && [ "$5" = "debug" ] && [ "$6" = "models" ]; then\n'
         f"  printf '%s\\n' {json.dumps(payload)}\n"
         "  exit 0\n"
         "fi\n"
-        "exit 0\n",
+        "exit 1\n",
         encoding="utf-8",
     )
     codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
@@ -51,10 +54,10 @@ def test_registry_and_capabilities() -> None:
     check(issubclass(FuguProvider, CodexProvider), "fugu reuses CodexProvider")
     check(FuguProvider.KIND == "fugu", "fugu KIND")
     check(FuguProvider.RUNNER_KIND == "fugu", "fugu has its own frozen runner dispatch")
-    # Fugu drives the SAME `codex` binary as generic Codex; only the profile
-    # differs — selected via `-p fugu`. No separate launcher binary.
+    # Fugu drives the SAME `codex` binary as generic Codex; only the config
+    # overrides differ. No separate launcher binary.
     check(FuguProvider.CODEX_BINARY == "codex", "fugu reuses the regular codex binary")
-    check(FuguProvider.CODEX_PROFILE == "fugu", "fugu selects the fugu profile via -p")
+    check(FuguProvider.CODEX_PROFILE is None, "fugu does not use Codex profiles for app-server")
     check(CodexProvider.CODEX_PROFILE is None, "generic codex has no profile override")
     # Fugu IS codex under the hood, so the codex app-server capabilities
     # (fork, steering, subagents, team mode) carry over unchanged.
@@ -63,7 +66,7 @@ def test_registry_and_capabilities() -> None:
     check(FuguProvider.supports_steering is True, "fugu inherits codex steering")
     check(FuguProvider.supports_native_subagents is True, "fugu inherits codex subagents")
     # Sakana's catalog advertises exactly high + xhigh for Fugu/Fugu Ultra;
-    # the profile routes the call to Fugu, so the effort dial works.
+    # the model-provider override routes the call to Fugu, so the effort dial works.
     check(FuguProvider.supports_reasoning_effort is True, "fugu exposes the reasoning-effort dial")
     check(FuguProvider.reasoning_effort_options == ("high", "xhigh"), "fugu offers high + xhigh only")
     check(FuguProvider.default_reasoning_effort == "high", "fugu defaults to high")
@@ -75,26 +78,36 @@ def test_models_catalog() -> None:
     check(fetch is fetch_fugu_models, "fugu refresh resolves to fetch_fugu_models")
 
 
-def test_argv_builder_selects_profile() -> None:
+def test_argv_builder_selects_fugu_sakana_overrides() -> None:
     # Generic codex: no profile flag, just the subcommand.
     check(_build_app_server_argv("codex", None) == ["codex", "app-server"], "generic argv has no -p")
-    # Fugu: -p fugu precedes the subcommand, ahead of any -c overrides.
-    fugu_argv = _build_app_server_argv("codex", "fugu", ["model_reasoning_effort=high"])
-    check(fugu_argv == ["codex", "-p", "fugu", "-c", "model_reasoning_effort=high", "app-server"],
-          "fugu argv selects the profile before the subcommand")
-    # Global flags precede the subcommand for any profile.
+    provider = FuguProvider({"id": "fugu-test", "kind": "fugu"})
+    fugu_overrides = [
+        *provider.codex_config_overrides(model="fugu-ultra"),
+        "model_reasoning_effort=\"high\"",
+    ]
+    fugu_argv = _build_app_server_argv("codex", FuguProvider.CODEX_PROFILE, fugu_overrides)
+    check(fugu_argv == [
+        "codex",
+        "-c", "model_provider=\"sakana\"",
+        "-c", "model=\"fugu-ultra\"",
+        "-c", "model_reasoning_effort=\"high\"",
+        "app-server",
+    ], "fugu argv selects Sakana via config overrides before app-server")
+    check("-p" not in fugu_argv, "fugu app-server argv never uses unsupported profile flag")
+    # Global flags still precede the subcommand for generic profile users.
     check(_build_app_server_argv("codex", "other") == ["codex", "-p", "other", "app-server"],
           "arbitrary profile is forwarded")
 
 
-def test_fetch_uses_codex_with_fugu_profile() -> None:
+def test_fetch_uses_codex_with_sakana_overrides() -> None:
     bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-bin-"))
     old_path = os.environ.get("PATH", "")
     try:
         _make_fake_codex(bin_dir)
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
-        # The fetched models come from `codex -p fugu debug models`.
-        check(fetch_fugu_models() == ["fugu", "fugu-ultra"], "fetch_fugu_models parses the fugu profile catalog")
+        # The fetched models come from Codex with Sakana model-provider config.
+        check(fetch_fugu_models() == ["fugu", "fugu-ultra"], "fetch_fugu_models parses the fugu catalog")
     finally:
         os.environ["PATH"] = old_path
         shutil.rmtree(bin_dir, ignore_errors=True)
@@ -148,8 +161,8 @@ def main() -> int:
     tests = [
         test_registry_and_capabilities,
         test_models_catalog,
-        test_argv_builder_selects_profile,
-        test_fetch_uses_codex_with_fugu_profile,
+        test_argv_builder_selects_fugu_sakana_overrides,
+        test_fetch_uses_codex_with_sakana_overrides,
         test_codex_binary_override_mechanism,
         test_fugu_not_auto_installable,
         test_fugu_models_fallback_without_binary,
