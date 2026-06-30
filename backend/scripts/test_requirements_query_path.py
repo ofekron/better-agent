@@ -155,6 +155,19 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
 
 
+def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
+    import requirement_context as rc
+
+    spec = rc.GET_REQUIREMENTS_PROCESSOR_SPEC
+    server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+
+    check(spec.version >= 2, "processor spec version invalidates polluted direct bases")
+    check(spec.run_mode == "fork", "processor uses fork mode for lookup isolation")
+    check(spec.ephemeral_forks is True, "processor uses ephemeral fork per lookup")
+    check("_GET_REQUIREMENTS_TIMEOUT = 330.0" in server, "MCP get-requirements timeout covers three processor attempts")
+    check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
+
+
 def test_prepare_orchestration_is_cheap_and_nonblocking() -> None:
     import requirement_context as rc
 
@@ -234,6 +247,7 @@ def run() -> None:
     test_query_path_has_no_inline_extraction()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
+    test_processor_dispatch_is_isolated_and_timeout_budgeted()
     test_prepare_orchestration_is_cheap_and_nonblocking()
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
