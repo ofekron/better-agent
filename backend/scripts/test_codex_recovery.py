@@ -43,6 +43,7 @@ from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState  # noqa: E402
+from codex_usage import token_usage_from_codex_usage  # noqa: E402
 from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
 from run_recovery import (  # noqa: E402
     _integrate_one,
@@ -552,6 +553,24 @@ def test_dead_wrapper_ignores_malformed_usage_values() -> bool:
     }
     if usage != expected:
         print(f"  expected malformed usage to zero, got {usage!r}")
+        return False
+    return True
+
+
+def test_codex_usage_normalizer_zeros_malformed_live_values() -> bool:
+    usage = token_usage_from_codex_usage({
+        "input_tokens": True,
+        "output_tokens": -5,
+        "cached_input_tokens": "9",
+    })
+    expected = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+    }
+    if usage != expected:
+        print(f"  expected malformed live usage to zero, got {usage!r}")
         return False
     return True
 
@@ -1312,6 +1331,7 @@ TESTS = [
     ("dead codex wrapper uses rollout terminal complete", test_dead_wrapper_uses_rollout_terminal_complete),
     ("dead codex wrapper resolves missing jsonl path", test_dead_wrapper_resolves_missing_jsonl_path),
     ("dead codex wrapper ignores malformed usage values", test_dead_wrapper_ignores_malformed_usage_values),
+    ("codex usage normalizer zeros malformed live values", test_codex_usage_normalizer_zeros_malformed_live_values),
     ("dead codex wrapper uses rollout terminal failure", test_dead_wrapper_uses_rollout_terminal_failure),
     ("dead codex wrapper without terminal fails closed", test_dead_wrapper_without_terminal_still_fails_closed),
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
