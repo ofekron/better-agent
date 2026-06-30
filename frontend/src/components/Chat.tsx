@@ -502,6 +502,7 @@ export function Chat({
   onRename,
   onAddTag,
   onAdvSync,
+  onToggleRearranger,
   tags,
   onAdvSyncClick,
   onRemoveTag,
@@ -1253,6 +1254,21 @@ export function Chat({
                 >
                   {showRaw ? t("chat.chatButton") : t("chat.rawJsonButton")}
                 </button>
+                {onToggleRearranger && (
+                  <button
+                    className={`raw-toggle rearranger-toolbar-toggle ${
+                      session.rearranger_enabled ? "active" : ""
+                    }`}
+                    onClick={() => {
+                      onToggleRearranger(!session.rearranger_enabled);
+                      setToolbarMenuOpen(false);
+                    }}
+                  >
+                    {session.rearranger_enabled
+                      ? t("chat.disableRearrangerButton")
+                      : t("chat.enableRearrangerButton")}
+                  </button>
+                )}
                 {userFacingForks(session).length > 0 && (
                   <button
                     className={`raw-toggle ${showTree ? "active" : ""}`}

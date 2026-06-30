@@ -88,6 +88,8 @@
   "chat.chatButton": "채팅",
   "chat.rawJsonButton": "원본 JSON",
   "chat.treeButton": "트리",
+  "chat.enableRearrangerButton": "재정렬 사용",
+  "chat.disableRearrangerButton": "재정렬 중지",
   "chat.loadingOlderMessages": "이전 메시지 불러오는 중...",
   "chat.loadOlderMessages": "이전 메시지 불러오기",
   "chat.rootEvents": "연결되지 않은 이벤트",

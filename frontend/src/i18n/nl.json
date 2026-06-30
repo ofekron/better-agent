@@ -88,6 +88,8 @@
   "chat.chatButton": "Chat",
   "chat.rawJsonButton": "Ruwe JSON",
   "chat.treeButton": "Boom",
+  "chat.enableRearrangerButton": "Herschikker inschakelen",
+  "chat.disableRearrangerButton": "Herschikker uitschakelen",
   "chat.loadingOlderMessages": "Oudere berichten laden...",
   "chat.loadOlderMessages": "Oudere berichten laden",
   "chat.rootEvents": "Niet-gekoppelde gebeurtenissen",

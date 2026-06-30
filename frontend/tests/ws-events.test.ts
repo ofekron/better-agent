@@ -148,11 +148,12 @@ describe("WebSocket event handling", () => {
     });
     await h.flush();
 
-    // The Tree button only shows when rearranger is enabled.
-    const treeBtn = Array.from(h.$$("button")).find((b) =>
-      /Tree/.test(b.textContent ?? ""),
-    );
-    expect(treeBtn).toBeDefined();
+    await h.click(".chat-toolbar-overflow-trigger");
+    expect(
+      Array.from(h.$$("button")).some((b) =>
+        /chat\.disableRearrangerButton/.test(b.textContent ?? ""),
+      ),
+    ).toBe(true);
     h.unmount();
   });
 

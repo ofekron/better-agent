@@ -88,6 +88,8 @@
   "chat.chatButton": "Chat",
   "chat.rawJsonButton": "Rohes JSON",
   "chat.treeButton": "Baum",
+  "chat.enableRearrangerButton": "Neuordnung aktivieren",
+  "chat.disableRearrangerButton": "Neuordnung deaktivieren",
   "chat.loadingOlderMessages": "Ältere Nachrichten werden geladen...",
   "chat.loadOlderMessages": "Ältere Nachrichten laden",
   "chat.rootEvents": "Angeheftete Ereignisse",

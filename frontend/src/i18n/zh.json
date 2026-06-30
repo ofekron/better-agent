@@ -88,6 +88,8 @@
   "chat.chatButton": "聊天",
   "chat.rawJsonButton": "原始 JSON",
   "chat.treeButton": "树状",
+  "chat.enableRearrangerButton": "启用重排",
+  "chat.disableRearrangerButton": "停用重排",
   "chat.loadingOlderMessages": "正在加载更早的消息...",
   "chat.loadOlderMessages": "加载更早的消息",
   "chat.rootEvents": "未挂载的事件",
