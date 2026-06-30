@@ -5262,6 +5262,33 @@ button.run-badge-clickable:focus-visible {
   cursor: pointer;
   font-size: calc(13px * var(--app-font-scale));
 }
+.extension-ui-settings-instructions-input {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: calc(13px * var(--app-font-scale));
+  line-height: 1.5;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+.extension-ui-settings-instructions-input::placeholder {
+  color: var(--text-muted);
+}
+.extension-ui-settings-instructions-input:focus {
+  outline: none;
+  border-color: var(--accent, #6aa3ff);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #6aa3ff) 28%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .extension-ui-settings-instructions-input {
+    transition: none;
+  }
+}
 .shortcut-settings-header {
   display: flex;
   justify-content: space-between;

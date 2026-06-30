@@ -192,6 +192,17 @@ def _fingerprint_after_root_write_locked(
     newest_mtime_ns = max(newest_mtime_ns, file_signature[0])
     return count, newest_mtime_ns, total_size
 
+
+def _publish_index_fingerprint_locked(
+    fingerprint: tuple[int, int, int] | None,
+) -> None:
+    global _index_fingerprint, _dir_fingerprint_cache
+    if fingerprint is None:
+        return
+    _index_fingerprint = fingerprint
+    with _dir_fingerprint_cache_lock:
+        _dir_fingerprint_cache = (time.monotonic(), fingerprint)
+
 # ── Summary index ─────────────────────────────────────────────────────
 #
 # In-memory dict of root_session_id → summary_dict. Writers update their
@@ -2239,16 +2250,13 @@ def _schedule_index_sidecar_write(
 def _persist_index_sidecar_if_loaded(
     fingerprint: tuple[int, int, int] | None = None,
 ) -> None:
-    global _index_fingerprint, _dir_fingerprint_cache
     with _index_lock:
         if not _index_loaded:
             return
         fp = fingerprint
         if fp is None:
             fp = _dir_fingerprint()
-        _index_fingerprint = fp
-        with _dir_fingerprint_cache_lock:
-            _dir_fingerprint_cache = (time.monotonic(), fp)
+        _publish_index_fingerprint_locked(fp)
         fork_index = dict(_fork_index)
         root_forks = {
             root_id: set(forks)
@@ -4035,14 +4043,15 @@ def write_session_full(
                     file_signature,
                 )
                 _root_index_signatures[root["id"]] = file_signature
+                _publish_index_fingerprint_locked(updated_fingerprint)
                 index_loaded = _index_loaded
         else:
             index_loaded = False
             updated_fingerprint = None
-    if index_loaded and (fork_topology_changed or root.get("forks")):
+    if index_loaded and fork_topology_changed:
         with perf.timed("store.session.write_full.index_sidecar"):
             _persist_index_sidecar_if_loaded(updated_fingerprint)
-    elif root.get("forks"):
+    elif root.get("forks") and not index_loaded:
         with perf.timed("store.session.write_full.index_sidecar"):
             _refresh_index_sidecar_for_written_root(root, file_signature)
     # INVARIANT: update summary index AFTER the durable write (post

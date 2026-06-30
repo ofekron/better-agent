@@ -648,7 +648,7 @@ def _extract_text(data: dict) -> str:
 
 def _event_timestamp(event: dict) -> str:
     data = _event_data(event)
-    containers = [data, event]
+    containers = [event, data]
     message = data.get("message")
     if isinstance(message, dict):
         containers.append(message)
@@ -682,6 +682,9 @@ _INTERNAL_IMPORT_PROMPT_SIGNATURES = (
     "direct Claude Code CLI process configured for the Z.AI Claude-compatible provider",
     "machine completion worker for the requirement-analysis pipeline",
     "You are an adversarial reviewer for Better Agent",
+    "You are a HOSTILE adversarial code reviewer.",
+    "You are adversarial reviewer for a Better Agent RCA.",
+    "You are worker:testape",
     "Better Agent requires a parent-session reply after subagent work.",
 )
 
@@ -692,6 +695,7 @@ _INTERNAL_IMPORT_PROMPT_PREFIXES = (
     "<machine-completion-prep>",
     "<search-worker-provision>",
     "<get-requirements-processor-prep>",
+    "<file-editor-provision>",
     "<verdict-prompt>",
 )
 
@@ -699,7 +703,10 @@ _INTERNAL_IMPORT_PROMPT_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE | re.DOTALL)
     for pattern in (
         r"^(adversarial(ly)? (re-)?review|read-only adversarial|final adversarial review|second adversarial review)",
+        r"^you are a hostile adversarial code reviewer\b",
         r"^use hostile adversarial review stance",
+        r"^#\s*testape/[a-z0-9_/-]+\b",
+        r"^▶\s*👤\s*user\b",
         r"^in /users/[^,\n]+,\s*adversarially review",
         r"^(read-only:|read-only adversarial validation|in /users/[^,\n]+,\s*read-only:|in /users/[^,\n]+,\s*audit\b)",
         r"^please review the following git diff representing",
@@ -779,6 +786,37 @@ def _native_created_iso(sess: NativeSession, turns: Optional[list[_Turn]] = None
     return _local_iso(sess.created_at)
 
 
+def _max_native_iso(values: list[str]) -> Optional[str]:
+    best = ""
+    for raw in values:
+        value = _local_iso(raw)
+        if value and value > best:
+            best = value
+    return best or None
+
+
+def _native_turn_activity_iso(turn: _Turn) -> Optional[str]:
+    return _max_native_iso([turn.timestamp, *[_event_timestamp(ev) for ev in turn.events]])
+
+
+def _native_last_activity_iso(sess: NativeSession, turns: list[_Turn]) -> Optional[str]:
+    values = [sess.created_at]
+    for turn in turns:
+        values.append(turn.timestamp)
+        values.extend(_event_timestamp(ev) for ev in turn.events)
+    return _max_native_iso(values)
+
+
+def _imported_message_last_activity_iso(root_id: str) -> Optional[str]:
+    live = session_manager.get(root_id) or {}
+    values = [
+        str(m.get("timestamp") or "")
+        for m in (live.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+    return _max_native_iso(values)
+
+
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
     if sess.title:
         return sess.title[:80]
@@ -837,8 +875,6 @@ def _import_session_locked(sess: NativeSession) -> str:
     root_id = created["id"]
 
     from orchs import ApplyEventCtx, get_strategy
-    from run_recovery import _max_event_timestamp, _repair_updated_at_to_last_activity
-
     strategy = get_strategy("native")
     failures = 0
     with session_manager.batch(root_id):
@@ -858,6 +894,7 @@ def _import_session_locked(sess: NativeSession) -> str:
                 "source": "native_import",
             }
             assistant_msg = strategy.build_assistant_scaffold()
+            assistant_msg["timestamp"] = _native_turn_activity_iso(turn) or user_msg["timestamp"]
             messages.append(user_msg)
             messages.append(assistant_msg)
             ctx = ApplyEventCtx(
@@ -897,7 +934,10 @@ def _import_session_locked(sess: NativeSession) -> str:
             logger.exception("native_import: failed to delete empty session %s", root_id)
         raise ValueError("native session has no importable events")
 
-    _repair_updated_at_to_last_activity(root_id, _max_event_timestamp(events))
+    last_activity = _imported_message_last_activity_iso(root_id) or _native_last_activity_iso(sess, turns)
+    if last_activity:
+        with session_manager.batch(root_id, bump_updated_at=False):
+            session_manager.set_updated_at(root_id, last_activity)
     _registry_set_for(sess, root_id)
     if failures:
         logger.warning(

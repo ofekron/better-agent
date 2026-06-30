@@ -184,11 +184,17 @@ def test_internal_import_prompt_filter() -> None:
         "<machine-completion-prep>\nYou are a reusable machine-completion worker.",
         "<search-worker-provision>\nYou are a reusable session-search ranking worker.",
         "<get-requirements-processor-prep>\nYou are a reusable requirements lookup worker.",
+        "<file-editor-provision>\nYou are the reusable base session for Better Agent file editing.",
         "<verdict-prompt>\nYou are an adversarial supervisor.",
         "Better Agent requires a parent-session reply after subagent work.",
         "Better Agent run.sh startup checker for Z.AI",
+        "You are adversarial reviewer for a Better Agent RCA. Keep report under 200 words.",
+        "You are worker:testape — the SINGLE global TestApe e2e worker in the user's main Better Agent instance.",
         "Adversarial review under 200 words. Symptom: duplicate prompt send.",
+        "You are a HOSTILE adversarial code reviewer. Be ruthless, not hedging.",
         "Read-only adversarial validation in /Users/ofekron/better-claude. Do not edit files.",
+        "# testape/eval_js\nadapter_id: \"web_9224_np_automation\"",
+        "▶ 👤 USER is there a tool/framework library w/e out there that auto syncs SDK + cli + mcp for an api?",
         "In /Users/ofekron/better-claude, read-only: find where allowed reasoning_effort values are defined.",
         "Please review the following git diff representing the addition of a template option.",
         "Investigate this TestApe product bug in /Users/ofekron/testape and return commit-ready facts.",
@@ -661,6 +667,10 @@ def test_ingest_claude_matrix() -> None:
     loaded = session_manager.get(root_id)
     check(sum(1 for m in loaded["messages"] if m["role"] == "user") == 1, "malformed skipped, real imported")
     check(loaded["messages"][0]["timestamp"].startswith("2026-01-01"), "user timestamp preserves prompt date")
+    check(loaded["messages"][1]["timestamp"].startswith("2026-01-02"), "assistant timestamp preserves native date")
+    check(loaded["updated_at"].startswith("2026-01-02"), "updated_at preserves native last activity")
+    disk = json.loads((Path(_TMP_HOME) / "sessions" / f"{root_id}.json").read_text(encoding="utf-8"))
+    check(disk["updated_at"].startswith("2026-01-02"), "disk updated_at preserves native last activity")
 
 
 # --------------------------------------------------------------------------- #

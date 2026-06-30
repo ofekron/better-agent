@@ -280,6 +280,99 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
     assert "scheduler" in cfg_re["mcp_servers"]
 
 
+def test_user_instructions_save_load_clear() -> None:
+    """Per-extension user instructions round-trip: empty by default, trimmed on
+    save, cleared when set to whitespace/empty."""
+    restore = _with_fake_extension(_FakeKeychain())
+    try:
+        assert extension_store.get_user_instructions("ofek.demo") == ""
+        saved = extension_store.set_user_instructions("ofek.demo", "  prefer staging  ")
+        assert saved == "prefer staging"  # trimmed
+        assert extension_store.get_user_instructions("ofek.demo") == "prefer staging"
+        # extension_config surfaces it for the Settings UI.
+        assert extension_store.extension_config("ofek.demo")["user_instructions"] == "prefer staging"
+        # Whitespace-only clears it.
+        assert extension_store.set_user_instructions("ofek.demo", "   ") == ""
+        assert extension_store.get_user_instructions("ofek.demo") == ""
+    finally:
+        restore()
+
+
+def test_user_instructions_validation() -> None:
+    """Over-length text is rejected; non-string is rejected; None coerces to
+    an empty (cleared) value."""
+    restore = _with_fake_extension(_FakeKeychain())
+    try:
+        too_long = "x" * (extension_store._USER_INSTRUCTIONS_MAX_CHARS + 1)
+        try:
+            extension_store.set_user_instructions("ofek.demo", too_long)
+            raise AssertionError("expected rejection for over-length instructions")
+        except extension_store.ExtensionError:
+            pass
+        try:
+            extension_store.set_user_instructions("ofek.demo", 123)  # type: ignore[arg-type]
+            raise AssertionError("expected rejection for non-string instructions")
+        except extension_store.ExtensionError:
+            pass
+        # None is allowed and clears.
+        assert extension_store.set_user_instructions("ofek.demo", None) == ""
+    finally:
+        restore()
+
+
+def test_user_instruction_contexts_active_filtering_and_shape() -> None:
+    """The injected capability-context block carries only ACTIVE +
+    runtime-ready extensions with non-empty instructions, in the
+    provider-uniform shape; bare_config suppresses it entirely."""
+    record = {
+        "manifest": {"id": "ofek.demo", "name": "Demo", "entrypoints": {}},
+        "source": {"type": "git"},
+        "enabled": True,
+    }
+    real_get = extension_store.get_extension
+    real_list = extension_store.list_extensions
+    real_active = extension_store._record_active
+    real_ready = extension_store._record_runtime_ready
+    extension_store.get_extension = lambda eid: record if eid == "ofek.demo" else real_get(eid)  # type: ignore[assignment]
+    extension_store.list_extensions = lambda **_kw: [record]  # type: ignore[assignment]
+    extension_store._record_active = lambda r: True  # type: ignore[assignment]
+    extension_store._record_runtime_ready = lambda r: True  # type: ignore[assignment]
+    try:
+        # No instructions yet → no block.
+        assert extension_store.user_instruction_contexts() == []
+
+        extension_store.set_user_instructions("ofek.demo", "always ask before deleting")
+        blocks = extension_store.user_instruction_contexts()
+        assert len(blocks) == 1
+        block = blocks[0]
+        assert block["category"] == "instructions"
+        assert block["content_kind"] == "extension_user_instructions"
+        assert "Demo (ofek.demo)" in block["content"]
+        assert "always ask before deleting" in block["content"]
+
+        # bare_config suppresses entirely.
+        assert extension_store.user_instruction_contexts(bare_config=True) == []
+
+        # Inactive extension contributes nothing.
+        extension_store._record_active = lambda r: False  # type: ignore[assignment]
+        assert extension_store.user_instruction_contexts() == []
+        extension_store._record_active = lambda r: True  # type: ignore[assignment]
+
+        # Not-runtime-ready contributes nothing.
+        extension_store._record_runtime_ready = lambda r: False  # type: ignore[assignment]
+        assert extension_store.user_instruction_contexts() == []
+    finally:
+        # Clear residue so order-dependent sibling tests start clean (tests
+        # share one temp home).
+        extension_store._record_active = lambda r: True  # type: ignore[assignment]
+        extension_store._record_runtime_ready = lambda r: True  # type: ignore[assignment]
+        extension_store.set_user_instructions("ofek.demo", "")
+        extension_store.get_extension = real_get  # type: ignore[assignment]
+        extension_store.list_extensions = real_list  # type: ignore[assignment]
+        extension_store._record_active = real_active  # type: ignore[assignment]
+        extension_store._record_runtime_ready = real_ready  # type: ignore[assignment]
+
+
 def test_sdk_setting_builder_and_read_surface() -> None:
     settings = [
         sdk.Setting(key="token", label="Token", type="secret").to_dict(),

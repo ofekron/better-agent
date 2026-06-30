@@ -68,6 +68,10 @@ class SetExtensionSettingRequest(BaseModel):
     value: Any
 
 
+class SetUserInstructionsRequest(BaseModel):
+    instructions: str = ""
+
+
 class SetMcpEnabledRequest(BaseModel):
     enabled: bool
 
@@ -542,6 +546,24 @@ async def set_extension_setting(extension_id: str, req: SetExtensionSettingReque
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
     return result
+
+
+@router.get("/{extension_id}/user-instructions")
+async def get_extension_user_instructions(extension_id: str):
+    try:
+        return {"instructions": extension_store.get_user_instructions(extension_id)}
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+
+
+@router.patch("/{extension_id}/user-instructions")
+async def set_extension_user_instructions(extension_id: str, req: SetUserInstructionsRequest):
+    try:
+        instructions = extension_store.set_user_instructions(extension_id, req.instructions)
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"instructions": instructions}
 
 
 @router.get("/{extension_id}/mcp")

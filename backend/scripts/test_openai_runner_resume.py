@@ -399,5 +399,351 @@ def test_tool_call_then_text_preserves_both(monkeypatch):
     )
 
 
+def _no_dangling_tool_calls(messages) -> bool:
+    for idx, m in enumerate(messages):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        need = {str(c.get("id")) for c in m["tool_calls"] if c.get("id")}
+        have = {
+            str(t.get("tool_call_id"))
+            for t in messages[idx + 1:]
+            if t.get("role") == "tool"
+        }
+        if not need.issubset(have):
+            return False
+    return True
+
+
+def test_inflight_turn_persists_context_before_completion(monkeypatch):
+    """REGRESSION: the reported bug — resume/continuation on the openai
+    runner reported "no context" on turn 2.
+
+    Root cause was that history was saved ONLY at the end of `_run`. A turn
+    that never reached normal completion (still in-flight when the next turn
+    started, cancelled, or killed mid-loop) left ZERO durable context, so the
+    next turn resumed empty and answered "I don't have the previous context".
+
+    This asserts that at the moment a tool runs — i.e. BEFORE the turn
+    completes — the durable on-disk history already contains the user prompt,
+    so a concurrent/next resume can see it. The model has emitted tool_calls
+    by then, but those calls are not yet balanced by tool results, so the
+    incremental snapshot must trim that dangling assistant block.
+    """
+    stub = _Stub({0: _tool_call_then_text_response(call_idx=0),
+                  1: _sse_lines(content="final-after-tool")})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+
+    sid_preset = "inflightsid000000000000000000000a"
+    snapshots: list[list[dict]] = []
+
+    def snapshotting_tool(args, cwd):
+        # At the moment the tool runs, the user prompt + assistant tool_call
+        # must ALREADY be durable on disk (incremental persistence). Capture
+        # what a concurrent resume would load right now.
+        try:
+            disk = json.loads(
+                runner_openai._session_path(sid_preset).read_text()
+            )["messages"]
+        except Exception:
+            disk = []
+        snapshots.append(disk)
+        return "tool-output"
+
+    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", snapshotting_tool)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_inflight_"))
+        # Pre-seed empty history so _load_history_for_run resumes a known sid,
+        # keeping the on-disk path deterministic for the mid-run snapshot.
+        runner_openai._save_history(sid_preset, [])
+        inputs = {
+            "prompt": "important-task", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-inflight",
+            "backend_url": "", "internal_token": "",
+        }
+        rd = _make_run_dir(tmp, inputs)
+        rc = asyncio.run(runner_openai._run(rd, inputs))
+        assert rc == 0
+    finally:
+        stub.stop()
+
+    assert snapshots, "Bash tool never ran"
+    mid = snapshots[0]
+    user_contents = [m.get("content") for m in mid if m.get("role") == "user"]
+    assert "important-task" in user_contents, (
+        "mid-flight (before turn completion) the user prompt was NOT durable — "
+        "a concurrent resume would see empty context (the reported bug)"
+    )
+    # The mid-flight snapshot must be resume-safe: no dangling assistant
+    # tool_calls without matching tool results. Since the snapshot was taken
+    # before the tool result was appended, the assistant tool_call block must
+    # not be persisted yet; the final turn save below restores it once balanced.
+    assert _no_dangling_tool_calls(mid), mid
+    assert not any(m.get("tool_calls") for m in mid if m.get("role") == "assistant"), mid
+
+    final_history = json.loads(
+        runner_openai._session_path(sid_preset).read_text()
+    )["messages"]
+    assert any(
+        m.get("tool_calls") for m in final_history if m.get("role") == "assistant"
+    ), final_history
+    assert any(m.get("role") == "tool" for m in final_history), final_history
+    assert _no_dangling_tool_calls(final_history), final_history
+
+
+def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
+    """MUST-FIX #1 (adversarial): prove the actual user-facing resume, not
+    just the on-disk shape.
+
+    Turn 1 DIES before normal completion (a cancel arrives mid tool-loop, the
+    same shape as a SIGKILL/restart mid-turn). With end-of-`_run`-only saving
+    this left empty durable history and turn 2 answered "no context". Here a
+    REAL second `_run` resumes the same session id, and we assert the stub the
+    model talks to in turn 2 actually receives turn 1's user prompt — i.e. the
+    resumed process loaded mid-flight context and proceeded with it.
+    """
+    stub = _Stub({
+        0: _tool_call_then_text_response(call_idx=0),  # turn 1: tool call
+        1: _sse_lines(content="resumed-reply"),         # turn 2: plain reply
+    })
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+
+    sid_preset = "resumemidsid0000000000000000000a"
+
+    def cancelling_tool(args, cwd):
+        # The tool runs, its result is appended+persisted (balanced), then the
+        # turn is cancelled before reaching normal completion — i.e. turn 1
+        # never finishes cleanly, exactly the reported failure mode.
+        run_dir = Path(os.environ["OPENAI_RESUME_RUN_DIR"])
+        (run_dir / "cancel").write_text("", encoding="utf-8")
+        return "tool-output"
+
+    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", cancelling_tool)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_resume_mid_"))
+        # ---- turn 1: dies mid-flight (cancelled) ----
+        inputs1 = {
+            "prompt": "important-task", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-resume-mid",
+            "backend_url": "", "internal_token": "",
+        }
+        rd1 = tmp / "run_turn1"
+        rd1.mkdir(parents=True, exist_ok=True)
+        (rd1 / "input.json").write_text(json.dumps(inputs1), encoding="utf-8")
+        monkeypatch.setenv("OPENAI_RESUME_RUN_DIR", str(rd1))
+        rc1 = asyncio.run(runner_openai._run(rd1, inputs1))
+        # turn 1 did not complete normally
+        complete1 = json.loads((rd1 / "complete.json").read_text())
+        assert rc1 == 1 and complete1["error"] == "cancelled", complete1
+
+        # context from the dead turn must already be durable on disk
+        mid_disk = json.loads(
+            runner_openai._session_path(sid_preset).read_text())["messages"]
+        assert "important-task" in _user_contents(mid_disk), (
+            "turn 1 died without leaving its prompt durable (the reported bug)"
+        )
+        assert _no_dangling_tool_calls(mid_disk), mid_disk
+
+        # ---- turn 2: a REAL second _run resumes the same session ----
+        inputs2 = {
+            "prompt": "follow-up", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-resume-mid",
+            "backend_url": "", "internal_token": "",
+        }
+        rd2 = tmp / "run_turn2"
+        rd2.mkdir(parents=True, exist_ok=True)
+        (rd2 / "input.json").write_text(json.dumps(inputs2), encoding="utf-8")
+        rc2 = asyncio.run(runner_openai._run(rd2, inputs2))
+        assert rc2 == 0
+        with stub.lock:
+            turn2_req = stub.requests[-1]
+    finally:
+        stub.stop()
+
+    turn2_users = _user_contents(turn2_req)
+    assert "important-task" in turn2_users, (
+        "resumed turn 2 did NOT carry turn 1's prompt — the model would report "
+        "no context (the exact user-facing bug)"
+    )
+    assert "follow-up" in turn2_users, turn2_users
+    # And the resumed request must itself be a valid resume (no dangling block).
+    assert _no_dangling_tool_calls(turn2_req), turn2_req
+
+
+def test_capability_context_excluded_from_durable_history(monkeypatch):
+    """MUST-FIX #2 (adversarial): capability-context exclusion is durable.
+
+    The per-turn capability system message is transient scaffolding for THIS
+    run only; baking it into the saved transcript would replay stale capability
+    instructions on every future resume. Assert it is absent from the on-disk
+    history after a turn that had one, including the incremental snapshots.
+    """
+    secret = "CAP_BODY_SHOULD_NOT_PERSIST_xyz123"
+    stub = _Stub({0: _tool_call_then_text_response(call_idx=0),
+                  1: _sse_lines(content="cap-final")})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+
+    sid_preset = "capexclsid000000000000000000000a"
+    disk_snapshots: list[list[dict]] = []
+
+    def snapshotting_tool(args, cwd):
+        # Capture the incremental on-disk history mid-turn too, so we prove the
+        # capability message is excluded from EVERY persisted snapshot, not
+        # only the final one.
+        try:
+            disk_snapshots.append(json.loads(
+                runner_openai._session_path(sid_preset).read_text())["messages"])
+        except Exception:
+            disk_snapshots.append([])
+        return "tool-output"
+
+    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", snapshotting_tool)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_cap_excl_"))
+        runner_openai._save_history(sid_preset, [])
+        inputs = {
+            "prompt": "do-the-thing", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-cap-excl",
+            "backend_url": "", "internal_token": "",
+            "capability_contexts": [
+                {"name": "TestCap", "category": "capability", "content": secret},
+            ],
+        }
+        rd = _make_run_dir(tmp, inputs)
+        rc = asyncio.run(runner_openai._run(rd, inputs))
+        assert rc == 0
+        with stub.lock:
+            sent = stub.requests[0]
+    finally:
+        stub.stop()
+
+    # The capability context MUST have reached the model (it is live for the run)
+    assert any(secret in str(m.get("content")) for m in sent), (
+        "capability context was not delivered to the model this turn"
+    )
+
+    # ...but it must NOT be in any persisted snapshot, mid-flight or final.
+    final_disk = json.loads(
+        runner_openai._session_path(sid_preset).read_text())["messages"]
+    all_persisted = list(disk_snapshots) + [final_disk]
+    assert disk_snapshots, "Bash tool never ran; no mid-flight snapshot captured"
+    for snap in all_persisted:
+        assert not any(secret in str(m.get("content")) for m in snap), (
+            "capability context leaked into durable history; it would replay on "
+            f"every future resume: {snap}"
+        )
+        assert not any(
+            m.get("role") == "system" and secret in str(m.get("content"))
+            for m in snap
+        ), snap
+
+
+def test_cancel_path_persists_balanced_context(monkeypatch):
+    """MUST-FIX #3a (adversarial): explicit cancel-path persistence coverage.
+
+    A cancelled turn must still leave the context it accumulated durable AND
+    resume-safe (balanced), so the next turn continues instead of starting
+    blank — without ever persisting a dangling tool-call block.
+    """
+    stub = _Stub({0: _tool_call_then_text_response(call_idx=0)})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+
+    sid_preset = "cancelpersist000000000000000000a"
+
+    def cancelling_tool(args, cwd):
+        (Path(os.environ["OPENAI_CANCEL_RUN_DIR"]) / "cancel").write_text(
+            "", encoding="utf-8")
+        return "tool-output"
+
+    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash", cancelling_tool)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_cancel_persist_"))
+        inputs = {
+            "prompt": "cancel-but-keep-context", "images": [], "files": [],
+            "cwd": str(tmp), "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-cancel-persist",
+            "backend_url": "", "internal_token": "",
+        }
+        rd = _make_run_dir(tmp, inputs)
+        monkeypatch.setenv("OPENAI_CANCEL_RUN_DIR", str(rd))
+        rc = asyncio.run(runner_openai._run(rd, inputs))
+        complete = json.loads((rd / "complete.json").read_text())
+    finally:
+        stub.stop()
+
+    assert rc == 1 and complete["error"] == "cancelled", complete
+    history = json.loads(
+        runner_openai._session_path(sid_preset).read_text())["messages"]
+    assert "cancel-but-keep-context" in _user_contents(history), (
+        "cancelled turn lost its prompt — next resume would be blank"
+    )
+    assert _no_dangling_tool_calls(history), history
+    assert _no_invalid_assistant(history), history
+
+
+def test_exception_path_persists_accumulated_context(monkeypatch):
+    """MUST-FIX #3b (adversarial): explicit exception-path persistence.
+
+    If the model loop raises unexpectedly mid-turn, the best-effort save in the
+    except handler must still leave the already-accumulated context (at minimum
+    the user prompt) durable, so the next resume is not blank.
+    """
+    stub = _Stub({0: _sse_lines(content="never-reached")})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+
+    sid_preset = "excpersist0000000000000000000000a"
+
+    async def boom(*a, **k):
+        raise RuntimeError("simulated mid-turn crash")
+
+    monkeypatch.setattr(runner_openai, "_one_round", boom)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_exc_persist_"))
+        inputs = {
+            "prompt": "keep-me-on-crash", "images": [], "files": [],
+            "cwd": str(tmp), "model": "stub-model", "reasoning_effort": None,
+            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
+            "mode": "native", "app_session_id": "sid-app-exc-persist",
+            "backend_url": "", "internal_token": "",
+        }
+        rd = _make_run_dir(tmp, inputs)
+        rc = asyncio.run(runner_openai._run(rd, inputs))
+        complete = json.loads((rd / "complete.json").read_text())
+    finally:
+        stub.stop()
+
+    assert rc == 1 and complete["success"] is False, complete
+    assert "RuntimeError" in str(complete.get("error")), complete
+    history = json.loads(
+        runner_openai._session_path(sid_preset).read_text())["messages"]
+    assert "keep-me-on-crash" in _user_contents(history), (
+        "exception path lost the accumulated context — next resume would be blank"
+    )
+    assert _no_dangling_tool_calls(history), history
+
+
 if __name__ == "__main__":
     sys.exit(0)
