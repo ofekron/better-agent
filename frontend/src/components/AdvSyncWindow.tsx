@@ -197,7 +197,7 @@ function AdvSyncPane({ label, session, parentTree }: PaneProps) {
             No turns yet — waiting for the driver…
           </div>
         ) : (
-          groups.map((g) => (
+          groups.map((g, idx) => (
             <MessageGroup
               key={g.user.id}
               userMessage={g.user}
@@ -205,6 +205,7 @@ function AdvSyncPane({ label, session, parentTree }: PaneProps) {
               sessionId={session.id}
               threadColorMap={undefined}
               defaultCollapsed={!!g.assistant}
+              isLastGroup={idx === groups.length - 1}
               orchestrationMode={parentTree.orchestration_mode}
               runs={[]}
             />

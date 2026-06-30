@@ -47,12 +47,76 @@ describe("MessageGroup collapsed interrupted indicator", () => {
       );
 
       await waitFor(() => {
-        expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+        expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+        expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
         expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
       });
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("keeps historical collapsed groups compact when a later group exists", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    try {
+      const { container } = render(
+        <Chat
+          messages={[
+            makeUserMsg({ id: "u1", content: "older prompt" }),
+            makeAssistantMsg({ id: "a1", content: "older reply", isStreaming: false }),
+            makeUserMsg({ id: "u2", content: "latest prompt" }),
+            makeAssistantMsg({ id: "a2", content: "streaming reply", isStreaming: true }),
+          ]}
+          pendingMessages={[]}
+          runs={[{ run_id: "run-1", kind: "manager", target_message_id: "a2", pid: null }]}
+          streamingEvents={[]}
+          traceSteps={[]}
+          isStreaming
+          isStopping={false}
+          streamingLoadPhase={null}
+          onSend={() => true}
+          disabled={false}
+          session={makeSession()}
+          draft=""
+          onDraftChange={() => {}}
+          queuedPrompt={null}
+          onPromoteQueued={() => {}}
+        />,
+      );
+
+      const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".message-group");
+      expect(firstGroup).not.toBeNull();
+      expect(firstGroup!.querySelector('.user-message-box > .message-box-body')).not.toBeNull();
+      expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
+      expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("keeps the latest assistant body expanded when manually collapsed", () => {
+    const { container } = render(
+      <MessageGroup
+        userMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
+        assistantMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
+        defaultCollapsed={false}
+        isLastGroup
+        orchestrationMode="manager"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /User/i }));
+
+    expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
+    expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });
 
   it("auto-collapses a live latest group when the turn finishes", async () => {
@@ -105,7 +169,8 @@ describe("MessageGroup collapsed interrupted indicator", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+      expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+      expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
       expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     });
   });
@@ -157,7 +222,8 @@ describe("MessageGroup collapsed interrupted indicator", () => {
     ]);
     await h.flush();
 
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
   });
@@ -183,7 +249,8 @@ describe("MessageGroup collapsed interrupted indicator", () => {
     });
     await h.flush();
 
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
   });

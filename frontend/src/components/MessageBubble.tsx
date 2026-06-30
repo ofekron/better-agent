@@ -2763,7 +2763,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  per-frame WS streaming updates — those mutate only the in-flight
  *  assistant message (last in the list), leaving every earlier
  *  group's props referentially stable. */
-function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
+function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterUserMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLastGroup = false }: {
   userMessage: ChatMessage;
   assistantMessage?: ChatMessage;
   /** Worker output nested under the supervisor/main message. */
@@ -2801,6 +2801,11 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
+  /** True only for the latest visible chat group. When that group auto-collapses
+   * after turn completion, collapse the prompt body but keep the final assistant
+   * message body expanded so the answer remains readable. Historical groups use
+   * the compact collapsed preview. */
+  isLastGroup?: boolean;
 }) {
   const { t } = useTranslation();
   const assistantContainerRef = useRef<HTMLDivElement>(null);
@@ -2827,13 +2832,12 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
   useEffect(() => {
     if (!userToggledRef.current) setCollapsed(defaultCollapsed);
   }, [defaultCollapsed]);
-  // When a turn finishes, its whole group auto-collapses (arrow flips to ▶,
-  // assistant body folds into the summary preview) — same as historical
-  // groups, so the scrollback compresses uniformly. A single `collapsed`
-  // boolean drives both the arrow and the assistant body; keeping them in
-  // sync is what makes "turn finishes → group collapses" actually fold the
-  // response away instead of leaving a half-collapsed turn.
-  const assistantCollapsed = collapsed;
+  // Split collapse surfaces for the latest group: when a turn finishes, the
+  // prompt body folds away (header arrow flips to ▶) but the final assistant
+  // message body remains expanded so the answer stays readable. Historical
+  // groups keep the compact collapsed preview behavior.
+  const userBodyCollapsed = isLastGroup ? collapsed : false;
+  const assistantCollapsed = isLastGroup ? false : collapsed;
   const toggleCollapsed = () => {
     userToggledRef.current = true;
     const groupEl = groupRef.current;
@@ -3182,7 +3186,7 @@ function MessageGroupImpl({ userMessage, assistantMessage, workerSubGroups, sess
             </div>
           </div>
         )}
-        {(() => {
+        {!userBodyCollapsed && (() => {
           const hasArtificial = hasArtificialSections(rawUserContent);
           return (
             <div className="message-box-body">
