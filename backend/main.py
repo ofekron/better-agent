@@ -2179,14 +2179,18 @@ async def native_import_status():
 
 
 @app.get("/api/native-import/summary")
-async def native_import_summary(provider_ids: Optional[str] = None):
+async def native_import_summary(
+    provider_ids: Optional[str] = None,
+    all_projects: bool = False,
+):
     """Counts-only preview of importable native sessions, grouped by
     provider. Read-only; does not start a job. Returns grouped counts
     instead of one row per session — a full Claude+Codex history is tens
     of thousands of sessions and the row dump reached hundreds of MB."""
     import native_import
     ids = provider_ids.split(",") if provider_ids else None
-    return await asyncio.to_thread(native_import.count_native_sessions, ids)
+    project_paths = None if all_projects else native_import.loaded_project_paths()
+    return await asyncio.to_thread(native_import.count_native_sessions, ids, project_paths)
 
 
 def _parse_native_import_limit(body: dict):
@@ -2203,9 +2207,12 @@ def _parse_native_import_limit(body: dict):
 
 
 def _parse_native_import_project_paths(body: dict) -> Optional[list[str]]:
+    import native_import
+    if isinstance(body, dict) and body.get("all_projects") is True:
+        return None
     raw = body.get("project_paths") if isinstance(body, dict) else None
     if raw is None:
-        return None
+        return native_import.loaded_project_paths()
     if not isinstance(raw, list):
         raise HTTPException(status_code=400, detail="project_paths must be a list of paths or omitted")
     return [str(p) for p in raw if isinstance(p, str) and p]

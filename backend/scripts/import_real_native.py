@@ -41,9 +41,8 @@ def _internal_token() -> str | None:
 
 def _loaded_project_paths() -> list[str]:
     try:
-        import project_store  # noqa
-        return [p.get("path") or p.get("cwd") for p in project_store.list_projects()
-                if isinstance(p, dict) and (p.get("path") or p.get("cwd"))]
+        import native_import  # noqa
+        return native_import.loaded_project_paths()
     except Exception:
         return []
 
@@ -73,6 +72,8 @@ def _try_backend(port: int, limit: int, provider_ids, project_paths) -> bool:
         body["provider_ids"] = provider_ids
     if project_paths is not None:
         body["project_paths"] = project_paths
+    else:
+        body["all_projects"] = True
     try:
         status = _post(f"{base}/api/internal/native-import", token, body)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError):

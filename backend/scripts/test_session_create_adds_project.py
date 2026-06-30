@@ -95,6 +95,18 @@ def main() -> None:
         )
         if bare_cwd in _project_paths():
             raise AssertionError("bare_config cwd was registered as a project")
+
+        import_cwd = str(Path(work, "imported").resolve())
+        session_manager.create(
+            name="imported",
+            model="sonnet",
+            cwd=import_cwd,
+            orchestration_mode="native",
+            source="import",
+            user_initiated=True,
+        )
+        if import_cwd in _project_paths():
+            raise AssertionError("imported session cwd was registered as a project")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)

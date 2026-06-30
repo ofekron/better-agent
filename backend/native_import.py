@@ -121,6 +121,10 @@ def _is_junk_cwd(cwd: str) -> bool:
 # cwd like /private/tmp/... becomes a '-private-tmp-...' dir. Trailing '-'
 # avoids matching real dirs like /tmpwork.
 _JUNK_DIR_PREFIXES = ("-tmp-", "-private-tmp-", "-var-folders-", "-private-var-folders-")
+_UUID_PATH_RE = re.compile(r"/agents/agents_workspaces/[0-9a-fA-F-]{36}$")
+_AGENT_STRATEGY_PATH_RE = re.compile(
+    r"/(?:agents|technical_analysis)/agents_strategies/[^/]+$"
+)
 
 
 def _is_junk_session(sess: NativeSession) -> bool:
@@ -150,6 +154,49 @@ def _under_projects(cwd: str, project_paths: list[str]) -> bool:
         if p == base or base in p.parents:
             return True
     return False
+
+
+def _is_generated_project_path(project_path: str) -> bool:
+    try:
+        p = Path(project_path).expanduser().resolve()
+    except OSError:
+        return True
+    text = str(p)
+    if p == Path.home().resolve():
+        return True
+    if _is_junk_cwd(text):
+        return True
+    return bool(_UUID_PATH_RE.search(text) or _AGENT_STRATEGY_PATH_RE.search(text))
+
+
+def loaded_project_paths() -> list[str]:
+    try:
+        import project_store
+        projects = project_store.list_projects()
+    except Exception:
+        logger.exception("native_import: project_store scan failed")
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        if (project.get("node_id") or "primary") != "primary":
+            continue
+        path = project.get("path") or project.get("cwd")
+        if not isinstance(path, str) or not path:
+            continue
+        if _is_generated_project_path(path):
+            continue
+        try:
+            norm = str(Path(path).expanduser().resolve())
+        except OSError:
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
 
 
 def _ba_managed_native_ids() -> set[str]:
@@ -879,10 +926,22 @@ def _repair_imported_root_timestamps(root_id: str, fallback: Optional[str] = Non
     )
 
 
-def repair_imported_roots() -> dict:
+def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
     import session_store
     repaired = 0
     deleted = 0
+    removed_projects = 0
+    project_filtered = project_paths if project_paths is not None else loaded_project_paths()
+    try:
+        import project_store
+        for project in project_store.list_projects():
+            path = project.get("path") if isinstance(project, dict) else None
+            node_id = project.get("node_id") if isinstance(project, dict) else None
+            if isinstance(path, str) and _is_generated_project_path(path):
+                if project_store.remove_project(path, node_id=node_id or "primary"):
+                    removed_projects += 1
+    except Exception:
+        logger.exception("native_import: imported-project cleanup failed")
     registry = _registry_load()
     deleted_roots: set[str] = set()
     for path in (paths.ba_home() / "sessions").glob("*.json"):
@@ -893,6 +952,11 @@ def repair_imported_roots() -> dict:
         except Exception:
             continue
         if root.get("source") != "import":
+            continue
+        if project_filtered and not _under_projects(root.get("cwd") or "", project_filtered):
+            session_manager.delete(root["id"])
+            deleted_roots.add(root["id"])
+            deleted += 1
             continue
         users = [
             m for m in (root.get("messages") or [])
@@ -928,7 +992,7 @@ def repair_imported_roots() -> dict:
             repaired += 1
     if deleted_roots:
         _registry_save({k: v for k, v in registry.items() if v not in deleted_roots})
-    return {"repaired": repaired, "deleted": deleted}
+    return {"repaired": repaired, "deleted": deleted, "removed_projects": removed_projects}
 
 
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
@@ -1139,7 +1203,10 @@ def already_imported_keys() -> set[str]:
         return set(_registry_load().keys())
 
 
-def count_native_sessions(provider_ids: Optional[list[str]] = None) -> dict:
+def count_native_sessions(
+    provider_ids: Optional[list[str]] = None,
+    project_paths: Optional[list[str]] = None,
+) -> dict:
     """Counts-only preview of importable native sessions, grouped by provider.
 
     Returns `{total, imported, pending, by_provider:{kind:{total,imported,
@@ -1148,7 +1215,11 @@ def count_native_sessions(provider_ids: Optional[list[str]] = None) -> dict:
     Claude+Codex history. Uses `hydrate=False` so identifying the sessions
     never reads their jsonl bodies.
     """
-    sessions = enumerate_native_sessions(provider_ids, hydrate=False)
+    sessions = enumerate_native_sessions(
+        provider_ids,
+        project_paths,
+        hydrate=project_paths is not None,
+    )
     imported = already_imported_keys()
     by_provider: dict[str, dict] = {}
     for s in sessions:
@@ -1185,6 +1256,8 @@ class JobStatus:
     started_at: str = ""
     finished_at: str = ""
     provider_ids: list[str] = field(default_factory=list)
+    project_paths: list[str] = field(default_factory=list)
+    all_projects: bool = True
     errors: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -1198,6 +1271,8 @@ class JobStatus:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "provider_ids": list(self.provider_ids),
+            "project_paths": list(self.project_paths),
+            "all_projects": bool(self.all_projects),
             "errors": list(self.errors),
         }
 
@@ -1252,7 +1327,7 @@ def start_import(
     `limit` caps the number of NEW sessions imported (already-imported
     sessions are still skipped, not counted against the limit).
     `project_paths` opts into the project filter (see
-    `enumerate_native_sessions`); resume ignores it and finishes all."""
+    `enumerate_native_sessions`)."""
     with _JOB_LOCK:
         global _JOB
         if _JOB is not None and _JOB.status == "running":
@@ -1260,6 +1335,8 @@ def start_import(
         _JOB = JobStatus(
             status="running",
             provider_ids=list(provider_ids or []),
+            project_paths=list(project_paths or []),
+            all_projects=project_paths is None,
             started_at=datetime.now().isoformat(),
         )
         status_ref = _JOB
@@ -1286,8 +1363,15 @@ def resume_if_interrupted() -> None:
     if not persisted or persisted.get("status") != "running":
         return
     provider_ids = persisted.get("provider_ids") or None
-    logger.info("native_import: resuming interrupted import (providers=%s)", provider_ids)
-    start_import(provider_ids)
+    if "all_projects" not in persisted and "project_paths" not in persisted:
+        project_paths = None
+    else:
+        project_paths = None if persisted.get("all_projects") else persisted.get("project_paths")
+    logger.info(
+        "native_import: resuming interrupted import (providers=%s project_paths=%s)",
+        provider_ids, project_paths,
+    )
+    start_import(provider_ids, project_paths=project_paths)
 
 
 def _run_import(

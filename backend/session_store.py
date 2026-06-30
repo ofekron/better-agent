@@ -441,6 +441,7 @@ def _build_summary_for_root(
         "permission": root.get("permission", {}),
         "provider_id": root.get("provider_id"),
         "cwd": cwd,
+        "cwd_explicit": root.get("cwd_explicit", True),
         "node_id": root.get("node_id") or "primary",
         "created_at": root.get("created_at", ""),
         "updated_at": _effective_updated,
@@ -3555,7 +3556,12 @@ def should_auto_register_project(session: dict) -> bool:
     machine-completion workers, TestApe-isolated runs); their cwd is an
     implementation detail and must never surface in the user's project
     list."""
-    return bool(session.get("cwd")) and not session.get("bare_config")
+    return (
+        bool(session.get("cwd"))
+        and not session.get("bare_config")
+        and session.get("source") != "import"
+        and session.get("cwd_explicit", True) is not False
+    )
 
 
 def create_session(
@@ -3621,6 +3627,7 @@ def create_session(
         "reasoning_effort": resolved_reasoning_effort,
         "permission": _session_permission(permission, provider_id),
         "cwd": cwd or str(Path.home()),
+        "cwd_explicit": bool(cwd),
         # `created_at` may be supplied (native import preserves the original
         # conversation time so analytics bucket it under its real date, not now).
         "created_at": created_at or datetime.now().isoformat(),
