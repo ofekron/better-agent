@@ -4533,7 +4533,7 @@ def _can_preserve_summary_order(
         not search_query
         and not appended_virtual_sessions
         and not folder_view
-        and sort_by in {"updated_at", "last_user_prompt_at"}
+        and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
 
@@ -4548,7 +4548,7 @@ def _can_page_local_summary_order(
     return (
         not search_query
         and not folder_view
-        and sort_by in {"updated_at", "last_user_prompt_at"}
+        and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
 
@@ -4670,7 +4670,7 @@ def _can_page_local_search_scores(
         and not model_ids
         and not modes
         and not sources
-        and sort_by in {"updated_at", "last_user_prompt_at"}
+        and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
         and not connected
     )

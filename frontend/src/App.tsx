@@ -229,7 +229,9 @@ function mergeOpenSessionRecord(current: Session | undefined, incoming: Session)
   const currentFreshness = openSessionFreshness(current);
   const incomingFreshness = openSessionFreshness(incoming);
   if (incomingFreshness < currentFreshness) return current;
-  return { ...current, ...incoming };
+  const merged = { ...current, ...incoming };
+  const keys = Object.keys(incoming) as (keyof Session)[];
+  return keys.some((key) => current[key] !== merged[key]) ? merged : current;
 }
 
 const ProviderConfigSyncPage = lazyWithRetry(() =>
@@ -1499,6 +1501,7 @@ function AppMain({
   );
   const handleUserMessagePersisted = useCallback(
     (sessionId: string, userMessage: ChatMessage) => {
+      const userTimestamp = userMessage.timestamp || new Date().toISOString();
       if (ackedRef.current.has(userMessage.id)) return;
       logPromptSend("user_message_persisted", {
         app_session_id: sessionId,
@@ -1507,6 +1510,17 @@ function AppMain({
         content_length: userMessage.content.length,
       });
       ackedRef.current.add(userMessage.id);
+      applySessionMetadata(sessionId, (session) => ({
+        // The backend sidebar summary derives these fields from persisted
+        // messages, but the local sidebar/tabs need the same sort keys before
+        // the follow-up refetch/WS projection arrives.
+        updated_at: userTimestamp,
+        last_user_prompt_at: userTimestamp,
+        message_count: Math.max(
+          (session.message_count ?? session.messages?.length ?? 0) + 1,
+          session.messages?.length ?? 0,
+        ),
+      }));
       addMessages(sessionId, [userMessage]);
       const cid = userMessage.client_id ?? null;
       takePendingQueueDraft(sessionId, cid);
@@ -1534,7 +1548,7 @@ function AppMain({
       // Refresh sidebar so timestamps + sort order update immediately.
       refreshSessions();
     },
-    [addMessages, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
+    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
   );
   const handleSteerPromptPersisted = useCallback(
     (_sessionId: string, steerClientId?: string | null) => {
@@ -1645,7 +1659,8 @@ function AppMain({
       // draft_input_seq is not newer than the one we already hold (e.g. the
       // pre-send text broadcast arriving after the clear-on-send). Otherwise
       // it would resurrect just-sent text into the composer.
-      const storedSeq = getNode(sessionId)?.draft_input_seq;
+      const existingNode = getNode(sessionId);
+      const storedSeq = existingNode?.draft_input_seq;
       const toApply = filterStaleDraftPatch(
         patch,
         storedSeq,
@@ -1653,7 +1668,7 @@ function AppMain({
       );
       applySessionMetadata(sessionId, toApply);
       setOpenSessionRecords((prev) => {
-        const session = prev[sessionId] || getNode(sessionId) || sessions.find((s) => s.id === sessionId);
+        const session = prev[sessionId] || existingNode || sessions.find((s) => s.id === sessionId);
         if (!session) return prev;
         return {
           ...prev,
@@ -1662,7 +1677,7 @@ function AppMain({
       });
       if ("topbar_pinned" in toApply) {
         const nextPinned = Boolean(toApply.topbar_pinned);
-        const session = getNode(sessionId);
+        const session = existingNode;
         setTopbarPinnedSessions((prev) => {
           const next = { ...prev };
           if (nextPinned && session) {
@@ -3423,6 +3438,26 @@ function AppMain({
     setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }, []);
 
+  const openSessionRecordSessionSignature = useMemo(
+    () => sessions.map((session) => [
+      session.id,
+      session.name,
+      session.cwd,
+      session.node_id || "primary",
+      session.model,
+      session.provider_id,
+      session.updated_at,
+      session.last_user_prompt_at,
+      session.last_opened_at,
+      session.topbar_pinned ? "1" : "0",
+      session.topbar_pinned_at ?? "",
+      session.pinned ? "1" : "0",
+      session.archived ? "1" : "0",
+      String(session.message_count ?? ""),
+    ].join("\u0000")).join("\u0001"),
+    [sessions],
+  );
+
   useEffect(() => {
     setOpenSessionRecords((prev) => {
       let next: Record<string, Session> | null = null;
@@ -3435,7 +3470,7 @@ function AppMain({
       }
       return next ?? prev;
     });
-  }, [sessions]);
+  }, [openSessionRecordSessionSignature]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!currentTree?.id) return;
@@ -3454,20 +3489,24 @@ function AppMain({
   }, []);
 
   useEffect(() => {
+    const knownIds = Object.keys(knownRoutedSessionIds);
+    if (knownIds.length === 0) return;
     const confirmed = new Set(sessions.map((s) => s.id));
     if (currentTree?.id) confirmed.add(currentTree.id);
     for (const id of Object.keys(openSessionRecords)) confirmed.add(id);
+    const staleKnownIds = knownIds.filter((id) => confirmed.has(id));
+    if (staleKnownIds.length === 0) return;
     setKnownRoutedSessionIds((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const id of Object.keys(next)) {
-        if (!confirmed.has(id)) continue;
+      for (const id of staleKnownIds) {
+        if (!next[id]) continue;
         delete next[id];
         changed = true;
       }
       return changed ? next : prev;
     });
-  }, [currentTree?.id, openSessionRecords, sessions]);
+  }, [currentTree?.id, knownRoutedSessionIds, openSessionRecords, sessions]);
 
   // -------------------------------------------------------------------
   // Route ↔ session sync

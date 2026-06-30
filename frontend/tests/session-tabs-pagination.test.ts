@@ -617,6 +617,46 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("moves an opened existing session to the first unpinned tab immediately", async () => {
+    const older = makeSession({
+      id: "older-session",
+      name: "Older",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
+      message_count: 1,
+    });
+    const newer = makeSession({
+      id: "newer-session",
+      name: "Newer",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-02T00:00:00.000Z",
+      last_opened_at: "2026-01-02T00:00:00.000Z",
+      message_count: 1,
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([older.id, newer.id]),
+    );
+    const h = await renderApp({ seed: { sessions: [newer, older] } });
+
+    expect(
+      await waitFor(
+        h,
+        () => h.$$(".session-tab-wrapper").map((el) => el.dataset.tabMovementKey).join(",") ===
+          "newer-session,older-session",
+      ),
+    ).toBe(true);
+
+    await h.selectSession(older.id);
+
+    expect(h.$$(".session-tab-wrapper").map((el) => el.dataset.tabMovementKey)).toEqual([
+      "older-session",
+      "newer-session",
+    ]);
+    h.unmount();
+  }, 10000);
+
   it("registers a newly created session in open tabs immediately", async () => {
     const existing = makeSession({
       id: "existing-session",

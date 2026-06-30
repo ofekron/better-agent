@@ -1513,6 +1513,7 @@ export function SessionList({
   }, [refreshOrganization]);
 
   useEffect(() => {
+    if (Object.keys(ackedOrganizationBySession).length === 0) return;
     setAckedOrganizationBySession((current) => {
       let changed = false;
       const next = { ...current };
@@ -1533,7 +1534,7 @@ export function SessionList({
       }
       return changed ? next : current;
     });
-  }, [sessions]);
+  }, [ackedOrganizationBySession, sessions]);
 
   // Distinct requirement tags across all sessions, for the tag filter panel.
   const requirementTagOptions = useMemo(() => {
@@ -1599,13 +1600,19 @@ export function SessionList({
 
   useEffect(() => {
     const validFolders = new Set(folders.map((folder) => folder.id));
-    setSelectedFolderIds((prev) => prev.filter((id) => validFolders.has(id)));
+    const nextFolderIds = selectedFolderIds.filter((id) => validFolders.has(id));
+    if (nextFolderIds.length !== selectedFolderIds.length) {
+      setSelectedFolderIds(nextFolderIds);
+    }
     const validTagIds = new Set<string>([
       ...tags.map((tag) => tag.id),
       ...requirementTagOptions.map(reqTagKey),
     ]);
-    setSelectedTagIds((prev) => prev.filter((id) => validTagIds.has(id)));
-  }, [folders, tags, requirementTagOptions]);
+    const nextTagIds = selectedTagIds.filter((id) => validTagIds.has(id));
+    if (nextTagIds.length !== selectedTagIds.length) {
+      setSelectedTagIds(nextTagIds);
+    }
+  }, [folders, tags, requirementTagOptions, selectedFolderIds, selectedTagIds]);
 
   // Filter option universes are the FULL set of choices, independent of the
   // currently-loaded (filtered) sessions — so applying one filter never makes
@@ -1711,9 +1718,16 @@ export function SessionList({
     ],
   );
 
+  const backendFiltersKey = useMemo(
+    () => JSON.stringify(backendFilters),
+    [backendFilters],
+  );
+  const lastBackendFiltersKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (lastBackendFiltersKeyRef.current === backendFiltersKey) return;
+    lastBackendFiltersKeyRef.current = backendFiltersKey;
     onBackendFiltersChange?.(backendFilters);
-  }, [backendFilters, onBackendFiltersChange]);
+  }, [backendFilters, backendFiltersKey, onBackendFiltersChange]);
 
   const applyAckedOrganization = (
     sessionId: string,
@@ -1932,14 +1946,15 @@ export function SessionList({
     [filtered],
   );
   useEffect(() => {
-    setSelectedSessionIds((current) => {
-      const next = new Set<string>();
-      for (const id of current) {
-        if (selectableSessionIds.has(id)) next.add(id);
-      }
-      return next.size === current.size ? current : next;
-    });
-  }, [selectableSessionIds]);
+    if (selectedSessionIds.size === 0) return;
+    const next = new Set<string>();
+    for (const id of selectedSessionIds) {
+      if (selectableSessionIds.has(id)) next.add(id);
+    }
+    if (next.size !== selectedSessionIds.size) {
+      setSelectedSessionIds(next);
+    }
+  }, [selectableSessionIds, selectedSessionIds]);
 
   const [collapsedFolders, setCollapsedFolders] = useLocalStorage<string[]>(
     "better-agent-collapsed-folders",
@@ -2041,7 +2056,7 @@ export function SessionList({
   // ArrowDown/Up key press.
   useEffect(() => {
     if (sortedRoots.length === 0) {
-      setHighlightedSessionId(null);
+      if (highlightedSessionId !== null) setHighlightedSessionId(null);
       return;
     }
     if (
