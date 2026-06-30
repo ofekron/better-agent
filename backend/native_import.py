@@ -833,6 +833,45 @@ def _repair_imported_root_updated_at(root_id: str, fallback: Optional[str] = Non
     )
 
 
+def repair_imported_roots() -> dict:
+    import session_store
+    repaired = 0
+    deleted = 0
+    registry = _registry_load()
+    deleted_roots: set[str] = set()
+    for path in (paths.ba_home() / "sessions").glob("*.json"):
+        if path.name.endswith(".summary.json"):
+            continue
+        try:
+            root = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if root.get("source") != "import":
+            continue
+        users = [
+            m for m in (root.get("messages") or [])
+            if isinstance(m, dict) and m.get("role") == "user"
+        ]
+        first_prompt = _extract_text({"message": {"content": users[0].get("content")}}) if users else ""
+        last_user_ts = _imported_last_user_prompt_iso(root)
+        if not first_prompt or _is_internal_import_prompt(first_prompt) or not last_user_ts:
+            session_manager.delete(root["id"])
+            deleted_roots.add(root["id"])
+            deleted += 1
+            continue
+        if root.get("updated_at") != last_user_ts:
+            root["updated_at"] = last_user_ts
+            session_store.write_session_full(
+                root,
+                bump_updated_at=False,
+                preserve_projection_fields=True,
+            )
+            repaired += 1
+    if deleted_roots:
+        _registry_save({k: v for k, v in registry.items() if v not in deleted_roots})
+    return {"repaired": repaired, "deleted": deleted}
+
+
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
     if sess.title:
         return sess.title[:80]
@@ -1227,6 +1266,7 @@ def _run_import(
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})
                     logger.exception("native_import: failed %s", sess.registry_key)
             _persist_job(status)  # checkpoint so a crash here resumes cleanly
+        repair_imported_roots()
         status.status = "done"
     except Exception:
         status.status = "error"
