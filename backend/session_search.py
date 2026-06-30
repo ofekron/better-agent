@@ -508,26 +508,52 @@ def _apply_proposed_sessions(
 # candidate collection before dispatch.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Match the last balanced {...} object in the worker's reply.
-_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
-
-
 def _parse_worker_result(text: str) -> Optional[dict]:
     """Extract the JSON object `{session_ids, reasoning}` from the worker's
     reply text. Returns None when no valid object parses."""
     if not text:
         return None
-    # The reply may surround the JSON with prose; take the last {...} span.
-    m = _JSON_OBJECT_RE.search(text)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(obj, dict) or "session_ids" not in obj:
-        return None
-    return obj
+    for candidate in _json_object_spans_from_end(text):
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and "session_ids" in obj:
+            return obj
+    return None
+
+
+def _json_object_spans_from_end(text: str):
+    depth = 0
+    end: Optional[int] = None
+    in_string = False
+    escaped = False
+    for idx in range(len(text) - 1, -1, -1):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "}":
+            if depth == 0:
+                end = idx + 1
+            depth += 1
+            continue
+        if ch != "{":
+            continue
+        if depth == 0 or end is None:
+            continue
+        depth -= 1
+        if depth == 0:
+            yield text[idx:end]
+            end = None
 
 
 class SessionSearchSpec(ProvisionedSessionSpec):
