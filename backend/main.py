@@ -8188,6 +8188,23 @@ async def rewind_and_retry(session_id: str, body: dict):
 
     user_msg = msgs[user_idx]
     retry_prompt = user_msg.get("content") or ""
+    retry_images = []
+    for img in user_msg.get("images") or []:
+        if not isinstance(img, dict):
+            continue
+        filename = img.get("filename")
+        media_type = img.get("media_type")
+        if not isinstance(filename, str) or not isinstance(media_type, str):
+            continue
+        img_path = resolve_session_image_path(session_id, filename)
+        if not img_path.exists():
+            raise HTTPException(status_code=500, detail=t("error.image_not_found"))
+        import base64
+        raw = await asyncio.to_thread(img_path.read_bytes)
+        retry_images.append({
+            "data": base64.b64encode(raw).decode("ascii"),
+            "media_type": media_type,
+        })
 
     try:
         await coordinator.rewind_files(session_id, user_msg["id"])
@@ -8203,6 +8220,7 @@ async def rewind_and_retry(session_id: str, body: dict):
 
     return {
         "retry_prompt": retry_prompt,
+        "retry_images": retry_images,
         "retry_model": sess.get("model"),
         "retry_cwd": sess.get("cwd"),
         "retry_orchestration_mode": sess.get("orchestration_mode") or "team",

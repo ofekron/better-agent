@@ -4798,12 +4798,14 @@ function AppMain({
         }
         const data = (await res.json()) as {
           retry_prompt?: string;
+          retry_images?: ImagePayload[];
           retry_model?: string;
           retry_cwd?: string;
           retry_orchestration_mode?: import("./types").OrchestrationMode;
         };
         const prompt = data.retry_prompt ?? "";
-        if (!prompt) return;
+        const retryImages = data.retry_images ?? [];
+        if (!prompt && retryImages.length === 0) return;
 
         const pendingMsg: ChatMessage = {
           id: `pending-${Date.now()}`,
@@ -4813,6 +4815,14 @@ function AppMain({
           timestamp: new Date().toISOString(),
           isStreaming: false,
           status: "sending",
+          ...(retryImages.length > 0
+            ? {
+                images: retryImages.map((img) => ({
+                  media_type: img.media_type,
+                  dataUrl: `data:${img.media_type};base64,${img.data}`,
+                })),
+              }
+            : {}),
         };
         appendPendingForSession(sessionId, pendingMsg);
 
@@ -4822,7 +4832,7 @@ function AppMain({
           data.retry_cwd ?? cwd ?? currentSession.cwd,
           null,
           sessionId,
-          undefined,
+          retryImages.length > 0 ? retryImages : undefined,
           data.retry_orchestration_mode ?? currentSession?.orchestration_mode ?? undefined,
           pendingMsg.id
         );
