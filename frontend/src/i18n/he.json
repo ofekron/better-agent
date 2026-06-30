@@ -732,6 +732,8 @@
   "fileComment.emptyHint": "בחרו טקסט בקובץ כדי להוסיף הערה לטווח זה. הערות מרובות מצטרפות לשליחה אחת.",
   "fileComment.failedToAdd": "נכשל להוסיף הערה: ",
   "thinking.thinking": "חושב",
+  "projectSuggestion.sendTo": "שלח אל {{project}}",
+  "projectSuggestion.moveTo": "העבר אל {{project}}",
   "projectSettings.loading": "טוען קבצי קונפיג...",
   "projectSettings.instructions": "הוראות",
   "projectSettings.settings": "הגדרות",

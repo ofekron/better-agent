@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "Selecciona texto en el archivo para encolar un comentario para ese rango. Varios comentarios se agrupan en un único Enviar.",
   "fileComment.failedToAdd": "Error al añadir comentario: ",
   "thinking.thinking": "Pensando",
+  "projectSuggestion.sendTo": "Enviar a {{project}}",
+  "projectSuggestion.moveTo": "Mover a {{project}}",
   "projectSettings.loading": "Cargando archivos de configuración...",
   "projectSettings.instructions": "Instrucciones",
   "projectSettings.settings": "Ajustes",

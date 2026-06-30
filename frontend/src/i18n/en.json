@@ -751,6 +751,8 @@
   "fileComment.emptyHint": "Select text in the file to queue a comment for that range. Multiple comments batch into one Send.",
   "fileComment.failedToAdd": "Failed to add comment: ",
   "thinking.thinking": "Thinking",
+  "projectSuggestion.sendTo": "Send to {{project}}",
+  "projectSuggestion.moveTo": "Move to {{project}}",
   "projectSettings.loading": "Loading config files...",
   "projectSettings.instructions": "Instructions",
   "projectSettings.settings": "Settings",

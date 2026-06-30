@@ -726,6 +726,8 @@
   "fileComment.emptyHint": "Selecteer tekst in het bestand om een opmerking voor dat bereik in de wachtrij te zetten. Meerdere opmerkingen worden gebundeld in één Versturen.",
   "fileComment.failedToAdd": "Opmerking toevoegen mislukt: ",
   "thinking.thinking": "Aan het denken",
+  "projectSuggestion.sendTo": "Versturen naar {{project}}",
+  "projectSuggestion.moveTo": "Verplaatsen naar {{project}}",
   "projectSettings.loading": "Configbestanden laden...",
   "projectSettings.instructions": "Instructies",
   "projectSettings.settings": "Instellingen",

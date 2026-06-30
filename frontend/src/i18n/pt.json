@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "Selecione texto no arquivo para enfileirar um comentário para esse intervalo. Vários comentários são agrupados em um único Enviar.",
   "fileComment.failedToAdd": "Falha ao adicionar comentário: ",
   "thinking.thinking": "Pensando",
+  "projectSuggestion.sendTo": "Enviar para {{project}}",
+  "projectSuggestion.moveTo": "Mover para {{project}}",
   "projectSettings.loading": "Carregando arquivos de configuração...",
   "projectSettings.instructions": "Instruções",
   "projectSettings.settings": "Configurações",

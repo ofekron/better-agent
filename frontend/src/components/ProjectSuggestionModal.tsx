@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { scaledFontSize } from "../utils/typography";
 
@@ -24,6 +25,9 @@ export function ProjectSuggestionModal({
   onSendHere,
   onCancel,
 }: Props) {
+  const { t } = useTranslation();
+  const sendHereLabel = t("projectSuggestion.sendTo", { project: currentName });
+  const moveLabel = t("projectSuggestion.moveTo", { project: targetName });
   useBackButtonDismiss(true, onCancel);
   const confidence = Math.round(suggestion.score * 100);
   const bodyTextStyle = {
@@ -35,7 +39,7 @@ export function ProjectSuggestionModal({
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <div
-        className="modal-content"
+        className="modal-content project-suggestion-modal"
         style={{ maxWidth: "440px" }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -62,11 +66,22 @@ export function ProjectSuggestionModal({
           </p>
         </div>
         <div className="modal-footer">
-          <button type="button" className="btn-secondary" onClick={onSendHere}>
-            Send here
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onSendHere}
+            title={sendHereLabel}
+          >
+            {sendHereLabel}
           </button>
-          <button type="button" className="btn-primary" onClick={onMove} autoFocus>
-            Move &amp; send
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onMove}
+            autoFocus
+            title={moveLabel}
+          >
+            {moveLabel}
           </button>
         </div>
       </div>

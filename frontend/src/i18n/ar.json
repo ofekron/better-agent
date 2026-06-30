@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "حدّد نصًا في الملف لإضافة تعليق للطابور لهذا النطاق. تُجمَّع التعليقات المتعددة في إرسالة واحدة.",
   "fileComment.failedToAdd": "فشل إضافة التعليق: ",
   "thinking.thinking": "يفكّر",
+  "projectSuggestion.sendTo": "إرسال إلى {{project}}",
+  "projectSuggestion.moveTo": "نقل إلى {{project}}",
   "projectSettings.loading": "جارٍ تحميل ملفات الإعداد...",
   "projectSettings.instructions": "التعليمات",
   "projectSettings.settings": "الإعدادات",

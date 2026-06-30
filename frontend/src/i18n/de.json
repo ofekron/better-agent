@@ -726,6 +726,8 @@
   "fileComment.emptyHint": "Markieren Sie Text in der Datei, um einen Kommentar für diesen Bereich einzureihen. Mehrere Kommentare werden zu einem Senden zusammengefasst.",
   "fileComment.failedToAdd": "Kommentar konnte nicht hinzugefügt werden: ",
   "thinking.thinking": "Denkt nach",
+  "projectSuggestion.sendTo": "An {{project}} senden",
+  "projectSuggestion.moveTo": "Nach {{project}} verschieben",
   "projectSettings.loading": "Konfigurationsdateien werden geladen...",
   "projectSettings.instructions": "Anweisungen",
   "projectSettings.settings": "Einstellungen",

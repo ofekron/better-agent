@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "Seleziona del testo nel file per accodare un commento per quel range. Più commenti vengono raggruppati in un unico Invia.",
   "fileComment.failedToAdd": "Aggiunta del commento non riuscita: ",
   "thinking.thinking": "Pensiero",
+  "projectSuggestion.sendTo": "Invia a {{project}}",
+  "projectSuggestion.moveTo": "Sposta in {{project}}",
   "projectSettings.loading": "Caricamento file di configurazione...",
   "projectSettings.instructions": "Istruzioni",
   "projectSettings.settings": "Impostazioni",

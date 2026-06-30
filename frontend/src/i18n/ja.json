@@ -726,6 +726,8 @@
   "fileComment.emptyHint": "ファイル内のテキストを選択すると、その範囲へのコメントをキューに追加できます。複数のコメントは 1 回の送信にまとめられます。",
   "fileComment.failedToAdd": "コメントの追加に失敗しました: ",
   "thinking.thinking": "思考中",
+  "projectSuggestion.sendTo": "{{project}} に送信",
+  "projectSuggestion.moveTo": "{{project}} に移動",
   "projectSettings.loading": "設定ファイルを読み込み中...",
   "projectSettings.instructions": "指示",
   "projectSettings.settings": "設定",
