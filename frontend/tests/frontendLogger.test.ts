@@ -76,4 +76,14 @@ describe("frontend logger", () => {
     expect(payload.message).not.toContain("componentStack");
     expect(payload.message).not.toContain("SessionStatusBadge");
   });
+
+  it("does not forward benign mobile no-intent console errors", async () => {
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    console.error({ message: "No processing needed" });
+    console.error({ message: "No processing needed." });
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

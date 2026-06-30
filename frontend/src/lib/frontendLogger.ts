@@ -3,6 +3,10 @@ import { API } from "../api";
 type FrontendLogLevel = "debug" | "info" | "warn" | "error";
 
 let installed = false;
+const benignConsoleErrorMessages = new Set([
+  "No processing needed",
+  "No processing needed.",
+]);
 
 function stringifyArg(arg: unknown): string {
   if (arg instanceof Error) return arg.stack || arg.message;
@@ -76,6 +80,7 @@ export function installFrontendLogger(): void {
   const nativeConsoleError = console.error.bind(console);
   console.error = (...args: unknown[]) => {
     nativeConsoleError(...args);
+    if (isBenignConsoleError(args)) return;
     const errArg = args.find((a) => a instanceof Error) as Error | undefined;
     // React's error boundaries pass an ErrorInfo object carrying
     // `componentStack` (the "at <Component>" tree) as a separate arg.
@@ -102,6 +107,18 @@ export function installFrontendLogger(): void {
       stack,
     );
   };
+}
+
+function isBenignConsoleError(args: unknown[]): boolean {
+  if (args.length !== 1) return false;
+  const arg = args[0];
+  if (!arg || typeof arg !== "object" || arg instanceof Error || Array.isArray(arg)) {
+    return false;
+  }
+  const keys = Object.keys(arg);
+  if (keys.length !== 1 || keys[0] !== "message") return false;
+  const message = (arg as { message?: unknown }).message;
+  return typeof message === "string" && benignConsoleErrorMessages.has(message);
 }
 
 /** Pull React's `componentStack` out of a console.error arg list (the
