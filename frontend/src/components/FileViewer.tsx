@@ -21,6 +21,7 @@ import { trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
 
 import { API } from "../api";
+import { rawFileUrl } from "../utils/rawFileUrl";
 
 export interface FileTagAnchor {
   filePath: string;
@@ -868,7 +869,7 @@ export function FileViewer({
   const canCommentOnFile = !!onAddFileTag && !isDiffMode && !showLatestDiff;
   const hasUnsavedOriginalChanges = dirty || hasDraft;
   const synced = !stale && !hasUnsavedOriginalChanges && !showLatestDiff;
-  const rawUrl = `${API}/api/file/raw?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}&_v=${rawVersion}`;
+  const rawUrl = rawFileUrl(API, filePath, nodeId, rawVersion);
 
   return (
     <div className="file-viewer">
