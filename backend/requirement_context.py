@@ -75,7 +75,7 @@ RG_OPTIONS_WITH_VALUE = {
 
 class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 1
+    version = 2
     name = "worker:requirements:query-processor"
     env_prefix = "GET_REQUIREMENTS_PROCESSOR"
     task_key = "requirement_analysis"
@@ -83,8 +83,8 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     bare_config = False
     worker_creation_policy = "deny"
     machine_completion = False
-    run_mode = "direct"
-    ephemeral_forks = False
+    run_mode = "fork"
+    ephemeral_forks = True
     dispatch = "http"
     on_no_fork = "error"
     provision_timeout = 90.0
