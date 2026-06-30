@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
-import { scrollHorizontalItemIntoView } from "src/utils/tabScroll";
+import { scrollHorizontalItemToCenter } from "src/utils/tabScroll";
 import { sessionLinkMarker } from "src/utils/linkifyFilePaths";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
@@ -36,8 +36,6 @@ export function SessionTabs({
     sessions.map((session) => session.id),
   );
   const activeRef = useRef<HTMLDivElement>(null);
-  const prevFirstIdRef = useRef<string | null>(null);
-  const prevIdsRef = useRef<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
     sessionId: string;
     x: number;
@@ -45,8 +43,8 @@ export function SessionTabs({
   } | null>(null);
 
   useEffect(() => {
-    scrollHorizontalItemIntoView(scrollRef.current, activeRef.current);
-  }, [currentSessionId, sessions]);
+    scrollHorizontalItemToCenter(scrollRef.current, activeRef.current);
+  }, [currentSessionId]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -61,21 +59,6 @@ export function SessionTabs({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [contextMenu]);
-
-  // Scroll the tabs strip back to the start when a NEW session becomes
-  // the first (leftmost) tab. Fires only when the first tab changed to
-  // one that wasn't open before, so reordering existing tabs never
-  // yanks the scroll position.
-  useEffect(() => {
-    const firstId = sessions[0]?.id ?? null;
-    const prevFirst = prevFirstIdRef.current;
-    const prevIds = prevIdsRef.current;
-    prevFirstIdRef.current = firstId;
-    prevIdsRef.current = new Set(sessions.map((s) => s.id));
-    if (!firstId || firstId === prevFirst) return;
-    if (prevIds.has(firstId)) return;
-    scrollRef.current?.scrollTo({ left: 0 });
-  }, [sessions]);
 
   if (sessions.length === 0) return null;
   const contextSession = contextMenu

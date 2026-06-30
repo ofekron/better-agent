@@ -59,7 +59,7 @@ describe("top tab auto-scroll", () => {
     vi.restoreAllMocks();
   });
 
-  it("scrolls the active session tab wrapper through the tabs container", async () => {
+  it("centers the active session tab wrapper when the selected session changes", async () => {
     vi.spyOn(window, "matchMedia").mockReturnValue({
       matches: true,
     } as MediaQueryList);
@@ -98,12 +98,56 @@ describe("top tab auto-scroll", () => {
     );
 
     await waitFor(() => {
-      expect(scrollTo).toHaveBeenCalledWith({ left: 240, behavior: "auto" });
+      expect(scrollTo).toHaveBeenCalledWith({ left: 330, behavior: "auto" });
     });
     expect(
       (document.querySelector('[data-tab-movement-key="sess-2"]') as HTMLElement)
         .scrollIntoView,
     ).not.toHaveBeenCalled();
+  });
+
+  it("does not scroll session tabs when only the tab list changes", async () => {
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: true,
+    } as MediaQueryList);
+    const sessions = [
+      makeSession({ id: "sess-1", name: "One", cwd: "/tmp/project-a" }),
+      makeSession({ id: "sess-2", name: "Two", cwd: "/tmp/project-a" }),
+    ];
+    const { rerender } = render(
+      <SessionTabs
+        sessions={sessions}
+        providers={[]}
+        currentSessionId="sess-2"
+        sortField="updated_at"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onCloseOthers={vi.fn()}
+        onToggleTopbarPin={vi.fn()}
+      />,
+    );
+
+    const scrollTo = installTabGeometry(
+      ".session-tabs",
+      '[data-tab-movement-key="sess-2"]',
+    );
+    rerender(
+      <SessionTabs
+        sessions={[
+          makeSession({ id: "sess-3", name: "Three", cwd: "/tmp/project-a" }),
+          ...sessions,
+        ]}
+        providers={[]}
+        currentSessionId="sess-2"
+        sortField="updated_at"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onCloseOthers={vi.fn()}
+        onToggleTopbarPin={vi.fn()}
+      />,
+    );
+
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it("scrolls the active project tab wrapper through the tabs container", async () => {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  horizontalCenterScrollTarget,
   horizontalScrollTarget,
+  scrollHorizontalItemToCenter,
   scrollHorizontalItemIntoView,
 } from "src/utils/tabScroll";
 
@@ -127,6 +129,66 @@ describe("tab horizontal scrolling", () => {
     scrollHorizontalItemIntoView(container, item);
 
     expect(scrollTo).toHaveBeenCalledWith({ left: 240, behavior: "auto" });
+    expect(item.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("centers a selected tab when there is room on both sides", () => {
+    const container = element({
+      left: 0,
+      width: 300,
+      clientWidth: 300,
+      scrollWidth: 1000,
+    });
+    const item = element({ left: 420, width: 120 });
+
+    expect(horizontalCenterScrollTarget(container, item)).toBe(330);
+  });
+
+  it("centers a visible selected tab instead of leaving it alone", () => {
+    const container = element({
+      left: 0,
+      width: 300,
+      scrollLeft: 100,
+      clientWidth: 300,
+      scrollWidth: 1000,
+    });
+    const item = element({ left: 40, width: 120 });
+
+    expect(horizontalCenterScrollTarget(container, item)).toBe(50);
+  });
+
+  it("clamps centered selected tab scrolling to the closest edge", () => {
+    const container = element({
+      left: 0,
+      width: 300,
+      scrollLeft: 100,
+      clientWidth: 300,
+      scrollWidth: 1000,
+    });
+    const item = element({ left: -80, width: 120 });
+
+    expect(horizontalCenterScrollTarget(container, item)).toBe(0);
+  });
+
+  it("scrolls selected tabs to the centered target through the container", () => {
+    const container = element({
+      left: 0,
+      width: 300,
+      clientWidth: 300,
+      scrollWidth: 1000,
+    });
+    const item = element({ left: 420, width: 120 });
+    const scrollTo = vi.fn();
+
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: true,
+    } as MediaQueryList);
+    container.scrollTo = scrollTo;
+    item.scrollIntoView = vi.fn();
+
+    scrollHorizontalItemToCenter(container, item);
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 330, behavior: "auto" });
     expect(item.scrollIntoView).not.toHaveBeenCalled();
   });
 });
