@@ -554,6 +554,35 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("persists last-opened when the current session is clicked in the sidebar", async () => {
+    const session = makeSession({
+      id: "selected-opened-session",
+      name: "Selected opened session",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2020-01-01T00:00:00.000Z",
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    await h.selectSession(session.id);
+    const row = h.backend.state.sessions.find((s) => s.id === session.id);
+    if (!row) throw new Error("session missing from mock backend");
+    row.last_opened_at = "2020-01-01T00:00:00.000Z";
+    h.backend.calls.length = 0;
+
+    await h.selectSession(session.id);
+
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/opened`,
+      ),
+    ).toBe(true);
+    expect(Date.parse(row.last_opened_at ?? "")).toBeGreaterThan(
+      Date.parse("2020-01-01T00:00:00.000Z"),
+    );
+    h.unmount();
+  }, 10000);
+
   it("applies last-opened metadata patches to open tab ordering", async () => {
     const first = makeSession({
       id: "ws-first-session",

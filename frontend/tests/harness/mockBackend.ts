@@ -422,6 +422,12 @@ export class MockBackend {
           context_window: session.context_window ?? null,
         };
       }
+      if (sub === "/opened" && method === "POST") {
+        if (!session) return notFound();
+        const at = new Date().toISOString();
+        session.last_opened_at = at;
+        return { id, last_opened_at: at };
+      }
       if (sub === "" && method === "DELETE") {
         // Cascade-delete: drop any prompt-engineering session whose
         // parent is this id, and tear down its temp file. Mirrors the

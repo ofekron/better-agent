@@ -212,10 +212,17 @@ const OPEN_SESSION_FRESHNESS_FIELDS = [
   "last_opened_at",
   "topbar_pinned_at",
 ] as const;
+const OPEN_SESSION_CONTENT_FRESHNESS_FIELDS = [
+  "updated_at",
+  "last_user_prompt_at",
+] as const;
 
-function openSessionFreshness(session: Session): number {
+function sessionFreshness(
+  session: Session,
+  fields: readonly (typeof OPEN_SESSION_FRESHNESS_FIELDS)[number][],
+): number {
   let newest = -Infinity;
-  for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+  for (const field of fields) {
     const value = session[field];
     if (!value) continue;
     const ms = Date.parse(value);
@@ -226,10 +233,33 @@ function openSessionFreshness(session: Session): number {
 
 function mergeOpenSessionRecord(current: Session | undefined, incoming: Session): Session {
   if (!current) return incoming;
-  const currentFreshness = openSessionFreshness(current);
-  const incomingFreshness = openSessionFreshness(incoming);
-  if (incomingFreshness < currentFreshness) return current;
+  const currentContentFreshness = sessionFreshness(current, OPEN_SESSION_CONTENT_FRESHNESS_FIELDS);
+  const incomingContentFreshness = sessionFreshness(incoming, OPEN_SESSION_CONTENT_FRESHNESS_FIELDS);
+  if (incomingContentFreshness < currentContentFreshness) {
+    let merged = current;
+    for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+      const incomingValue = incoming[field];
+      if (!incomingValue) continue;
+      const currentValue = current[field];
+      const currentMs = currentValue ? Date.parse(currentValue) : NaN;
+      const incomingMs = Date.parse(incomingValue);
+      if (!Number.isNaN(incomingMs) && (Number.isNaN(currentMs) || incomingMs > currentMs)) {
+        merged = { ...merged, [field]: incomingValue };
+      }
+    }
+    return merged;
+  }
   const merged = { ...current, ...incoming };
+  for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
+    const currentValue = current[field];
+    const incomingValue = incoming[field];
+    if (!currentValue || !incomingValue) continue;
+    const currentMs = Date.parse(currentValue);
+    const incomingMs = Date.parse(incomingValue);
+    if (!Number.isNaN(currentMs) && !Number.isNaN(incomingMs) && currentMs > incomingMs) {
+      merged[field] = currentValue;
+    }
+  }
   const keys = Object.keys(incoming) as (keyof Session)[];
   return keys.some((key) => current[key] !== merged[key]) ? merged : current;
 }
@@ -756,6 +786,7 @@ function AppMain({
     addOfflineSession,
     restoreOfflineSession,
     selectSession,
+    markSessionOpened,
     clearCurrentSession,
     deleteSession,
     addMessages,
@@ -1668,11 +1699,22 @@ function AppMain({
       );
       applySessionMetadata(sessionId, toApply);
       setOpenSessionRecords((prev) => {
-        const session = prev[sessionId] || existingNode || sessions.find((s) => s.id === sessionId);
+        const session = existingNode || sessions.find((s) => s.id === sessionId) || prev[sessionId];
         if (!session) return prev;
+        const current = prev[sessionId];
+        const nextSession = {
+          ...session,
+          ...current,
+          ...toApply,
+        } as Session;
+        if (current && Object.keys(toApply).every((key) =>
+          current[key as keyof Session] === nextSession[key as keyof Session]
+        )) {
+          return prev;
+        }
         return {
           ...prev,
-          [sessionId]: mergeOpenSessionRecord(session, { ...session, ...toApply } as Session),
+          [sessionId]: nextSession,
         };
       });
       if ("topbar_pinned" in toApply) {
@@ -6166,7 +6208,9 @@ function AppMain({
               selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
               onSelect={(id) => {
-                const openedAt = new Date().toISOString();
+                const openedAt = currentSession?.id === id
+                  ? markSessionOpened(id)
+                  : new Date().toISOString();
                 stampOpenSessionLastOpened(id, openedAt);
                 const s = sessions.find((s) => s.id === id);
                 if (s) {
