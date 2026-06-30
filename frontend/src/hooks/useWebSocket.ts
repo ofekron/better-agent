@@ -37,7 +37,7 @@ export type StreamingLoadPhase = "starting" | "connected" | null;
 
 export function resolveLiveFrameSessionId(
   event: WSEvent,
-  focusedSessionId: string | null | undefined,
+  _focusedSessionId: string | null | undefined,
 ): string | null {
   const data = event.data as {
     app_session_id?: unknown;
@@ -49,7 +49,7 @@ export function resolveLiveFrameSessionId(
   if (event.type === "todos_snapshot" && typeof data?.session_id === "string" && data.session_id) {
     return data.session_id;
   }
-  return focusedSessionId ?? null;
+  return null;
 }
 
 /** Payload for a rearranger_updated WS event, surfaced to App for routing
@@ -85,9 +85,8 @@ interface UseWebSocketOptions {
    * Used by the split-pane fork view: every visible pane's session
    * stays subscribed so its messages_replay / messages_delta /
    * user_message_persisted / run_state / session_metadata_updated
-   * frames flow in. Live `manager_event`/`worker_event` cosmetic
-   * frames still route only to the focused pane — non-focused panes
-   * converge via the persisted-delta path. */
+   * frames flow in. Live `manager_event`/`worker_event` frames route
+   * only when the backend provides their owning `app_session_id`. */
   additionalAppSessionIds?: string[];
   onRewindComplete?: (appSessionId: string, messages: ChatMessage[]) => void;
   /** Backend's response to a subscribe with `since_seq=N`. Carries
@@ -820,10 +819,9 @@ export function useWebSocket(
         // message for the SPECIFIC session the event belongs to. The
         // backend's `_dispatch_raw` annotates `data.app_session_id`
         // on every per-session frame so a client subscribed to N
-        // panes can route each frame to the right one. Falls back
-        // to the focused pane id only as a defensive last resort —
-        // any new event type that forgets to carry app_session_id
-        // would otherwise misroute under split-fork view.
+        // panes can route each frame to the right one. Ownerless
+        // render frames are ignored instead of being grafted onto
+        // whichever pane is focused.
         // `pr-link` is a no-uuid metadata agent_message (a PR was just
         // created). It never lands on the render tree — surface it only
         // as an ephemeral chat-panel toast, on the LIVE push. Diverted
@@ -925,9 +923,8 @@ export function useWebSocket(
           setStreamingLoadPhase("starting");
           setLastResult(null);
           const managerSid =
-            (event.data as { app_session_id?: string })?.app_session_id ??
-            currentAppSessionIdRef.current ??
-            "";
+            (event.data as { app_session_id?: string })?.app_session_id ?? "";
+          if (!managerSid) return;
           setStreamingAppSessionId(managerSid || null);
           onTurnStartedRef.current?.(managerSid);
         }

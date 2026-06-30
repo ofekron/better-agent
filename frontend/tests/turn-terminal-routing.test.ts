@@ -5,17 +5,8 @@ import { MockWebSocketController } from "./harness/mockWebSocket";
 import type { WSEvent } from "../src/types";
 
 /**
- * Regression: terminal WS frames (turn_complete / turn_stopped /
- * turn_detached / error) must route to the session the turn belongs to
- * (`event.data.app_session_id`), NOT the focused pane
- * (`currentAppSessionId`).
- *
- * The WS subscribes to every open pane. Before the fix these frames
- * carried no app_session_id and the handler routed by the focused pane,
- * so a turn finishing in a background pane (e.g. you sent a native
- * prompt then switched away) fired `onTurnTerminal(focusedId)` — clearing
- * the WRONG pane's `isStreaming`. The real pane stayed stuck "Running…"
- * until a manual refresh re-pulled REST.
+ * Terminal WS frames route by `event.data.app_session_id`.
+ * Ownerless render frames never route by the focused pane.
  */
 describe("useWebSocket terminal-frame routing by app_session_id", () => {
   let ctrl: MockWebSocketController;
@@ -41,15 +32,17 @@ describe("useWebSocket terminal-frame routing by app_session_id", () => {
   async function mount(focused: string) {
     const onTurnTerminal = vi.fn();
     const onTurnDetached = vi.fn();
+    const onLiveTurnEvent = vi.fn();
     const r = renderHook(() =>
       useWebSocket("ws://test", {
         currentAppSessionId: focused,
         onTurnTerminal,
         onTurnDetached,
+        onLiveTurnEvent,
       }),
     );
     await flush(); // let the socket open + currentAppSessionId effect settle
-    return { onTurnTerminal, onTurnDetached, r };
+    return { onTurnTerminal, onTurnDetached, onLiveTurnEvent, r };
   }
 
   it("turn_complete for a BACKGROUND session routes to THAT session, not the focused one", async () => {
@@ -69,6 +62,15 @@ describe("useWebSocket terminal-frame routing by app_session_id", () => {
     const { onTurnTerminal } = await mount("b");
     emit({ type: "turn_complete", data: { success: true } });
     expect(onTurnTerminal).toHaveBeenCalledWith("b");
+  });
+
+  it("ownerless live render frames do not route to the focused session", async () => {
+    const { onLiveTurnEvent } = await mount("b");
+    emit({
+      type: "manager_event",
+      data: { uuid: "evt-1", event: { type: "assistant", message: { content: "from another session" } } },
+    });
+    expect(onLiveTurnEvent).not.toHaveBeenCalled();
   });
 
   it("turn_stopped for a background session routes there with its stop metadata", async () => {
@@ -113,6 +115,6 @@ describe("live todo snapshot routing", () => {
         { type: "turn_complete", data: { session_id: "wrong-shape" } },
         "focused",
       ),
-    ).toBe("focused");
+    ).toBeNull();
   });
 });
