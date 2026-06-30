@@ -114,11 +114,15 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
 def _event_uuid(event: dict) -> Optional[str]:
     """Extract the claude event uuid from an event dict.
 
-    Handles legacy manager_event wrappers (`data.event.data.uuid`)
-    and the canonical agent_message shape (`data.uuid`).
+    Handles top-level event UUIDs, legacy manager_event wrappers
+    (`data.event.data.uuid`), and canonical agent_message shape
+    (`data.uuid`).
     """
     if not isinstance(event, dict):
         return None
+    uid = event.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
     data = event.get("data")
     if not isinstance(data, dict):
         return None
@@ -217,7 +221,7 @@ class OrchestrationStrategy(ABC):
     # Event types that land on msg.events (the narrow render tree).
     # DO NOT extend without auditing `_reconcile_msg_events_from_jsonl`.
     # `manager_event` kept for backward compat with pre-migration events.jsonl rows.
-    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "model_switched", "steer_prompt")
+    _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "model_switched", "steer_prompt", "lifecycle_notice")
 
     # Hard caps on lifecycle accumulators so a `done` event that never
     # fires (orphan run, crashed handler, race between cancel and
@@ -912,6 +916,9 @@ class OrchestrationStrategy(ABC):
         # form.  Use it for both the render tree AND events.jsonl writes.
         norm_etype = normalized.get("type") or etype or "unknown"
         norm_data = normalized.get("data") if isinstance(normalized.get("data"), dict) else data
+        norm_uuid = normalized.get("uuid")
+        if isinstance(norm_uuid, str) and norm_uuid and isinstance(norm_data, dict) and not norm_data.get("uuid"):
+            norm_data = {**norm_data, "uuid": norm_uuid}
 
         # Attention markers MUST be detected on RAW assistant text, BEFORE
         # the file-ref/tag rewrite below strips the `<TAG>` wrapper out of
