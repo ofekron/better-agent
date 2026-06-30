@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from paths import ba_home
 from typing import Awaitable, Callable, Iterable, Iterator, Optional
+import trace_grep_index
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,11 @@ class TraceCollector:
             with open(index_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(self.to_index_entry()) + "\n")
 
+            try:
+                trace_grep_index.index_trace(self.to_dict(), trace_path)
+            except Exception:
+                logger.debug("Failed to update trace grep index %s", self.trace_id, exc_info=True)
+
             logger.info(
                 "Trace saved: %s (session=%s, steps=%d, duration=%sms)",
                 self.trace_id, self.session_id, len(self.steps), self.total_duration_ms,
@@ -416,60 +422,14 @@ def grep_traces(
 
     Returns list of matches: {trace_id, step_index, step_type, field, match_context, ...}
     """
-    if not _traces_dir().exists():
-        return []
-
-    pattern_lower = pattern.lower()
-    results = []
-
-    dirs = [_traces_dir() / session_id] if session_id else sorted(_traces_dir().iterdir(), reverse=True)
-    for session_dir in dirs:
-        if not session_dir.is_dir():
-            continue
-        for trace_file in sorted(session_dir.glob("*.json"), reverse=True):
-            try:
-                trace = json.loads(trace_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-
-            for i, step in enumerate(trace.get("steps", [])):
-                if step_type and step.get("step_type") != step_type:
-                    continue
-
-                matches_in = []
-                if field in ("prompts", "all"):
-                    prompt = step.get("input_prompt", "")
-                    if pattern_lower in prompt.lower():
-                        # Extract match context (100 chars around first hit)
-                        pos = prompt.lower().find(pattern_lower)
-                        start = max(0, pos - 50)
-                        end = min(len(prompt), pos + len(pattern) + 50)
-                        matches_in.append(("input_prompt", prompt[start:end]))
-
-                if field in ("outputs", "all"):
-                    output = step.get("raw_output", "")
-                    if pattern_lower in output.lower():
-                        pos = output.lower().find(pattern_lower)
-                        start = max(0, pos - 50)
-                        end = min(len(output), pos + len(pattern) + 50)
-                        matches_in.append(("raw_output", output[start:end]))
-
-                for matched_field, context in matches_in:
-                    results.append({
-                        "trace_id": trace.get("trace_id"),
-                        "session_id": trace.get("session_id"),
-                        "timestamp": trace.get("timestamp"),
-                        "user_prompt_preview": trace.get("user_prompt", "")[:100],
-                        "step_index": i,
-                        "step_type": step.get("step_type"),
-                        "thread_name": step.get("thread_name"),
-                        "matched_field": matched_field,
-                        "match_context": context,
-                    })
-                    if len(results) >= limit:
-                        return results
-
-    return results
+    return trace_grep_index.search(
+        pattern,
+        traces_dir=_traces_dir(),
+        field=field,
+        session_id=session_id,
+        step_type=step_type,
+        limit=limit,
+    )
 
 
 def get_latest_trace(session_id: Optional[str] = None) -> Optional[dict]:
