@@ -152,6 +152,15 @@ def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
     assert "ba_home()" not in path_source
 
 
+def test_auto_restart_pref_read_is_off_loop() -> None:
+    source = (ROOT / "auto_restart_on_idle.py").read_text(encoding="utf-8")
+    tick_start = source.index("async def _tick(")
+    tick_end = source.index("busy = await asyncio.to_thread(self._is_busy)", tick_start)
+    tick_source = source[tick_start:tick_end]
+    assert "await asyncio.to_thread(self._is_enabled)" in tick_source
+    assert "if not self._is_enabled():" not in tick_source
+
+
 def test_session_opened_avoids_full_session_copy() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = main_source.index("async def mark_session_opened(")
@@ -3215,6 +3224,7 @@ if __name__ == "__main__":
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_user_prefs_uses_cached_path_for_hot_reads()
+    test_auto_restart_pref_read_is_off_loop()
     test_session_opened_avoids_full_session_copy()
     test_message_delta_replay_skips_full_snapshot_rebuild()
     test_message_summary_reader_filters_requested_message_ids()

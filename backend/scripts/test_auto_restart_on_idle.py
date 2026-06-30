@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 
 # Per CLAUDE.md: isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module.
@@ -145,6 +146,22 @@ async def _run() -> None:
         "no stale fire after re-enable",
         len(triggered) == 1,
         f"triggered {len(triggered)} times",
+    )
+
+    enabled_thread_ids: list[int] = []
+    main_thread_id = threading.get_ident()
+
+    def enabled_off_loop() -> bool:
+        enabled_thread_ids.append(threading.get_ident())
+        return True
+
+    mon, _triggered = _make_monitor(busy_sequence=[False], enabled=True)
+    mon._is_enabled = enabled_off_loop  # type: ignore[assignment]
+    await mon._tick()
+    check(
+        "pref read runs off loop",
+        bool(enabled_thread_ids) and all(t != main_thread_id for t in enabled_thread_ids),
+        f"thread ids {enabled_thread_ids}, main {main_thread_id}",
     )
 
 

@@ -72,7 +72,7 @@ class AutoRestartOnIdleMonitor:
             return
         if self._triggered:
             return
-        if not self._is_enabled():
+        if not await asyncio.to_thread(self._is_enabled):
             # Reset so a later enable-while-idle does not fire on stale history.
             self._was_busy = False
             return
