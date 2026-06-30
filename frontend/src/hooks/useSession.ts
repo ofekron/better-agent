@@ -71,6 +71,7 @@ export type SessionMetadataPatch = {
   messages?: ChatMessage[];
   message_count?: number;
   updated_at?: string;
+  last_opened_at?: string;
   pagination?: Session["pagination"];
   right_panel_open?: boolean;
   right_panel_active_tab?:
@@ -874,6 +875,24 @@ export function useSession(authStatus?: string) {
     return sortSessionsForList(list, folderView, sortBy, rankOf);
   }, []);
 
+  const stampSessionLastOpened = useCallback((sessionId: string, at: string) => {
+    const apply = (session: Session): Session =>
+      session.last_opened_at === at ? session : { ...session, last_opened_at: at };
+
+    setCurrentSession((prev) =>
+      prev ? updateNodeById(prev, sessionId, apply) : prev
+    );
+
+    const rootId = sessionTreeRootByNodeRef.current.get(sessionId);
+    if (rootId) {
+      const cached = sessionTreeCacheRef.current.get(rootId);
+      if (cached) {
+        const updated = updateNodeById(cached, sessionId, apply);
+        if (updated !== cached) sessionTreeCacheRef.current.set(rootId, updated);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!currentSession || wsTargetSessionId === null) return;
     rememberSessionTree(currentSession);
@@ -1213,6 +1232,12 @@ export function useSession(authStatus?: string) {
     const myReqId = ++selectRequestIdRef.current;
     const opId = `session:select:${id}`;
     startOp(opId);
+    // Bump locally before the async backend stamp/REST tree can race. The
+    // top tab strip sorts from the session summaries/current tree; without
+    // this optimistic timestamp, opening a cached or not-yet-open session can
+    // leave the selected tab behind until a later refetch happens to arrive.
+    const openedAt = new Date().toISOString();
+    stampSessionLastOpened(id, openedAt);
     // Stamp last-opened on the backend (fire-and-forget) so the "last
     // opened" session sort reflects this selection. Does not gate the
     // open flow; backend bumps last_opened_at without touching updated_at.
@@ -1260,6 +1285,7 @@ export function useSession(authStatus?: string) {
     if (cached && cur?.id !== id) {
       setCurrentSession({
         ...cached,
+        last_opened_at: openedAt,
         messages: [],
         forks: [],
       });
@@ -1279,6 +1305,12 @@ export function useSession(authStatus?: string) {
       // stores the whole tree in currentSession; the split-pane UI
       // reads forks from `currentSession.forks`.
       const tree = (await res.json()) as Session;
+      const treeWithOpenedAt = updateNodeById(tree, id, (node) => {
+        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
+        const optimisticMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= optimisticMs) return node;
+        return { ...node, last_opened_at: openedAt };
+      });
       if (myReqId !== selectRequestIdRef.current) return;
       // Record REST-resolve checkpoint for the open-latency probe.
       // The quiet timer only arms once restMs is set, so any replay/
@@ -1303,27 +1335,27 @@ export function useSession(authStatus?: string) {
       // during the fetch — the REST response was generated before those
       // messages existed, so carryDrafts alone would lose them.
       setCurrentSession((prev) => {
-        if (!prev || prev.id !== tree.id) {
+        if (!prev || prev.id !== treeWithOpenedAt.id) {
           console.info(
             "[stale-dbg] selectSession %s: direct tree (prev=%s tree=%s)",
-            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", tree.id.slice(0, 8),
+            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", treeWithOpenedAt.id.slice(0, 8),
           );
-          return tree;
+          return treeWithOpenedAt;
         }
         if (
           treeHasStreamingAssistant(prev) &&
-          treeHasStreamingAssistant(tree)
+          treeHasStreamingAssistant(treeWithOpenedAt)
         ) {
           console.info("[stale-dbg] selectSession %s: kept prev (streaming)", id.slice(0, 8));
           return prev;
         }
-        const carried = carryDrafts(prev, tree);
-        const treeAsst = tree.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
+        const carried = carryDrafts(prev, treeWithOpenedAt);
+        const treeAsst = treeWithOpenedAt.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
         const prevAsst = prev.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
         console.info(
           "[stale-dbg] selectSession %s: merging tree_msgs=%d prev_msgs=%d tree_last_evts=%d prev_last_evts=%d",
           id.slice(0, 8),
-          tree.messages?.length ?? 0, prev.messages?.length ?? 0,
+          treeWithOpenedAt.messages?.length ?? 0, prev.messages?.length ?? 0,
           treeAsst?.events?.length ?? 0, prevAsst?.events?.length ?? 0,
         );
         if (prev.messages?.length) {
@@ -1396,7 +1428,7 @@ export function useSession(authStatus?: string) {
       setSessionLoading(false);
       completeOp(opId);
     }
-  }, [cachedSessionTreeFor]);
+  }, [cachedSessionTreeFor, stampSessionLastOpened]);
 
   const deleteSession = useCallback(
     async (id: string) => {
@@ -2237,6 +2269,7 @@ export function useSession(authStatus?: string) {
         if (patch.messages !== undefined) next.messages = patch.messages;
         if (patch.message_count !== undefined) next.message_count = patch.message_count;
         if (patch.updated_at !== undefined) next.updated_at = patch.updated_at;
+        if (patch.last_opened_at !== undefined) next.last_opened_at = patch.last_opened_at;
         if (patch.pagination !== undefined) next.pagination = patch.pagination;
         if (patch.right_panel_open !== undefined)
           next.right_panel_open = patch.right_panel_open;
