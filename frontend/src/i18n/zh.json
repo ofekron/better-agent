@@ -109,6 +109,7 @@
   "input.steerTitle": "发送到进行中的 Codex 轮次",
   "input.interruptSendButton": "打断",
   "input.queueSendButton": "排队",
+  "input.sendToNewSession": "发送到新会话",
   "input.forkButton": "Fork",
   "input.addNote": "保存为笔记",
   "notes.empty": "暂无笔记",

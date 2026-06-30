@@ -109,6 +109,7 @@
   "input.steerTitle": "Enviar para o turno ativo do Codex",
   "input.interruptSendButton": "Interromper",
   "input.queueSendButton": "Enfileirar",
+  "input.sendToNewSession": "Enviar para nova sessão",
   "input.forkButton": "Fork",
   "input.addNote": "Salvar como nota",
   "notes.empty": "Nenhuma nota ainda",

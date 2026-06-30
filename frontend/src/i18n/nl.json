@@ -109,6 +109,7 @@
   "input.steerTitle": "Versturen in de actieve Codex-beurt",
   "input.interruptSendButton": "Onderbreken",
   "input.queueSendButton": "Wachtrij",
+  "input.sendToNewSession": "Naar nieuwe sessie sturen",
   "input.forkButton": "Fork",
   "input.addNote": "Als notitie opslaan",
   "notes.empty": "Nog geen notities",

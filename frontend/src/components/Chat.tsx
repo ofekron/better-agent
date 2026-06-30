@@ -364,6 +364,11 @@ interface Props {
    * button. Click forwards the trimmed draft up to App.tsx, which opens
    * the fork/new picker and starts the prompt-eng overlay. */
   onEngineer?: (draft: string) => void;
+  onSendToNewSession?: (
+    prompt: string,
+    images: import("./InputArea").PastedImage[],
+    files: import("./InputArea").FileAttachment[],
+  ) => boolean | Promise<boolean>;
   /** Optional: full root tree for split-pane fork view. When this has
    * a non-empty `forks` array, the linear chat list is replaced by a
    * `ForkSplitView` (shared messages above the fork point, N+1 columns
@@ -505,6 +510,7 @@ export function Chat({
   draftImages,
   onImagesChange,
   onEngineer,
+  onSendToNewSession,
   tree,
   pendingBySession,
   focusedSessionId,
@@ -1444,6 +1450,7 @@ export function Chat({
               onFork={onForkAndSend}
               canFork={!!onForkAndSend}
               onEngineer={onEngineer}
+              onSendToNewSession={onSendToNewSession}
               disabled={disabled}
               isStreaming={effectiveIsStreaming}
               isStopping={isStopping}

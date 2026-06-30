@@ -109,6 +109,7 @@
   "input.steerTitle": "Направить в активный ход Codex",
   "input.interruptSendButton": "Прервать",
   "input.queueSendButton": "В очередь",
+  "input.sendToNewSession": "Отправить в новую сессию",
   "input.forkButton": "Форк",
   "input.addNote": "Сохранить как заметку",
   "notes.empty": "Заметок пока нет",

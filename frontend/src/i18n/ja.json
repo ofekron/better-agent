@@ -109,6 +109,7 @@
   "input.steerTitle": "アクティブな Codex ターンへ介入",
   "input.interruptSendButton": "割り込み",
   "input.queueSendButton": "キュー",
+  "input.sendToNewSession": "新しいセッションに送信",
   "input.forkButton": "フォーク（分岐）",
   "input.addNote": "ノートとして保存",
   "notes.empty": "ノートはまだありません",

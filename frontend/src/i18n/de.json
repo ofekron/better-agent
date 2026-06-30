@@ -109,6 +109,7 @@
   "input.steerTitle": "In den aktiven Codex-Turn senden",
   "input.interruptSendButton": "Unterbrechen",
   "input.queueSendButton": "Einreihen",
+  "input.sendToNewSession": "An neue Sitzung senden",
   "input.forkButton": "Fork",
   "input.addNote": "Als Notiz speichern",
   "notes.empty": "Noch keine Notizen",

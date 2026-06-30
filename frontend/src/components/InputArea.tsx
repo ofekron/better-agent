@@ -81,6 +81,7 @@ interface Props {
   draft: string;
   onDraftChange: (value: string) => void;
   onEngineer?: (draft: string) => void;
+  onSendToNewSession?: (prompt: string, images: PastedImage[], files: FileAttachment[]) => boolean | Promise<boolean>;
   onFork?: (prompt: string, images: PastedImage[]) => boolean | Promise<boolean>;
   canFork?: boolean;
   forkTargetLabel?: string;
@@ -151,6 +152,7 @@ export function InputArea({
   draft,
   onDraftChange,
   onEngineer,
+  onSendToNewSession,
   onFork,
   canFork = false,
   forkTargetLabel,
@@ -507,6 +509,11 @@ export function InputArea({
       setIgnoreNextDraft(null);
     }
   }, [localDraft, images, disabled, onFork, canFork, onDraftChange]);
+
+  const handleSendToNewSession = useCallback(() => {
+    if (!onSendToNewSession) return;
+    void submitDraft(onSendToNewSession);
+  }, [onSendToNewSession, submitDraft]);
 
   const handleScheduleSubmit = useCallback(
     async (payload: ScheduleSendPayload): Promise<boolean> => {
@@ -923,6 +930,19 @@ export function InputArea({
                   title={t("schedule.scheduleSend")}
                 >
                   <Icon name="clock" size={14} /> {t("schedule.scheduleSend")}
+                </button>
+              )}
+              {onSendToNewSession && (
+                <button
+                  className="overflow-menu-item"
+                  data-testid="send-to-new-session-btn"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    handleSendToNewSession();
+                  }}
+                  disabled={!canSend}
+                >
+                  <Icon name="folder-plus" size={14} /> {t("input.sendToNewSession")}
                 </button>
               )}
               {onAddCapabilityToNextTurn && (
