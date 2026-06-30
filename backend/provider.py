@@ -609,6 +609,40 @@ class Provider(ABC):
             and getattr(rs, "lingering", False)
         ]
 
+    def lingering_run_details(self, app_session_id: str) -> list[dict]:
+        """Rich per-run snapshot for the babysitter-lingering runs of
+        `app_session_id`: what each run is (mode), when it started, and
+        the prompt that kicked it off (read from the run's `input.json`).
+        The frontend background-strip surfaces this in its "info" expand
+        so the user can see WHAT is still running and WHY, not just that
+        something is. Falls back to an empty prompt when the run dir or
+        input.json is gone (defensive across providers)."""
+        out: list[dict] = []
+        for run_id, rs in self._runs.items():
+            if getattr(rs, "app_session_id", None) != app_session_id:
+                continue
+            if not getattr(rs, "lingering", False):
+                continue
+            prompt = ""
+            run_dir = getattr(rs, "run_dir", None)
+            if run_dir is not None:
+                inp = run_dir / "input.json"
+                try:
+                    if inp.exists():
+                        raw = json.loads(inp.read_text(encoding="utf-8"))
+                        if isinstance(raw, dict):
+                            prompt = str(raw.get("prompt") or "").strip()
+                except Exception:
+                    prompt = ""
+            out.append({
+                "run_id": run_id,
+                "mode": getattr(rs, "mode", None),
+                "started_at": getattr(rs, "started_at", "") or "",
+                "target_message_id": getattr(rs, "target_message_id", None),
+                "prompt": prompt,
+            })
+        return out
+
     # ------------------------------------------------------------------
     # backend_state.json — shared path; subclass writes provider-specific
     # contents.
