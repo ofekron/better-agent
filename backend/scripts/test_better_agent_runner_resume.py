@@ -182,6 +182,35 @@ def test_better_agent_runner_resumes_history_across_turns(monkeypatch):
     )
 
 
+def test_run_populates_token_usage_duration_ms(monkeypatch):
+    # duration_ms used to be hardcoded to None; analytics consumes it, so a
+    # completed turn must report a non-negative integer measured across the run.
+    stub = _Stub({0: _sse_lines(content="hi")})
+    stub.start()
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="openai_dur_cwd_"))
+        inputs = {
+            "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
+            "model": "stub-model", "reasoning_effort": None,
+            "permission": {"default": "bypass"}, "session_id": None,
+            "mode": "native", "app_session_id": "dur-app-1",
+            "backend_url": "", "internal_token": "",
+        }
+        rd = _make_run_dir(tmp, inputs)
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
+        assert rc == 0, f"runner exited {rc}"
+        complete = json.loads((rd / "complete.json").read_text())
+    finally:
+        stub.stop()
+
+    tu = complete["token_usage"]
+    assert tu["input_tokens"] == 5 and tu["output_tokens"] == 3, tu
+    dur = tu["duration_ms"]
+    assert isinstance(dur, int) and dur >= 0, f"duration_ms not populated: {dur!r}"
+
+
 def _no_invalid_assistant(messages) -> bool:
     """True if no assistant message has content=None and no tool_calls
     (the shape that 400s on strict OpenAI-compatible endpoints)."""
