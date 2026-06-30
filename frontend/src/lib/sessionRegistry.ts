@@ -187,6 +187,7 @@ type BufferedDelta =
   | { type: "run_state"; payload: RunStatePayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
   | { type: "session_error_changed"; payload: SessionErrorPayload }
+  | { type: "turn_start"; payload: SessionTurnStartPayload }
   | { type: "session_user_input_changed"; payload: SessionUserInputPayload }
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
@@ -223,6 +224,10 @@ interface SessionErrorPayload {
   has_error: boolean;
   cwd?: string;
   node_id?: string;
+}
+interface SessionTurnStartPayload {
+  app_session_id?: string;
+  session_id?: string;
 }
 interface SessionUserInputPayload {
   session_id?: string;
@@ -310,6 +315,9 @@ class SessionRegistry {
       }],
       ["session_error_changed", (p) => {
         this.dispatch("session_error_changed", p as SessionErrorPayload);
+      }],
+      ["turn_start", (p) => {
+        this.dispatch("turn_start", p as SessionTurnStartPayload);
       }],
       ["session_user_input_changed", (p) => {
         this.dispatch("session_user_input_changed", p as SessionUserInputPayload);
@@ -439,6 +447,8 @@ class SessionRegistry {
         return this.onUnread(ev.payload);
       case "session_error_changed":
         return this.onError(ev.payload);
+      case "turn_start":
+        return this.onTurnStart(ev.payload);
       case "session_user_input_changed":
         return this.onUserInput(ev.payload);
       case "session_marker_changed":
@@ -495,6 +505,16 @@ class SessionRegistry {
     this.sessions.set(d.session_id, { ...prev, has_error: next });
     this.version += 1;
     this.notifySession(d.session_id);
+  }
+
+  private onTurnStart(d: SessionTurnStartPayload) {
+    const sid = d.app_session_id || d.session_id || "";
+    if (!sid) return;
+    const prev = this.sessions.get(sid);
+    if (!prev?.has_error) return;
+    this.sessions.set(sid, { ...prev, has_error: false });
+    this.version += 1;
+    this.notifySession(sid);
   }
 
   private onUserInput(d: SessionUserInputPayload) {
