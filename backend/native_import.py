@@ -697,6 +697,7 @@ _INTERNAL_IMPORT_PROMPT_PREFIXES = (
     "<get-requirements-processor-prep>",
     "<file-editor-provision>",
     "<verdict-prompt>",
+    "<command-name>",
 )
 
 _INTERNAL_IMPORT_PROMPT_PATTERNS = tuple(
@@ -816,15 +817,30 @@ def _imported_last_user_prompt_iso(session: dict) -> Optional[str]:
     return _max_native_iso(values)
 
 
-def _repair_imported_root_updated_at(root_id: str, fallback: Optional[str] = None) -> None:
+def _imported_first_user_prompt_iso(session: dict) -> Optional[str]:
+    best = ""
+    for message in session.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        value = _local_iso(str(message.get("timestamp") or ""))
+        if value and (not best or value < best):
+            best = value
+    return best or None
+
+
+def _repair_imported_root_timestamps(root_id: str, fallback: Optional[str] = None) -> None:
     session_manager.flush_pending_persists()
     root = session_manager.get_ref(root_id)
     if not isinstance(root, dict):
         return
+    first_prompt = _imported_first_user_prompt_iso(root)
     last_activity = _imported_last_user_prompt_iso(root) or fallback
-    if not last_activity:
+    if not first_prompt and not last_activity:
         return
-    root["updated_at"] = last_activity
+    if first_prompt:
+        root["created_at"] = first_prompt
+    if last_activity:
+        root["updated_at"] = last_activity
     import session_store
     session_store.write_session_full(
         root,
@@ -853,14 +869,21 @@ def repair_imported_roots() -> dict:
             if isinstance(m, dict) and m.get("role") == "user"
         ]
         first_prompt = _extract_text({"message": {"content": users[0].get("content")}}) if users else ""
+        first_user_ts = _imported_first_user_prompt_iso(root)
         last_user_ts = _imported_last_user_prompt_iso(root)
         if not first_prompt or _is_internal_import_prompt(first_prompt) or not last_user_ts:
             session_manager.delete(root["id"])
             deleted_roots.add(root["id"])
             deleted += 1
             continue
+        changed = False
+        if first_user_ts and root.get("created_at") != first_user_ts:
+            root["created_at"] = first_user_ts
+            changed = True
         if root.get("updated_at") != last_user_ts:
             root["updated_at"] = last_user_ts
+            changed = True
+        if changed:
             session_store.write_session_full(
                 root,
                 bump_updated_at=False,
@@ -992,7 +1015,7 @@ def _import_session_locked(sess: NativeSession) -> str:
             logger.exception("native_import: failed to delete empty session %s", root_id)
         raise ValueError("native session has no importable events")
 
-    _repair_imported_root_updated_at(root_id, _native_last_activity_iso(sess, turns))
+    _repair_imported_root_timestamps(root_id, _native_last_activity_iso(sess, turns))
     _registry_set_for(sess, root_id)
     if failures:
         logger.warning(

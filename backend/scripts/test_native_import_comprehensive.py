@@ -186,6 +186,7 @@ def test_internal_import_prompt_filter() -> None:
         "<get-requirements-processor-prep>\nYou are a reusable requirements lookup worker.",
         "<file-editor-provision>\nYou are the reusable base session for Better Agent file editing.",
         "<verdict-prompt>\nYou are an adversarial supervisor.",
+        "<command-name>/login</command-name>\n<command-message>login</command-message>",
         "Better Agent requires a parent-session reply after subagent work.",
         "Better Agent run.sh startup checker for Z.AI",
         "You are adversarial reviewer for a Better Agent RCA. Keep report under 200 words.",
@@ -666,11 +667,21 @@ def test_ingest_claude_matrix() -> None:
     root_id = native_import.import_session(sess)
     loaded = session_manager.get(root_id)
     check(sum(1 for m in loaded["messages"] if m["role"] == "user") == 1, "malformed skipped, real imported")
+    check(loaded["created_at"].startswith("2026-01-01"), "created_at preserves first native user prompt date")
     check(loaded["messages"][0]["timestamp"].startswith("2026-01-01"), "user timestamp preserves prompt date")
     check(loaded["messages"][1]["timestamp"].startswith("2026-01-02"), "assistant timestamp preserves native date")
     check(loaded["updated_at"].startswith("2026-01-01"), "updated_at preserves native user prompt date")
     disk = json.loads((Path(_TMP_HOME) / "sessions" / f"{root_id}.json").read_text(encoding="utf-8"))
+    check(disk["created_at"].startswith("2026-01-01"), "disk created_at preserves first native user prompt date")
     check(disk["updated_at"].startswith("2026-01-01"), "disk updated_at preserves native user prompt date")
+    disk["created_at"] = "2026-06-30T00:00:00"
+    disk["updated_at"] = "2026-06-30T00:00:00"
+    session_store.write_session_full(disk, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(repaired["repaired"] >= 1, "repair reports timestamp correction")
+    check(fixed["created_at"].startswith("2026-01-01"), "repair restores created_at from first user prompt")
+    check(fixed["updated_at"].startswith("2026-01-01"), "repair restores updated_at from last user prompt")
 
 
 # --------------------------------------------------------------------------- #
