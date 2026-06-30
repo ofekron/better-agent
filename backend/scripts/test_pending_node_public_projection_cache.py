@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
+from datetime import datetime, timedelta
 
 import _test_home
 
@@ -53,8 +55,45 @@ def test_public_projection_cache_invalidates_on_mutation() -> bool:
     return ok
 
 
+def test_public_projection_cache_invalidates_on_expiry() -> bool:
+    pending_node_registrations.create(
+        node_id="worker-expired",
+        address="127.0.0.1:9001",
+        cwd_roots=["/tmp/expired"],
+        secret_hash="must-not-leak-expired",
+        fingerprint="expired123",
+    )
+    warm = node_link.public_pending_nodes()
+    rec = pending_node_registrations.get("worker-expired")
+    assert rec is not None
+    expired_at = (datetime.now() - timedelta(seconds=1)).isoformat()
+    rec["expires_at"] = expired_at
+    pending_node_registrations._path("worker-expired").write_text(json.dumps(rec), encoding="utf-8")
+    pending_node_registrations._cache_loaded = False
+    node_link._public_pending_cache = (
+        pending_node_registrations.version(),
+        [{**warm[0], "expires_at": expired_at}],
+    )
+    cached = node_link.public_pending_nodes_cached()
+    after_expiry = node_link.public_pending_nodes()
+    ok = (
+        len(warm) == 1
+        and cached is None
+        and after_expiry == []
+    )
+    print(
+        f"{PASS if ok else FAIL} pending-node public projection cache expiry "
+        f"-- warm={warm} cached={cached} after={after_expiry}",
+    )
+    return ok
+
+
 if __name__ == "__main__":
     try:
-        sys.exit(0 if test_public_projection_cache_invalidates_on_mutation() else 1)
+        ok = (
+            test_public_projection_cache_invalidates_on_mutation()
+            and test_public_projection_cache_invalidates_on_expiry()
+        )
+        sys.exit(0 if ok else 1)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

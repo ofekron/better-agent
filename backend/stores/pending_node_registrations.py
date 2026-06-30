@@ -78,6 +78,18 @@ def _copy_record(record: dict) -> dict:
     return copied
 
 
+def _is_pending_active(record: dict, now: datetime | None = None) -> bool:
+    if record.get("status") != "pending":
+        return False
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return True
+    try:
+        return datetime.fromisoformat(expires_at) >= (now or datetime.now())
+    except (TypeError, ValueError):
+        return True
+
+
 def _dir() -> Path:
     return ba_home() / "pending_nodes"
 
@@ -148,7 +160,17 @@ def list_pending() -> list[dict]:
     REST `GET /api/pending_nodes` endpoint for popup rehydration."""
     global _cache_loaded
     with _cache_lock:
+        now = datetime.now()
         if _cache_loaded:
+            expired = [
+                node_id
+                for node_id, rec in _pending_by_node.items()
+                if not _is_pending_active(rec, now)
+            ]
+            for node_id in expired:
+                _pending_by_node.pop(node_id, None)
+            if expired:
+                _bump_version_locked()
             return sorted(
                 (_copy_record(rec) for rec in _pending_by_node.values()),
                 key=lambda r: r.get("created_at", ""),
@@ -167,7 +189,7 @@ def list_pending() -> list[dict]:
                 rec = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if rec.get("status") != "pending":
+            if not _is_pending_active(rec, now):
                 continue
             node_id = rec.get("node_id")
             if isinstance(node_id, str):

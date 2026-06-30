@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import _test_home
@@ -65,6 +67,20 @@ def main() -> int:
             return 1
         if store.list_pending() != []:
             print(f"approved node still pending: {store.list_pending()!r}")
+            return 1
+
+        expired = store.create(
+            node_id="node-expired",
+            address="ws://127.0.0.1:9998",
+            cwd_roots=["/tmp/expired"],
+            secret_hash="expired-hash",
+            fingerprint="expired-fingerprint",
+        )
+        expired["expires_at"] = (datetime.now() - timedelta(seconds=1)).isoformat()
+        store._path("node-expired").write_text(json.dumps(expired), encoding="utf-8")
+        store._cache_loaded = False
+        if store.list_pending() != []:
+            print(f"expired node still pending: {store.list_pending()!r}")
             return 1
 
         print("PASS test_pending_node_registrations_cache")
