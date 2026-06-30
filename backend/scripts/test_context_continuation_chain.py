@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-continuation-chain-")
@@ -36,11 +38,20 @@ def test_session_manager_persists_continuation_chain() -> None:
 def test_start_continuation_for_same_session() -> None:
     sess = session_manager.create(name="continuation-flow", cwd="/tmp", model="m")
     sid = sess["id"]
+    native_path = Path(_TMP_HOME) / "native" / "old-provider-sid.jsonl"
+    run_dir = Path(_TMP_HOME) / "runs" / "run-old-provider-sid"
+    run_dir.mkdir(parents=True)
+    (run_dir / "backend_state.json").write_text(
+        json.dumps({
+            "session_id": "old-provider-sid",
+            "jsonl_path": str(native_path),
+        }),
+        encoding="utf-8",
+    )
     started = start_continuation_for(
         session_manager=session_manager,
         app_session_id=sid,
         prompt="continue the work",
-        provider_kind="codex",
         old_provider_sid="old-provider-sid",
     )
     fresh = session_manager.get(sid)
@@ -49,7 +60,10 @@ def test_start_continuation_for_same_session() -> None:
     assert started.continuation_chain == ["old-provider-sid"]
     assert started.chain_depth == 1
     assert "Better Agent session id: " + sid in started.prompt
+    expected_session_path = Path(_TMP_HOME) / "sessions" / f"{sid}.json"
+    assert f"Better Agent session file path: {expected_session_path}" in started.prompt
     assert "Previous provider session ids: old-provider-sid" in started.prompt
+    assert f"- old-provider-sid: {native_path}" in started.prompt
     assert started.prompt.endswith("continue the work")
 
 

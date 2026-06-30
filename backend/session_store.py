@@ -2464,6 +2464,10 @@ def _session_path(sid: str) -> Path:
     return _sessions_dir() / f"{root_id}.json"
 
 
+def session_file_path(sid: str) -> str:
+    return str(_session_path(sid))
+
+
 def session_file_fingerprint(root_id: str) -> Optional[tuple[int, int]]:
     path = _sessions_dir() / f"{root_id}.json"
     try:
