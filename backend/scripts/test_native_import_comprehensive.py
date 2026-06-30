@@ -668,9 +668,9 @@ def test_ingest_claude_matrix() -> None:
     check(sum(1 for m in loaded["messages"] if m["role"] == "user") == 1, "malformed skipped, real imported")
     check(loaded["messages"][0]["timestamp"].startswith("2026-01-01"), "user timestamp preserves prompt date")
     check(loaded["messages"][1]["timestamp"].startswith("2026-01-02"), "assistant timestamp preserves native date")
-    check(loaded["updated_at"].startswith("2026-01-02"), "updated_at preserves native last activity")
+    check(loaded["updated_at"].startswith("2026-01-01"), "updated_at preserves native user prompt date")
     disk = json.loads((Path(_TMP_HOME) / "sessions" / f"{root_id}.json").read_text(encoding="utf-8"))
-    check(disk["updated_at"].startswith("2026-01-02"), "disk updated_at preserves native last activity")
+    check(disk["updated_at"].startswith("2026-01-01"), "disk updated_at preserves native user prompt date")
 
 
 # --------------------------------------------------------------------------- #
