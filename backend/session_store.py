@@ -258,6 +258,7 @@ _summary_sidecar_write_queue: queue.Queue[
 ] = queue.Queue(maxsize=256)
 _summary_sidecar_write_started = False
 _summary_sidecar_write_lock = threading.Lock()
+_summary_roots_fingerprint: tuple[str, ...] = ()
 
 
 def _clear_negative_root_resolve_cache() -> None:
@@ -401,16 +402,6 @@ _SUMMARY_PROJECTION_FIELDS = (
 )
 
 
-def current_turn_error(session: dict) -> Optional[str]:
-    for msg in reversed(session.get("messages") or []):
-        if msg.get("role") != "assistant":
-            continue
-        error = msg.get("error")
-        return str(error) if error else None
-    error = session.get("unseen_error")
-    return str(error) if error else None
-
-
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
@@ -460,7 +451,7 @@ def _build_summary_for_root(
         "message_count": len(_msgs),
         "first_prompt": _first_user_prompt(root),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
-        "unseen_error": current_turn_error(root),
+        "unseen_error": root.get("unseen_error"),
         "orchestration_mode": _normalize_orchestration_mode(
             root.get("orchestration_mode")
         ),
@@ -1165,6 +1156,13 @@ def _write_summary_file(
     *,
     root_mtime_ns: int | None = None,
 ) -> None:
+    root_path = _sessions_dir() / f"{root_id}.json"
+    if not root_path.exists():
+        try:
+            (_sessions_dir() / f"{root_id}.summary.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
     sp = _sessions_dir() / f"{root_id}.summary.json"
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=f".{root_id}.summary.",
@@ -1177,11 +1175,14 @@ def _write_summary_file(
         os.replace(tmp_path, sp)
         target_mtime_ns = time.time_ns()
         if root_mtime_ns is None:
-            root_path = _sessions_dir() / f"{root_id}.json"
             try:
                 root_mtime_ns = root_path.stat().st_mtime_ns
             except OSError:
-                root_mtime_ns = None
+                try:
+                    sp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
         if root_mtime_ns is not None:
             target_mtime_ns = max(target_mtime_ns, root_mtime_ns)
         os.utime(sp, ns=(target_mtime_ns, target_mtime_ns))
@@ -1248,6 +1249,72 @@ def _schedule_summary_sidecar_write(
             _summary_sidecar_write_queue.put_nowait(item)
         except queue.Full:
             pass
+
+
+def _root_summary_ids_on_disk() -> tuple[str, ...]:
+    try:
+        return tuple(sorted(p.stem for p in _session_json_files()))
+    except OSError:
+        return ()
+
+
+def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
+    try:
+        entries = list(_sessions_dir().iterdir())
+    except OSError:
+        return
+    suffixes = (".summary.json", ".opened.json")
+    for path in entries:
+        name = path.name
+        suffix = next((s for s in suffixes if name.endswith(s)), None)
+        if suffix is None:
+            continue
+        sid = name.removesuffix(suffix)
+        if sid in root_ids:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
+    global _summary_index_version, _summary_order_version, _summary_metadata_version
+    removed = [
+        sid for sid in list(_summary_index)
+        if sid not in root_ids
+    ]
+    if not removed:
+        return False
+    for sid in removed:
+        _summary_index.pop(sid, None)
+        try:
+            (_sessions_dir() / f"{sid}.summary.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            (_sessions_dir() / f"{sid}.opened.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+    _summary_index_version += 1
+    _summary_order_version += 1
+    _summary_metadata_version += 1
+    return True
+
+
+def _reconcile_summary_index_roots() -> None:
+    global _summary_roots_fingerprint
+    if not _summary_index_loaded:
+        return
+    root_ids_tuple = _root_summary_ids_on_disk()
+    root_ids = set(root_ids_tuple)
+    with _summary_index_lock:
+        if root_ids_tuple == _summary_roots_fingerprint:
+            return
+        _purge_missing_summary_roots_locked(root_ids)
+        _summary_roots_fingerprint = root_ids_tuple
+        _summary_sorted_id_caches.clear()
+    _cleanup_orphan_summary_sidecars(root_ids)
 
 
 def _summary_index_cache_path() -> Path:
@@ -1458,7 +1525,7 @@ def _do_build_summary_index_unsafe() -> None:
         is already cached. Cold build → not cached → no
         `_summary_build_lock → session_manager-RLock` edge forms.
     """
-    global _summary_index_loaded, _summary_index_version, _summary_order_version, _summary_metadata_version
+    global _summary_index_loaded, _summary_index_version, _summary_order_version, _summary_metadata_version, _summary_roots_fingerprint
     _ensure_dir()
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
@@ -1471,6 +1538,11 @@ def _do_build_summary_index_unsafe() -> None:
             seen_cursor_ids.add(name.removesuffix(".seen.json"))
         elif name.endswith(".json") and not _is_sidecar_json(name):
             full_files[p.stem] = p
+    _cleanup_orphan_summary_sidecars(set(full_files))
+    summary_files = {
+        sid: path for sid, path in summary_files.items()
+        if sid in full_files
+    }
     summary_cache_fingerprint = _summary_index_cache_fingerprint(
         full_files,
         summary_files,
@@ -1485,6 +1557,7 @@ def _do_build_summary_index_unsafe() -> None:
             _summary_order_version += 1
             _summary_metadata_version += 1
             _summary_index_loaded = True
+            _summary_roots_fingerprint = tuple(sorted(full_files))
         _start_summary_projection_repair()
         _start_metadata_search_index_warm()
         return
@@ -1600,6 +1673,7 @@ def _do_build_summary_index_unsafe() -> None:
                 }
                 _summary_index_version += 1
         _summary_index_loaded = True
+        _summary_roots_fingerprint = tuple(sorted(full_files))
 
     _start_summary_projection_repair()
     _start_metadata_search_index_warm()
@@ -4131,6 +4205,7 @@ def list_sessions() -> list[dict]:
     """
     global _summary_sorted_cache_version, _summary_sorted_id_cache
     _ensure_summary_index(blocking=False)
+    _reconcile_summary_index_roots()
     with _summary_index_lock:
         if _summary_sorted_cache_version != _summary_order_version:
             _summary_sorted_id_cache = [
@@ -4152,6 +4227,7 @@ def list_sessions() -> list[dict]:
 
 def ordered_session_summary_ids(sort_by: str) -> list[str]:
     _ensure_summary_index(blocking=False)
+    _reconcile_summary_index_roots()
     with _summary_index_lock:
         cached = _summary_sorted_id_caches.get(sort_by)
         if cached is None or cached[0] != _summary_order_version:
@@ -4176,6 +4252,7 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
+    _reconcile_summary_index_roots()
     with _summary_index_lock:
         found = {
             sid: _summary_index[sid]
@@ -4195,6 +4272,7 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
+    _reconcile_summary_index_roots()
     with _summary_index_lock:
         return [
             _summary_index[sid]
