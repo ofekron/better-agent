@@ -4857,7 +4857,10 @@ function AppMain({
         created_at: now,
         updated_at: now,
         messages: [],
-        pinned: true,
+        // Mirror the backend default: new sessions start UNPINNED. While
+        // empty (0 messages) the sidebar sort already floats them to the
+        // top, so they stay visible without sticking there permanently.
+        pinned: false,
         offline_pending: true,
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
