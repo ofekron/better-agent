@@ -45,6 +45,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from event_ingester import event_ingester  # noqa: E402
+from event_shape import frontend_events_from_journal_rows  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -542,6 +543,77 @@ def test_same_uuid_streaming_update_dual_surface_dedup() -> bool:
     return True
 
 
+def test_lifecycle_notice_same_uuid_replaces_render_tree_and_projects_latest() -> bool:
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    uid = "codex-context-compacted-uuid"
+    notice = {
+        "type": "lifecycle_notice",
+        "data": {
+            "kind": "context_compacted",
+            "message": "Context compacted",
+        },
+        "uuid": uid,
+    }
+    detail = {
+        "type": "lifecycle_notice",
+        "data": {
+            "kind": "compacted",
+            "message": "Context compacted",
+            "replacement_history": [{"role": "user", "text": "original ask"}],
+        },
+        "uuid": uid,
+    }
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event=notice,
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event=detail,
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    _drain_journal(sid, 2)
+
+    refreshed = session_manager.get(sid)
+    asst = next(m for m in refreshed["messages"] if m["id"] == msg["id"])
+    evs = asst.get("events") or []
+    if len(evs) != 1:
+        print(f"  msg.events len: expected 1 lifecycle notice, got {len(evs)}")
+        return False
+    if evs[0].get("uuid") != uid:
+        print(f"  lifecycle notice lost top-level uuid: {evs[0].get('uuid')!r}")
+        return False
+    data = evs[0].get("data") or {}
+    if data.get("kind") != "compacted" or data.get("replacement_history") != [{"role": "user", "text": "original ask"}]:
+        print(f"  render tree kept wrong lifecycle data: {data!r}")
+        return False
+
+    rows, _, _ = event_ingester.read_events(sid, limit=10)
+    lifecycle_rows = [row for row in rows if row.get("type") == "lifecycle_notice"]
+    if len(lifecycle_rows) != 2:
+        print(f"  expected 2 journal lifecycle snapshots, got {len(lifecycle_rows)}")
+        return False
+    if any((row.get("data") or {}).get("uuid") != uid for row in lifecycle_rows):
+        print(f"  journal rows did not preserve lifecycle uuid: {lifecycle_rows!r}")
+        return False
+    projected = frontend_events_from_journal_rows(lifecycle_rows)
+    if len(projected) != 1:
+        print(f"  frontend projection should coalesce to 1 row, got {len(projected)}")
+        return False
+    projected_data = projected[0].get("data") or {}
+    if projected_data.get("kind") != "compacted":
+        print(f"  frontend projection kept stale lifecycle notice: {projected_data!r}")
+        return False
+    return True
+
+
 def test_reconcile_after_streaming_preserves_latest_snapshot() -> bool:
     """End-to-end regression for the "render tree regresses to older
     snapshot" bug an earlier hostile review surfaced.
@@ -789,6 +861,8 @@ TESTS = [
     ("non-render etypes skip msg.events", test_non_render_etypes_skip_msg_events_but_reach_events_jsonl),
     ("same-uuid streaming update: render replaces; jsonl appends",
         test_same_uuid_streaming_update_dual_surface_dedup),
+    ("same-uuid lifecycle notice update: render/project latest only",
+        test_lifecycle_notice_same_uuid_replaces_render_tree_and_projects_latest),
     ("reconcile after streaming preserves latest snapshot (no regression)",
         test_reconcile_after_streaming_preserves_latest_snapshot),
     ("reconcile fills partial finalized msg from orphan tail",

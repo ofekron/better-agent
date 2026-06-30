@@ -20,8 +20,31 @@ RENDER_EVENT_TYPES = frozenset({
     "manager_event",
     "model_switched",
     "steer_prompt",
+    "lifecycle_notice",
     "worker_event",
 })
+
+
+def _event_uuid(event: dict) -> str | None:
+    if not isinstance(event, dict):
+        return None
+    uid = event.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    uid = data.get("uuid")
+    if isinstance(uid, str) and uid:
+        return uid
+    inner = data.get("event")
+    if isinstance(inner, dict):
+        inner_data = inner.get("data")
+        if isinstance(inner_data, dict):
+            uid = inner_data.get("uuid")
+            if isinstance(uid, str) and uid:
+                return uid
+    return None
 
 
 def frontend_event_from_journal_row(
@@ -52,8 +75,7 @@ def frontend_events_from_journal_rows(
         event = frontend_event_from_journal_row(row, include_seq=include_seq)
         if event is None:
             continue
-        data = event.get("data") if isinstance(event, dict) else None
-        uid = data.get("uuid") if isinstance(data, dict) else None
+        uid = _event_uuid(event)
         if uid and uid in uuid_idx:
             events[uuid_idx[uid]] = event
             continue
