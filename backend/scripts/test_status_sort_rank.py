@@ -1,8 +1,8 @@
 """Status-sort rank + sort-key regression tests.
 
 Locks the backend half of the "group by status" sort option:
-  1. `_session_status_rank` buckets correctly (5 waiting-for-user,
-     4 running, 3 needs-decision, 2 has-new, 1 all-done, 0 none) with
+  1. `_session_status_rank` buckets correctly (6 error, 5 waiting-for-user,
+     4 has-new, 3 open-todo, 2 running, 1 all-done, 0 none) with
      highest-wins precedence, reading monitoring snapshot first then row
      fallback, and marker TAG (not color).
   2. `_session_list_sort_key` puts status BELOW empty-new + pinned and ABOVE
@@ -54,16 +54,34 @@ mon = {
 }
 unread = {"new": 3}
 
-check("rank.running.active", main._session_status_rank({"id": "run"}, mon, unread) == 4)
-check("rank.running.waiting_bg", main._session_status_rank({"id": "bg"}, mon, unread) == 4)
+check("rank.error.has_error", main._session_status_rank({"id": "err", "has_error": True}, mon, unread) == 6)
+check("rank.error.unseen_error", main._session_status_rank({"id": "err", "unseen_error": {"msg": "x"}}, mon, unread) == 6)
+check("rank.running.active", main._session_status_rank({"id": "run"}, mon, unread) == 2)
+check("rank.running.waiting_bg", main._session_status_rank({"id": "bg"}, mon, unread) == 2)
 check("rank.approval.blocked_state", main._session_status_rank({"id": "blocked"}, mon, unread) == 5)
 check("rank.input.pending_snapshot", main._session_status_rank({"id": "ask"}, mon, unread, {"ask": 1}) == 5)
 check("rank.input.row_fallback", main._session_status_rank({"id": "ask", "pending_user_input_count": 1}, mon, unread) == 5)
 check(
     "rank.needs.marker_tag",
-    main._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 3,
+    main._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
-check("rank.hasnew.unread", main._session_status_rank({"id": "new"}, mon, unread) == 2)
+check("rank.hasnew.unread", main._session_status_rank({"id": "new"}, mon, unread) == 4)
+check(
+    "rank.open_todo",
+    main._session_status_rank(
+        {"id": "idle", "current_todos": [{"content": "A", "status": "in_progress"}]},
+        mon,
+        unread,
+    ) == 3,
+)
+check(
+    "rank.open_task",
+    main._session_status_rank(
+        {"id": "idle", "current_tasks": [{"content": "A", "status": "pending"}]},
+        mon,
+        unread,
+    ) == 3,
+)
 check(
     "rank.alldone.marker_tag",
     main._session_status_rank({"id": "idle", "markers": marker(DONE)}, mon, unread) == 1,
@@ -85,15 +103,31 @@ check(
     "rank.row_fallback.blocked",
     main._session_status_rank({"id": "remote", "monitoring_state": "blocked_on_user"}, {}, {}) == 5,
 )
-# precedence: running beats a needs-decision marker on the same session
+# precedence: needs-decision beats running on the same session
 check(
-    "rank.precedence.running_over_marker",
-    main._session_status_rank({"id": "run", "markers": marker(NEEDS)}, mon, unread) == 4,
+    "rank.precedence.needs_over_running",
+    main._session_status_rank({"id": "run", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
 # precedence: needs-decision beats unread
 check(
     "rank.precedence.needs_over_unread",
-    main._session_status_rank({"id": "new", "markers": marker(NEEDS)}, mon, unread) == 3,
+    main._session_status_rank({"id": "new", "markers": marker(NEEDS)}, mon, unread) == 5,
+)
+check(
+    "rank.precedence.unread_over_open_todo",
+    main._session_status_rank(
+        {"id": "new", "current_todos": [{"content": "A", "status": "pending"}]},
+        mon,
+        unread,
+    ) == 4,
+)
+check(
+    "rank.precedence.open_todo_over_running",
+    main._session_status_rank(
+        {"id": "run", "current_todos": [{"content": "A", "status": "pending"}]},
+        mon,
+        unread,
+    ) == 3,
 )
 # classification is by TAG, not color/tooltip — a marker with no tag is inert
 check(
@@ -106,11 +140,11 @@ check(
 # row fallback: sid absent from snapshot → read the row's own fields
 check(
     "rank.row_fallback.monitoring",
-    main._session_status_rank({"id": "remote", "monitoring_state": "active"}, {}, {}) == 4,
+    main._session_status_rank({"id": "remote", "monitoring_state": "active"}, {}, {}) == 2,
 )
 check(
     "rank.row_fallback.unread",
-    main._session_status_rank({"id": "remote", "unread_count": 5}, {}, {}) == 2,
+    main._session_status_rank({"id": "remote", "unread_count": 5}, {}, {}) == 4,
 )
 
 # ── 2. list sort key (non-search): empty > pinned > status > ts ───────────
@@ -123,7 +157,7 @@ def lkey(sess):
 
 running_old = {"id": "run", "updated_at": "2020-01-01T00:00:00", "message_count": 5}
 idle_new = {"id": "idle", "updated_at": "2030-01-01T00:00:00", "message_count": 5}
-# running (rank 4) sorts above idle even though idle is far newer (reverse=True)
+# running (rank 2) sorts above idle even though idle is far newer (reverse=True)
 check("listkey.status_beats_time", lkey(running_old) > lkey(idle_new))
 
 pinned_idle = {"id": "idle", "updated_at": "2020-01-01T00:00:00", "message_count": 5, "pinned": True}

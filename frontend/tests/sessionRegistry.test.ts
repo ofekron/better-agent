@@ -173,6 +173,8 @@ describe("sessionRegistry — per-session deltas", () => {
       markers: {},
       testape_active: false,
       has_error: false,
+      current_todos: [],
+      current_tasks: [],
     });
   });
 
@@ -491,17 +493,20 @@ describe("sessionRegistry — bootstrap mechanics", () => {
 describe("status rank (mirror of backend _session_status_rank)", () => {
   const m = (tag: string) => ({ ext: { color: "#x", tooltip: "t", tag } });
 
-  it("buckets: 5 waiting-for-user, 4 running, 3 needs, 2 new, 1 done, 0 none — highest wins", () => {
-    expect(statusRankOf({ monitoring_state: "active" })).toBe(4);
-    expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(4);
+  it("buckets: 6 error, 5 needs-user, 4 new, 3 open-todo, 2 running, 1 done, 0 none", () => {
+    expect(statusRankOf({ has_error: true })).toBe(6);
+    expect(statusRankOf({ monitoring_state: "active" })).toBe(2);
+    expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(2);
     expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(5);
     expect(statusRankOf({ pending_user_input_count: 1 })).toBe(5);
-    expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(3);
-    expect(statusRankOf({ unread_count: 2 })).toBe(2);
+    expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(5);
+    expect(statusRankOf({ unread_count: 2 })).toBe(4);
+    expect(statusRankOf({ current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
+    expect(statusRankOf({ current_tasks: [{ content: "A", status: "in_progress" }] })).toBe(3);
     expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
     expect(statusRankOf({ monitoring_state: "idle" })).toBe(0);
-    // precedence: running outranks a stale needs-decision marker
-    expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(4);
+    expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(5);
+    expect(statusRankOf({ monitoring_state: "active", current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
     // classification by TAG, not color — untagged marker is inert
     expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
   });
@@ -517,14 +522,21 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
       node_id: "primary",
     });
     // Row snapshot claims stopped, but the live registry says active → live wins.
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(4);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+
+    eventBus.publish("session_metadata_updated", {
+      session_id: sid,
+      patch: { current_todos: [{ content: "A", status: "pending" }] },
+    });
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(3);
   });
 
   it("statusRankForRow falls back to row fields when the sid is unseeded", async () => {
     await resetRegistry();
-    expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(4);
+    expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(2);
     expect(statusRankForRow({ id: "deep-page-input", pending_user_input_count: 1 })).toBe(5);
-    expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(2);
+    expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(4);
+    expect(statusRankForRow({ id: "deep-page-4", current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
     expect(statusRankForRow({ id: "deep-page-3" })).toBe(0);
   });
 
