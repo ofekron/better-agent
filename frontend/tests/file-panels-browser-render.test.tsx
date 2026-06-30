@@ -70,13 +70,15 @@ describe("FilePanels browser rendering", () => {
 
   it("rewrites local html assets through the authenticated file endpoint", () => {
     const srcDoc = htmlPreviewSrcDoc(
-      "<html><head><link href='./styles.css'></head><body><img src='shots/a.png'><a href='https://example.com'>x</a></body></html>",
+      "<html><head><link href='./styles.css'></head><body><img src='shots/a.png'><a href='#slide-2'>jump</a><a href='https://example.com'>x</a></body></html>",
       "/repo/marketing/singular/index.html",
       "primary",
     );
 
     expect(srcDoc).toContain("/api/file/raw?path=%2Frepo%2Fmarketing%2Fsingular%2Fstyles.css");
     expect(srcDoc).toContain("/api/file/raw?path=%2Frepo%2Fmarketing%2Fsingular%2Fshots%2Fa.png");
+    expect(srcDoc).toContain('href="#slide-2"');
+    expect(srcDoc).not.toContain('href="#slide-2" target="_blank"');
     expect(srcDoc).toContain('href="https://example.com"');
     expect(srcDoc).toContain('target="_blank"');
   });

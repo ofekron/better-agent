@@ -109,8 +109,13 @@ export function htmlPreviewSrcDoc(html: string, htmlPath: string, nodeId: string
     if (value) el.setAttribute("srcset", rewriteSrcset(value, htmlPath, nodeId));
   });
 
-  // Keep links inside the preview from taking over the Better Agent tab.
+  // Keep external links inside the preview from taking over the Better
+  // Agent tab. Same-document anchors (deck navigation like #slide-2)
+  // must stay inside the rendered preview so HTML presentations behave
+  // like a browser in the panel.
   doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (href.startsWith("#")) return;
     a.setAttribute("target", "_blank");
     a.setAttribute("rel", "noreferrer noopener");
   });
