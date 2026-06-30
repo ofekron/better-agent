@@ -1,8 +1,8 @@
-"""Regression: runner_openai must route Bash/Write/Edit approvals through the
+"""Regression: runner_better_agent must route Bash/Write/Edit approvals through the
 backend HTTP client (tool_approval_client.request_tool_approval), NOT the
 in-process tool_approval.registry.
 
-The bug: runner_openai ran in a subprocess but created approval records in its
+The bug: runner_better_agent ran in a subprocess but created approval records in its
 own in-process registry. The backend (separate process) never saw them, the
 frontend never showed a prompt, and every approval silently timed out 5 minutes
 later into "Error: tool use denied by user" — even though the user never denied
@@ -23,7 +23,7 @@ _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
 import importlib  # noqa: E402
-import runner_openai  # noqa: E402
+import runner_better_agent  # noqa: E402
 import tool_approval  # noqa: E402
 
 
@@ -34,9 +34,9 @@ def test_approval_routes_through_http_client_approved(monkeypatch):
         calls.append(kwargs)
         return True
 
-    monkeypatch.setattr(runner_openai, "request_tool_approval", fake_request_tool_approval)
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", fake_request_tool_approval)
 
-    verdict = asyncio.run(runner_openai._request_approval(
+    verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-1", run_id="run-1", tool_name="Bash",
         args={"command": "ls"}, backend_url="http://backend",
         internal_token="tok", cancel_path=Path(_TMP_HOME) / "nope-cancel",
@@ -55,8 +55,8 @@ def test_approval_routes_through_http_client_approved(monkeypatch):
 
 
 def test_approval_routes_through_http_client_denied(monkeypatch):
-    monkeypatch.setattr(runner_openai, "request_tool_approval", lambda **kw: False)
-    verdict = asyncio.run(runner_openai._request_approval(
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: False)
+    verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-2", run_id="run-2", tool_name="Write",
         args={"path": "x"}, backend_url="http://backend",
         internal_token="tok", cancel_path=Path(_TMP_HOME) / "nope-cancel-2",
@@ -70,15 +70,15 @@ def test_approval_does_not_touch_in_process_registry(monkeypatch):
     out into a silent denial. Regression-lock that no record is created."""
     tool_approval.registry._pending.clear()
 
-    monkeypatch.setattr(runner_openai, "request_tool_approval", lambda **kw: False)
-    asyncio.run(runner_openai._request_approval(
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: False)
+    asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-3", run_id="run-3", tool_name="Edit",
         args={}, backend_url="http://backend", internal_token="tok",
         cancel_path=Path(_TMP_HOME) / "nope-cancel-3",
     ))
 
     assert tool_approval.registry.list_for_session("sid-3") == [], (
-        "runner_openai must not create in-process approval records; route via "
+        "runner_better_agent must not create in-process approval records; route via "
         "tool_approval_client.request_tool_approval so the backend surfaces them"
     )
 
@@ -89,8 +89,8 @@ def test_request_approval_swallows_exception_as_denial(monkeypatch):
     def raising(**kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(runner_openai, "request_tool_approval", raising)
-    verdict = asyncio.run(runner_openai._request_approval(
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", raising)
+    verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-2b", run_id="run-2b", tool_name="Bash",
         args={}, backend_url="http://backend", internal_token="tok",
         cancel_path=Path(_TMP_HOME) / "nope-cancel-2b",
@@ -111,8 +111,8 @@ def test_cancel_aborts_in_flight_approval(monkeypatch):
         _t.sleep(2)
         return True
 
-    monkeypatch.setattr(runner_openai, "request_tool_approval", slow_request)
-    verdict = asyncio.run(runner_openai._request_approval(
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", slow_request)
+    verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-4", run_id="run-4", tool_name="Bash",
         args={"command": "x"}, backend_url="http://backend",
         internal_token="tok", cancel_path=cancel_path,
@@ -132,11 +132,11 @@ class _FakeEmitter:
 def test_dispatch_tool_gates_bash_and_emits_denial(monkeypatch):
     """End-to-end at the dispatch layer: a denied Bash emits the denial as the
     tool result; bypass=True skips the gate entirely."""
-    monkeypatch.setattr(runner_openai, "request_tool_approval", lambda **kw: False)
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: False)
     em = _FakeEmitter()
     call = {"id": "c1", "name": "Bash", "arguments": '{"command": "ls"}'}
 
-    res = asyncio.run(runner_openai._dispatch_tool(
+    res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-5",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
         backend_url="http://backend", internal_token="tok",
@@ -151,13 +151,13 @@ def test_dispatch_tool_non_interactive_fails_closed_without_blaming_user(monkeyp
     an honest config message — never the user-blaming 'denied by user'."""
     approved_called = []
     monkeypatch.setattr(
-        runner_openai, "request_tool_approval",
+        runner_better_agent, "request_tool_approval",
         lambda **kw: approved_called.append(kw) or True,
     )
     em = _FakeEmitter()
     call = {"id": "c2", "name": "Bash", "arguments": '{"command": "ls"}'}
 
-    res = asyncio.run(runner_openai._dispatch_tool(
+    res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-6",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=False,
         backend_url="", internal_token="",
@@ -170,15 +170,15 @@ def test_dispatch_tool_non_interactive_fails_closed_without_blaming_user(monkeyp
 
 def test_dispatch_tool_bypass_runs_handler(monkeypatch):
     """bypass=True skips the gate entirely; the handler runs."""
-    monkeypatch.setattr(runner_openai, "request_tool_approval", lambda **kw: True)
+    monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: True)
     fired = []
-    orig_bash = runner_openai.TOOL_HANDLERS.get("Bash")
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash",
+    orig_bash = runner_better_agent.TOOL_HANDLERS.get("Bash")
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash",
                         lambda args, cwd: fired.append(args) or "ok")
     em = _FakeEmitter()
     call = {"id": "c1", "name": "Bash", "arguments": '{"command": "ls"}'}
 
-    res = asyncio.run(runner_openai._dispatch_tool(
+    res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-7",
         run_dir=Path(_TMP_HOME), bypass=True, interactive=False,
         backend_url="", internal_token="",

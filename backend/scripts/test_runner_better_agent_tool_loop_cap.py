@@ -1,4 +1,4 @@
-"""Regression: runner_openai must not silently truncate agentic turns.
+"""Regression: runner_better_agent must not silently truncate agentic turns.
 
 Pre-fix, `_run` capped the tool loop at `_MAX_TOOL_LOOPS = 40` and, when the
 cap was exhausted without the model emitting a terminal response, left
@@ -34,7 +34,7 @@ os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
-import runner_openai  # noqa: E402
+import runner_better_agent  # noqa: E402
 
 
 def _sse_chunks(chunks: list) -> bytes:
@@ -136,12 +136,12 @@ def test_long_agentic_turn_reaches_natural_stop(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
     # Bash must not actually shell out 60 times; stub it to an instant reply.
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash",
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash",
                         lambda args, cwd: "tool-output")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cap_long_"))
         rd = _make_run_dir(tmp, _base_inputs(tmp, app_sid="sid-cap-long"))
-        rc = asyncio.run(runner_openai._run(rd, _base_inputs(tmp, app_sid="sid-cap-long")))
+        rc = asyncio.run(runner_better_agent._run(rd, _base_inputs(tmp, app_sid="sid-cap-long")))
         complete = json.loads((rd / "complete.json").read_text())
     finally:
         stub.stop()
@@ -164,14 +164,14 @@ def test_cap_exhaustion_is_reported_as_failure(monkeypatch):
     stub.start()
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
-    monkeypatch.setitem(runner_openai.TOOL_HANDLERS, "Bash",
+    monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash",
                         lambda args, cwd: "tool-output")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cap_short_"))
         inputs = _base_inputs(tmp, app_sid="sid-cap-short",
                               extra={"max_tool_loops": 3})
         rd = _make_run_dir(tmp, inputs)
-        rc = asyncio.run(runner_openai._run(rd, inputs))
+        rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
     finally:
         stub.stop()

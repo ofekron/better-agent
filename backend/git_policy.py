@@ -11,7 +11,7 @@ Enforcement is provider-specific (only BA-controlled exec paths can be hardened)
   `disallowed_tools`. Verified honored even under `bypassPermissions`
   (live probe 2026-06-28).
 - OpenAI/agy: `command_runs_git()` regex at the BA `_tool_bash` exec gate
-  (`runner_openai.py`). Provider runner reads `git_policy` from its run input.
+  (`runner_better_agent.py`). Provider runner reads `git_policy` from its run input.
 - Gemini/Codex: CLI-internal exec, NOT enforceable → audit-only (handled by the
   extension), not here.
 """

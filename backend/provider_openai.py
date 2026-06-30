@@ -1,7 +1,7 @@
-"""OpenAIProvider — `Provider` implementation for the BA-owned OpenAI runner.
+"""OpenAIProvider — `Provider` implementation for the BA-owned Better Agent runner.
 
 Unlike claude/gemini/codex (which drive an external CLI subprocess), the
-`openai` provider runs the agent loop inside BA itself: `runner_openai.py`
+`openai` provider runs the agent loop inside BA itself: `runner_better_agent.py`
 makes HTTP Chat Completions calls and executes tools in-process. It
 normalizes its events to the Claude-jsonl shape and writes them to
 `session_events.jsonl`; this provider tails that file (reusing
@@ -58,7 +58,7 @@ from runs_dir import (
 logger = logging.getLogger(__name__)
 
 
-_RUNNER_PATH = Path(__file__).parent / "runner_openai.py"
+_RUNNER_PATH = Path(__file__).parent / "runner_better_agent.py"
 _HEADLESS_TIMEOUT_S = 60.0
 _TAIL_POLL_INTERVAL = 0.05
 _RUNNER_EVENT_TYPES = {"agent_message", "worker_start", "worker_event", "worker_complete"}
@@ -138,14 +138,14 @@ class RunState:
 # OpenAIProvider
 # ============================================================================
 class OpenAIProvider(Provider):
-    """Drives the BA-owned `runner_openai.py` subprocess. The runner
+    """Drives the BA-owned `runner_better_agent.py` subprocess. The runner
     performs Chat Completions calls + in-process tool execution itself
     and writes normalized events to `session_events.jsonl`; this provider
     tails that file and pushes events onto the orchestrator queue."""
 
     KIND: ClassVar[str] = "openai"
 
-    # The OpenAI runner owns the agent loop/history, so features that are
+    # The Better Agent runner owns the agent loop/history, so features that are
     # awkward CLI-specific hacks elsewhere are implemented directly here:
     # fork = copy BA-owned message history to a fresh agent session,
     # manager mode = expose the same loopback orchestration tools, and
@@ -260,7 +260,7 @@ class OpenAIProvider(Provider):
                 f"{self.KIND} provider does not support team mode."
             )
         # `fork` is gated by the class-level capability. OpenAI supports it by
-        # copying BA-owned history in runner_openai, but keep the defensive gate
+        # copying BA-owned history in runner_better_agent, but keep the defensive gate
         # so per-record capability overrides can still disable it cleanly.
         if fork and not self.supports_fork:
             raise NotImplementedError(
@@ -371,7 +371,7 @@ class OpenAIProvider(Provider):
         containment().after_spawn(run_id, popen.pid)
 
         logger.info(
-            "spawned openai runner pid=%d mode=%s run_id=%s",
+            "spawned Better Agent runner pid=%d mode=%s run_id=%s",
             popen.pid, mode, run_id,
         )
 
@@ -610,7 +610,7 @@ class OpenAIProvider(Provider):
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
     ) -> bool:
-        """Re-attach a still-running detached OpenAI runner after a
+        """Re-attach a still-running detached Better Agent runner after a
         backend restart.
 
         `recover_in_flight` only classifies the on-disk run. This method
@@ -848,7 +848,7 @@ class OpenAIProvider(Provider):
             return None
 
         try:
-            import runner_openai as _ro
+            import runner_better_agent as _ro
             parent_sid = resume_sid or session_id
             if fork:
                 sid, messages = _ro._load_history_for_run(parent_sid, fork=True)

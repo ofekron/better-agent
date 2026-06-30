@@ -1,4 +1,4 @@
-"""Regression: OpenAI runner must forward tool arguments to loopback handlers.
+"""Regression: Better Agent runner must forward tool arguments to loopback handlers.
 
 `_dispatch_tool` decodes the provider's JSON arguments into a bare dict, but
 every loopback handler unwraps its input via `_args(params)` (i.e. it reads
@@ -26,16 +26,16 @@ import _test_home
 _test_home.isolate("bc-test-openai-loopback-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import runner_openai
+import runner_better_agent
 import extension_store
 
 
-def _make_emitter() -> runner_openai.EventEmitter:
+def _make_emitter() -> runner_better_agent.EventEmitter:
     tmp = tempfile.NamedTemporaryFile(
         prefix="events-", suffix=".jsonl", delete=False
     )
     tmp.close()
-    return runner_openai.EventEmitter(Path(tmp.name))
+    return runner_better_agent.EventEmitter(Path(tmp.name))
 
 
 def test_dispatch_forwards_args_to_loopback_handler() -> None:
@@ -43,9 +43,9 @@ def test_dispatch_forwards_args_to_loopback_handler() -> None:
 
     async def fake_ask(params: dict) -> str:
         # Mirror the real handler contract: unwrap via _args.
-        args = runner_openai._args(params)
+        args = runner_better_agent._args(params)
         seen.append(args)
-        return runner_openai._dynamic_tool_json_result(
+        return runner_better_agent._dynamic_tool_json_result(
             {"success": True}, success=True
         )
 
@@ -59,7 +59,7 @@ def test_dispatch_forwards_args_to_loopback_handler() -> None:
     }
 
     result = asyncio.run(
-        runner_openai._dispatch_tool(
+        runner_better_agent._dispatch_tool(
             call,
             Path("/tmp"),
             "app-1",
@@ -70,7 +70,7 @@ def test_dispatch_forwards_args_to_loopback_handler() -> None:
             "tok",
             emitter,
             {"ask": fake_ask},
-            runner_openai.LockRegistry(),
+            runner_better_agent.LockRegistry(),
             False,
         )
     )
@@ -86,15 +86,15 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
     did not fail loudly; it silently created a default unnamed/default-provider
     sub-session. Lock that optional args survive dispatch too."""
     captured: list[tuple[str, dict]] = []
-    original_post = runner_openai._post_loopback_sync
+    original_post = runner_better_agent._post_loopback_sync
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload))
         return {"success": True, "target_session_id": "sub-1"}
 
-    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
     try:
-        handlers = runner_openai._build_loopback_tool_handlers(
+        handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -102,7 +102,7 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
-            lock_registry=runner_openai.LockRegistry(),
+            lock_registry=runner_better_agent.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -119,7 +119,7 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
             ),
         }
         result = asyncio.run(
-            runner_openai._dispatch_tool(
+            runner_better_agent._dispatch_tool(
                 call,
                 Path("/tmp"),
                 "sender-1",
@@ -130,12 +130,12 @@ def test_real_create_sub_session_preserves_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
-                runner_openai.LockRegistry(),
+                runner_better_agent.LockRegistry(),
                 False,
             )
         )
     finally:
-        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
 
     assert json.loads(result).get("success") is True
     assert captured, "create_sub_session handler never posted to backend"
@@ -153,15 +153,15 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
     """End-to-end through the real ask handler: a valid call must NOT be
     rejected with the 'required' error that triggered the fallback cascade."""
     captured: list[tuple[str, dict]] = []
-    original_post = runner_openai._post_loopback_sync
+    original_post = runner_better_agent._post_loopback_sync
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload))
         return {"success": True}
 
-    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
     try:
-        handlers = runner_openai._build_loopback_tool_handlers(
+        handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -169,7 +169,7 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
-            lock_registry=runner_openai.LockRegistry(),
+            lock_registry=runner_better_agent.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -180,7 +180,7 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
             ),
         }
         result = asyncio.run(
-            runner_openai._dispatch_tool(
+            runner_better_agent._dispatch_tool(
                 call,
                 Path("/tmp"),
                 "sender-1",
@@ -191,12 +191,12 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
-                runner_openai.LockRegistry(),
+                runner_better_agent.LockRegistry(),
                 False,
             )
         )
     finally:
-        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
 
     assert "required" not in result, result
     assert captured, "ask handler never posted to backend"
@@ -207,15 +207,15 @@ def test_real_ask_handler_accepts_dispatched_args() -> None:
 
 def test_real_ask_async_mode_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
-    original_post = runner_openai._post_loopback_sync
+    original_post = runner_better_agent._post_loopback_sync
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload))
         return {"success": True, "queued_id": "queued-1", "expects_response": True}
 
-    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
     try:
-        handlers = runner_openai._build_loopback_tool_handlers(
+        handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -223,7 +223,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
             },
             cwd="/tmp/project",
             model="model-x",
-            lock_registry=runner_openai.LockRegistry(),
+            lock_registry=runner_better_agent.LockRegistry(),
         )
         emitter = _make_emitter()
         call = {
@@ -239,7 +239,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
             ),
         }
         result = asyncio.run(
-            runner_openai._dispatch_tool(
+            runner_better_agent._dispatch_tool(
                 call,
                 Path("/tmp"),
                 "sender-1",
@@ -250,12 +250,12 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
-                runner_openai.LockRegistry(),
+                runner_better_agent.LockRegistry(),
                 False,
             )
         )
     finally:
-        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
 
     parsed = json.loads(result)
     assert parsed["expects_response"] is True
@@ -270,7 +270,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
 
 def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
-    original_post = runner_openai._post_loopback_sync
+    original_post = runner_better_agent._post_loopback_sync
     original_ready = extension_store.is_extension_runtime_ready
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
@@ -287,10 +287,10 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
             ]
         }
 
-    runner_openai._post_loopback_sync = fake_post  # type: ignore[assignment]
+    runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
     extension_store.is_extension_runtime_ready = lambda _extension_id: True  # type: ignore[assignment]
     try:
-        handlers = runner_openai._build_loopback_tool_handlers(
+        handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
@@ -298,7 +298,7 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
             },
             cwd="/repo",
             model="model-x",
-            lock_registry=runner_openai.LockRegistry(),
+            lock_registry=runner_better_agent.LockRegistry(),
         )
         assert "ensure_named_worker" in handlers
         emitter = _make_emitter()
@@ -315,7 +315,7 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
             ),
         }
         result = asyncio.run(
-            runner_openai._dispatch_tool(
+            runner_better_agent._dispatch_tool(
                 call,
                 Path("/tmp"),
                 "sender-1",
@@ -326,12 +326,12 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
                 "tok",
                 emitter,
                 handlers,
-                runner_openai.LockRegistry(),
+                runner_better_agent.LockRegistry(),
                 False,
             )
         )
     finally:
-        runner_openai._post_loopback_sync = original_post  # type: ignore[assignment]
+        runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
         extension_store.is_extension_runtime_ready = original_ready  # type: ignore[assignment]
 
     parsed = json.loads(result)
@@ -354,7 +354,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         "app_session_id": "sender-1",
     }
 
-    without_team = runner_openai._tool_schemas_for_run(
+    without_team = runner_better_agent._tool_schemas_for_run(
         inputs=base,
         capabilities_enabled=False,
         loopback_enabled=True,
@@ -369,7 +369,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         for schema in without_team
     )
 
-    with_team = runner_openai._tool_schemas_for_run(
+    with_team = runner_better_agent._tool_schemas_for_run(
         inputs=base,
         capabilities_enabled=False,
         loopback_enabled=True,

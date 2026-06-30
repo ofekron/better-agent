@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
 
 from runner_codex import _prepend_capability_context as codex_prompt  # noqa: E402
 from runner_gemini import _prepend_capability_context as gemini_prompt  # noqa: E402
-from runner_openai import render_capability_context as openai_capability_context  # noqa: E402
+from runner_better_agent import render_capability_context as openai_capability_context  # noqa: E402
 from orchs.native import handle_turn as native_handle_turn  # noqa: E402
 from capability_contexts import normalize_capability_contexts  # noqa: E402
 from turn_manager import _provider_capability_contexts  # noqa: E402

@@ -1,4 +1,4 @@
-"""Regression: OpenAI runner disables parallel tool calls.
+"""Regression: Better Agent runner disables parallel tool calls.
 
 Incremental history persistence trims incomplete assistant tool-call blocks so
 stored history is always resume-safe. If the provider can emit multiple tool
@@ -21,7 +21,7 @@ os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
-import runner_openai  # noqa: E402
+import runner_better_agent  # noqa: E402
 
 
 class _Resp:
@@ -59,13 +59,13 @@ class _Client:
 
 
 def test_stream_chat_disables_parallel_tool_calls() -> None:
-    original = runner_openai.httpx.AsyncClient
+    original = runner_better_agent.httpx.AsyncClient
     _Client.payloads.clear()
     try:
-        runner_openai.httpx.AsyncClient = _Client  # type: ignore[assignment]
+        runner_better_agent.httpx.AsyncClient = _Client  # type: ignore[assignment]
 
         async def _go() -> None:
-            async for _ in runner_openai._stream_chat(
+            async for _ in runner_better_agent._stream_chat(
                 "http://stub",
                 "key",
                 "model",
@@ -76,7 +76,7 @@ def test_stream_chat_disables_parallel_tool_calls() -> None:
 
         asyncio.run(_go())
     finally:
-        runner_openai.httpx.AsyncClient = original
+        runner_better_agent.httpx.AsyncClient = original
 
     assert _Client.payloads, "_stream_chat did not issue a request"
     assert _Client.payloads[0].get("parallel_tool_calls") is False

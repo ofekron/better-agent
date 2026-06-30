@@ -1,4 +1,4 @@
-"""runner_openai — BA-owned agent loop over an OpenAI Chat Completions endpoint.
+"""runner_better_agent — BA-owned agent loop over an OpenAI Chat Completions endpoint.
 
 Unlike the claude/gemini/codex runners (which spawn an external CLI that owns
 the tool/MCP/approval loop), this runner IS the agent host: it makes HTTP
@@ -10,7 +10,7 @@ only `run_dir/session_events.jsonl` (Claude-shaped lines), `state.json`, and
 `complete.json`. The provider (provider_openai.py) tails session_events.jsonl
 with GeminiJsonlTailer and feeds apply_event.
 
-OpenAI is the clean path where BA owns the internals instead of adapting to
+OpenAI-compatible APIs are the clean path where BA owns the internals instead of adapting to
 provider-native CLI quirks:
   - native and team/manager mode both run through this in-process loop.
   - in-process coding tools: Bash, Read, Write, Edit, Grep, Glob.
@@ -68,11 +68,11 @@ from orchestration_tool_schemas import (
 from capability_contexts import prepend_capability_context, render_capability_context
 from tool_approval_client import describe_tool_call, request_tool_approval
 
-logger = logging.getLogger("runner_openai")
+logger = logging.getLogger("runner_better_agent")
 
 _BASH_TIMEOUT_S = 120
 _MAX_OUTPUT_CHARS = 40_000
-# Safety bound on the agent tool loop. runner_openai IS the agent host (no
+# Safety bound on the agent tool loop. runner_better_agent IS the agent host (no
 # external CLI like claude/codex/gemini to impose its own limits), so it needs
 # an in-process runaway guard. High enough that agentic models (e.g. Sakana
 # Fugu, a tool-heavy multi-agent system that routinely needs >40 tool rounds)
@@ -80,7 +80,7 @@ _MAX_OUTPUT_CHARS = 40_000
 # cap IS hit, the turn is reported as not-completed (see _run's for/else),
 # never silently as a successful completion.
 _MAX_TOOL_LOOPS = 1000
-_SESSIONS_SUBDIR = "openai_sessions"
+_SESSIONS_SUBDIR = "better_agent_sessions"
 DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
 _OPEN_FILE_PANEL_HTTP_TIMEOUT_S = 30.0
 _TOOL_ENV_DENY_EXACT = {
@@ -2021,14 +2021,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
         _persist_history()
     except Exception as e:
-        logger.exception("openai runner loop failed")
+        logger.exception("Better Agent runner loop failed")
         error = f"{type(e).__name__}: {e}"
         # Best-effort durable save even on an unexpected loop failure, so the
         # context accumulated before the crash survives for the next resume.
         try:
             _persist_history()
         except Exception:
-            logger.exception("openai runner: history persist after failure failed")
+            logger.exception("Better Agent runner: history persist after failure failed")
 
     if error:
         emitter.emit_error(error)
@@ -2294,7 +2294,7 @@ _SYSTEM_PROMPT = (
 def main(run_dir: Path) -> int:
     logging.basicConfig(
         level=logging.INFO,
-        format="[runner_openai %(process)d] %(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="[runner_better_agent %(process)d] %(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
