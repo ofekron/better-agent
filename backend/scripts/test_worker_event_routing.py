@@ -45,6 +45,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 import config_store  # noqa: E402
+import render_stub  # noqa: E402
 import session_store  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
@@ -685,6 +686,59 @@ def test_f_panel_stores_inner_not_outer_wrapper() -> bool:
     return ok
 
 
+def test_n_snapshot_routes_journal_worker_event_to_panel_once() -> bool:
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_N")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_N", "uuid-N", "partial"),
+        source_is_provider_stream=True,
+    )
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_N", "uuid-N", "final"),
+        source_is_provider_stream=True,
+    )
+
+    session_manager._since_cache.pop(sid, None)
+    replay = session_manager.get_messages_since(sid, since_seq=0, limit=50) or {}
+    msg = next(
+        (m for m in replay.get("messages") or [] if m.get("id") == msg_id),
+        {},
+    )
+    panel = next(
+        (
+            p for p in msg.get("workers") or []
+            if p.get("delegation_id") == "del_N"
+        ),
+        {},
+    )
+    parent_worker_events = [
+        e for e in msg.get("events") or [] if e.get("type") == "worker_event"
+    ]
+    panel_events = panel.get("events") or []
+    last_content = (
+        ((panel_events[-1].get("data") or {}).get("message") or {}).get("content")
+        if panel_events else None
+    )
+    ok = (
+        parent_worker_events == []
+        and len(panel_events) == 1
+        and last_content == "final"
+        and render_stub.renderable_count(msg) == 1
+    )
+    print(
+        f"{PASS if ok else FAIL} N: snapshot routes journal worker_event once — "
+        f"parent_worker_events={len(parent_worker_events)} "
+        f"panel_events={len(panel_events)} last_content={last_content!r} "
+        f"renderable={render_stub.renderable_count(msg)}",
+    )
+    return ok
+
+
 # ─── runner ───────────────────────────────────────────────────────
 
 def main() -> int:
@@ -705,6 +759,7 @@ def main() -> int:
             test_k_worker_start_creates_panel_before_worker_event(),
             test_l_post_trigger_insert_at_counts_after_current_event(),
             test_m_session_panel_emitters_stamp_after_pending_trigger(),
+            test_n_snapshot_routes_journal_worker_event_to_panel_once(),
         ]
     finally:
         session_manager.flush_pending_persists()
