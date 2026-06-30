@@ -32,6 +32,7 @@ import logging
 import threading
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -117,11 +118,23 @@ _public_pending_cache: tuple[int, list[dict]] | None = None
 _public_pending_cache_lock = threading.Lock()
 
 
+def _public_record_expired(record: dict) -> bool:
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) < datetime.now()
+    except (TypeError, ValueError):
+        return False
+
+
 def public_pending_nodes_cached() -> list[dict] | None:
     version = pending_node_registrations.version()
     with _public_pending_cache_lock:
         cached = _public_pending_cache
         if cached is None or cached[0] != version:
+            return None
+        if any(_public_record_expired(item) for item in cached[1]):
             return None
         return [dict(item) for item in cached[1]]
 
