@@ -525,7 +525,7 @@ def _machine_nodes_enabled_cached() -> bool:
                 global _machine_nodes_enabled_cache
                 try:
                     enabled = await asyncio.to_thread(
-                        _builtin_extension_enabled,
+                        _builtin_extension_runtime_ready,
                         extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
                     )
                 except Exception:
@@ -535,7 +535,7 @@ def _machine_nodes_enabled_cached() -> bool:
 
             _machine_nodes_enabled_refresh_task = asyncio.create_task(_refresh())
         return cached[1]
-    enabled = _builtin_extension_enabled(
+    enabled = _builtin_extension_runtime_ready(
         extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID,
     )
     _machine_nodes_enabled_cache = (now, enabled)

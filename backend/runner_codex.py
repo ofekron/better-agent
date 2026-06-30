@@ -20,6 +20,7 @@ codex subprocess.
 import argparse
 import asyncio
 import base64
+import copy
 import http.client
 import json
 import logging
@@ -187,6 +188,19 @@ def _add_dynamic_tool(
     tool_handlers[name] = handler
     existing_tool_names.add(name)
     return True
+
+
+def _codex_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    cleaned = copy.deepcopy(schema)
+    for prop in (cleaned.get("properties") or {}).values():
+        if not isinstance(prop, dict):
+            continue
+        schema_type = prop.get("type")
+        if isinstance(schema_type, list) and "null" in schema_type:
+            prop["type"] = [item for item in schema_type if item != "null"]
+            if len(prop["type"]) == 1:
+                prop["type"] = prop["type"][0]
+    return cleaned
 
 _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -576,7 +590,7 @@ def _build_delegate_task_dynamic_tool() -> dict:
     return {
         "name": "delegate_task",
         "description": _DELEGATE_TASK_DESCRIPTION,
-        "inputSchema": _DELEGATE_TASK_INPUT_SCHEMA,
+        "inputSchema": _codex_input_schema(_DELEGATE_TASK_INPUT_SCHEMA),
     }
 
 

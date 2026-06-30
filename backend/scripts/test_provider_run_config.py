@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
 
 import provider_run_config  # noqa: E402
 import runner  # noqa: E402
+import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_gemini  # noqa: E402
 import open_file_panel_mcp  # noqa: E402
@@ -107,7 +108,7 @@ def _install_requirements_extension_record(
         "python": "mcp/server.py",
         "args": [],
         "env": {},
-        "user_facing": True,
+        "user_facing": False,
         "bare_allowed": False,
         "requires_backend_auth": True,
     }
@@ -159,6 +160,11 @@ def _install_requirements_extension_record(
             "last_checked_at": "2026-01-01T00:00:00+00:00",
             "expires_at": "2099-01-01T00:00:00+00:00",
         },
+    }
+    record = data["extensions"][extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID]
+    record["consent"] = {
+        "fingerprint": extension_store.permission_consent_fingerprint(record),
+        "granted_at": "2026-01-01T00:00:00+00:00",
     }
     extension_store._save(data)  # type: ignore[attr-defined]
     extension_store.set_harness_delivery_mode(
@@ -1107,7 +1113,7 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
         "supervisor loop checks extension runtime readiness",
     )
     check(
-        "is_extension_runtime_ready(" in orchestrator_src
+        "runtime_not_ready_message(" in orchestrator_src
         and "BUILTIN_SUPERVISOR_EXTENSION_ID" in orchestrator_src,
         "direct supervisor target checks extension runtime readiness",
     )
@@ -1168,6 +1174,51 @@ def t_requirements_mcp_uses_private_extension() -> None:
     check("better-agent-requirements" in servers, "normal runs use private requirements MCP")
 
 
+def t_better_agent_runner_uses_extension_mcp_configs() -> None:
+    _install_requirements_extension_record()
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
+        "open_file_panel_enabled": True,
+        "app_session_id": "ba-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-ba",
+    }
+    configs = runner_better_agent._extension_mcp_server_configs_for_run(
+        inputs, user_facing=True, bare=False,
+    )
+    check(
+        "better-agent-requirements" in configs,
+        "Better Agent runner gets requirements through private extension",
+    )
+    headless = dict(inputs)
+    headless["open_file_panel_enabled"] = False
+    check(
+        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
+            headless, user_facing=False, bare=False,
+        ),
+        "Better Agent runner keeps requirements MCP for authenticated headless sessions",
+    )
+
+    missing_token = dict(inputs)
+    missing_token["internal_token"] = ""
+    check(
+        "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
+            missing_token, user_facing=True, bare=False,
+        ),
+        "Better Agent runner omits requirements MCP without backend auth",
+    )
+    check(
+        "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
+            inputs, user_facing=True, bare=True,
+        ),
+        "Better Agent runner omits requirements MCP for bare runs",
+    )
+
+
 def t_native_requirements_mcp_injected_with_run_auth() -> None:
     _install_requirements_extension_record(delivery="native", replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
@@ -1217,8 +1268,8 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     headless = dict(inputs)
     headless["open_file_panel_enabled"] = False
     check(
-        "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
-        "native requirements MCP is omitted for non-user-facing runs",
+        "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
+        "native requirements MCP is kept for authenticated headless runs",
     )
     bare = dict(inputs)
     bare["bare_config"] = True
@@ -1346,6 +1397,7 @@ def main() -> int:
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
+        ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
         ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),

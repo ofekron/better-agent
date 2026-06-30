@@ -334,6 +334,127 @@ def test_openai_loopback_recovers_completed_ask_result():
     assert recovered == result
 
 
+def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
+    runner = _mod("runner_better_agent")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+    original_call = runner._mcp_call_tool
+    calls = []
+
+    def fake_configs(inputs, *, user_facing, bare):
+        assert user_facing is True
+        assert bare is False
+        return {
+            "better-agent-requirements": {
+                "command": sys.executable,
+                "args": ["-c", "pass"],
+                "env": {},
+            },
+        }
+
+    async def fake_list(server_name, config):
+        assert server_name == "better-agent-requirements"
+        return [{
+            "name": "get_requirements",
+            "description": "Return processed requirements.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }]
+
+    async def fake_call(spec, args):
+        calls.append((spec, args))
+        return json.dumps({"success": True, "count": 1})
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        runner._mcp_call_tool = fake_call
+        schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
+            {"cwd": "/repo"},
+            user_facing=True,
+            bare=False,
+            used_names=set(),
+        ))
+        assert [schema["function"]["name"] for schema in schemas] == ["get_requirements"]
+        assert schemas[0]["function"]["parameters"]["required"] == ["query"]
+        assert "get_requirements" in handlers
+
+        with tempfile.TemporaryDirectory() as d:
+            emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
+            result = asyncio.run(runner._dispatch_tool(
+                {
+                    "id": "call_req",
+                    "name": "get_requirements",
+                    "arguments": json.dumps({"query": "assistant requirements"}),
+                },
+                Path(d),
+                "app-session",
+                Path(d),
+                True,
+                True,
+                "http://backend",
+                "tok",
+                emitter,
+                {},
+                runner.LockRegistry(),
+                False,
+                handlers,
+            ))
+            emitter.close()
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+        runner._mcp_call_tool = original_call
+
+    assert json.loads(result) == {"success": True, "count": 1}
+    assert calls
+    assert calls[0][0]["server_name"] == "better-agent-requirements"
+    assert calls[0][0]["tool_name"] == "get_requirements"
+    assert calls[0][1] == {"query": "assistant requirements"}
+
+
+def test_openai_runner_speaks_real_requirements_mcp_stdio():
+    runner = _mod("runner_better_agent")
+    repo = Path(__file__).resolve().parents[2]
+    config = {
+        "command": sys.executable,
+        "args": [str(repo / "better-agent-private/extensions/requirements/mcp/server.py")],
+        "env": {
+            "PYTHONPATH": os.pathsep.join([
+                str(repo / "sdk"),
+                str(repo / "backend"),
+                str(repo / "better-agent-private/extensions/requirements"),
+            ]),
+            "BETTER_CLAUDE_BACKEND_URL": "http://127.0.0.1:9",
+            "BETTER_CLAUDE_INTERNAL_TOKEN": "test-token",
+            "BETTER_CLAUDE_APP_SESSION_ID": "app-session",
+            "BETTER_CLAUDE_CWD": str(repo),
+        },
+    }
+
+    tools = asyncio.run(runner._mcp_list_tools("better-agent-requirements", config))
+    assert {tool["name"] for tool in tools} >= {
+        "get_requirements",
+        "get_requirements_internal",
+    }
+
+    result = asyncio.run(runner._mcp_call_tool(
+        {
+            "server_name": "better-agent-requirements",
+            "tool_name": "get_requirements",
+            "config": config,
+        },
+        {"query": "assistant requirements", "cwd": str(repo), "max_matches": 1},
+    ))
+    payload = json.loads(result)
+    assert payload["success"] is False
+    assert "better_agent_sdk" not in payload.get("error", "")
+    assert "INTERNAL_TOKEN" not in payload.get("error", "")
+
+
 def test_openai_attach_recovered_run_schedules_bootstrap():
     provider_mod = _mod("provider_openai")
     provider = provider_mod.OpenAIProvider({
@@ -409,6 +530,39 @@ def test_tools_path_confinement():
         # grep
         (cwdp / "g.txt").write_text("foo bar\nbaz\n", encoding="utf-8")
         assert "foo bar" in runner._tool_grep({"pattern": "foo"}, cwdp)
+
+
+def test_read_allows_declared_runtime_skill_files_only():
+    runner = _mod("runner_better_agent")
+    runtime_skills = _mod("runtime_skills")
+    original_discover = runtime_skills._discover_skills
+    with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as skill_root:
+        cwdp = Path(cwd)
+        skill_dir = Path(skill_root) / "project-structure"
+        skill_dir.mkdir()
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text("declared skill", encoding="utf-8")
+        other = Path(skill_root) / "other.txt"
+        other.write_text("secret", encoding="utf-8")
+
+        def fake_discover(_cwd):
+            return [{
+                "name": "project-structure",
+                "description": "",
+                "dir": str(skill_dir),
+                "path": str(skill_md),
+            }]
+
+        try:
+            runtime_skills._discover_skills = fake_discover
+            assert "declared skill" in runner._tool_read({"file_path": str(skill_md)}, cwdp)
+            assert runner._tool_read({"file_path": str(other)}, cwdp).startswith("Error:")
+            assert runner._tool_write({
+                "file_path": str(skill_md),
+                "content": "mutate",
+            }, cwdp).startswith("Error:")
+        finally:
+            runtime_skills._discover_skills = original_discover
 
 
 def test_live_turn_against_endpoint():
