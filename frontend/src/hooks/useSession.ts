@@ -973,6 +973,15 @@ export function useSession(authStatus?: string) {
     applySessionPatchEverywhere(sessionId, { last_opened_at: at });
   }, [applySessionPatchEverywhere]);
 
+  const markSessionOpened = useCallback((sessionId: string, at = new Date().toISOString()) => {
+    stampSessionLastOpened(sessionId, at);
+    void fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {});
+    return at;
+  }, [stampSessionLastOpened]);
+
   useEffect(() => {
     if (!currentSession || wsTargetSessionId === null) return;
     rememberSessionTree(currentSession);
@@ -1341,15 +1350,7 @@ export function useSession(authStatus?: string) {
     // top tab strip sorts from the session summaries/current tree; without
     // this optimistic timestamp, opening a cached or not-yet-open session can
     // leave the selected tab behind until a later refetch happens to arrive.
-    const openedAt = new Date().toISOString();
-    stampSessionLastOpened(id, openedAt);
-    // Stamp last-opened on the backend (fire-and-forget) so the "last
-    // opened" session sort reflects this selection. Does not gate the
-    // open flow; backend bumps last_opened_at without touching updated_at.
-    void fetch(`${API}/api/sessions/${encodeURIComponent(id)}/opened`, {
-      method: "POST",
-      credentials: "include",
-    }).catch(() => {});
+    const openedAt = markSessionOpened(id);
     // Drop WS target immediately so the WS hook unsubscribes from the
     // old session. The new target is set only after REST resolves and
     // seq cursors are seeded — prevents since_seq=0 flood.
@@ -1543,7 +1544,7 @@ export function useSession(authStatus?: string) {
       setSessionLoading(false);
       completeOp(opId);
     }
-  }, [cachedSessionTreeFor, exchangePageSize, stampSessionLastOpened]);
+  }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
 
   const deleteSession = useCallback(
     async (id: string) => {
@@ -2671,6 +2672,7 @@ export function useSession(authStatus?: string) {
     restoreOfflineSession,
     forkSession,
     selectSession,
+    markSessionOpened,
     clearCurrentSession,
     deleteSession,
     addMessages,
