@@ -46,6 +46,7 @@ from provider_codex import CodexProvider, RunState, read_codex_run_rollout_event
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
 from event_shape import extract_output_text as _extract_output_text  # noqa: E402
 from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
+from codex_native import CodexRolloutNormalizer  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
 from run_recovery import (  # noqa: E402
@@ -1526,6 +1527,31 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
     return asyncio.run(_run())
 
 
+def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="test")
+    events = normalizer.normalize_event({
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_reasoning",
+            "message": "Need inspect before editing.",
+        },
+    })
+    if len(events) != 1:
+        print(f"  expected one event, got {events!r}")
+        return False
+    content = ((events[0].get("message") or {}).get("content") or [])
+    block = content[0] if content and isinstance(content[0], dict) else {}
+    ok = (
+        events[0].get("type") == "assistant"
+        and block.get("type") == "thinking"
+        and block.get("thinking") == "Need inspect before editing."
+        and "text" not in block
+    )
+    if not ok:
+        print(f"  bad reasoning event: {events!r}")
+    return ok
+
+
 TESTS = [
     ("codex live orphan is emitted (not skipped)", test_live_orphan_is_emitted_not_skipped),
     ("codex replay reads native rollout jsonl", test_codex_replay_reads_native_rollout_jsonl),
@@ -1550,6 +1576,7 @@ TESTS = [
     ("codex replay splits reused child by parent tool call", test_codex_replay_splits_reused_child_by_parent_tool_call),
     ("codex provider child setup persists source and starts panel", test_codex_provider_child_setup_persists_source_and_starts_panel),
     ("codex provider starts child panel from spawn result", test_codex_provider_starts_child_panel_from_spawn_result),
+    ("codex event_msg.agent_reasoning renders as thinking", test_codex_event_msg_agent_reasoning_renders_as_thinking),
 ]
 
 
