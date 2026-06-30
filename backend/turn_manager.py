@@ -33,6 +33,7 @@ construction.
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import random
@@ -59,7 +60,7 @@ from runtime_skills import runtime_skill_contexts
 from i18n import t
 import llm_call_log
 from provider import StreamEvent
-from runs_dir import pid_alive as _pid_alive, salvage_complete_payload
+from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
 from turn_helpers import (
@@ -88,6 +89,39 @@ _BRIDGE_EVENT_TYPES = frozenset((
     "turn_complete", "turn_stopped", "turn_detached",
     "worker_creation_requested",
 ))
+
+
+def _event_uuid(event_dict: dict) -> str:
+    data = event_dict.get("data")
+    if isinstance(data, dict):
+        uid = data.get("uuid")
+        return uid if isinstance(uid, str) else ""
+    return ""
+
+
+def _event_fingerprint(event_dict: dict) -> str:
+    try:
+        return json.dumps(event_dict, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        return repr(event_dict)
+
+
+def _missing_event_dicts(existing: list[dict], candidates: list[dict]) -> list[dict]:
+    seen = {
+        (_event_uuid(event), _event_fingerprint(event))
+        for event in existing
+        if _event_uuid(event)
+    }
+    missing: list[dict] = []
+    for event in candidates:
+        uid = _event_uuid(event)
+        key = (uid, _event_fingerprint(event))
+        if uid and key in seen:
+            continue
+        if uid:
+            seen.add(key)
+        missing.append(event)
+    return missing
 
 
 class _Cancelled(Exception):
@@ -2071,16 +2105,65 @@ class TurnManager:
                                 run_id,
                             )
                             captured_complete = False
-                            try:
-                                late = await asyncio.wait_for(queue.get(), timeout=1)
+                            late_deadline = asyncio.get_running_loop().time() + 1.0
+                            while True:
+                                remaining = late_deadline - asyncio.get_running_loop().time()
+                                if remaining <= 0:
+                                    break
+                                try:
+                                    late = await asyncio.wait_for(
+                                        queue.get(), timeout=min(remaining, 0.1),
+                                    )
+                                except asyncio.TimeoutError:
+                                    continue
+                                except Exception:
+                                    break
                                 late_dict = {"type": late.type, "data": late.data}
                                 if not _is_synthetic_event(late_dict):
                                     attempt_events.append(late_dict)
+                                    if late.type not in ("session_discovered", "complete", "error"):
+                                        try:
+                                            await ws_callback(
+                                                _stamp_agent_type(mode, late_dict),
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "dead-runner late event ws_callback failed",
+                                                exc_info=True,
+                                            )
                                 if late.type == "complete":
                                     captured_complete = True
-                            except (asyncio.TimeoutError, Exception):
-                                pass
+                                    break
                             if not captured_complete:
+                                if getattr(provider, "KIND", "") == "codex":
+                                    try:
+                                        from provider_codex import read_codex_run_rollout_events
+                                        replayed_events = read_codex_run_rollout_events(
+                                            runs_root() / run_id,
+                                        )
+                                    except Exception:
+                                        logger.debug(
+                                            "codex dead-runner rollout replay failed for %s",
+                                            run_id,
+                                            exc_info=True,
+                                        )
+                                        replayed_events = []
+                                    for replayed_event in _missing_event_dicts(
+                                        attempt_events, replayed_events,
+                                    ):
+                                        if _is_synthetic_event(replayed_event):
+                                            continue
+                                        attempt_events.append(replayed_event)
+                                        try:
+                                            await ws_callback(
+                                                _stamp_agent_type(mode, replayed_event),
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "codex replay event ws_callback failed for %s",
+                                                run_id,
+                                                exc_info=True,
+                                            )
                                 # The runner frequently succeeded and wrote
                                 # complete.json just before exiting, but the
                                 # provider's complete event lost the race
