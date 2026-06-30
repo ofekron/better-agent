@@ -33,6 +33,7 @@ def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
     session_store._fork_index.clear()
     session_store._index_loaded = False
     session_store._summary_index.clear()
