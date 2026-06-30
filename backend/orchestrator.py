@@ -1476,14 +1476,23 @@ class Coordinator:
                     sub_session=sub_session,
                 )
                 created = True
-            else:  # auto / manual → search_sessions, take the first suggestion
+            else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
                     suggestion = await session_search.search(task)
                 except Exception:
                     logger.exception("delegate_task: session_search failed")
                     suggestion = {"session_ids": []}
                 ids = (suggestion or {}).get("session_ids") or []
-                target = ids[0] if ids else None
+                target = next(
+                    (
+                        sid for sid in ids
+                        if isinstance(sid, str)
+                        and sid
+                        and sid != caller
+                        and session_manager.get(sid)
+                    ),
+                    None,
+                )
                 if not target:
                     target = self._delegate_task_create_session(
                         caller,
