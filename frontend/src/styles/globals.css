@@ -4984,6 +4984,42 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   gap: 12px;
 }
+.extension-ui-settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+.extension-ui-settings-search:focus-within {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--bg-tertiary) 82%, var(--accent) 18%);
+  color: var(--text-secondary);
+}
+.extension-ui-settings-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 0;
+  font-size: calc(13px * var(--app-font-scale));
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  outline: none;
+}
+.extension-ui-settings-search-input::placeholder {
+  color: var(--text-muted);
+}
+.extension-ui-settings-empty-search {
+  padding: 8px 0;
+  transition: opacity 180ms ease;
+}
 .settings-error {
   color: var(--error);
   font-size: calc(13px * var(--app-font-scale));
@@ -7219,7 +7255,7 @@ button.run-badge-clickable:focus-visible {
 /* Message Group (prompt + response)       */
 /* ======================================= */
 
-.message-group {
+.turn-group {
   margin-bottom: 16px;
 }
 
@@ -7253,9 +7289,9 @@ button.run-badge-clickable:focus-visible {
   line-height: 1.45;
 }
 
-/* Children of a user prompt sit to the right of a vertical line, visually
+/* Children of a turn group sit to the right of a vertical line, visually
    grouping the entire assistant response under the prompt that triggered it. */
-.message-group-children {
+.turn-group-children {
   display: flex;
   flex-direction: column;
   margin-block: 8px;
@@ -7264,7 +7300,7 @@ button.run-badge-clickable:focus-visible {
   border-inline-start: 2px solid var(--accent-dim);
 }
 
-/* Worker output sub-groups nested inside a supervisor/main message group. */
+/* Worker output sub-groups nested inside a supervisor/main turn group. */
 .worker-sub-group {
   margin-top: 10px;
   padding-top: 8px;
@@ -7317,7 +7353,7 @@ button.run-badge-clickable:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.message-group-children > .collapse-summary {
+.turn-group-children > .collapse-summary {
   padding: 4px 0 8px;
 }
 
@@ -10845,7 +10881,7 @@ pre .inline-tag-highlight {
   position: relative;
 }
 
-.message-row > .message-group {
+.message-row > .turn-group {
   flex: 1;
   min-width: 0;
 }
@@ -14721,7 +14757,7 @@ button.progress-inflight {
   .chat-messages {
     padding: 12px 8px;
   }
-  .message-group-children {
+  .turn-group-children {
     margin-inline-start: 4px;
     padding-inline-start: 14px;
   }

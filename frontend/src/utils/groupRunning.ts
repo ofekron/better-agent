@@ -1,9 +1,9 @@
 import type { ChatMessage, RunInfo } from "../types";
 
-/** A message group is "running" while it has active backend runs OR its
+/** A turn group is "running" while it has active backend runs OR its
  *  assistant message is streaming (not stopped). Single source of truth for
  *  both auto-collapse gating (Chat.tsx defaultCollapsed) and the in-group
- *  "Running…" indicator (MessageGroup). */
+ *  "Running…" indicator (TurnGroup). */
 export function isGroupRunning(
   assistantMessage: ChatMessage | undefined,
   runs: RunInfo[] | undefined,

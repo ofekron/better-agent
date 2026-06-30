@@ -10,15 +10,15 @@ import type {
 import type { InlineTag } from "../types/inlineTag";
 import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { isUnanchoredRun } from "../utils/runTargets";
-import { MessageGroup } from "./MessageBubble";
+import { TurnGroup } from "./MessageBubble";
 import type { StreamingLoadPhase } from "../hooks/useWebSocket";
 import { buildThreadColorMap } from "../threadColors";
 
-type MessagePair = { user: ChatMessage; assistant?: ChatMessage };
+type TurnPair = { initiator: ChatMessage; response?: ChatMessage };
 
 interface TimelineRow {
-  primary?: MessagePair;
-  supervisor?: MessagePair;
+  primary?: TurnPair;
+  supervisor?: TurnPair;
 }
 
 interface Props {
@@ -93,10 +93,10 @@ export function SupervisorSplitView({
   );
 
   const rows = useMemo(() => {
-    type Tagged = { pair: MessagePair; slot: "primary" | "supervisor"; ts: string };
+    type Tagged = { pair: TurnPair; slot: "primary" | "supervisor"; ts: string };
     const items: Tagged[] = [
-      ...primaryPairs.map((p) => ({ pair: p, slot: "primary" as const, ts: p.user.timestamp })),
-      ...supervisorPairs.map((p) => ({ pair: p, slot: "supervisor" as const, ts: p.user.timestamp })),
+      ...primaryPairs.map((p) => ({ pair: p, slot: "primary" as const, ts: p.initiator.timestamp })),
+      ...supervisorPairs.map((p) => ({ pair: p, slot: "supervisor" as const, ts: p.initiator.timestamp })),
     ];
     items.sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""));
 
@@ -143,18 +143,18 @@ export function SupervisorSplitView({
           </div>
         ) : (
           rows.map((row, idx) => {
-            const isLastPrimary = idx === lastPrimaryIdx;
-            const isLastSupervisor = idx === lastSupervisorIdx;
+            const isLatestPrimaryTurn = idx === lastPrimaryIdx;
+            const isLatestSupervisorTurn = idx === lastSupervisorIdx;
             return (
               <div className="supervisor-timeline-row" key={
-                (row.primary?.user.id ?? "") + (row.supervisor?.user.id ?? "")
+                (row.primary?.initiator.id ?? "") + (row.supervisor?.initiator.id ?? "")
               }>
                 <div className="supervisor-timeline-cell">
                   {row.primary && (
                     <CellGroup
                       pair={row.primary}
                       runs={runs}
-                      isLast={isLastPrimary}
+                      isLatestTurn={isLatestPrimaryTurn}
                       sessionId={session.id}
                       orchestrationMode={session.orchestration_mode}
                       threadColorMap={threadColorMap}
@@ -169,7 +169,7 @@ export function SupervisorSplitView({
                       onAdvSyncClick={onAdvSyncClick}
                       expandAllTrigger={expandAllTrigger}
                       streamingLoadPhase={
-                        row.primary.assistant?.isStreaming && isLastPrimary
+                        row.primary.response?.isStreaming && isLatestPrimaryTurn
                           ? streamingLoadPhase
                           : undefined
                       }
@@ -184,7 +184,7 @@ export function SupervisorSplitView({
                     <CellGroup
                       pair={row.supervisor}
                       runs={runs}
-                      isLast={isLastSupervisor}
+                      isLatestTurn={isLatestSupervisorTurn}
                       sessionId={session.id}
                       orchestrationMode={session.orchestration_mode}
                       threadColorMap={threadColorMap}
@@ -199,7 +199,7 @@ export function SupervisorSplitView({
                       onAdvSyncClick={onAdvSyncClick}
                       expandAllTrigger={expandAllTrigger}
                       streamingLoadPhase={
-                        row.supervisor.assistant?.isStreaming && isLastSupervisor
+                        row.supervisor.response?.isStreaming && isLatestSupervisorTurn
                           ? streamingLoadPhase
                           : undefined
                       }
@@ -218,26 +218,26 @@ export function SupervisorSplitView({
   );
 }
 
-function buildPairs(messages: ChatMessage[]): MessagePair[] {
-  const out: MessagePair[] = [];
+function buildPairs(messages: ChatMessage[]): TurnPair[] {
+  const out: TurnPair[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== "user") continue;
     const next = messages[i + 1];
-    const pair: MessagePair =
+    const pair: TurnPair =
       next && next.role === "assistant"
-        ? { user: msg, assistant: next }
-        : { user: msg };
+        ? { initiator: msg, response: next }
+        : { initiator: msg };
     out.push(pair);
-    if (pair.assistant) i++;
+    if (pair.response) i++;
   }
   return out;
 }
 
 interface CellGroupProps {
-  pair: MessagePair;
+  pair: TurnPair;
   runs: RunInfo[];
-  isLast: boolean;
+  isLatestTurn: boolean;
   sessionId: string;
   orchestrationMode?: Session["orchestration_mode"];
   threadColorMap: Map<string, string>;
@@ -256,7 +256,7 @@ interface CellGroupProps {
 function CellGroup({
   pair,
   runs,
-  isLast,
+  isLatestTurn,
   sessionId,
   orchestrationMode,
   threadColorMap,
@@ -271,29 +271,29 @@ function CellGroup({
   expandAllTrigger,
   streamingLoadPhase,
 }: CellGroupProps) {
-  const groupRuns = runs.filter((r) => {
-    if (r.target_message_id === pair.user.id) return true;
-    if (pair.assistant && r.target_message_id === pair.assistant.id) return true;
-    if (isUnanchoredRun(r) && !pair.assistant && isLast) return true;
+  const turnRuns = runs.filter((r) => {
+    if (r.target_message_id === pair.initiator.id) return true;
+    if (pair.response && r.target_message_id === pair.response.id) return true;
+    if (isUnanchoredRun(r) && !pair.response && isLatestTurn) return true;
     return false;
   });
 
   return (
-    <MessageGroup
-      key={pair.user.id}
-      userMessage={pair.user}
-      assistantMessage={pair.assistant}
+    <TurnGroup
+      key={pair.initiator.id}
+      initiatorMessage={pair.initiator}
+      responseMessage={pair.response}
       sessionId={sessionId}
       onFileClick={onFileClick}
       onViewDiff={onViewDiff}
       onRetry={onRetry}
       onRetryStopped={onRetryStopped}
       threadColorMap={threadColorMap}
-      defaultCollapsed={!!pair.assistant && !pair.assistant.isStreaming}
-      isLastGroup={isLast}
+      defaultCollapsed={!!pair.response && !pair.response.isStreaming}
+      isLatestTurnGroup={isLatestTurn}
       expandAllTrigger={expandAllTrigger}
       orchestrationMode={orchestrationMode}
-      runs={groupRuns}
+      runs={turnRuns}
       tags={tags}
       onRemoveTag={onRemoveTag}
       advSyncOverlays={advSyncOverlays}

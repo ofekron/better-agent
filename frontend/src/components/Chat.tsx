@@ -21,7 +21,7 @@ import type {
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
 import type { StreamingLoadPhase } from "../hooks/useWebSocket";
-import { MessageGroup, MessageBubble } from "./MessageBubble";
+import { TurnGroup, MessageBubble } from "./MessageBubble";
 import { InputArea } from "./InputArea";
 import type { ScheduleSendPayload } from "./ScheduleSendPopover";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
@@ -44,8 +44,8 @@ import {
 } from "../utils/agentMessages";
 
 /** Stable empty-runs singleton so groups with no targeted runs hand a
- *  referentially identical array to MessageGroup across renders — a
- *  fresh `[]` per render would defeat the downstream `memo(MessageGroup)`.
+ *  referentially identical array to TurnGroup across renders — a
+ *  fresh `[]` per render would defeat the downstream `memo(TurnGroup)`.
  *  Frozen so an accidental `.push` on the shared instance throws loudly
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
@@ -306,15 +306,17 @@ function ToolApprovalCard({
   );
 }
 
-/** One rendered turn: a user message paired with its assistant reply (if
- * any), the runs targeting it, and whether it's the latest group. Exposed
- * so callers can inject a per-turn footer via `renderGroupFooter`. */
-export interface ChatGroup {
-  userMessage: ChatMessage;
-  assistantMessage?: ChatMessage;
-  groupRuns: RunInfo[];
-  isLast: boolean;
+/** One rendered turn group: an initiating turn message (User/Ask/Message/
+ * Provisioning/etc.) paired with its assistant response (if any), the runs
+ * targeting that turn, and whether it is the latest turn group. Exposed so
+ * callers can inject a per-turn footer via `renderTurnFooter`. */
+export interface TurnGroupData {
+  initiatorMessage: ChatMessage;
+  responseMessage?: ChatMessage;
+  turnRuns: RunInfo[];
+  isLatest: boolean;
 }
+
 
 interface Props {
   messages: ChatMessage[];
@@ -438,14 +440,14 @@ interface Props {
   headerNode?: import("react").ReactNode;
   composerHeaderNode?: import("react").ReactNode;
   composerOverflowNode?: import("react").ReactNode;
-  /** Optional node rendered BELOW each message group (per turn). Used by
+  /** Optional node rendered BELOW each turn group. Used by
    * the Ask view to inject the inline session picker for any turn whose
    * assistant message carries an `ask_result` — rendered outside the
    * group so it stays visible even when the group is collapsed. */
-  renderGroupFooter?: (group: ChatGroup) => import("react").ReactNode;
+  renderTurnFooter?: (group: TurnGroupData) => import("react").ReactNode;
   /** Optional per-group CSS class. When provided, each group is wrapped
    * in a div (instead of a Fragment) with the returned class. */
-  getGroupClassName?: (group: ChatGroup) => string | undefined;
+  getTurnGroupClassName?: (group: TurnGroupData) => string | undefined;
   /** Hide the per-session toolbar (name + Trace/Raw/Tree toggles).
    * The Ask view has no use for it. */
   hideToolbar?: boolean;
@@ -543,8 +545,8 @@ export function Chat({
   headerNode,
   composerHeaderNode,
   composerOverflowNode,
-  renderGroupFooter,
-  getGroupClassName,
+  renderTurnFooter,
+  getTurnGroupClassName,
   hideToolbar,
   onShowNotes,
   onShowComments,
@@ -975,7 +977,7 @@ export function Chat({
   // token mutates the last message's content, not its id, so `threadIdKey`
   // holds and the Map keeps the same reference. Without this the Map was
   // rebuilt on every token and its new identity broke memo() on every
-  // MessageGroup, re-rendering the whole chat instead of the streaming group.
+  // TurnGroup, re-rendering the whole chat instead of the streaming turn group.
   const threadIdKey = allMessages.map((m) => m.id).join("\n");
   const threadColorMap = useMemo(
     () => buildThreadColorMap(allMessages.map((m) => m.id)),
@@ -992,25 +994,25 @@ export function Chat({
     [showTree, showTrace, session?.rearranger_tree, streamingEvents, threadColorMap],
   );
 
-  const groups = useMemo(() => {
-    // Pair consecutive user+assistant messages into groups.
-    const pairs: { userMessage: ChatMessage; assistantMessage?: ChatMessage }[] = [];
+  const turnGroups = useMemo(() => {
+    // Pair consecutive turn initiators + assistant messages into turn groups.
+    const pairs: { initiatorMessage: ChatMessage; responseMessage?: ChatMessage }[] = [];
     let pendingUser: ChatMessage | null = null;
 
     for (const m of allMessages) {
       if (m.role === "user") {
-        if (pendingUser) pairs.push({ userMessage: pendingUser });
+        if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
         pendingUser = m;
       } else if (m.role === "assistant") {
         if (pendingUser) {
-          pairs.push({ userMessage: pendingUser, assistantMessage: m });
+          pairs.push({ initiatorMessage: pendingUser, responseMessage: m });
           pendingUser = null;
         } else {
           // Orphan assistant (user msg was cancelled / never persisted).
           // Synthesize an empty user stub so the assistant renders in
           // its proper slot instead of being mislabeled as "User".
           pairs.push({
-            userMessage: {
+            initiatorMessage: {
               id: `__synth-${m.id}`,
               role: "user" as const,
               content: "",
@@ -1018,18 +1020,18 @@ export function Chat({
               timestamp: m.timestamp,
               isStreaming: false,
             },
-            assistantMessage: m,
+            responseMessage: m,
           });
         }
       }
     }
-    if (pendingUser) pairs.push({ userMessage: pendingUser });
+    if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
 
     const lastGroupIdx = pairs.length - 1;
     return pairs.map((pair, idx) => {
       const mids = new Set<string>();
-      mids.add(pair.userMessage.id);
-      if (pair.assistantMessage) mids.add(pair.assistantMessage.id);
+      mids.add(pair.initiatorMessage.id);
+      if (pair.responseMessage) mids.add(pair.responseMessage.id);
 
       const collected = visibleRuns.filter((r) => r.target_message_id && mids.has(r.target_message_id));
 
@@ -1039,8 +1041,8 @@ export function Chat({
       }
       return {
         ...pair,
-        groupRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
-        isLast: idx === lastGroupIdx,
+        turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
+        isLatest: idx === lastGroupIdx,
       };
     });
   }, [allMessages, visibleRuns]);
@@ -1048,10 +1050,10 @@ export function Chat({
   // Coalesce streaming-driven re-renders so the chat's layout animations
   // animate in chunks instead of re-triggering on every token. Idle sessions
   // pass through immediately so user interactions stay snappy.
-  const displayGroups = useThrottledValue(groups, sessionRunning ? 140 : 0);
+  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning ? 140 : 0);
 
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
-  // Keyed on displayGroups (the throttled render data), not raw messages, so
+  // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
   // the snap runs in the same commit that grows the DOM — otherwise throttling
   // would scroll to the stale pre-update height. Skip the snap on a prepend
   // render (older messages loaded); the hook's layout effect already restored
@@ -1065,49 +1067,49 @@ export function Chat({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [displayGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
+  }, [displayTurnGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
 
-  const latestGroup = groups[groups.length - 1];
-  const latestGroupRunning =
-    !!latestGroup &&
+  const latestTurnGroup = turnGroups[turnGroups.length - 1];
+  const latestTurnGroupRunning =
+    !!latestTurnGroup &&
     (sessionRunning ||
-      (latestGroup.assistantMessage
-        ? isGroupRunning(latestGroup.assistantMessage, latestGroup.groupRuns)
-        : latestGroup.groupRuns.length > 0));
-  const latestAssistantSpeech = assistantSpeechText(latestGroup?.assistantMessage);
+      (latestTurnGroup.responseMessage
+        ? isGroupRunning(latestTurnGroup.responseMessage, latestTurnGroup.turnRuns)
+        : latestTurnGroup.turnRuns.length > 0));
+  const latestResponseSpeech = assistantSpeechText(latestTurnGroup?.responseMessage);
   const previousLatestTurnRef = useRef<{
     sessionId?: string;
-    userMessageId?: string;
-    assistantMessageId?: string;
+    initiatorMessageId?: string;
+    responseMessageId?: string;
     running: boolean;
   } | null>(null);
   useEffect(() => {
     const current = {
       sessionId: session?.id,
-      userMessageId: latestGroup?.userMessage.id,
-      assistantMessageId: latestGroup?.assistantMessage?.id,
-      running: latestGroupRunning,
+      initiatorMessageId: latestTurnGroup?.initiatorMessage.id,
+      responseMessageId: latestTurnGroup?.responseMessage?.id,
+      running: latestTurnGroupRunning,
     };
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = current;
     if (
       !previous ||
       previous.sessionId !== current.sessionId ||
-      previous.userMessageId !== current.userMessageId ||
-      previous.assistantMessageId !== current.assistantMessageId ||
+      previous.initiatorMessageId !== current.initiatorMessageId ||
+      previous.responseMessageId !== current.responseMessageId ||
       !previous.running ||
       current.running ||
       !voicePlaybackEnabled ||
-      !latestAssistantSpeech
+      !latestResponseSpeech
     ) {
       return;
     }
-    speakAssistantText(latestAssistantSpeech);
+    speakAssistantText(latestResponseSpeech);
   }, [
-    latestAssistantSpeech,
-    latestGroup?.assistantMessage?.id,
-    latestGroup?.userMessage.id,
-    latestGroupRunning,
+    latestResponseSpeech,
+    latestTurnGroup?.responseMessage?.id,
+    latestTurnGroup?.initiatorMessage.id,
+    latestTurnGroupRunning,
     session?.id,
     voicePlaybackEnabled,
   ]);
@@ -1129,13 +1131,13 @@ export function Chat({
     if (reduceMotion) return NO_ENTERING;
     const prevFirst = prevFirstGroupIdRef.current;
     if (!prevFirst) return NO_ENTERING;
-    const anchorIdx = displayGroups.findIndex((g) => g.userMessage.id === prevFirst);
+    const anchorIdx = displayTurnGroups.findIndex((g) => g.initiatorMessage.id === prevFirst);
     if (anchorIdx <= 0) return NO_ENTERING;
-    return new Set(displayGroups.slice(0, anchorIdx).map((g) => g.userMessage.id));
-  }, [displayGroups, reduceMotion]);
+    return new Set(displayTurnGroups.slice(0, anchorIdx).map((g) => g.initiatorMessage.id));
+  }, [displayTurnGroups, reduceMotion]);
   useLayoutEffect(() => {
-    prevFirstGroupIdRef.current = displayGroups[0]?.userMessage.id;
-  }, [displayGroups]);
+    prevFirstGroupIdRef.current = displayTurnGroups[0]?.initiatorMessage.id;
+  }, [displayTurnGroups]);
 
   return (
     <MotionConfig reducedMotion="user" transition={{ duration: 0.55, ease: "easeInOut" }}>
@@ -1310,7 +1312,7 @@ export function Chat({
 
         {!showTrace && !showRaw && !showTree && (
           <>
-            {sessionLoading && displayGroups.length === 0 ? (
+            {sessionLoading && displayTurnGroups.length === 0 ? (
               <div className="chat-loading-skeleton">
                 <div className="chat-loading-pulse" />
               </div>
@@ -1328,32 +1330,32 @@ export function Chat({
               />
             ) : (
               <LayoutGroup>
-              {displayGroups.map((g) => {
-                const groupCls = getGroupClassName?.(g);
+              {displayTurnGroups.map((g) => {
+                const groupCls = getTurnGroupClassName?.(g);
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
                 return (
-                  <Wrapper key={g.userMessage.id} {...wrapperProps}>
-                    <MessageGroup
-                      enterAnimation={enteringGroupIds.has(g.userMessage.id)}
-                      userMessage={g.userMessage}
-                      assistantMessage={g.assistantMessage}
-                      runs={g.groupRuns}
-                      sessionRunning={g.isLast ? sessionRunning : false}
-                      isLastGroup={g.isLast}
+                  <Wrapper key={g.initiatorMessage.id} {...wrapperProps}>
+                    <TurnGroup
+                      enterAnimation={enteringGroupIds.has(g.initiatorMessage.id)}
+                      initiatorMessage={g.initiatorMessage}
+                      responseMessage={g.responseMessage}
+                      runs={g.turnRuns}
+                      sessionRunning={g.isLatest ? sessionRunning : false}
+                      isLatestTurnGroup={g.isLatest}
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
-                        !!g.assistantMessage &&
-                        !isGroupRunning(g.assistantMessage, g.groupRuns)
+                        !!g.responseMessage &&
+                        !isGroupRunning(g.responseMessage, g.turnRuns)
                       }
                       threadColorMap={threadColorMap}
                       onRetry={onRetry}
                       onRetryStopped={onRetryStopped}
                       onContinueRateLimitOnAnotherProvider={onContinueRateLimitOnAnotherProvider}
-                      onAlterUserMessage={
+                      onAlterTurnMessage={
                         onAlterUserMessage &&
-                        g.isLast &&
-                        !g.userMessage.id.startsWith("pending-")
+                        g.isLatest &&
+                        !g.initiatorMessage.id.startsWith("pending-")
                           ? onAlterUserMessage
                           : undefined
                       }
@@ -1365,7 +1367,7 @@ export function Chat({
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
                     />
-                    {renderGroupFooter?.(g)}
+                    {renderTurnFooter?.(g)}
                   </Wrapper>
                 );
               })}

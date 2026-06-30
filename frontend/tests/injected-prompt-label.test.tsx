@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import React from "react";
 import "../src/i18n";
-import { MessageGroup, MessageBubble } from "../src/components/MessageBubble";
+import { TurnGroup, MessageBubble } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 
 afterEach(cleanup);
@@ -12,12 +12,12 @@ afterEach(cleanup);
  * injected (source-bearing) user prompt must never display "User", and a
  * genuine source-less prompt must display "User".
  */
-describe("injected user-prompt label — paired render path (MessageGroup)", () => {
+describe("injected user-prompt label — paired render path (TurnGroup)", () => {
   function label(source?: string): string | null {
     const { container } = render(
-      <MessageGroup
-        userMessage={makeUserMsg({ id: "u1", content: "hi", source })}
-        assistantMessage={makeAssistantMsg({ id: "a1", content: "ok" })}
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "hi", source })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "ok" })}
         orchestrationMode="native"
       />,
     );
