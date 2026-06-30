@@ -807,14 +807,30 @@ def _native_last_activity_iso(sess: NativeSession, turns: list[_Turn]) -> Option
     return _max_native_iso(values)
 
 
-def _imported_message_last_activity_iso(root_id: str) -> Optional[str]:
-    live = session_manager.get(root_id) or {}
+def _imported_last_user_prompt_iso(session: dict) -> Optional[str]:
     values = [
         str(m.get("timestamp") or "")
-        for m in (live.get("messages") or [])
-        if isinstance(m, dict)
+        for m in (session.get("messages") or [])
+        if isinstance(m, dict) and m.get("role") == "user"
     ]
     return _max_native_iso(values)
+
+
+def _repair_imported_root_updated_at(root_id: str, fallback: Optional[str] = None) -> None:
+    session_manager.flush_pending_persists()
+    root = session_manager.get_ref(root_id)
+    if not isinstance(root, dict):
+        return
+    last_activity = _imported_last_user_prompt_iso(root) or fallback
+    if not last_activity:
+        return
+    root["updated_at"] = last_activity
+    import session_store
+    session_store.write_session_full(
+        root,
+        bump_updated_at=False,
+        preserve_projection_fields=True,
+    )
 
 
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
@@ -877,7 +893,7 @@ def _import_session_locked(sess: NativeSession) -> str:
     from orchs import ApplyEventCtx, get_strategy
     strategy = get_strategy("native")
     failures = 0
-    with session_manager.batch(root_id):
+    with session_manager.batch(root_id, bump_updated_at=False):
         session = session_manager.get_ref(root_id)
         if session is None:
             raise RuntimeError("created session vanished before import")
@@ -924,6 +940,9 @@ def _import_session_locked(sess: NativeSession) -> str:
             if not assistant_msg.get("events"):
                 messages.pop()
                 messages.pop()
+        last_activity = _imported_last_user_prompt_iso(session) or _native_last_activity_iso(sess, turns)
+        if last_activity:
+            session["updated_at"] = last_activity
 
     # Every turn collapsed to pure metadata → nothing renderable. Tear down
     # the just-created empty session rather than leave an orphan bubble.
@@ -934,10 +953,7 @@ def _import_session_locked(sess: NativeSession) -> str:
             logger.exception("native_import: failed to delete empty session %s", root_id)
         raise ValueError("native session has no importable events")
 
-    last_activity = _imported_message_last_activity_iso(root_id) or _native_last_activity_iso(sess, turns)
-    if last_activity:
-        with session_manager.batch(root_id, bump_updated_at=False):
-            session_manager.set_updated_at(root_id, last_activity)
+    _repair_imported_root_updated_at(root_id, _native_last_activity_iso(sess, turns))
     _registry_set_for(sess, root_id)
     if failures:
         logger.warning(
