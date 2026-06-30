@@ -37,6 +37,7 @@ from provider import (
 )
 from provider_run_config import normalize_provider_run_config
 from cli_paths import resolve_cli_binary
+from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
@@ -827,7 +828,8 @@ class GeminiProvider(Provider):
             return recovered
 
         for child in iter_run_dirs(run_id_filter):
-            if (child / "reconciled.marker").exists():
+            marker_path = child / "reconciled.marker"
+            if marker_path.exists() and marker_matches_current(marker_path, self.KIND):
                 continue
             complete_path = child / "complete.json"
             has_complete_json = complete_path.exists()
@@ -904,6 +906,8 @@ class GeminiProvider(Provider):
                 "cancelled": bool(bs.get("cancelled", False)),
                 "mode": bs.get("mode") or rs_disk.get("mode") or "native",
                 "provider_id": bs.get("provider_id") or self.id,
+                "provider_kind": bs.get("provider_kind") or self.KIND,
+                "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
                 "recovered_as": "live_orphan" if live_orphan else "dead_orphan",

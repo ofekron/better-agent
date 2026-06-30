@@ -773,6 +773,29 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
             return False
         if last_asst.get("agent_session_id") is None:
             return False
+
+    # Fully-ingested events are not enough to prove the turn reached the
+    # normal finalize chokepoint. A backend can die after the provider stream
+    # and complete.json are durable, but before `_finalize_turn_messages` (or
+    # recovery's `_apply_completion_state`) stamps the assistant terminal
+    # fields. Without this guard, recovery marks the run reconciled and leaves
+    # the sidebar/chat with a blank non-terminal assistant bubble forever.
+    if not alive and has_complete:
+        payload = _salvage_complete_payload(str(desc.get("run_id") or ""))
+        if payload is None:
+            return False
+        stopped = bool(last_asst.get("stopped_at"))
+        if bool(payload.get("success")):
+            if not stopped and not last_asst.get("completed_at"):
+                return False
+        elif not bool(desc.get("cancelled")):
+            error_text = str(payload.get("error") or "")
+            if (
+                not stopped
+                and error_text.lower() != "cancelled"
+                and not last_asst.get("error")
+            ):
+                return False
     return _events_fully_ingested(desc)
 
 
@@ -1268,30 +1291,42 @@ def _apply_completion_state(
     run_id: str,
     cancelled: bool,
 ) -> None:
-    """Pin the assistant msg as not-streaming at recovery completion.
+    """Pin a recovered assistant message to a terminal state.
 
-    Cancelled recovered runs must carry `stopped_at` so the rendered
-    message exits the in-flight UI state and exposes retry affordances.
-    Non-cancelled completions clear stale `stopped_at` because they
-    finished normally.
-
-    A recovered run that FAILED (non-success, non-cancel) also surfaces
-    the sidebar error dot here — mirroring the live `_finalize_turn_messages`
-    chokepoint so the dot is set consistently whether the failure happened
-    live or was discovered during recovery."""
+    Recovery is the finalize chokepoint for turns whose runner survived (or
+    completed during) a backend restart. It must leave the assistant message in
+    the same terminal shape as the live finalizer: successful runs get
+    `completed_at`, failed non-cancelled runs get an assistant error + sidebar
+    dot, and hard-killed/cancelled recovery does not forge a user-stop
+    `stopped_at`.
+    """
     session_manager.set_streaming(persist_sid, msg_id, False)
-    session_manager.set_stopped_at(
-        persist_sid,
-        msg_id,
-        datetime.utcnow().isoformat() if cancelled else None,
-    )
-    if not cancelled:
-        payload = _salvage_complete_payload(run_id)
-        if payload is not None and not payload.get("success"):
-            session_manager.set_unseen_error(
+
+    payload = None if cancelled else _salvage_complete_payload(run_id)
+    if payload is not None and payload.get("success"):
+        live = session_manager.get_ref(persist_sid) or {}
+        msg = _assistant_by_id(live, msg_id)
+        if msg is None or not (msg.get("stopped_at") or msg.get("completed_at")):
+            session_manager.set_completed_at(
                 persist_sid,
-                payload.get("error") or "Run failed during recovery.",
+                msg_id,
+                datetime.utcnow().isoformat(),
             )
+        return
+
+    if payload is not None and not payload.get("success"):
+        live = session_manager.get_ref(persist_sid) or {}
+        msg = _assistant_by_id(live, msg_id)
+        if msg is not None and (msg.get("stopped_at") or msg.get("error")):
+            return
+        error_text = payload.get("error") or "Run failed during recovery."
+        if str(error_text).lower() != "cancelled":
+            session_manager.set_assistant_error(
+                persist_sid,
+                msg_id,
+                str(error_text),
+            )
+            session_manager.set_unseen_error(persist_sid, str(error_text))
 
 
 def _finalize_sync(

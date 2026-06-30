@@ -22,7 +22,10 @@ CLAUDE_INGESTION_VERSION = 2
 # timestamp, undoing the spurious bumps that mis-ordered the sidebar.
 # v6: recover Codex native subagent panels from parent wait/notification rows
 # when live ingestion missed persisting child rollout sources.
-CODEX_INGESTION_VERSION = 6
+# v7: require recovered successful/failed runs to carry assistant terminal
+# fields (`completed_at` / assistant error) before reconciling, so already-
+# ingested-but-not-finalized turns are re-digested and sealed.
+CODEX_INGESTION_VERSION = 7
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
 # session_events.jsonl through the gemini-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the
@@ -35,7 +38,9 @@ COPILOT_INGESTION_VERSION = 2
 # openai is a gemini-family provider: BA's own runner writes
 # session_events.jsonl (Claude-shaped), recovered via the gemini-family replay
 # reader. v1: initial shape.
-OPENAI_INGESTION_VERSION = 1
+# v2: require recovered successful/failed runs to carry assistant terminal
+# fields (`completed_at` / assistant error) before reconciling.
+OPENAI_INGESTION_VERSION = 2
 
 
 def current_ingestion_version(provider_kind: str | None) -> int:
