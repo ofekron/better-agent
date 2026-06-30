@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useMemo, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
@@ -13,7 +13,7 @@ interface Props {
   /** Add a new project (opens the dir picker). */
   onAdd: () => void;
   /** Remove a project. */
-  onRemove: (path: string, nodeId: string) => void;
+  onRemove: (path: string, nodeId: string) => void | Promise<void>;
   /** Open per-project settings. */
   onOpenSettings: (path: string, nodeId: string) => void;
   /** Per-project unseen project structure updates count. */
@@ -47,6 +47,9 @@ export function ProjectTabs({
   // escape the tabs' horizontal-scroll overflow clip.
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [listModalOpen, setListModalOpen] = useState(false);
+  const [selectedProjectKeys, setSelectedProjectKeys] = useState<Set<string>>(() => new Set());
+  const [deleting, setDeleting] = useState(false);
 
   // Scroll the active tab into view on mount and when selection changes.
   useEffect(() => {
@@ -78,6 +81,56 @@ export function ProjectTabs({
   const menuProject = projects.find(
     (p) => `${p.node_id || "primary"}::${p.path}` === menuFor,
   );
+  const projectKeys = useMemo(
+    () => projects.map((project) => `${project.node_id || "primary"}::${project.path}`),
+    [projects],
+  );
+  const selectedProjects = projects.filter((project) =>
+    selectedProjectKeys.has(`${project.node_id || "primary"}::${project.path}`),
+  );
+  const allProjectsSelected = projects.length > 0 && selectedProjects.length === projects.length;
+  const selectedCount = selectedProjects.length;
+
+  useEffect(() => {
+    if (!listModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !deleting) setListModalOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [deleting, listModalOpen]);
+
+  const closeListModal = () => {
+    if (deleting) return;
+    setListModalOpen(false);
+  };
+
+  const setProjectSelected = (key: string, checked: boolean) => {
+    setSelectedProjectKeys((current) => {
+      const next = new Set(current);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+
+  const setAllProjectsSelected = (checked: boolean) => {
+    setSelectedProjectKeys(checked ? new Set(projectKeys) : new Set());
+  };
+
+  const deleteSelectedProjects = async () => {
+    if (selectedProjects.length === 0 || deleting) return;
+    setDeleting(true);
+    try {
+      for (const project of selectedProjects) {
+        await onRemove(project.path, project.node_id || "primary");
+      }
+      setSelectedProjectKeys(new Set());
+      setListModalOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div
@@ -156,6 +209,16 @@ export function ProjectTabs({
       >
         +
       </button>
+      <button
+        type="button"
+        className="project-tab-manage"
+        disabled={disabled}
+        title={t("projects.manageTitle")}
+        aria-label={t("projects.manageTitle")}
+        onClick={() => !disabled && setListModalOpen(true)}
+      >
+        <Icon name="sliders" size={16} />
+      </button>
 
       {menuFor && menuProject && (
         <div
@@ -185,6 +248,86 @@ export function ProjectTabs({
           >
             {t("projects.removeTitle")}
           </button>
+        </div>
+      )}
+
+      {listModalOpen && (
+        <div className="modal-overlay project-list-modal-overlay" role="presentation" onMouseDown={closeListModal}>
+          <div
+            className="modal-content project-list-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="project-list-modal-title"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h2 id="project-list-modal-title">{t("projects.manageTitle")}</h2>
+              <button
+                type="button"
+                className="modal-close"
+                aria-label={t("projects.closeManagement")}
+                disabled={deleting}
+                onClick={closeListModal}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body project-list-modal-body">
+              <label className="project-list-select-all">
+                <input
+                  type="checkbox"
+                  checked={allProjectsSelected}
+                  disabled={deleting || projects.length === 0}
+                  onChange={(e) => setAllProjectsSelected(e.currentTarget.checked)}
+                />
+                <span>{t("projects.selectAll")}</span>
+              </label>
+              <div className="project-list-modal-list">
+                {projects.map((project) => {
+                  const nodeId = project.node_id || "primary";
+                  const key = `${nodeId}::${project.path}`;
+                  const label =
+                    project.name || project.path.replace(/\/+$/, "").split("/").pop() || project.path;
+                  return (
+                    <label key={key} className="project-list-modal-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedProjectKeys.has(key)}
+                        disabled={deleting}
+                        onChange={(e) => setProjectSelected(key, e.currentTarget.checked)}
+                      />
+                      <span className="project-list-modal-main">
+                        <span className="project-list-modal-name">{label}</span>
+                        <span className="project-list-modal-path">{project.path}</span>
+                      </span>
+                      {nodeId !== "primary" && (
+                        <span className="project-list-modal-node">{nodeId}</span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="modal-footer project-list-modal-footer">
+              <span className="project-list-modal-count">
+                {t("projects.selectedCount", { count: selectedCount })}
+              </span>
+              <button type="button" className="project-list-modal-secondary" disabled={deleting} onClick={closeListModal}>
+                {t("projects.cancel")}
+              </button>
+              <button
+                type="button"
+                className="project-list-modal-danger"
+                disabled={deleting || selectedCount === 0}
+                onClick={deleteSelectedProjects}
+              >
+                <Icon name="trash" size={15} />
+                {deleting
+                  ? t("projects.deletingSelected")
+                  : t("projects.deleteSelected")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

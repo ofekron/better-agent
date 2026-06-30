@@ -15391,6 +15391,123 @@ button.progress-inflight {
   color: var(--text-primary, #eee);
 }
 
+.project-tab-manage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--text-secondary, #aaa);
+  padding: 4px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, transform 0.18s ease;
+}
+.project-tab-manage:hover {
+  color: var(--text-primary, #eee);
+  transform: translateY(-1px);
+}
+
+.project-list-modal {
+  width: min(680px, 92vw);
+  max-height: min(720px, 88vh);
+}
+.project-list-modal-body {
+  gap: 10px;
+}
+.project-list-select-all,
+.project-list-modal-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+.project-list-select-all {
+  grid-template-columns: 18px minmax(0, 1fr);
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  font-weight: 600;
+}
+.project-list-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.project-list-modal-row {
+  min-height: 54px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-primary);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.project-list-modal-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover, var(--border));
+}
+.project-list-modal-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.project-list-modal-name,
+.project-list-modal-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-list-modal-name {
+  font-size: calc(13px * var(--app-font-scale));
+  font-weight: 600;
+}
+.project-list-modal-path,
+.project-list-modal-node,
+.project-list-modal-count {
+  color: var(--text-muted);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.project-list-modal-node {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-list-modal-footer {
+  align-items: center;
+}
+.project-list-modal-count {
+  margin-inline-end: auto;
+}
+.project-list-modal-secondary,
+.project-list-modal-danger {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+.project-list-modal-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #f87171;
+}
+.project-list-modal-secondary:hover:not(:disabled),
+.project-list-modal-danger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+.project-list-modal-danger:disabled,
+.project-list-modal-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Config dropdown — position: fixed so it escapes the tabs'
    horizontal-scroll overflow clip; coordinates set inline. */
 .project-tab-menu {
@@ -15442,6 +15559,34 @@ button.progress-inflight {
   .machine-tab,
   .project-tab {
     will-change: auto;
+  }
+  .project-tab-manage,
+  .project-list-modal-row,
+  .project-list-modal-secondary,
+  .project-list-modal-danger {
+    transition: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .project-list-modal {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    border-radius: 0;
+  }
+  .project-list-modal-footer {
+    flex-wrap: wrap;
+  }
+  .project-list-modal-count {
+    width: 100%;
+    margin-inline-end: 0;
+  }
+  .project-list-modal-secondary,
+  .project-list-modal-danger {
+    flex: 1 1 140px;
+    justify-content: center;
   }
 }
 
