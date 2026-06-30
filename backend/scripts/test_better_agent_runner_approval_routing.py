@@ -141,6 +141,8 @@ def test_dispatch_tool_gates_bash_and_emits_denial(monkeypatch):
         run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
         backend_url="http://backend", internal_token="tok",
         emitter=em, loopback_handlers={},
+        lock_registry=runner_better_agent.LockRegistry(),
+        enforce_file_locks=False,
     ))
     assert res == "Error: tool use denied by user"
     assert em.results == [("c1", "Error: tool use denied by user")]
@@ -162,10 +164,42 @@ def test_dispatch_tool_non_interactive_fails_closed_without_blaming_user(monkeyp
         run_dir=Path(_TMP_HOME), bypass=False, interactive=False,
         backend_url="", internal_token="",
         emitter=em, loopback_handlers={},
+        lock_registry=runner_better_agent.LockRegistry(),
+        enforce_file_locks=False,
     ))
     assert "approval channel unavailable" in res
     assert "denied by user" not in res
     assert approved_called == []  # gate never reached the HTTP client
+
+
+def test_dispatch_tool_approval_sees_normalized_file_link(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        runner_better_agent,
+        "request_tool_approval",
+        lambda **kw: calls.append(kw) or False,
+    )
+    em = _FakeEmitter()
+    with tempfile.TemporaryDirectory() as cwd:
+        cwdp = Path(cwd)
+        target = cwdp / "real.txt"
+        call = {
+            "id": "c-link",
+            "name": "Write",
+            "arguments": '{"file_path":"[fake.txt](bcfile:' + str(target) + '?L=1)","content":"x"}',
+        }
+
+        res = asyncio.run(runner_better_agent._dispatch_tool(
+            call, cwd=cwdp, app_session_id="sid-link",
+            run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
+            backend_url="http://backend", internal_token="tok",
+            emitter=em, loopback_handlers={},
+            lock_registry=runner_better_agent.LockRegistry(),
+            enforce_file_locks=False,
+        ))
+
+    assert res == "Error: tool use denied by user"
+    assert calls[0]["summary"]["input"]["file_path"] == str(target)
 
 
 def test_dispatch_tool_bypass_runs_handler(monkeypatch):
@@ -183,6 +217,8 @@ def test_dispatch_tool_bypass_runs_handler(monkeypatch):
         run_dir=Path(_TMP_HOME), bypass=True, interactive=False,
         backend_url="", internal_token="",
         emitter=em, loopback_handlers={},
+        lock_registry=runner_better_agent.LockRegistry(),
+        enforce_file_locks=False,
     ))
     assert res == "ok"
     assert fired == [{"command": "ls"}]

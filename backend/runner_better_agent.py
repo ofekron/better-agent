@@ -569,6 +569,16 @@ def _tool_path_arg(raw: Any) -> str:
     return value
 
 
+def _normalize_file_tool_args(tool_name: str, args: dict) -> dict:
+    if tool_name not in {"Read", "Write", "Edit"}:
+        return args
+    normalized = dict(args)
+    key = "file_path" if "file_path" in normalized else "path" if "path" in normalized else ""
+    if key:
+        normalized[key] = _tool_path_arg(normalized[key])
+    return normalized
+
+
 def _confined_path(cwd: Path, raw: str) -> Path:
     """Resolve raw against cwd and refuse escapes (.., absolute, symlink)."""
     raw = _tool_path_arg(raw)
@@ -2371,6 +2381,7 @@ async def _dispatch_tool(
         emitter.emit_tool_result(call["id"], f"Error: bad arguments json: {e}")
         return f"Error: bad arguments json: {e}"
     args = _canonical_tool_input(name, raw_args)
+    args = _normalize_file_tool_args(name, args)
 
     # Capability management tools — no filesystem side effects, no permission
     # gate. They POST to the core capabilities endpoint over the loopback.
