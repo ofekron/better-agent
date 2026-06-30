@@ -15,6 +15,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -27,6 +28,7 @@ def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
     session_store._fork_index.clear()
     session_store._index_loaded = False
     session_manager._roots.clear()
@@ -134,10 +136,44 @@ def test_append_user_msg_dedupes_client_id() -> bool:
     return ok
 
 
+def test_append_user_msg_queue_projection_uses_locked_snapshot() -> bool:
+    _reset_home()
+    sid = _create_session()
+    original = session_queue_projection.upsert_from_session
+    live_ref_seen = {"value": False}
+
+    def spy(session: dict) -> None:
+        live_ref_seen["value"] = session is session_manager.get_ref(sid)
+        original(session)
+
+    session_queue_projection.upsert_from_session = spy
+    try:
+        session_manager.append_user_msg(sid, {
+            "id": "user-projection",
+            "role": "user",
+            "content": "projection",
+            "client_id": "client-projection",
+        })
+    finally:
+        session_queue_projection.upsert_from_session = original
+
+    record = session_queue_projection.get(sid) or {}
+    ok = (
+        live_ref_seen["value"] is False
+        and [m.get("id") for m in record.get("user_messages") or []]
+        == ["user-projection"]
+    )
+    print(
+        f"{PASS if ok else FAIL} append_user_msg queue projection uses locked snapshot",
+    )
+    return ok
+
+
 def main_runner() -> int:
     tests = [
         test_duplicate_client_id_dedupes_during_dequeue_gap,
         test_append_user_msg_dedupes_client_id,
+        test_append_user_msg_queue_projection_uses_locked_snapshot,
     ]
     results = [test() for test in tests]
     shutil.rmtree(_TMP_HOME, ignore_errors=True)

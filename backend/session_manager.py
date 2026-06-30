@@ -1715,6 +1715,52 @@ class SessionManager:
             tail=render_stub.STUB_TAIL,
         )
 
+    @staticmethod
+    def _merge_render_event(
+        owner: dict, event: dict, *, replace_existing: bool = True,
+    ) -> None:
+        from orchs.base import _event_uuid
+
+        events = owner.setdefault("events", [])
+        ev_uuid = _event_uuid(event)
+        if ev_uuid:
+            for index, existing in enumerate(events):
+                if _event_uuid(existing) == ev_uuid:
+                    if replace_existing:
+                        events[index] = event
+                    return
+        events.append(event)
+
+    def _route_frontend_events_to_message_copy(
+        self, msg: dict, events: list[dict],
+    ) -> None:
+        msg["events"] = []
+        workers = {
+            worker.get("delegation_id"): worker
+            for worker in (msg.get("workers") or [])
+            if isinstance(worker, dict) and worker.get("delegation_id")
+        }
+        live_worker_event_owners = {
+            delegation_id
+            for delegation_id, worker in workers.items()
+            if worker.get("events")
+        }
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "worker_event":
+                self._merge_render_event(msg, event)
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            worker = workers.get(data.get("delegation_id"))
+            inner = data.get("event")
+            if worker is None or not isinstance(inner, dict) or not inner:
+                continue
+            replace_existing = data.get("delegation_id") not in live_worker_event_owners
+            self._merge_render_event(
+                worker, inner, replace_existing=replace_existing,
+            )
+
     def _hydrate_native_message_copy(
         self, root_id: str, node_sid: str, msg: dict,
     ) -> None:
@@ -1722,12 +1768,12 @@ class SessionManager:
         if not msg_id:
             return
         from event_journal import event_journal_reader
-        from event_shape import extract_output_text, strip_synthetic_events
+        import render_stub
 
         events = event_journal_reader.read_ws_events(
             root_id, sid_filter=node_sid, msg_id_filter=msg_id,
         )
-        msg["events"] = events
+        self._route_frontend_events_to_message_copy(msg, events)
         msg.pop("stub", None)
         summary = self._native_event_summaries(
             root_id, node_sid, {msg_id},
@@ -1735,7 +1781,7 @@ class SessionManager:
         if summary:
             msg["event_ref"] = self._event_ref(root_id, node_sid, msg_id, summary)
         if not msg.get("isStreaming"):
-            content = extract_output_text(strip_synthetic_events(events))
+            content = render_stub.message_output_text(msg)
             if content != (msg.get("content") or ""):
                 msg["content"] = content
 
@@ -2528,7 +2574,6 @@ class SessionManager:
 
         copied = []
         from event_journal import event_journal_reader
-        from event_shape import extract_output_text, strip_synthetic_events
 
         def _copy_assistant_for_snapshot(m: dict, *, is_latest: bool) -> dict:
             out = {k: v for k, v in m.items() if k not in ("events", "_uid_idx")}
@@ -2577,19 +2622,18 @@ class SessionManager:
             if use_journal_summaries:
                 summary = summaries.get(msg_id, {})
                 if is_latest and summary:
-                    m["events"] = event_journal_reader.read_frontend_events(
+                    journal_events = event_journal_reader.read_frontend_events(
                         rid,
                         fork_id=node_sid if node_sid != rid else None,
                         message_id=msg_id,
                         summary=summary,
                     )
+                    self._route_frontend_events_to_message_copy(m, journal_events)
                     m["event_ref"] = self._event_ref(
                         rid, node_sid, msg_id, summary,
                     )
                     if not m.get("isStreaming"):
-                        content = extract_output_text(
-                            strip_synthetic_events(m["events"])
-                        )
+                        content = render_stub.message_output_text(m)
                         if content != (m.get("content") or ""):
                             m["content"] = content
                 elif is_latest:
@@ -2655,7 +2699,6 @@ class SessionManager:
 
         import render_stub
         from event_journal import event_journal_reader
-        from event_shape import extract_output_text, strip_synthetic_events
 
         latest_id = render_stub.latest_assistant_id(all_msgs)
         summary_ids = {
@@ -2703,17 +2746,16 @@ class SessionManager:
             is_latest = msg_id == latest_id or m.get("isStreaming")
             summary = summaries.get(msg_id, {})
             if is_latest and summary:
-                m["events"] = event_journal_reader.read_frontend_events(
+                journal_events = event_journal_reader.read_frontend_events(
                     rid,
                     fork_id=node_sid if node_sid != rid else None,
                     message_id=msg_id,
                     summary=summary,
                 )
+                self._route_frontend_events_to_message_copy(m, journal_events)
                 m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
                 if not m.get("isStreaming"):
-                    content = extract_output_text(
-                        strip_synthetic_events(m["events"])
-                    )
+                    content = render_stub.message_output_text(m)
                     if content != (m.get("content") or ""):
                         m["content"] = content
             elif is_latest:
@@ -2870,12 +2912,36 @@ class SessionManager:
                 counts[sid] = queued_count
         self._queued_prompt_counts_by_sid = counts
 
-    def _record_queued_prompt_count(self, sid: str, session: dict) -> None:
-        queued_count = len(session.get("queued_prompts") or [])
+    def _set_queued_prompt_count(self, sid: str, queued_count: int) -> None:
         if queued_count:
             self._queued_prompt_counts_by_sid[sid] = queued_count
             return
         self._queued_prompt_counts_by_sid.pop(sid, None)
+
+    @staticmethod
+    def _project_queue_record(session: dict) -> Optional[dict]:
+        import session_queue_projection
+
+        return session_queue_projection.project_session(session)
+
+    @staticmethod
+    def _upsert_queue_record(record: Optional[dict]) -> None:
+        if record is None:
+            return
+        import session_queue_projection
+
+        session_queue_projection.upsert_record(record)
+
+    def _queue_projection_enricher(
+        self, holder: dict[str, Optional[dict]], *, include_queued_prompts: bool,
+    ) -> Callable[[dict], dict]:
+        def _enrich(session: dict) -> dict:
+            holder["record"] = self._project_queue_record(session)
+            if include_queued_prompts:
+                return {"queued_prompts": list(session.get("queued_prompts") or [])}
+            return {}
+
+        return _enrich
 
     # ── Batch ──────────────────────────────────────────────────────
 
@@ -3841,6 +3907,8 @@ class SessionManager:
     # ── Queued prompts ──────────────────────────────────────────────
 
     def add_queued_prompt(self, sid: str, prompt: dict) -> Optional[dict]:
+        projection: dict[str, Optional[dict]] = {}
+
         def _do(s: dict) -> None:
             q = s.setdefault("queued_prompts", [])
             q[:] = [p for p in q if p.get("id") != prompt.get("id")]
@@ -3850,25 +3918,27 @@ class SessionManager:
             sid,
             _do,
             {"kind": "queued_prompts_updated"},
-            enrich=lambda s: {
-                "queued_prompts": list(s.get("queued_prompts") or [])
-            },
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=True,
+            ),
         )
         if result is not None:
-            self._record_queued_prompt_count(sid, result)
-            import session_queue_projection
-            session_queue_projection.upsert_from_session(result)
+            queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
+            self._set_queued_prompt_count(sid, queued_len)
+            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag add_queued_prompt sid=%s qp_id=%s client_id=%s "
                 "-> queue_len=%d",
                 sid, prompt.get("id"), prompt.get("client_id"),
-                len(result.get("queued_prompts") or []),
+                queued_len,
             )
         return result
 
     def update_queued_prompt(
         self, sid: str, queued_id: str, updates: dict,
     ) -> Optional[dict]:
+        projection: dict[str, Optional[dict]] = {}
+
         def _do(s: dict) -> None:
             for prompt in s.setdefault("queued_prompts", []):
                 if prompt.get("id") == queued_id:
@@ -3879,25 +3949,27 @@ class SessionManager:
             sid,
             _do,
             {"kind": "queued_prompts_updated"},
-            enrich=lambda s: {
-                "queued_prompts": list(s.get("queued_prompts") or [])
-            },
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=True,
+            ),
         )
         if result is not None:
-            self._record_queued_prompt_count(sid, result)
-            import session_queue_projection
-            session_queue_projection.upsert_from_session(result)
+            queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
+            self._set_queued_prompt_count(sid, queued_len)
+            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag update_queued_prompt sid=%s qp_id=%s keys=%s "
                 "-> queue_len=%d",
                 sid, queued_id, sorted(updates.keys()),
-                len(result.get("queued_prompts") or []),
+                queued_len,
             )
         return result
 
     def remove_queued_prompt(
         self, sid: str, queued_id: Optional[str],
     ) -> Optional[dict]:
+        projection: dict[str, Optional[dict]] = {}
+
         def _do(s: dict) -> None:
             if queued_id is None:
                 s["queued_prompts"] = []
@@ -3911,24 +3983,26 @@ class SessionManager:
             sid,
             _do,
             {"kind": "queued_prompts_updated"},
-            enrich=lambda s: {
-                "queued_prompts": list(s.get("queued_prompts") or [])
-            },
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=True,
+            ),
         )
         if result is not None:
-            self._record_queued_prompt_count(sid, result)
-            import session_queue_projection
-            session_queue_projection.upsert_from_session(result)
+            queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
+            self._set_queued_prompt_count(sid, queued_len)
+            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag remove_queued_prompt sid=%s qp_id=%s "
                 "-> queue_len=%d",
-                sid, queued_id, len(result.get("queued_prompts") or []),
+                sid, queued_id, queued_len,
             )
         return result
 
     def remove_queued_prompt_by_client_id(
         self, sid: str, client_id: str,
     ) -> Optional[dict]:
+        projection: dict[str, Optional[dict]] = {}
+
         def _do(s: dict) -> None:
             s["queued_prompts"] = [
                 p for p in s.get("queued_prompts", [])
@@ -3939,18 +4013,18 @@ class SessionManager:
             sid,
             _do,
             {"kind": "queued_prompts_updated"},
-            enrich=lambda s: {
-                "queued_prompts": list(s.get("queued_prompts") or [])
-            },
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=True,
+            ),
         )
         if result is not None:
-            self._record_queued_prompt_count(sid, result)
-            import session_queue_projection
-            session_queue_projection.upsert_from_session(result)
+            queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
+            self._set_queued_prompt_count(sid, queued_len)
+            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag remove_queued_prompt_by_client_id sid=%s "
                 "client_id=%s -> queue_len=%d",
-                sid, client_id, len(result.get("queued_prompts") or []),
+                sid, client_id, queued_len,
             )
         return result
 
@@ -3962,6 +4036,7 @@ class SessionManager:
             rid = self._root_id_for(sid)
             if rid is None:
                 return None
+            projection_record: Optional[dict] = None
             with self._lock_for_root(rid):
                 sess = self._cached(sid)
                 if sess is None:
@@ -3980,19 +4055,27 @@ class SessionManager:
                 change = {"kind": "user_msg_appended", "msg": msg}
                 if not (batch_ctx and batch_ctx.get("_phantom")):
                     self._fire(sid, change)
-                result = sess
-            import session_queue_projection
-            session_queue_projection.upsert_from_session(result)
+                projection_record = self._project_queue_record(sess)
+            self._upsert_queue_record(projection_record)
             return msg
+
+        projection: dict[str, Optional[dict]] = {}
 
         def _do(s: dict) -> None:
             session_store.assign_message_seq(s, msg)
             s["messages"].append(msg)
-        result = self._run(sid, _do, {"kind": "user_msg_appended", "msg": msg})
+
+        result = self._run(
+            sid,
+            _do,
+            {"kind": "user_msg_appended", "msg": msg},
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=False,
+            ),
+        )
         if result is None:
             return None
-        import session_queue_projection
-        session_queue_projection.upsert_from_session(result)
+        self._upsert_queue_record(projection.get("record"))
         return msg
 
     def append_assistant_msg(self, sid: str, msg: dict) -> Optional[dict]:

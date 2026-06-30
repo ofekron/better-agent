@@ -135,6 +135,12 @@ def upsert_from_session(session: dict[str, Any]) -> None:
     record = project_session(session)
     if record is None:
         return
+    upsert_record(record)
+
+
+def upsert_record(record: dict[str, Any]) -> None:
+    if not isinstance(record.get("id"), str) or not record["id"]:
+        return
     with _lock:
         _load_locked()
         if _records.get(record["id"]) == record:
