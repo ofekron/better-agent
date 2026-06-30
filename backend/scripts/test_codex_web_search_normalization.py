@@ -227,6 +227,7 @@ def test_response_item_assistant_message_becomes_text_event() -> bool:
     event = _normalize_response_item_event(
         {
             "type": "message",
+            "id": "msg_1",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "done"}],
         },
@@ -236,6 +237,112 @@ def test_response_item_assistant_message_becomes_text_event() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "text"
     assert block["text"] == "done"
+    return True
+
+
+def test_response_item_assistant_message_uuid_is_stable() -> bool:
+    payload = {
+        "type": "message",
+        "id": "msg_stable",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "done"}],
+    }
+    first = _normalize_response_item_event(payload, "parent")
+    second = _normalize_response_item_event(payload, "parent")
+    assert first is not None
+    assert second is not None
+    assert first["uuid"] == second["uuid"]
+    return True
+
+
+def test_response_item_render_branches_keep_stable_uuids() -> bool:
+    payloads = [
+        {
+            "type": "reasoning",
+            "id": "reasoning_1",
+            "summary": [{"type": "summary_text", "text": "checked parser"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "exec_command",
+            "arguments": {"cmd": "pwd"},
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "/tmp/project",
+        },
+        {
+            "type": "web_search_call",
+            "id": "search_1",
+            "action": {"query": "Better Agent"},
+        },
+        {
+            "type": "future_shape",
+            "id": "future_1",
+            "value": {"ok": True},
+        },
+    ]
+    for payload in payloads:
+        first = _normalize_response_item_event(payload, "parent")
+        second = _normalize_response_item_event(payload, "parent")
+        assert first is not None, payload
+        assert second is not None, payload
+        assert first["uuid"] == second["uuid"], payload
+        assert first["parentUuid"] == second["parentUuid"], payload
+    return True
+
+
+def test_codex_rollout_item_replay_keeps_stable_uuids() -> bool:
+    raw_events = [
+        {
+            "type": "item.started",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "item": {
+                "id": "cmd_1",
+                "type": "command_execution",
+                "command": "pwd",
+            },
+        },
+        {
+            "type": "item.completed",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "item": {
+                "id": "msg_1",
+                "type": "agent_message",
+                "text": "Progress update",
+            },
+        },
+    ]
+    first = CodexRolloutNormalizer(namespace="thread-1")
+    second = CodexRolloutNormalizer(namespace="thread-1")
+    first_rows = [row for raw in raw_events for row in first.normalize_event(raw)]
+    second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
+    assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
+    assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
+    return True
+
+
+def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> bool:
+    raw_events = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"type": "agent_message", "message": "Progress update"},
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "payload": {"type": "agent_reasoning", "message": "checking"},
+        },
+    ]
+    first = CodexRolloutNormalizer(namespace="thread-1")
+    second = CodexRolloutNormalizer(namespace="thread-1")
+    first_rows = [row for raw in raw_events for row in first.normalize_event(raw)]
+    second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
+    assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
+    assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
     return True
 
 
@@ -326,7 +433,7 @@ def test_codex_rollout_digests_known_event_msg_primitives() -> bool:
         rows = normalizer.normalize_event({"type": "event_msg", "payload": payload})
         assert len(rows) == 1
         block = rows[0]["message"]["content"][0]
-        text = block.get("text") or block.get("content")
+        text = block.get("text") or block.get("content") or block.get("thinking")
         assert expected in text, (payload, text)
         if payload["type"] != "patch_apply_end":
             assert not str(text).startswith("Codex native event_msg."), text
@@ -1257,6 +1364,22 @@ TESTS = [
     (
         "response_item assistant message becomes text event",
         test_response_item_assistant_message_becomes_text_event,
+    ),
+    (
+        "response_item assistant message uuid is stable",
+        test_response_item_assistant_message_uuid_is_stable,
+    ),
+    (
+        "response_item render branches keep stable uuids",
+        test_response_item_render_branches_keep_stable_uuids,
+    ),
+    (
+        "codex rollout item replay keeps stable uuids",
+        test_codex_rollout_item_replay_keeps_stable_uuids,
+    ),
+    (
+        "codex rollout event_msg replay keeps stable parent chain",
+        test_codex_rollout_event_msg_replay_keeps_stable_parent_chain,
     ),
     (
         "response_item user message without subagent notification is skipped",

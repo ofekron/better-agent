@@ -1558,6 +1558,21 @@ def _stable_uuid(namespace: str, key: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:{key}"))
 
 
+def _stable_payload_key(payload: dict) -> str:
+    item_id = payload.get("id") or payload.get("call_id")
+    if isinstance(item_id, str) and item_id:
+        return item_id
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _response_item_uuid(parent_uuid: str, payload: dict, suffix: str = "") -> str:
+    payload_type = payload.get("type") or "unknown"
+    return _stable_uuid(
+        parent_uuid,
+        f"response_item:{payload_type}:{_stable_payload_key(payload)}{suffix}",
+    )
+
+
 def _file_size(path: Optional[Path]) -> int:
     if path is None:
         return 0
@@ -1589,7 +1604,9 @@ _CODEX_AGENT_TOOL_NAMES = {
 # Event normalization — Codex ThreadEvent → Claude jsonl shape
 # ============================================================================
 
-def _normalize_agent_message(item: dict, parent_uuid: str) -> dict:
+def _normalize_agent_message(
+    item: dict, parent_uuid: str, *, event_uuid: Optional[str] = None,
+) -> dict:
     text = item.get("text", "")
     return _with_parent_tool_use_id({
         "type": "assistant",
@@ -1598,13 +1615,15 @@ def _normalize_agent_message(item: dict, parent_uuid: str) -> dict:
             "content": [{"type": "text", "text": text}],
             "model": "codex",
         },
-        "uuid": _new_uuid(),
+        "uuid": event_uuid or _new_uuid(),
         "parentUuid": parent_uuid,
         "timestamp": datetime.now().isoformat(),
     }, item)
 
 
-def _normalize_reasoning(item: dict, parent_uuid: str) -> dict:
+def _normalize_reasoning(
+    item: dict, parent_uuid: str, *, event_uuid: Optional[str] = None,
+) -> dict:
     text = item.get("text", "")
     return _with_parent_tool_use_id({
         "type": "assistant",
@@ -1613,7 +1632,7 @@ def _normalize_reasoning(item: dict, parent_uuid: str) -> dict:
             "content": [{"type": "thinking", "thinking": text}],
             "model": "codex",
         },
-        "uuid": _new_uuid(),
+        "uuid": event_uuid or _new_uuid(),
         "parentUuid": parent_uuid,
         "timestamp": datetime.now().isoformat(),
     }, item)
@@ -2129,7 +2148,7 @@ def _normalize_response_message(payload: dict, parent_uuid: str) -> Optional[dic
             "content": [{"type": "text", "text": text}],
             "model": "codex",
         },
-        "uuid": _new_uuid(),
+        "uuid": _response_item_uuid(parent_uuid, payload),
         "parentUuid": parent_uuid,
         "timestamp": datetime.now().isoformat(),
     }, payload)
@@ -2158,7 +2177,7 @@ def _normalize_response_reasoning(payload: dict, parent_uuid: str) -> Optional[d
             "content": [{"type": "thinking", "thinking": text}],
             "model": "codex",
         },
-        "uuid": _new_uuid(),
+        "uuid": _response_item_uuid(parent_uuid, payload),
         "parentUuid": parent_uuid,
         "timestamp": datetime.now().isoformat(),
     }, payload)
@@ -2416,6 +2435,7 @@ def _normalize_response_item_event(payload: dict, parent_uuid: str) -> Optional[
         return _normalize_response_reasoning(payload, parent_uuid)
     if payload_type in ("function_call", "custom_tool_call", "tool_search_call"):
         event, _ = _normalize_response_tool_call(payload, parent_uuid)
+        event["uuid"] = _response_item_uuid(parent_uuid, payload, ":tool_use")
         return event
     if payload_type in (
         "function_call_output",
@@ -2423,10 +2443,15 @@ def _normalize_response_item_event(payload: dict, parent_uuid: str) -> Optional[
         "tool_search_output",
     ):
         event, _ = _normalize_response_tool_result(payload, parent_uuid)
+        event["uuid"] = _response_item_uuid(parent_uuid, payload, ":tool_result")
         return event
     if payload_type == "web_search_call":
-        return _normalize_web_search(_web_search_item_from_payload(payload), parent_uuid)
-    return _normalize_native_payload("response_item", payload, parent_uuid)
+        event = _normalize_web_search(_web_search_item_from_payload(payload), parent_uuid)
+        event["uuid"] = _response_item_uuid(parent_uuid, payload, ":web_search")
+        return event
+    event = _normalize_native_payload("response_item", payload, parent_uuid)
+    event["uuid"] = _response_item_uuid(parent_uuid, payload, ":native")
+    return event
 
 
 def _normalize_error_item(item: dict, parent_uuid: str) -> dict:
