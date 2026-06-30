@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "Выделите текст в файле, чтобы поставить комментарий для этого диапазона в очередь. Несколько комментариев объединяются в одну отправку.",
   "fileComment.failedToAdd": "Не удалось добавить комментарий: ",
   "thinking.thinking": "Размышляет",
+  "projectSuggestion.sendTo": "Отправить в {{project}}",
+  "projectSuggestion.moveTo": "Переместить в {{project}}",
   "projectSettings.loading": "Загрузка конфигурационных файлов...",
   "projectSettings.instructions": "Инструкции",
   "projectSettings.settings": "Настройки",

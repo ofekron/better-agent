@@ -8238,6 +8238,25 @@ button.run-badge-clickable:focus-visible {
   border-top: 1px solid var(--border);
 }
 
+.project-suggestion-modal .modal-footer button {
+  max-width: min(220px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: max-width 0.2s ease, filter 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.project-suggestion-modal .modal-footer button:hover,
+.project-suggestion-modal .modal-footer button:focus-visible {
+  max-width: min(320px, 48vw);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-suggestion-modal .modal-footer button {
+    transition: none;
+  }
+}
+
 .refresh-choice-modal {
   max-width: min(92vw, 440px);
 }

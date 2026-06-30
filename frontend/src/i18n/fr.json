@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "Sélectionnez du texte dans le fichier pour mettre un commentaire en file pour cette plage. Plusieurs commentaires sont regroupés en un seul Envoi.",
   "fileComment.failedToAdd": "Échec de l'ajout du commentaire : ",
   "thinking.thinking": "Réflexion",
+  "projectSuggestion.sendTo": "Envoyer vers {{project}}",
+  "projectSuggestion.moveTo": "Déplacer vers {{project}}",
   "projectSettings.loading": "Chargement des fichiers de configuration...",
   "projectSettings.instructions": "Instructions",
   "projectSettings.settings": "Paramètres",

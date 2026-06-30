@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "फ़ाइल में टेक्स्ट चुनें उस श्रेणी के लिए टिप्पणी कतारबद्ध करने हेतु। कई टिप्पणियाँ एक भेजें में समाहित होती हैं।",
   "fileComment.failedToAdd": "टिप्पणी जोड़ने में विफल: ",
   "thinking.thinking": "सोच रहा है",
+  "projectSuggestion.sendTo": "{{project}} को भेजें",
+  "projectSuggestion.moveTo": "{{project}} में ले जाएँ",
   "projectSettings.loading": "कॉन्फ़िग फ़ाइलें लोड हो रही हैं...",
   "projectSettings.instructions": "निर्देश",
   "projectSettings.settings": "सेटिंग्स",

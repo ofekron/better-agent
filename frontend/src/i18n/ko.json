@@ -730,6 +730,8 @@
   "fileComment.emptyHint": "파일에서 텍스트를 선택하여 해당 범위에 대한 댓글을 대기열에 추가하세요. 여러 댓글은 한 번의 보내기로 묶입니다.",
   "fileComment.failedToAdd": "댓글 추가 실패: ",
   "thinking.thinking": "생각하는 중",
+  "projectSuggestion.sendTo": "{{project}}(으)로 보내기",
+  "projectSuggestion.moveTo": "{{project}}(으)로 이동",
   "projectSettings.loading": "설정 파일 불러오는 중...",
   "projectSettings.instructions": "지시",
   "projectSettings.settings": "설정",
