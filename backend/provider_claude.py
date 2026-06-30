@@ -53,6 +53,7 @@ from provider import (
     schedule_loop_task,
     runner_argv,
 )
+import config_store
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -296,6 +297,7 @@ class ClaudeProvider(Provider):
                 f"provider {self.id} is defunct (record deleted); "
                 "cannot start new runs"
             )
+        self.assert_not_suspended(action="start new runs")
 
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +315,6 @@ class ClaudeProvider(Provider):
         # turn `app_session_id` is the (bare) manager, so its workers inherit
         # bare; a worker's own init turn uses the worker's (bare) session.
         from session_manager import manager as _sm
-        import config_store
         _run_config_fields = (
             "bare_config",
             "orchestration_mode",
@@ -997,6 +998,9 @@ class ClaudeProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
+        if config_store.provider_suspended(self.id):
+            return recovered
+
         for child in iter_run_dirs(run_id_filter):
             if marker_matches_current(child / "reconciled.marker", self.KIND):
                 continue
@@ -1148,6 +1152,7 @@ class ClaudeProvider(Provider):
         filesystem or shell. Used for pure-generation callers (composer
         fill) that must not side-effect the user's workspace.
         """
+        self.assert_not_suspended(action="run headless work")
         cmd: list[str] = [
             "claude",
             "-p",

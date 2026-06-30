@@ -5,6 +5,7 @@ TRANSLATIONS: dict[str, str] = {
     "error.cannot_delete_default_provider": "לא ניתן למחוק את ספק ברירת המחדל — קבעו ספק אחר כברירת מחדל קודם",
     "error.name_required": "נדרש שם",
     "error.no_default_provider": "אין ספק ברירת מחדל",
+    "error.provider_suspended": "הספק מושהה — לא ניתן לבצע: {action}",
     "error.invalid_path": "נתיב לא תקין",
     "error.orchestration_mode_frozen": "מצב תזמור קפוא לאחר יצירת הסשן",
     "error.no_recognized_selector": "לא זוהה שדה בורר",

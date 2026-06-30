@@ -224,7 +224,10 @@ class Rearranger:
                     "rearranger: failed to clear per-session sids after "
                     "bootstrap re-mint",
                 )
-        return default_provider()
+        provider = default_provider()
+        if getattr(provider, "suspended", False):
+            raise RuntimeError("default provider is suspended")
+        return provider
 
     def set_coordinator(self, coordinator) -> None:
         """Late-bind the coordinator to avoid a constructor cycle in main.py."""
@@ -603,6 +606,9 @@ class Rearranger:
             # Mint under the currently-active provider and pin so all
             # subsequent rearranger calls resolve back to the same one.
             mint_provider = default_provider()
+            if getattr(mint_provider, "suspended", False):
+                logger.warning("rearranger: skipping bootstrap — default provider is suspended")
+                return None
             result = await mint_provider.run_headless(
                 prompt=BOOTSTRAP_PROMPT,
                 session_id=new_sid,

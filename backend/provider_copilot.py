@@ -302,6 +302,7 @@ class CopilotProvider(GeminiProvider):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
         if self.defunct:
             raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
+        self.assert_not_suspended(action="start new runs")
         if reasoning_effort:
             raise NotImplementedError("copilot provider does not support reasoning effort.")
         if mode == "team":
@@ -429,6 +430,7 @@ class CopilotProvider(GeminiProvider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         if no_tools:
             # Copilot runs with --allow-all-tools; no proven disable path —
             # fail closed when the caller demanded a text-only run.

@@ -19,6 +19,7 @@ import {
   showConfigDirForKind,
 } from "./providerFormShape";
 import { Select } from "./Select";
+import { cacheProviders } from "../utils/providerCache";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
@@ -137,6 +138,7 @@ interface Template {
     runner?: Provider["runner"];
     default_reasoning_effort: ReasoningEffort | "";
     api_key?: string;
+    suspended?: boolean;
   };
 }
 
@@ -393,7 +395,9 @@ export function SettingsPage({
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return (await r.json()) as ProvidersState;
       });
-      setState(await promise);
+      const nextState = await promise;
+      setState(nextState);
+      cacheProviders(nextState.providers || [], nextState.default_provider_id ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "fetch failed");
     }
@@ -595,6 +599,17 @@ export function SettingsPage({
             }).promise;
             await refetch();
           })}
+          onSuspend={(p, suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
+            await trackPromise(`provider:suspend:${p.id}`, async () => {
+              const r = await fetch(`${API}/api/providers/${p.id}/suspended`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ suspended }),
+              });
+              if (!r.ok) throw new Error(await r.text());
+            }).promise;
+            await refetch();
+          })}
           onDelete={async (p) => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
@@ -673,6 +688,17 @@ export function SettingsPage({
             }).promise;
             await refetch();
           })}
+          onSuspend={(suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
+            await trackPromise(`provider:suspend:${view.providerId}`, async () => {
+              const r = await fetch(`${API}/api/providers/${view.providerId}/suspended`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ suspended }),
+              });
+              if (!r.ok) throw new Error(await r.text());
+            }).promise;
+            await refetch();
+          })}
           onDelete={async () => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
@@ -711,6 +737,7 @@ interface ProvidersListProps {
   onMobile: () => void;
   onEdit: (p: Provider) => void;
   onActivate: (p: Provider) => void;
+  onSuspend: (p: Provider, suspended: boolean) => void;
   onDelete: (p: Provider) => void;
   onOpenProviderConfigSync?: () => void;
   setupStatuses: ProviderSetupStatus[];
@@ -1559,6 +1586,7 @@ function ProvidersList({
   onMobile,
   onEdit,
   onActivate,
+  onSuspend,
   onDelete,
   onOpenProviderConfigSync,
   setupStatuses,
@@ -1624,6 +1652,7 @@ function ProvidersList({
           onAdd={onAdd}
           onEdit={onEdit}
           onActivate={onActivate}
+          onSuspend={onSuspend}
           onDelete={onDelete}
           onRefreshApp={onRefreshApp}
           refreshAppDisabled={refreshAppDisabled}
@@ -1818,6 +1847,7 @@ function ProvidersSettingsSection({
   onAdd,
   onEdit,
   onActivate,
+  onSuspend,
   onDelete,
   setupStatuses,
   projects,
@@ -1885,13 +1915,17 @@ function ProvidersSettingsSection({
       <div className="provider-list">
         {providers.map((p) => {
           const isActive = p.id === activeId;
+          const isSuspended = p.suspended === true;
           return (
-            <div key={p.id} className={`provider-row ${isActive ? "active" : ""}`}>
+            <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""}`}>
               <div className="provider-row-main" onClick={() => onEdit(p)}>
                 <div className="provider-row-name">
                   {p.name}
                   {isActive && (
                     <span className="provider-active-pill">{t('setup.default')}</span>
+                  )}
+                  {isSuspended && (
+                    <span className="provider-suspended-pill">{t('setup.suspended')}</span>
                   )}
                   {p.runner && (
                     <span
@@ -1911,7 +1945,7 @@ function ProvidersSettingsSection({
                 </div>
               </div>
               <div className="provider-row-actions">
-                {!isActive && (
+                {!isActive && !isSuspended && (
                   <button
                     type="button"
                     className="btn-secondary"
@@ -1921,6 +1955,14 @@ function ProvidersSettingsSection({
                     {t('setup.setDefaultButton')}
                   </button>
                 )}
+                <button
+                  type="button"
+                  className={isSuspended ? "btn-secondary" : "btn-warning"}
+                  disabled={busy}
+                  onClick={() => onSuspend(p, !isSuspended)}
+                >
+                  {isSuspended ? t('setup.resumeProvider') : t('setup.suspendProvider')}
+                </button>
                 <button
                   type="button"
                   className="btn-secondary"
@@ -2365,6 +2407,7 @@ interface FormPayload {
   default_reasoning_effort: ReasoningEffort | "";
   default_permission: Permission;
   api_key: string;
+  suspended: boolean;
   capabilities?: Record<string, boolean>;
 }
 
@@ -2425,12 +2468,13 @@ function ProviderForm({
    * the default_model dropdown. Undefined during the create wizard
    * (provider doesn't exist yet → free-text input). */
   providerId?: string;
-  initial: Omit<FormPayload, "api_key" | "default_permission" | "runner"> & {
+  initial: Omit<FormPayload, "api_key" | "default_permission" | "runner" | "suspended"> & {
     api_key?: string;
     capability_overrides?: Partial<Record<string, boolean>>;
     default_permission?: Permission;
     runner?: Provider["runner"];
     runner_options?: Provider["runner_options"];
+    suspended?: boolean;
   };
   initialHasKey: boolean;
   onClose: () => void;
@@ -2476,6 +2520,7 @@ function ProviderForm({
   };
   const [defaultPermission, setDefaultPermission] = useState<Permission>(seedPermission);
   const [apiKey, setApiKey] = useState(initial.api_key ?? "");
+  const [suspended, setSuspended] = useState(initial.suspended === true);
   const [submitting, setSubmitting] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[] | null>(null);
   const [customModelMode, setCustomModelMode] = useState(false);
@@ -2554,6 +2599,7 @@ function ProviderForm({
           mode_ === "api_key"
             ? apiKey || (initialHasKey ? KEEP : "")
             : "",
+        suspended,
         capabilities: Object.fromEntries(
           CAPABILITY_KEYS.filter((k) => capStates[k] !== "inherit").map((k) => [
             k,
@@ -2774,6 +2820,16 @@ function ProviderForm({
           </div>
         )}
 
+        <label className="setup-field provider-suspend-toggle">
+          <span>{t('setup.suspendProviderLabel')}</span>
+          <input
+            type="checkbox"
+            checked={suspended}
+            onChange={(e) => setSuspended(e.target.checked)}
+          />
+          <span className="setup-field-hint">{t('setup.suspendProviderHint')}</span>
+        </label>
+
         <div className="setup-field">
           <label>{t('setup.capabilitiesLabel')}</label>
           <div className="capability-overrides">
@@ -2831,6 +2887,7 @@ function EditProvider({
   onBack,
   onSubmit,
   onActivate,
+  onSuspend,
   onDelete,
 }: {
   providers: Provider[];
@@ -2842,6 +2899,7 @@ function EditProvider({
   onBack: () => void;
   onSubmit: (payload: FormPayload) => Promise<void>;
   onActivate: () => Promise<void>;
+  onSuspend: (suspended: boolean) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -2882,7 +2940,7 @@ function EditProvider({
       <div className="modal-body provider-edit-extra">
         {error && <div className="setup-error">{error}</div>}
         <div className="provider-edit-actions">
-          {!isActive && (
+          {!isActive && !provider.suspended && (
             <button
               type="button"
               className="btn-secondary"
@@ -2892,6 +2950,14 @@ function EditProvider({
               {t('setup.setDefaultButton')}
             </button>
           )}
+          <button
+            type="button"
+            className={provider.suspended ? "btn-secondary" : "btn-warning"}
+            disabled={busy}
+            onClick={() => onSuspend(!provider.suspended)}
+          >
+            {provider.suspended ? t('setup.resumeProvider') : t('setup.suspendProvider')}
+          </button>
           {!isActive && (
             <button
               type="button"

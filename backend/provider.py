@@ -40,7 +40,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Iterable, Optional
 
 import config_store
 from env_compat import dual_env_many
@@ -172,6 +172,10 @@ class StreamEvent:
 # ============================================================================
 # Provider ABC
 # ============================================================================
+class ProviderSuspendedError(RuntimeError):
+    """Raised when a provider is suspended and may not run work."""
+
+
 class Provider(ABC):
     KIND: ClassVar[str]
 
@@ -236,6 +240,7 @@ class Provider(ABC):
         # twice in one method.
         self._record: dict = dict(record)
         self.defunct: bool = False
+        self.suspended: bool = config_store.provider_suspended(self.id)
         self._apply_capability_overrides()
 
     # Per-provider capability overrides (record `capabilities` map) win
@@ -270,7 +275,16 @@ class Provider(ABC):
     @record.setter
     def record(self, value: dict) -> None:
         self._record = dict(value)
+        self.suspended = config_store.provider_suspended(self.id)
         self._apply_capability_overrides()
+
+    def assert_not_suspended(self, *, action: str = "start runs") -> None:
+        if config_store.provider_suspended(self.id):
+            self.suspended = True
+            raise ProviderSuspendedError(
+                f"provider {self.id} is suspended; cannot {action}"
+            )
+        self.suspended = False
 
     # ------------------------------------------------------------------
     # Env — base for every CLI subprocess this provider spawns.
@@ -821,11 +835,17 @@ def get_provider(provider_id: str) -> Provider:
     `record` setter which atomically replaces the record dict.
     """
     record = config_store.get_provider_with_key(provider_id)
+    suspended_record = record is None and config_store.provider_suspended(provider_id)
     with _CACHE_LOCK:
         cached = _PROVIDER_CACHE.get(provider_id)
         if record is None:
             if cached is not None:
+                if suspended_record:
+                    cached.suspended = True
+                    cached.defunct = False
+                    return cached
                 cached.defunct = True
+                cached.suspended = config_store.provider_suspended(provider_id)
                 # Unregister the perf depth gauge so a deleted
                 # provider stops emitting `q.provider.*.run_q
                 # depth=0` lines on every rollup. Idempotent
@@ -835,6 +855,10 @@ def get_provider(provider_id: str) -> Provider:
                     import perf as _perf
                     _perf.unregister_queue(gauge_name)
                 return cached
+            if suspended_record:
+                raise ProviderSuspendedError(
+                    f"provider {provider_id} is suspended; cannot start runs"
+                )
             raise KeyError(provider_id)
         kind = _provider_runtime_kind(record)
         cls = _resolve_class(kind)
@@ -864,6 +888,63 @@ def get_provider(provider_id: str) -> Provider:
         return instance
 
 
+
+
+def _run_ids_for_provider(provider_id: str) -> list[str]:
+    from runs_dir import runs_root
+    root = runs_root()
+    if not root.exists():
+        return []
+    run_ids: list[str] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        bs_path = child / "backend_state.json"
+        if not bs_path.exists():
+            continue
+        try:
+            data = json.loads(bs_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("provider_id") == provider_id:
+            run_ids.append(child.name)
+    return run_ids
+
+
+def cancel_provider_runs(provider_id: str, *, run_ids: Iterable[str] | None = None) -> int:
+    """Hard-stop every known run owned by a provider. Used when suspending
+    provider usage so active turns and babysitter background work cannot keep
+    spending that provider after the setting flips."""
+    ids = set(run_ids or [])
+    ids.update(_run_ids_for_provider(provider_id))
+    with _CACHE_LOCK:
+        cached = _PROVIDER_CACHE.get(provider_id)
+    if cached is not None:
+        try:
+            ids.update(run.get("run_id") for run in cached.active_runs() if run.get("run_id"))
+        except Exception:
+            logger.debug("cancel_provider_runs: active_runs failed", exc_info=True)
+    count = 0
+    for run_id in sorted(ids):
+        # Containment first: if the provider instance is absent (e.g. backend
+        # restarted and the provider is now suspended), run dirs still give us
+        # the run_id and containment can kill the whole tree on supported OSes.
+        try:
+            from containment import containment
+            containment().force_kill_all(run_id)
+        except Exception:
+            logger.debug("cancel_provider_runs: containment kill failed", exc_info=True)
+        signalled = False
+        if cached is not None:
+            try:
+                signalled = bool(cached.cancel_run(run_id))
+            except Exception:
+                logger.exception("cancel_provider_runs: cancel_run failed run=%s", run_id)
+        count += 1 if signalled or cached is None else 0
+    if cached is not None:
+        cached.suspended = config_store.provider_suspended(provider_id)
+    return count
+
 def default_provider() -> Provider:
     """The provider for the currently-active config_store record.
 
@@ -889,7 +970,10 @@ def load_all_providers() -> list[Provider]:
     those touched by request traffic. Required for cross-provider fan-
     outs like in-flight recovery, /api/processes aggregation, and
     shutdown's cancel_all."""
-    listed = config_store.list_providers().get("providers", []) or []
+    listed = [
+        p for p in (config_store.list_providers().get("providers", []) or [])
+        if not p.get("suspended")
+    ]
     if not listed:
         return []
     # Parallelize instantiation so multiple slow/timing-out keyring
@@ -979,6 +1063,13 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
         owner = None
         try:
             owner = get_provider(owner_id)
+        except ProviderSuspendedError:
+            log.info(
+                "recover_all_in_flight: %d run(s) owned by suspended "
+                "provider %s — leaving on disk while suspended",
+                len(run_ids), owner_id,
+            )
+            continue
         except KeyError:
             owner = None
         # `get_provider` keeps a cached instance even after the on-disk
@@ -988,6 +1079,13 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
         # written under the deleted provider's CLAUDE_CONFIG_DIR; an
         # active-provider recovery would synthesize complete.json with
         # the wrong session-id-resolution rules.
+        if owner is not None and getattr(owner, "suspended", False):
+            log.info(
+                "recover_all_in_flight: %d run(s) owned by suspended "
+                "provider %s — leaving on disk while suspended",
+                len(run_ids), owner_id,
+            )
+            continue
         if owner is None or owner.defunct:
             log.warning(
                 "recover_all_in_flight: %d run(s) owned by missing/"

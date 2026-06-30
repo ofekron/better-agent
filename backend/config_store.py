@@ -15,6 +15,7 @@ Each provider record:
       "default_model": str,    # default model id for new sessions / fallback
       "default_reasoning_effort": str,
       "runner":        "native" | "better_agent_runner",
+      "suspended":     bool,   # hard usage stop: no turns / bg work while true
     }
 
 The api_key for an api_key-mode provider is stored in the OS keychain under
@@ -353,6 +354,25 @@ def _runtime_kind_for_config(kind: str, runner: object) -> str:
     return kind
 
 
+def _provider_is_suspended(provider: dict | None) -> bool:
+    return bool((provider or {}).get("suspended") is True)
+
+
+def provider_suspended(provider_id: str | None) -> bool:
+    if not provider_id:
+        return False
+    state = _load_state()
+    for provider in state.get("providers", []):
+        if provider.get("id") == provider_id:
+            return _provider_is_suspended(provider)
+    return False
+
+
+def assert_provider_not_suspended(provider_id: str | None, *, action: str = "start runs") -> None:
+    if provider_id and provider_suspended(provider_id):
+        raise RuntimeError(f"provider {provider_id} is suspended; cannot {action}")
+
+
 def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
     runtime_kind = _runtime_kind_for_config(kind, runner)
     if kind == "gemini" and mode == "subscription":
@@ -394,6 +414,7 @@ def _seed_default_state() -> dict:
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
                 "runner": _clean_runner("claude", ""),
                 "default_permission": default_permission_for_kind("claude"),
+                "suspended": False,
             },
             {
                 "id": codex_pid,
@@ -407,6 +428,7 @@ def _seed_default_state() -> dict:
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
                 "runner": _clean_runner("codex", ""),
                 "default_permission": default_permission_for_kind("codex"),
+                "suspended": False,
             },
         ],
     }
@@ -435,6 +457,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "default_model": _default_model_for(mode, base_url),
         "default_reasoning_effort": _clean_default_reasoning_effort("claude", None),
         "runner": _clean_runner("claude", ""),
+        "suspended": False,
     }
     legacy_key = _read_legacy_api_key()
     if legacy_key and provider["mode"] == "api_key":
@@ -443,10 +466,18 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
 
 
 def _normalize_loaded_state(raw: dict) -> dict:
-    providers = raw["providers"]
+    providers = [
+        {**p, "suspended": _provider_is_suspended(p)}
+        for p in raw["providers"]
+        if isinstance(p, dict)
+    ]
     active = raw.get("default_provider_id")
-    if not any(p.get("id") == active for p in providers):
-        active = providers[0]["id"] if providers else None
+    active_record = next((p for p in providers if p.get("id") == active), None)
+    if active_record is None or _provider_is_suspended(active_record):
+        active = next(
+            (p["id"] for p in providers if not _provider_is_suspended(p)),
+            None,
+        )
     return {
         "default_provider_id": active,
         "providers": providers,
@@ -722,6 +753,9 @@ def resolve_internal_llm(task_key: str) -> dict:
     provider_id = assignment.get("provider_id")
     if provider_id:
         provider = get_provider(provider_id)
+        if provider and _provider_is_suspended(provider):
+            provider = None
+            provider_id = None
     if provider is None:
         provider = get_default_provider()
         provider_id = provider["id"] if provider else None
@@ -787,6 +821,7 @@ def _strip(provider: dict) -> dict:
         "default_model": provider.get("default_model", ""),
         "runner": _clean_runner(kind, provider.get("runner")),
         "runner_options": _runner_choices_for_kind(kind),
+        "suspended": _provider_is_suspended(provider),
         "reasoning_effort_options": effort_options,
         "default_reasoning_effort": default_effort if effort_options else "",
         "permission_options": permission_options,
@@ -978,6 +1013,8 @@ def get_provider_with_key(provider_id: str) -> Optional[dict]:
     state = _load_state()
     for p in state.get("providers", []):
         if p.get("id") == provider_id:
+            if _provider_is_suspended(p):
+                return None
             cp = dict(p)
             cp["api_key"] = _read_api_key(provider_id) if p.get("mode") == "api_key" else ""
             return cp
@@ -996,6 +1033,8 @@ def get_default_provider() -> Optional[dict]:
         return None
     for p in state.get("providers", []):
         if p.get("id") == active_id:
+            if _provider_is_suspended(p):
+                return None
             cp = dict(p)
             cp["api_key"] = _read_api_key(active_id) if p.get("mode") == "api_key" else ""
             return cp
@@ -1053,6 +1092,7 @@ def add_provider(payload: dict) -> dict:
             _runtime_kind_for_config(kind, runner),
             payload.get("default_permission"),
         ),
+        "suspended": payload.get("suspended") is True,
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
     }
@@ -1119,6 +1159,17 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         )
     if "custom_models" in payload and isinstance(payload["custom_models"], list):
         target["custom_models"] = list(payload["custom_models"])
+    if "suspended" in payload:
+        target["suspended"] = payload.get("suspended") is True
+        if target["suspended"] and state.get("default_provider_id") == provider_id:
+            state["default_provider_id"] = next(
+                (
+                    p.get("id")
+                    for p in state.get("providers", [])
+                    if p.get("id") != provider_id and not _provider_is_suspended(p)
+                ),
+                None,
+            )
     if "allowed_sinks" in payload:
         target["allowed_sinks"] = _clean_allowed_sinks(payload["allowed_sinks"])
     if "capabilities" in payload:
@@ -1151,9 +1202,37 @@ def delete_provider(provider_id: str) -> tuple[bool, str]:
 
 def set_default_provider(provider_id: str) -> Optional[dict]:
     state = _load_state()
-    if not any(p.get("id") == provider_id for p in state.get("providers", [])):
+    target = next((p for p in state.get("providers", []) if p.get("id") == provider_id), None)
+    if target is None:
         return None
+    if _provider_is_suspended(target):
+        raise RuntimeError("provider is suspended")
     state["default_provider_id"] = provider_id
+    _save_state(state)
+    apply_env_vars()
+    return list_providers()
+
+
+def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
+    state = _load_state()
+    target: Optional[dict] = None
+    for p in state.get("providers", []):
+        if p.get("id") == provider_id:
+            target = p
+            break
+    if target is None:
+        return None
+    target["suspended"] = bool(suspended)
+    if suspended and state.get("default_provider_id") == provider_id:
+        replacement = next(
+            (
+                p.get("id")
+                for p in state.get("providers", [])
+                if p.get("id") != provider_id and not _provider_is_suspended(p)
+            ),
+            None,
+        )
+        state["default_provider_id"] = replacement
     _save_state(state)
     apply_env_vars()
     return list_providers()
@@ -1189,10 +1268,11 @@ def apply_env_vars(provider_id: Optional[str] = None) -> None:
         if provider_id is not None
         else get_default_provider()
     )
-    if not active:
-        # No providers at all — clear any leftover env so we don't leak
-        # stale auth from a previous run into a fresh CLI spawn.
+    if not active or _provider_is_suspended(active):
+        # No provider (or the selected provider is suspended) — clear any
+        # leftover env so we don't leak stale auth into a fresh CLI spawn.
         os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
         os.environ.pop("ANTHROPIC_BASE_URL", None)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         _write_engine_env({})

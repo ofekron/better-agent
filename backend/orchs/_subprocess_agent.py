@@ -118,6 +118,8 @@ class SubprocessAgent:
             queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
             loop = asyncio.get_running_loop()
             provider = coordinator.provider_for_session(self.agent_session_id)
+            if getattr(provider, "suspended", False):
+                raise RuntimeError("provider is suspended")
             reasoning_effort = (
                 session_manager.get(self.agent_session_id) or {}
             ).get("reasoning_effort")
@@ -346,6 +348,8 @@ class SubprocessAgent:
 
             import startup_recovery_gate
             await startup_recovery_gate.wait_for_recovery_ready()
+            if getattr(provider, "suspended", False):
+                raise RuntimeError("provider is suspended")
             provider.start_run(
                 run_id=run_id,
                 prompt=prompt,

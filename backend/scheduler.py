@@ -96,6 +96,18 @@ class Scheduler:
                 schedule_store.delete(rec["id"])
                 await broadcast_schedules(self._coordinator, sid)
                 continue
+            try:
+                import config_store
+                provider_id = session.get("provider_id") or config_store.default_session_provider_id()
+                if provider_id and config_store.provider_suspended(provider_id):
+                    logger.info(
+                        "scheduler: delaying schedule %s for session %s — provider %s suspended",
+                        rec["id"], sid, provider_id,
+                    )
+                    await broadcast_schedules(self._coordinator, sid)
+                    continue
+            except Exception:
+                logger.debug("scheduler: provider suspension check failed", exc_info=True)
             # Mark BEFORE submit: at-most-once on crash (see store docs).
             schedule_store.mark_fired(rec["id"], now)
             params = {

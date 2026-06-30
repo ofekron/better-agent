@@ -1727,6 +1727,7 @@ class ProviderPayload(BaseModel):
     default_reasoning_effort: str = ""
     default_permission: dict = {}
     capabilities: dict[str, bool] | None = None
+    suspended: bool = False
 
 
 class ProviderPatch(BaseModel):
@@ -1743,6 +1744,7 @@ class ProviderPatch(BaseModel):
     default_reasoning_effort: str | None = None
     default_permission: dict | None = None
     capabilities: dict[str, bool] | None = None
+    suspended: bool | None = None
 
 
 class ProviderSetupInstallPayload(BaseModel):
@@ -1755,6 +1757,14 @@ async def _broadcast_provider_changed():
         "provider_changed",
         state,
     )
+
+
+def _provider_not_suspended(provider_id: str | None, *, action: str = "use provider") -> None:
+    if provider_id and config_store.provider_suspended(provider_id):
+        raise HTTPException(
+            status_code=409,
+            detail=t("error.provider_suspended", action=action),
+        )
 
 
 async def _broadcast_install(event_type: str, data: dict) -> None:
@@ -1920,9 +1930,15 @@ def _provider_permission(
 def _provider_for_required_model(provider_id: str | None) -> dict:
     provider = config_store.get_provider(provider_id) if provider_id else config_store.get_default_provider()
     if provider_id and not provider:
+        if config_store.provider_suspended(provider_id):
+            raise HTTPException(
+                status_code=409,
+                detail=t("error.provider_suspended", action="create sessions"),
+            )
         raise HTTPException(status_code=404, detail="provider not found")
     if not provider:
         raise HTTPException(status_code=400, detail="no active provider configured")
+    _provider_not_suspended(provider.get("id"), action="create sessions")
     return provider
 
 
@@ -2110,8 +2126,33 @@ async def patch_provider(provider_id: str, payload: ProviderPatch):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if record is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    if body.get("suspended") is True:
+        try:
+            from provider import cancel_provider_runs
+            cancelled = await asyncio.to_thread(cancel_provider_runs, provider_id)
+            if cancelled:
+                logger.info("provider %s suspended; cancelled %d run(s)", provider_id, cancelled)
+        except Exception:
+            logger.exception("failed to cancel runs for suspended provider %s", provider_id)
     await _broadcast_provider_changed()
     return record
+
+
+@app.post("/api/providers/{provider_id}/suspended")
+async def set_provider_suspended(provider_id: str, body: dict = Body(default={})):
+    suspended = bool((body or {}).get("suspended", True))
+    state = await asyncio.to_thread(config_store.set_provider_suspended, provider_id, suspended)
+    if state is None:
+        raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    cancelled = 0
+    if suspended:
+        try:
+            from provider import cancel_provider_runs
+            cancelled = await asyncio.to_thread(cancel_provider_runs, provider_id)
+        except Exception:
+            logger.exception("failed to cancel runs for suspended provider %s", provider_id)
+    await _broadcast_provider_changed()
+    return {"suspended": suspended, "cancelled_runs": cancelled, **state}
 
 
 @app.delete("/api/providers/{provider_id}")
@@ -2132,7 +2173,13 @@ async def remove_provider(provider_id: str):
 
 @app.post("/api/providers/{provider_id}/set-default")
 async def set_default_provider(provider_id: str):
-    state = await asyncio.to_thread(config_store.set_default_provider, provider_id)
+    try:
+        state = await asyncio.to_thread(config_store.set_default_provider, provider_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=t("error.provider_suspended", action="set as default"),
+        ) from exc
     if state is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
     await _broadcast_provider_changed()
@@ -7516,7 +7563,13 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
             requested_provider_id,
         )
         if not provider_record:
+            if config_store.provider_suspended(requested_provider_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail=t("error.provider_suspended", action="select for a session"),
+                )
             raise HTTPException(status_code=400, detail="Unknown provider")
+        _provider_not_suspended(requested_provider_id, action="select for a session")
         updates["provider_id"] = requested_provider_id
     if "model" in body and isinstance(body["model"], str) and body["model"].strip():
         requested_model = body["model"].strip()
@@ -14360,6 +14413,10 @@ async def websocket_chat(websocket: WebSocket):
                 _offline_err = _node_offline_error(_offline_session)
                 if _offline_err:
                     await _send_message_error(_offline_err)
+                    continue
+                _provider_id_for_send = (_offline_session or {}).get("provider_id")
+                if _provider_id_for_send and config_store.provider_suspended(_provider_id_for_send):
+                    await _send_message_error(t("error.provider_suspended", action="run turns"))
                     continue
                 if _offline_session:
                     model = _offline_session.get("model") or model

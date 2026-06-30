@@ -44,7 +44,7 @@ export function SessionSelectorControls({
   const { t } = useTranslation();
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const selectedProviderId = session.provider_id || providers[0]?.id || "";
+  const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const saving = useOpProgress(saveOp(session.id)).inflight;
   const loadingModels = useOpProgress(selectedProviderId ? providerModelsOp(selectedProviderId) : "").inflight;
   const busy = disabled || saving;
@@ -107,7 +107,7 @@ export function SessionSelectorControls({
   };
 
   const changeProvider = (providerId: string) => {
-    const nextProvider = providers.find((p) => p.id === providerId);
+    const nextProvider = providers.find((p) => p.id === providerId && !p.suspended);
     if (!nextProvider || providerId === selectedProviderId) return;
     const cachedModels = readProviderCache()?.modelsByProvider[providerId] ?? [];
     const preferredModel =
@@ -166,7 +166,9 @@ export function SessionSelectorControls({
           aria-label={t("newSession.provider", "Provider")}
         >
           {providers.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
+            <option key={p.id} value={p.id} disabled={p.suspended}>
+              {p.name}{p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
+            </option>
           ))}
         </select>
       </label>

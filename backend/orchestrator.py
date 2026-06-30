@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Literal, Optional
 
 from i18n import t
-from provider import StreamEvent, default_provider, get_provider, known_providers
+from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
 from runs_dir import pid_alive as _pid_alive
 from trace_collector import (
     TraceCollector,
@@ -717,6 +717,10 @@ class Coordinator:
         if pid:
             try:
                 prov = get_provider(pid)
+                if getattr(prov, "suspended", False):
+                    raise ProviderSuspendedError(
+                        f"provider {pid} is suspended; cannot start runs"
+                    )
                 if not prov.defunct:
                     return prov
                 logger.warning(
@@ -724,6 +728,8 @@ class Coordinator:
                     "falling back to active",
                     app_session_id, pid,
                 )
+            except ProviderSuspendedError:
+                raise
             except KeyError:
                 logger.warning(
                     "session %s references unknown provider_id %s — "
@@ -738,6 +744,10 @@ class Coordinator:
             return self.provider_for_session(app_session_id)
         try:
             prov = get_provider(pid)
+            if getattr(prov, "suspended", False):
+                raise ProviderSuspendedError(
+                    f"provider {pid} is suspended; cannot start runs"
+                )
             if not prov.defunct:
                 return prov
             logger.warning(
@@ -745,6 +755,8 @@ class Coordinator:
                 pid,
                 app_session_id,
             )
+        except ProviderSuspendedError:
+            raise
         except KeyError:
             logger.warning(
                 "per-turn provider_id %s is unknown for session %s — falling back to session provider",

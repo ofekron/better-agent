@@ -164,6 +164,7 @@ class RemoteProviderProxy(Provider):
             mode = "team"
         if mode not in ("native", "team"):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
+        self.assert_not_suspended(action="start new runs")
         # Layer-3 capability defense (matches GeminiProvider.start_run).
         # `supports_manager_mode` + `supports_fork` reflect the v1
         # assumption above (remote = Claude only → all True). If a
@@ -389,6 +390,7 @@ class RemoteProviderProxy(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         # One-shot request/response RPC: the node's own provider runs
         # `claude -p` and returns the JSON envelope. The CLI is bounded
         # by its own `timeout`; the WS round-trip gets a generous

@@ -124,6 +124,7 @@ class AgyProvider(GeminiProvider):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
         if self.defunct:
             raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
+        self.assert_not_suspended(action="start new runs")
         if reasoning_effort:
             raise NotImplementedError("agy provider does not support reasoning effort.")
         if mode == "team":
@@ -250,6 +251,7 @@ class AgyProvider(GeminiProvider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         if no_tools:
             # No proven tool-disable flag — fail closed rather than run
             # a tool-capable CLI when the caller demanded text-only.
