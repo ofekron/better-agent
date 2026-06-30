@@ -166,6 +166,38 @@ def _read_run_rollout_complete(run_dir: Path, session_id: Optional[str]) -> Opti
     )
 
 
+def read_codex_run_rollout_events(run_dir: Path) -> list[dict[str, Any]]:
+    bs: dict = {}
+    rs_disk: dict = {}
+    for target, path in (
+        (bs, run_dir / "backend_state.json"),
+        (rs_disk, run_dir / "state.json"),
+    ):
+        if not path.exists():
+            continue
+        try:
+            target.update(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    sid = bs.get("session_id") or rs_disk.get("session_id") or run_dir.name
+    jsonl_path = bs.get("jsonl_path") or rs_disk.get("jsonl_path") or rs_disk.get("rollout_path")
+    if sid and not jsonl_path:
+        from codex_native import resolve_rollout_path
+        resolved = resolve_rollout_path(str(sid))
+        jsonl_path = str(resolved) if resolved else None
+    if not jsonl_path:
+        return []
+
+    from codex_native import normalize_rollout_file
+    wrapped, _ = normalize_rollout_file(
+        Path(jsonl_path),
+        start_byte=_run_start_byte(bs, rs_disk),
+        namespace=str(sid),
+    )
+    return wrapped
+
+
 def fetch_codex_models() -> list[str]:
     """Parse `codex debug models` output and return visible model slugs.
 

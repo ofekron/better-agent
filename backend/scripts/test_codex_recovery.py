@@ -42,9 +42,12 @@ if _BACKEND not in sys.path:
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
-from provider_codex import CodexProvider, RunState  # noqa: E402
+from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
+from event_shape import extract_output_text as _extract_output_text  # noqa: E402
 from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
+import turn_manager as turn_manager_mod  # noqa: E402
+from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
 from run_recovery import (  # noqa: E402
     _integrate_one,
     _last_assistant,
@@ -96,11 +99,12 @@ def _seed_codex_run(
     complete: bool,
     target_message_id: str | None = None,
     write_jsonl_path: bool = True,
+    run_id: str | None = None,
 ) -> str:
     """Synthesize a codex run dir: native rollout jsonl + codex_stderr.log
     (NOT gemini_stderr.log) + state/backend_state. `pid` is stamped as
     runner_pid; `complete` controls whether complete.json exists."""
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -814,6 +818,205 @@ def test_codex_mcp_string_error_normalizes() -> bool:
     return True
 
 
+def test_codex_dead_runner_replay_preserves_tool_result_structure() -> bool:
+    app_sid, asst_id = _seed_session_with_streaming_assistant()
+    codex_sid = str(uuid.uuid4())
+    run_id = _seed_codex_run(
+        app_sid=app_sid,
+        codex_sid=codex_sid,
+        pid=0,
+        events=[
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_shell",
+                    "arguments": "{\"cmd\":\"printf secret-tool-output\"}",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_shell",
+                    "output": "secret-tool-output",
+                },
+            },
+            _make_assistant_text_event("final answer only"),
+        ],
+        complete=True,
+        target_message_id=asst_id,
+    )
+
+    events = read_codex_run_rollout_events(runs_root() / run_id)
+    if not any(
+        block.get("type") == "tool_result"
+        for event in events
+        for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
+        if isinstance(block, dict)
+    ):
+        print("  replay did not preserve tool_result blocks")
+        return False
+    output = _extract_output_text(events)
+    if "secret-tool-output" in output:
+        print(f"  tool result leaked into assistant output text: {output!r}")
+        return False
+    if "final answer only" not in output:
+        print(f"  assistant text missing from replay output: {output!r}")
+        return False
+    return True
+
+
+def test_codex_replay_dedup_allows_mutated_same_uuid() -> bool:
+    partial = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "uuid": "same-uuid",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
+        },
+    }
+    exact_duplicate = json.loads(json.dumps(partial))
+    updated = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "uuid": "same-uuid",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "final"}]},
+        },
+    }
+
+    missing = _missing_event_dicts([partial], [exact_duplicate, updated])
+    if missing != [updated]:
+        print(f"  expected only mutated same-uuid update, got {missing!r}")
+        return False
+    return True
+
+
+def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
+    class _UserPromptManager:
+        def get_in_flight_lifecycle_msg_id(self, _sid):
+            return None
+
+    class _FakeCodexProvider:
+        KIND = "codex"
+        id = "codex-test"
+
+        def __init__(self, app_sid: str, codex_sid: str) -> None:
+            self._runs = {}
+            self.app_sid = app_sid
+            self.codex_sid = codex_sid
+
+        def start_run(self, **kwargs) -> None:
+            _seed_codex_run(
+                app_sid=self.app_sid,
+                codex_sid=self.codex_sid,
+                pid=0,
+                events=[
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": "call_shell",
+                            "arguments": "{\"cmd\":\"printf hidden-tool-output\"}",
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call_shell",
+                            "output": "hidden-tool-output",
+                        },
+                    },
+                    _make_assistant_text_event("visible final answer"),
+                    _make_turn_completed_event(),
+                ],
+                complete=True,
+                run_id=kwargs["run_id"],
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+    class _Coordinator:
+        def __init__(self, provider) -> None:
+            self.internal_token = "token"
+            self.user_prompt_manager = _UserPromptManager()
+            self._session_cancelled = {}
+            self._provider = provider
+
+        def provider_for_run(self, *_args, **_kwargs):
+            return self._provider
+
+        def provider_for_session(self, *_args, **_kwargs):
+            return self._provider
+
+    async def _run() -> bool:
+        sess = session_manager.create(
+            name="dead-runner-replay",
+            model="gpt-5.5",
+            cwd="/tmp",
+            orchestration_mode="native",
+        )
+        app_sid = sess["id"]
+        codex_sid = str(uuid.uuid4())
+        provider = _FakeCodexProvider(app_sid, codex_sid)
+        tm = TurnManager(_Coordinator(provider))
+        ws_events: list[dict] = []
+
+        async def ws_callback(event: dict) -> None:
+            ws_events.append(event)
+
+        original_runtime = turn_manager_mod.runtime_skill_contexts
+        original_audit = turn_manager_mod.extension_audit_context
+        original_instructions = turn_manager_mod.extension_user_instruction_contexts
+        turn_manager_mod.runtime_skill_contexts = lambda *_args, **_kwargs: []
+        turn_manager_mod.extension_audit_context = lambda *_args, **_kwargs: []
+        turn_manager_mod.extension_user_instruction_contexts = lambda *_args, **_kwargs: []
+        try:
+            result = await tm._drive_cli_run(
+                prompt="do it",
+                cwd="/tmp",
+                model="gpt-5.5",
+                session_id=codex_sid,
+                ws_callback=ws_callback,
+                app_session_id=app_sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id=str(uuid.uuid4()),
+            )
+        finally:
+            turn_manager_mod.runtime_skill_contexts = original_runtime
+            turn_manager_mod.extension_audit_context = original_audit
+            turn_manager_mod.extension_user_instruction_contexts = original_instructions
+        events = result.get("events") or []
+        if result.get("success") is not True:
+            print(f"  expected success result, got {result!r}")
+            return False
+        if not any(
+            block.get("type") == "tool_result"
+            for event in events
+            for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
+            if isinstance(block, dict)
+        ):
+            print(f"  result events missing structured tool_result: {events!r}")
+            return False
+        output = _extract_output_text(events)
+        if "hidden-tool-output" in output or "visible final answer" not in output:
+            print(f"  bad extracted output: {output!r}")
+            return False
+        if not any(event.get("type") == "agent_message" for event in ws_events):
+            print(f"  replayed events were not emitted through ws_callback: {ws_events!r}")
+            return False
+        return True
+
+    return asyncio.run(_run())
+
+
 def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
@@ -1339,6 +1542,9 @@ TESTS = [
     ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
     ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),
     ("codex MCP string error normalizes", test_codex_mcp_string_error_normalizes),
+    ("codex dead-runner replay preserves tool result structure", test_codex_dead_runner_replay_preserves_tool_result_structure),
+    ("codex replay dedup allows mutated same uuid", test_codex_replay_dedup_allows_mutated_same_uuid),
+    ("turn manager dead runner replays codex rollout events", test_turn_manager_dead_runner_replays_codex_rollout_events),
     ("codex replay includes child subagent panel events", test_codex_replay_includes_child_subagent_panel_events),
     ("codex replay derives missing child sources from actual wait shape", test_codex_replay_derives_missing_child_sources_from_actual_wait_shape),
     ("codex replay splits reused child by parent tool call", test_codex_replay_splits_reused_child_by_parent_tool_call),
