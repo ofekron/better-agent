@@ -98,6 +98,149 @@ def test_event_emitter_shapes():
     assert lines[-1]["parentUuid"] is not None
 
 
+def test_zai_stream_payload_uses_preserved_thinking_and_tool_stream():
+    runner = _mod("runner_better_agent")
+    captured = {"payloads": []}
+
+    class _Resp:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}'
+            yield "data: [DONE]"
+
+        async def aread(self):
+            return b""
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, *, json=None, headers=None):
+            captured["payloads"].append(json or {})
+            return _Resp()
+
+    original = runner.httpx.AsyncClient
+    runner.httpx.AsyncClient = _Client
+    try:
+        async def _go_zai():
+            async for _ in runner._stream_chat(
+                "https://api.z.ai/api/coding/paas/v4",
+                "key",
+                "glm-5.2",
+                [{"role": "user", "content": "hi"}],
+                [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}],
+                reasoning_effort="medium",
+            ):
+                pass
+
+        async def _go_openai():
+            async for _ in runner._stream_chat(
+                "https://api.openai.com/v1",
+                "key",
+                "model",
+                [{"role": "user", "content": "hi"}],
+                [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}],
+                reasoning_effort="medium",
+            ):
+                pass
+
+        asyncio.run(_go_zai())
+        asyncio.run(_go_openai())
+    finally:
+        runner.httpx.AsyncClient = original
+
+    zai_payload, openai_payload = captured["payloads"]
+    assert zai_payload["thinking"] == {"type": "enabled", "clear_thinking": False}
+    assert zai_payload["tool_stream"] is True
+    assert "reasoning_effort" not in zai_payload
+    assert openai_payload["reasoning_effort"] == "medium"
+    assert "thinking" not in openai_payload
+    assert "tool_stream" not in openai_payload
+
+
+def test_better_agent_runner_preserves_zai_reasoning_in_history():
+    runner = _mod("runner_better_agent")
+    seen_messages = []
+
+    async def fake_stream_chat(*args, **kwargs):
+        seen_messages.append(args[3])
+        yield {"choices": [{"delta": {"reasoning_content": "think "}}]}
+        yield {"choices": [{"delta": {"reasoning_content": "step"}}]}
+        yield {"choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}]}
+
+    original_stream = runner._stream_chat
+    old_key = os.environ.get("OPENAI_API_KEY")
+    old_base = os.environ.get("OPENAI_BASE_URL")
+    runner._stream_chat = fake_stream_chat
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            run_dir = Path(d) / "run"
+            run_dir.mkdir()
+            os.environ["OPENAI_API_KEY"] = "key"
+            os.environ["OPENAI_BASE_URL"] = "https://api.z.ai/api/coding/paas/v4"
+            inputs = {
+                "prompt": "question",
+                "images": [],
+                "files": [],
+                "cwd": d,
+                "model": "glm-5.2",
+                "reasoning_effort": "medium",
+                "permission": {"mode": "bypassPermissions"},
+                "session_id": None,
+                "mode": "native",
+                "app_session_id": "app",
+                "disallowed_tools": [],
+                "setting_sources": [],
+                "backend_url": "",
+                "internal_token": "",
+                "fork": False,
+                "bare_config": True,
+                "continuation_chain": [],
+                "provider_run_config": {},
+                "capability_contexts": [],
+                "disabled_builtin_tools": [],
+                "disabled_builtin_extensions": [],
+            }
+            rc = asyncio.run(runner._run(run_dir, inputs))
+            state = json.loads((run_dir / "state.json").read_text())
+            second_run_dir = Path(d) / "run-2"
+            second_run_dir.mkdir()
+            inputs["session_id"] = state["session_id"]
+            rc2 = asyncio.run(runner._run(second_run_dir, inputs))
+            history = json.loads(runner._session_path(state["session_id"]).read_text())
+    finally:
+        runner._stream_chat = original_stream
+        if old_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old_key
+        if old_base is None:
+            os.environ.pop("OPENAI_BASE_URL", None)
+        else:
+            os.environ["OPENAI_BASE_URL"] = old_base
+
+    assert rc == 0
+    assert rc2 == 0
+    prior_assistant = [m for m in seen_messages[1] if m.get("role") == "assistant"][-1]
+    assert prior_assistant["reasoning_content"] == "think step"
+    assistant = [m for m in history["messages"] if m.get("role") == "assistant"][-1]
+    assert assistant["content"] == "answer"
+    assert assistant["reasoning_content"] == "think step"
+
+
 def test_event_emitter_buffers_tool_call_until_arguments_render():
     runner = _mod("runner_better_agent")
     with tempfile.TemporaryDirectory() as d:
