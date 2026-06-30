@@ -168,6 +168,24 @@ function isSidebarVisibleSession(session: Session): boolean {
   );
 }
 
+function canLocallyInsertIntoSessionList(
+  session: Session,
+  filters: SessionListFilters,
+): boolean {
+  if (!isSidebarVisibleSession(session)) return false;
+  if (filters.projectPath && session.cwd !== filters.projectPath) return false;
+  if (filters.search?.trim()) return false;
+  if (!filters.showArchived && session.archived) return false;
+  if (filters.fileEditMode && filters.fileEditMode !== "any") return false;
+  if (filters.folderIds?.length) return false;
+  if (filters.tagIds?.length) return false;
+  if (filters.providerIds?.length) return false;
+  if (filters.modelIds?.length) return false;
+  if (filters.modes?.length) return false;
+  if (filters.sources?.length) return false;
+  return true;
+}
+
 /** Return the two forks bound to an adv-sync overlay, in
  * (supportive, adversarial) order. Used by AdvSyncWindow. Returns
  * empty array if either fork is missing from the tree (e.g. one was
@@ -1233,17 +1251,23 @@ export function useSession(authStatus?: string) {
           throw await responseError(res);
         }
         const session = await res.json();
+        const listFilters = sessionListFiltersRef.current;
+        if (!canLocallyInsertIntoSessionList(session, listFilters)) {
+          void fetchSessionPage(0, true, listFilters);
+        }
         // Dedup: the backend's `session_created` WS broadcast can land
         // on this same tab before this POST `await` resolves, in which
         // case `appendSessionIfNew` already inserted it. Without this
         // check the sidebar shows the new session twice.
-        setSessions((prev) =>
-          sortForList(
-            prev.some((s) => s.id === session.id)
-              ? prev.map((s) => (s.id === session.id ? session : s))
-              : [session, ...prev],
-          ),
-        );
+        if (canLocallyInsertIntoSessionList(session, listFilters)) {
+          setSessions((prev) =>
+            sortForList(
+              prev.some((s) => s.id === session.id)
+                ? prev.map((s) => (s.id === session.id ? session : s))
+                : [session, ...prev],
+            ),
+          );
+        }
         lastEventSeqBySessionRef.current = {
           ...lastEventSeqBySessionRef.current,
           [session.id]: 0,
@@ -2363,11 +2387,15 @@ export function useSession(authStatus?: string) {
    * out backend-side). */
   const appendSessionIfNew = useCallback((session: Session) => {
     if (!isSidebarVisibleSession(session)) return;
+    if (!canLocallyInsertIntoSessionList(session, sessionListFiltersRef.current)) {
+      refetchLoadedSpan();
+      return;
+    }
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
       return sortForList([session, ...prev]);
     });
-  }, [sortForList]);
+  }, [refetchLoadedSpan, sortForList]);
 
   /** Drop a session by id (from a WS `session_deleted` event). Mirrors
    * the optimistic removal in `deleteSession`, but driven by the WS
