@@ -54,12 +54,13 @@ _RUNNER_PATH = Path(__file__).parent / "runner_codex.py"
 _TAIL_POLL_INTERVAL = 0.05
 
 # Cold-start models for when no cache exists yet.
-# Live-probed 2026-06-02 against codex CLI 0.136.0.
+# Live-probed 2026-07-01 against codex CLI 0.139.0.
 # The daily refresh via `fetch_codex_models()` keeps this current.
 CODEX_MODELS = [
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
 ]
 
 
