@@ -30,6 +30,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -176,6 +177,27 @@ def test_derived_from_last_assistant_error() -> None:
     print(f"{PASS} derived_from_last_assistant_error")
 
 
+def test_stale_flag_does_not_override_newer_success() -> None:
+    sid = _mk_session_with_assistant()
+    session_manager.set_assistant_error(sid, "a1", "HTTP 400: bad request")
+    assert session_manager.has_unseen_error(sid) is True
+
+    session_manager.append_user_msg(sid, {"id": "u2", "role": "user", "content": "again"})
+    session_manager.append_assistant_msg(sid, {
+        "id": "a2", "role": "assistant", "content": "ok", "events": [],
+    })
+    session_manager.set_unseen_error(sid, "stale old failure")
+
+    assert session_manager.has_unseen_error(sid) is False, (
+        "stale unseen_error must not mark a session after a newer successful turn"
+    )
+    summary = next(s for s in session_store.list_sessions() if s["id"] == sid)
+    assert summary.get("unseen_error") is None, (
+        "sidebar summary must project only the latest assistant turn failure"
+    )
+    print(f"{PASS} stale_flag_does_not_override_newer_success")
+
+
 def test_persistence_across_reload() -> None:
     sid = _mk_session()
     session_manager.set_unseen_error(sid, "persisted boom")
@@ -197,6 +219,7 @@ def main() -> int:
         test_mark_seen_does_not_clear_error()
         test_clear_retires_dot()
         test_derived_from_last_assistant_error()
+        test_stale_flag_does_not_override_newer_success()
         test_persistence_across_reload()
         print("ALL PASSED")
         return 0
