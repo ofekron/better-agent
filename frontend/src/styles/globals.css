@@ -9226,6 +9226,21 @@ button.run-badge-clickable:focus-visible {
   font-weight: 500;
 }
 
+.provider-runner-pill {
+  font-size: calc(10px * var(--app-font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-weight: 500;
+}
+.provider-runner-pill.runner-better_agent_runner {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .provider-row-meta {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--text-muted);

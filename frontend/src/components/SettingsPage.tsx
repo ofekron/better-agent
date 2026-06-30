@@ -1893,6 +1893,14 @@ function ProvidersSettingsSection({
                   {isActive && (
                     <span className="provider-active-pill">{t('setup.default')}</span>
                   )}
+                  {p.runner && (
+                    <span
+                      className={`provider-runner-pill runner-${p.runner}`}
+                      title={t('setup.runnerHint')}
+                    >
+                      {t(`setup.runner.${p.runner}`, { defaultValue: p.runner })}
+                    </span>
+                  )}
                 </div>
                 <div className="provider-row-meta">
                   {p.mode === "subscription"
