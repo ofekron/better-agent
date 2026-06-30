@@ -1340,7 +1340,6 @@ export function Chat({
                       assistantMessage={g.assistantMessage}
                       runs={g.groupRuns}
                       sessionRunning={g.isLast ? sessionRunning : false}
-                      isLastGroup={g.isLast}
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
                         !!g.assistantMessage &&
