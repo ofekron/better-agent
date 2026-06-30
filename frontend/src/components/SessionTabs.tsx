@@ -1,7 +1,8 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemIntoView } from "src/utils/tabScroll";
+import { sessionLinkMarker } from "src/utils/linkifyFilePaths";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
@@ -37,11 +38,29 @@ export function SessionTabs({
   const activeRef = useRef<HTMLDivElement>(null);
   const prevFirstIdRef = useRef<string | null>(null);
   const prevIdsRef = useRef<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<{
+    sessionId: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   useEffect(() => {
     scrollHorizontalItemIntoView(scrollRef.current, activeRef.current);
   }, [currentSessionId, sessions]);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
 
   // Scroll the tabs strip back to the start when a NEW session becomes
   // the first (leftmost) tab. Fires only when the first tab changed to
@@ -59,6 +78,32 @@ export function SessionTabs({
   }, [sessions]);
 
   if (sessions.length === 0) return null;
+  const contextSession = contextMenu
+    ? sessions.find((session) => session.id === contextMenu.sessionId)
+    : null;
+
+  const openContextMenuAt = (sessionId: string, x: number, y: number) => {
+    const width = 190;
+    const height = 92;
+    setContextMenu({
+      sessionId,
+      x: Math.min(x, Math.max(0, window.innerWidth - width - 8)),
+      y: Math.min(y, Math.max(0, window.innerHeight - height - 8)),
+    });
+  };
+
+  const openContextMenu = (e: MouseEvent, sessionId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenuAt(sessionId, e.clientX, e.clientY);
+  };
+
+  const copySessionMarker = async (session: Session) => {
+    await window.navigator.clipboard.writeText(
+      sessionLinkMarker(session.id, session.name || "Untitled"),
+    );
+    setContextMenu(null);
+  };
 
   return (
     <div
@@ -84,11 +129,19 @@ export function SessionTabs({
             key={s.id}
             data-tab-movement-key={s.id}
             className={`session-tab-wrapper${isActive ? " active" : ""}${topbarPinned ? " topbar-pinned" : ""}`}
+            onContextMenu={(e) => openContextMenu(e, s.id)}
           >
             <button
               type="button"
               className="session-tab"
               onClick={() => onSelect(s.id)}
+              onKeyDown={(e) => {
+                if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  e.preventDefault();
+                  openContextMenuAt(s.id, rect.left + 12, rect.bottom + 4);
+                }
+              }}
               title={`${s.name} (${s.cwd})`}
             >
               <div className="session-tab-content">
@@ -123,20 +176,6 @@ export function SessionTabs({
             >
               <Icon name="pin" size={13} />
             </button>
-            {sessions.length > 1 && (
-              <button
-                type="button"
-                className="session-tab-close-others"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCloseOthers(s.id);
-                }}
-                title={t("session.closeOtherTabsTitle")}
-                aria-label={t("session.closeOtherTabsTitle")}
-              >
-                <Icon name="x-circle" size={13} />
-              </button>
-            )}
             {!topbarPinned && (
               <button
                 type="button"
@@ -154,6 +193,47 @@ export function SessionTabs({
           </div>
         );
       })}
+      {contextMenu && contextSession && (
+        <div
+          className="session-tab-context-menu"
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="session-tab-context-item"
+            data-session-marker={sessionLinkMarker(
+              contextSession.id,
+              contextSession.name || "Untitled",
+            )}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              void copySessionMarker(contextSession);
+            }}
+          >
+            <Icon name="clipboard" size={14} />
+            <span>{t("session.copyAction")}</span>
+          </button>
+          {sessions.length > 1 && (
+            <button
+              type="button"
+              role="menuitem"
+              className="session-tab-context-item"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setContextMenu(null);
+                onCloseOthers(contextSession.id);
+              }}
+            >
+              <Icon name="x-circle" size={14} />
+              <span>{t("session.closeOtherTabsTitle")}</span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

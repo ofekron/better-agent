@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   compactLinkLabel,
   isAbsolutePath,
   linkifyFilePaths,
   parseMarkdownFileHref,
+  sessionLinkMarker,
+  sessionMarkersToMarkdown,
 } from "../src/utils/linkifyFilePaths";
 
 // Regression lock for the Windows file-ref bug: handleOpenFilePanel
@@ -107,5 +111,28 @@ describe("linkifyFilePaths", () => {
     expect(html).toContain("runner.py:963");
     expect(html).not.toContain("[backend/runner.py]");
     expect(html).not.toContain("(runner.py:963)");
+  });
+
+  it("renders Better Agent session markers as smart session links", () => {
+    const marker = sessionLinkMarker("session-abcdef", "Linked Session");
+    const html = renderToStaticMarkup(linkifyFilePaths(`open ${marker}`));
+
+    expect(marker).toBe("[[ba-session:session-abcdef|Linked%20Session]]");
+    expect(html).toContain("Linked Session · sess");
+    expect(html).not.toContain("[[ba-session:");
+  });
+
+  it("converts session markers for markdown renderers", () => {
+    expect(sessionMarkersToMarkdown(sessionLinkMarker("session-abcdef", "Linked Session")))
+      .toBe("[Linked Session · sess](/s/session-abcdef)");
+  });
+
+  it("opens the session route when a smart session link is clicked", () => {
+    window.history.pushState(null, "", "/");
+    render(createElement("div", null, linkifyFilePaths(sessionLinkMarker("session-abcdef", "Linked Session"))));
+
+    fireEvent.click(screen.getByRole("link", { name: "Linked Session · sess" }));
+
+    expect(window.location.pathname).toBe("/s/session-abcdef");
   });
 });

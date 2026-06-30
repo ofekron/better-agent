@@ -20,6 +20,7 @@ const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const FILE_LIKE_RE = /(?:^|[/\\])[^/\\?#]+\.[A-Za-z0-9]{1,8}(?::\d+(?:-\d+)?)?$/;
 const REL_FILE_WITH_LINE_RE = /^[^:/\\?#]+\.[A-Za-z0-9]{1,8}:\d+(?:-\d+)?$/;
 const TRAILING_SLASH_RE = /[/\\]+$/;
+const SESSION_LINK_MARKER_RE = /\[\[ba-session:([^|\]\n]+)\|([^\]\n]*)\]\]/g;
 
 /** True for POSIX (`/x`), Windows drive (`C:\x`, `C:/x`) and UNC
  * (`\\server`) absolute paths. Mirrors the backend file_ref_resolver
@@ -118,6 +119,51 @@ function normalizeComparableLink(value: string): string {
   return value.trim().replace(TRAILING_SLASH_RE, "");
 }
 
+function decodeMarkerPart(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function sessionLinkLabel(sessionId: string, name: string): string {
+  const label = name.trim() || "Session";
+  return `${label} · ${sessionId.slice(0, 4)}`;
+}
+
+function sessionPath(sessionId: string): string {
+  return `/s/${encodeURIComponent(sessionId)}`;
+}
+
+function parseSessionHref(href: string): { sessionId: string } | null {
+  const m = href.match(/^\/s\/([^/?#]+)\/?$/);
+  if (!m) return null;
+  try {
+    return { sessionId: decodeURIComponent(m[1]) };
+  } catch {
+    return { sessionId: m[1] };
+  }
+}
+
+function openSession(sessionId: string) {
+  const path = sessionPath(sessionId);
+  if (window.location.pathname !== path) window.history.pushState(null, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+export function sessionLinkMarker(sessionId: string, name: string): string {
+  return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(name)}]]`;
+}
+
+export function sessionMarkersToMarkdown(text: string): string {
+  return text.replace(SESSION_LINK_MARKER_RE, (_whole, rawId, rawName) => {
+    const sessionId = decodeMarkerPart(rawId);
+    const name = decodeMarkerPart(rawName);
+    return `[${sessionLinkLabel(sessionId, name)}](${sessionPath(sessionId)})`;
+  });
+}
+
 export function compactLinkLabel(href: string, label?: string | null): string {
   const trimmedHref = href.trim();
   const trimmedLabel = label?.trim();
@@ -187,6 +233,33 @@ function FileLinkButton({
   );
 }
 
+function SessionLinkButton({
+  sessionId,
+  label,
+}: {
+  sessionId: string;
+  label: ReactNode;
+}) {
+  const activate = (e: SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    openSession(sessionId);
+  };
+  return (
+    <span
+      role="link"
+      tabIndex={0}
+      className="session-smart-link"
+      onClick={activate}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") activate(e);
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 /** Walk a React tree replacing `bcfile:` markdown link tokens
  * (`[label](bcfile:...)`) inside text nodes with FileLinkButton. Uses
  * `[label](bcfile:href)` syntax found in raw text — used only for
@@ -195,10 +268,11 @@ function FileLinkButton({
  * `markdownLinkifyComponents` instead. */
 const RAW_MARKDOWN_FILE_LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
 
-function linkifyRawString(
+function linkifyRawFileString(
   text: string,
-  onFileClick: (path: string, focus?: FileFocus) => void,
+  onFileClick?: (path: string, focus?: FileFocus) => void,
 ): ReactNode {
+  if (!onFileClick) return text;
   const parts: ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
@@ -240,6 +314,36 @@ function linkifyRawString(
   return <>{parts}</>;
 }
 
+function linkifyRawString(
+  text: string,
+  onFileClick?: (path: string, focus?: FileFocus) => void,
+): ReactNode {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const re = new RegExp(SESSION_LINK_MARKER_RE.source, "g");
+  while ((m = re.exec(text)) !== null) {
+    const [whole, rawId, rawName] = m;
+    const start = m.index;
+    if (start > last) {
+      parts.push(linkifyRawFileString(text.slice(last, start), onFileClick));
+    }
+    const sessionId = decodeMarkerPart(rawId);
+    const name = decodeMarkerPart(rawName);
+    parts.push(
+      <SessionLinkButton
+        key={`session-${start}-${sessionId}`}
+        sessionId={sessionId}
+        label={sessionLinkLabel(sessionId, name)}
+      />,
+    );
+    last = start + whole.length;
+  }
+  if (last === 0) return linkifyRawFileString(text, onFileClick);
+  if (last < text.length) parts.push(linkifyRawFileString(text.slice(last), onFileClick));
+  return <>{parts}</>;
+}
+
 /** Walk a React node tree replacing bcfile: markdown-link tokens with
  * clickable buttons. Used by non-markdown renderers (raw <pre>, plain
  * text). Markdown renderers should use `markdownLinkifyComponents`. */
@@ -247,7 +351,6 @@ export function linkifyFilePaths(
   children: ReactNode,
   onFileClick?: (path: string, focus?: FileFocus) => void,
 ): ReactNode {
-  if (!onFileClick) return children;
   if (children === null || children === undefined || typeof children === "boolean") {
     return children;
   }
@@ -293,6 +396,15 @@ export function markdownLinkifyComponents(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function Anchor({ href, children, ...props }: any) {
     const parsed = typeof href === "string" ? parseMarkdownFileHref(href) : null;
+    const parsedSession = typeof href === "string" ? parseSessionHref(href) : null;
+    if (parsedSession) {
+      return (
+        <SessionLinkButton
+          sessionId={parsedSession.sessionId}
+          label={plainText(children) ?? sessionLinkLabel(parsedSession.sessionId, "")}
+        />
+      );
+    }
     if (parsed && onFileClick) {
       const mediaType = getMediaType(parsed.path);
       if (mediaType) {

@@ -607,13 +607,42 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions } });
 
     expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 3)).toBe(true);
-    await h.click('[data-tab-movement-key="sess-2"] .session-tab-close-others');
+    h.$('[data-tab-movement-key="sess-2"] .session-tab')?.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }),
+    );
+    expect(await waitFor(h, () => Boolean(h.$(".session-tab-context-menu")))).toBe(true);
+    expect(h.$$(".session-tab-context-item").length).toBe(2);
+    h.$("button.session-tab-context-item:last-child")?.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
+    await h.flush();
 
     expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 1)).toBe(true);
     expect(h.$(".session-tabs")?.textContent ?? "").toContain("Two");
     expect(window.location.pathname).toBe("/s/sess-2");
     expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
       .toEqual(["sess-2"]);
+    h.unmount();
+  }, 10000);
+
+  it("copies a smart session marker from the tab context menu", async () => {
+    const session = makeSession({
+      id: "sess-copy-1234",
+      name: "Copy Source",
+      cwd: "/tmp/project-a",
+    });
+    window.history.pushState(null, "", "/s/sess-copy-1234");
+    localStorage.setItem("better-agent-open-session-ids", JSON.stringify([session.id]));
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 1)).toBe(true);
+    h.$('[data-tab-movement-key="sess-copy-1234"] .session-tab')?.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }),
+    );
+    expect(await waitFor(h, () => Boolean(h.$(".session-tab-context-menu")))).toBe(true);
+    expect(h.$$(".session-tab-context-item").length).toBe(1);
+    expect(h.$("button.session-tab-context-item")?.dataset.sessionMarker)
+      .toBe("[[ba-session:sess-copy-1234|Copy%20Source]]");
     h.unmount();
   }, 10000);
 
