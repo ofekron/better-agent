@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 import httpx
+import config_store
 
 from provider import (
     Provider,
@@ -241,6 +242,7 @@ class OpenAIProvider(Provider):
             raise RuntimeError(
                 f"provider {self.id} is defunct; cannot start new runs"
             )
+        self.assert_not_suspended(action="start new runs")
         if reasoning_effort:
             normalized_effort = normalize_reasoning_effort(reasoning_effort)
             if normalized_effort is None:
@@ -272,7 +274,6 @@ class OpenAIProvider(Provider):
 
         runner_mode = "manager" if mode == "team" else mode
         from session_manager import manager as _sm
-        import config_store
         import user_prefs
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
@@ -719,6 +720,9 @@ class OpenAIProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
+        if config_store.provider_suspended(self.id):
+            return recovered
+
         for child in iter_run_dirs(run_id_filter):
             marker_path = child / "reconciled.marker"
             if marker_path.exists() and marker_matches_current(marker_path, self.KIND):
@@ -838,6 +842,7 @@ class OpenAIProvider(Provider):
         source session is not mutated. `no_tools` is accepted for parity — this
         path never sends tools.
         """
+        self.assert_not_suspended(action="run headless work")
         del cwd, no_tools
         rec = self.record
         base_url = str(rec.get("base_url") or "").strip()

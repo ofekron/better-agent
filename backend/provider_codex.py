@@ -33,6 +33,7 @@ from provider import (
     schedule_loop_task,
     runner_argv,
 )
+import config_store
 from provider_run_config import normalize_provider_run_config
 from reasoning_effort import CODEX_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from proc_control import process_control as _process_control
@@ -374,6 +375,7 @@ class CodexProvider(Provider):
             raise RuntimeError(
                 f"provider {self.id} is defunct; cannot start new runs"
             )
+        self.assert_not_suspended(action="start new runs")
 
         if mode == "team" and not self.supports_manager_mode:
             raise NotImplementedError(
@@ -388,7 +390,6 @@ class CodexProvider(Provider):
         run_dir.mkdir(parents=True, exist_ok=True)
         runner_mode = "manager" if mode == "team" else mode
         from session_manager import manager as _sm
-        import config_store
         import user_prefs
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
@@ -1056,6 +1057,9 @@ class CodexProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
+        if config_store.provider_suspended(self.id):
+            return recovered
+
         for child in iter_run_dirs(run_id_filter):
             if marker_matches_current(child / "reconciled.marker", self.KIND):
                 continue
@@ -1191,6 +1195,7 @@ class CodexProvider(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         cmd: list[str] = ["codex", "exec", "--skip-git-repo-check"]
         if no_tools:
             # Read-only sandbox: the model can read context but cannot

@@ -5,6 +5,7 @@ TRANSLATIONS: dict[str, str] = {
     "error.cannot_delete_default_provider": "cannot delete the default provider — set another as default first",
     "error.name_required": "name required",
     "error.no_default_provider": "no default provider",
+    "error.provider_suspended": "provider is suspended — cannot {action}",
     "error.invalid_path": "Invalid path",
     "error.orchestration_mode_frozen": "orchestration_mode is frozen after session creation",
     "error.no_recognized_selector": "no recognized selector field",

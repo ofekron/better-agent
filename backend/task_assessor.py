@@ -71,10 +71,16 @@ def _resolve_judge_provider(cfg: dict):
     pid = (cfg or {}).get("provider_id")
     if pid:
         try:
-            return provider_mod.get_provider(pid)
+            prov = provider_mod.get_provider(pid)
+            if getattr(prov, "suspended", False):
+                raise RuntimeError("provider is suspended")
+            return prov
         except Exception:
             logger.info("task_assessor: provider %s unavailable, using default", pid)
-    return provider_mod.default_provider()
+    prov = provider_mod.default_provider()
+    if getattr(prov, "suspended", False):
+        raise RuntimeError("default provider is suspended")
+    return prov
 
 
 def _parse_judge_json(text: str) -> tuple[bool, str] | None:

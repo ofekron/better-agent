@@ -39,6 +39,7 @@ from provider_run_config import normalize_provider_run_config
 from cli_paths import resolve_cli_binary
 from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
+import config_store
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
@@ -373,6 +374,7 @@ class GeminiProvider(Provider):
             raise RuntimeError(
                 f"provider {self.id} is defunct; cannot start new runs"
             )
+        self.assert_not_suspended(action="start new runs")
         if self.record.get("mode", "subscription") == "subscription":
             raise RuntimeError(GEMINI_SUBSCRIPTION_UNSUPPORTED)
         if reasoning_effort:
@@ -412,7 +414,6 @@ class GeminiProvider(Provider):
 
         runner_mode = "manager" if mode == "team" else mode
         from session_manager import manager as _sm
-        import config_store
         import user_prefs
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
@@ -827,6 +828,9 @@ class GeminiProvider(Provider):
         if not _runs_root().exists():
             return recovered
 
+        if config_store.provider_suspended(self.id):
+            return recovered
+
         for child in iter_run_dirs(run_id_filter):
             marker_path = child / "reconciled.marker"
             if marker_path.exists() and marker_matches_current(marker_path, self.KIND):
@@ -935,6 +939,7 @@ class GeminiProvider(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
+        self.assert_not_suspended(action="run headless work")
         cmd: list[str] = ["gemini", "-p", prompt, "-o", "json"]
         if no_tools:
             # Plan mode = read-only; the model cannot run mutating tools.

@@ -9239,6 +9239,12 @@ button.run-badge-clickable:focus-visible {
   background: var(--accent-dim);
 }
 
+.provider-row.suspended {
+  border-color: rgba(210, 153, 34, 0.45);
+  background: color-mix(in srgb, var(--bg-tertiary) 82%, rgba(210, 153, 34, 0.22));
+  transition: border-color 180ms ease, background 180ms ease, opacity 180ms ease;
+}
+
 .provider-row-main {
   flex: 1;
   cursor: pointer;
@@ -9265,6 +9271,17 @@ button.run-badge-clickable:focus-visible {
   border-radius: 999px;
   padding: 1px 6px;
   font-weight: 500;
+}
+
+.provider-suspended-pill {
+  font-size: calc(10px * var(--app-font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.55);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-weight: 600;
 }
 
 .provider-runner-pill {
@@ -9334,6 +9351,27 @@ button.run-badge-clickable:focus-visible {
   filter: brightness(1.1);
 }
 .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-warning {
+  padding: 6px 12px;
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  border-radius: 6px;
+  color: #d29922;
+  font-size: calc(12px * var(--app-font-scale));
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: rgba(210, 153, 34, 0.16);
+  border-color: rgba(210, 153, 34, 0.55);
+}
+
+.btn-warning:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -9441,6 +9479,19 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.provider-suspend-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  transition: color 160ms ease;
+}
+
+.provider-suspend-toggle .setup-field-hint {
+  grid-column: 1 / -1;
 }
 
 /* ======================================= */

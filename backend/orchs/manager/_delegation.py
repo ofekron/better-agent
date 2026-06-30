@@ -812,6 +812,8 @@ async def run_delegation_locked(
         with perf.timed("delegate.provider_start_run"):
             import startup_recovery_gate
             await startup_recovery_gate.wait_for_recovery_ready()
+            if getattr(provider, "suspended", False):
+                raise RuntimeError("provider is suspended")
             provider.start_run(
                 run_id=run_id,
                 prompt=worker_prompt,

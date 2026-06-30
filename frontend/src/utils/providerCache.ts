@@ -1,7 +1,7 @@
 import type { Provider } from "../types";
 
 const STORAGE_KEY = "better-agent-provider-cache";
-const VERSION = 3;
+const VERSION = 4;
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 export interface ProviderCache {
@@ -30,6 +30,7 @@ function isProvider(value: unknown): value is Provider {
     && (provider.last_model === undefined || typeof provider.last_model === "string")
     && (provider.last_reasoning_effort === undefined || (typeof provider.last_reasoning_effort === "string" && EFFORTS.has(provider.last_reasoning_effort)))
     && typeof provider.has_api_key === "boolean"
+    && typeof provider.suspended === "boolean"
     && typeof provider.supports_fork === "boolean"
     && typeof provider.supports_manager_mode === "boolean"
     && typeof provider.supports_rewind === "boolean"

@@ -594,6 +594,9 @@ async def refresh_one(pid: str) -> Optional[dict]:
     is not refreshable right now: Gemini CLI not installed, Claude
     subscription Keychain entry missing, api_key empty, etc.
     """
+    import config_store
+    if config_store.provider_suspended(pid):
+        return None
     rec = get_provider_with_key(pid)
     if not rec:
         return None
@@ -670,6 +673,8 @@ async def refresh_all_due(threshold_seconds: int = REFRESH_THRESHOLD_SECONDS):
     now = time.time()
     state = list_providers()
     for rec_public in state.get("providers", []):
+        if rec_public.get("suspended"):
+            continue
         pid = rec_public["id"]
         # Threshold check FIRST — cheap (disk read of small JSON).
         # `_resolve_refresh_fetch` may shell out to `security` /

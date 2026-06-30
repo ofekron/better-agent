@@ -1222,6 +1222,7 @@ export interface Provider {
   default_model: string;
   runner: ProviderRunner;
   runner_options: ProviderRunner[];
+  suspended: boolean;
   reasoning_effort_options: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | "";
   permission_options: PermissionOptions;

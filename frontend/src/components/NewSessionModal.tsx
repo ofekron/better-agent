@@ -256,9 +256,11 @@ export function resolveRoleConfig(
   modelsByProvider: Record<string, string[]>,
   role: "main" | "worker",
 ): RoleConfig {
+  const availableProviders = providers.filter((item) => !item.suspended);
   const provider =
-    providers.find((item) => item.id === saved?.providerId)
-    ?? providers.find((item) => item.id === defaultProviderId);
+    availableProviders.find((item) => item.id === saved?.providerId)
+    ?? availableProviders.find((item) => item.id === defaultProviderId)
+    ?? availableProviders[0];
   if (!provider) return { providerId: "", model: "", reasoningEffort: "", permission: {} };
 
   const models = modelsByProvider[provider.id] ?? [];
@@ -335,7 +337,8 @@ function ProviderModelPicker({
         <select
           value={value.providerId}
           onChange={(e) => {
-            const p = providers.find((pr) => pr.id === e.target.value);
+            const p = providers.find((pr) => pr.id === e.target.value && !pr.suspended);
+            if (!p) return;
             onChange({
               providerId: e.target.value,
               model: p?.last_model || p?.default_model || "",
@@ -345,8 +348,8 @@ function ProviderModelPicker({
           }}
         >
           {providers.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
+            <option key={p.id} value={p.id} disabled={p.suspended}>
+              {p.name}{p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
             </option>
           ))}
         </select>
@@ -678,7 +681,8 @@ export function NewSessionModal({
   // the modal forces "native". The main-role provider picker also
   // filters to capable providers when in manager mode so the user
   // can't pick a Gemini as the manager.
-  const managerCapableProviders = providers.filter(
+  const activeProviders = providers.filter((p) => !p.suspended);
+  const managerCapableProviders = activeProviders.filter(
     (p) => p.supports_manager_mode,
   );
   const managerModeAvailable = teamEnabled && managerCapableProviders.length > 0;
@@ -704,7 +708,7 @@ export function NewSessionModal({
   useEffect(() => {
     if (effectiveOrchestrationMode !== "team") return;
     if (!main.providerId) return;
-    const cur = providers.find((p) => p.id === main.providerId);
+    const cur = activeProviders.find((p) => p.id === main.providerId);
     if (cur && cur.supports_manager_mode) return;
     const fb = managerCapableProviders[0];
     if (fb) {
@@ -715,7 +719,7 @@ export function NewSessionModal({
         permission: resolvePermission(main, fb),
       });
     }
-  }, [effectiveOrchestrationMode, main.providerId, providers, managerCapableProviders]);
+  }, [effectiveOrchestrationMode, main.providerId, activeProviders, managerCapableProviders]);
 
   const addAttachments = useCallback((files: File[]) => {
     files.forEach((file) => {
@@ -1018,7 +1022,7 @@ export function NewSessionModal({
             <ProviderModelPicker
               label={t("newSession.sessionProvider")}
               role="main"
-              providers={providers}
+              providers={activeProviders}
               value={main}
               onChange={setMain}
             />
@@ -1036,7 +1040,7 @@ export function NewSessionModal({
               <ProviderModelPicker
                 label={t("newSession.workerProvider")}
                 role="worker"
-                providers={providers}
+                providers={activeProviders}
                 value={worker}
                 onChange={setWorker}
               />
@@ -1067,7 +1071,7 @@ export function NewSessionModal({
             className="btn-primary"
             opId="session:create"
             onClick={handleCreate}
-            extraDisabled={!(cwd || defaultCwd)}
+            extraDisabled={!(cwd || defaultCwd) || !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
