@@ -6500,9 +6500,7 @@ def _session_detail_snapshot_sync(
         tree["_detail_response_cache_key_parts"] = (
             detail_cache_key[0],
             detail_cache_key[1],
-            _session_event_file_fingerprint(root_id),
             has_events,
-            barrier_seq,
             tuple(sorted(_session_detail_watermarks(
                 root_id,
                 has_events,
@@ -6545,9 +6543,7 @@ def _session_detail_response_cache_key_sync(
     return (
         session_id,
         tree_key,
-        _session_event_file_fingerprint(root_id),
         has_events,
-        barrier_seq,
         tuple(sorted(watermarks.items())),
     )
 
@@ -6559,7 +6555,7 @@ def _session_detail_cached_key_still_current(
     msg_limit: int,
     exchange_count: Optional[int],
 ) -> bool:
-    if len(key) != 6 or key[0] != session_id:
+    if len(key) != 4 or key[0] != session_id:
         return False
     cached_tree_key = key[1]
     root_id = (
@@ -6578,7 +6574,11 @@ def _session_detail_cached_key_still_current(
     )
     if tree_key is None or key[1] != tree_key:
         return False
-    return key[2] == _session_event_file_fingerprint(root_id)
+    has_events, barrier_seq, max_context = _session_event_meta(root_id)
+    watermarks = _session_detail_watermarks(
+        root_id, has_events, barrier_seq, max_context,
+    )
+    return key[2] == has_events and key[3] == tuple(sorted(watermarks.items()))
 
 
 def _floor_events_from_seq(
@@ -6735,7 +6735,7 @@ async def get_session(
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     if cache_key is None:
         cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)
-        if isinstance(cache_key_parts, tuple) and len(cache_key_parts) == 6:
+        if isinstance(cache_key_parts, tuple) and len(cache_key_parts) == 4:
             cache_key = cache_key_parts
     else:
         tree.pop("_detail_response_cache_key_parts", None)

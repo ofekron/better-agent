@@ -1430,7 +1430,7 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     gate_start = source.index("def _can_page_local_summary_order(")
     gate_end = source.index("def _build_local_sessions_page_for_list(", gate_start)
     gate_source = source[gate_start:gate_end]
-    assert 'sort_by in {"updated_at", "last_user_prompt_at"}' in gate_source
+    assert 'sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}' in gate_source
     assert 'sort_by == "last_user_prompt_at"' in route_source
     assert "sessions.list.local_order_page" in route_source
     assert "sessions.list.virtual_count" in route_source
@@ -2653,7 +2653,7 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     helper_end = source.index("def _sessions_list_response(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "asyncio.create_task(_refresh())" in helper_source
-    assert "await asyncio.to_thread(\n                        _builtin_extension_enabled" in helper_source
+    assert "await asyncio.to_thread(\n                        _builtin_extension_runtime_ready" in helper_source
     assert "return cached[1]" in helper_source
 
 
