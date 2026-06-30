@@ -42,6 +42,7 @@ import sys
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
@@ -408,7 +409,7 @@ class EventEmitter:
         self._text_buf: list[str] = []
         self._thinking_uuid: Optional[str] = None
         self._thinking_buf: list[str] = []
-        self._tool_calls: dict[int, dict] = {}  # index -> {uuid, id, name, args}
+        self._tool_calls: dict[int, dict] = {}
         self._model: str = ""
 
     def set_model(self, model: str) -> None:
@@ -457,7 +458,7 @@ class EventEmitter:
         tc = self._tool_calls.get(idx)
         if tc is None:
             tc = {"uuid": _new_uuid(), "id": tc_id or "", "name": name or "",
-                  "args": ""}
+                  "args": "", "emitted": False}
             self._tool_calls[idx] = tc
         if tc_id:
             tc["id"] = tc_id
@@ -465,18 +466,28 @@ class EventEmitter:
             tc["name"] = tc["name"] or name
         if args_delta:
             tc["args"] += args_delta
+        self._emit_tool_call_if_renderable(tc)
+
+    def _emit_tool_call_if_renderable(self, tc: dict, *, force: bool = False) -> bool:
+        args = str(tc.get("args") or "")
+        if not force and (not tc.get("id") or not tc.get("name")):
+            return False
+        if not force and not args.strip():
+            return False
         canonical_name = _canonical_tool_name(tc["name"])
-        # emit current accumulated tool_use (id/name may still be partial until
-        # the chunk that carries them, but the final delta is authoritative).
         try:
-            parsed = json.loads(tc["args"]) if tc["args"] else {}
+            parsed = json.loads(args) if args else {}
         except json.JSONDecodeError:
+            if not force:
+                return False
             parsed = {}
         self._assistant(
             [{"type": "tool_use", "id": tc["id"], "name": canonical_name,
               "input": _canonical_tool_input(canonical_name, parsed)}],
             uuid_str=tc["uuid"],
         )
+        tc["emitted"] = True
+        return True
 
     def close_text(self) -> Optional[str]:
         """Finalize the text block, advance parent, return the text."""
@@ -501,6 +512,8 @@ class EventEmitter:
         last_uuid: Optional[str] = None
         for idx in sorted(self._tool_calls):
             tc = self._tool_calls[idx]
+            if not tc.get("emitted"):
+                self._emit_tool_call_if_renderable(tc, force=True)
             last_uuid = tc["uuid"]
             canonical_name = _canonical_tool_name(tc["name"])
             calls.append({"id": tc["id"], "name": canonical_name,
@@ -542,8 +555,23 @@ class EventEmitter:
 # tools
 # --------------------------------------------------------------------------
 
+_MARKDOWN_LINK_RE = re.compile(r"^\[[^\]\n]*\]\((?P<href>[^)\n]+)\)$")
+
+
+def _tool_path_arg(raw: Any) -> str:
+    value = str(raw or "").strip()
+    match = _MARKDOWN_LINK_RE.match(value)
+    if match:
+        value = match.group("href").strip()
+    if value.startswith("bcfile:"):
+        parsed = urllib.parse.urlparse(value)
+        value = urllib.parse.unquote(parsed.path)
+    return value
+
+
 def _confined_path(cwd: Path, raw: str) -> Path:
     """Resolve raw against cwd and refuse escapes (.., absolute, symlink)."""
+    raw = _tool_path_arg(raw)
     cwd = cwd.resolve()
     candidate = (cwd / raw).resolve() if not os.path.isabs(raw) else Path(raw).resolve()
     if candidate != cwd and cwd not in candidate.parents:
@@ -570,6 +598,7 @@ def _declared_runtime_skill_dirs(cwd: Path) -> set[Path]:
 
 
 def _readable_path(cwd: Path, raw: str) -> Path:
+    raw = _tool_path_arg(raw)
     try:
         return _confined_path(cwd, raw)
     except PermissionError:
