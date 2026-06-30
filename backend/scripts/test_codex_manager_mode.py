@@ -4,6 +4,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import _test_home
 _test_home.isolate("bc-test-codex-manager-")
 
@@ -18,6 +20,13 @@ def check(cond: bool, msg: str, failures: list[str]) -> None:
     print(("PASS " if cond else "FAIL ") + msg)
     if not cond:
         failures.append(msg)
+
+
+@pytest.fixture
+def failures() -> list[str]:
+    collected: list[str] = []
+    yield collected
+    assert not collected
 
 
 def test_codex_provider_advertises_manager_mode(failures: list[str]) -> None:
