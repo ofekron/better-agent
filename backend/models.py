@@ -341,6 +341,12 @@ def fetch_openai_models(base_url: str, api_key: str) -> list[str]:
     return models
 
 
+def _runtime_kind_for_provider(provider: dict) -> str:
+    if str(provider.get("runner") or "").strip() == "better_agent_runner":
+        return "openai"
+    return provider.get("kind", "claude")
+
+
 def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     """For a provider record, return a zero-arg callable that fetches
     the live model list (sync, intended for `asyncio.to_thread`), or
@@ -357,7 +363,7 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     captured value stays valid. Intentional — we don't want to re-read
     the keychain after the per-provider lock is held.
     """
-    kind = rec.get("kind", "claude")
+    kind = _runtime_kind_for_provider(rec)
     if kind == "claude":
         base_url = rec.get("base_url") or "https://api.anthropic.com"
         mode = rec.get("mode", "subscription")
@@ -418,7 +424,7 @@ def _static_cold_start(provider: dict) -> list[str]:
     """Cold-start data when no cache exists. Subscription Claude →
     `_SUBSCRIPTION_ALIASES`. Gemini → curated `GEMINI_MODELS`. Other
     cases → []. Explicit kind+mode pairing — no implicit fallthrough."""
-    kind = provider.get("kind", "claude")
+    kind = _runtime_kind_for_provider(provider)
     if kind == "gemini":
         from provider_gemini import GEMINI_MODELS
         return list(GEMINI_MODELS)

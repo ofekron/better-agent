@@ -114,6 +114,8 @@ def resolve_for_run(
         except Exception:
             record = None
     kind = (record or {}).get("kind") or fallback_kind
+    if isinstance(record, dict) and str(record.get("runner") or "").strip() == "better_agent_runner":
+        kind = "openai"
     return resolve_permission(
         kind,
         (owner or {}).get("permission") if isinstance(owner, dict) else None,

@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   modesForKind,
   availableModesForForm,
   apiEnvCopyForKind,
   showConfigDirForKind,
 } from "../src/components/providerFormShape";
+
+const settingsPageSource = readFileSync("src/components/SettingsPage.tsx", "utf8");
 
 describe("modesForKind", () => {
   it("restricts openai and gemini to api_key", () => {
@@ -57,5 +60,17 @@ describe("showConfigDirForKind", () => {
     expect(showConfigDirForKind("openai")).toBe(false);
     expect(showConfigDirForKind("claude")).toBe(true);
     expect(showConfigDirForKind("codex")).toBe(true);
+  });
+});
+
+describe("Fugu runner selector wiring", () => {
+  it("offers both native and Better Agent runners for fugu", () => {
+    expect(settingsPageSource).toContain('if (kind === "fugu") return ["native", "better_agent_runner"]');
+  });
+
+  it("routes Better Agent runner form behavior through openai semantics", () => {
+    expect(settingsPageSource).toContain('runner === "better_agent_runner" ? "openai" : kind');
+    expect(settingsPageSource).toContain('setMode("api_key")');
+    expect(settingsPageSource).toContain('SAKANA_FUGU_API_BASE_URL');
   });
 });
