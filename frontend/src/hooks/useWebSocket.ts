@@ -1253,7 +1253,11 @@ export function useWebSocket(
             };
             originated_by?: string | null;
           };
-          if (d.session_id && d.patch && d.originated_by !== clientIdRef.current) {
+          if (
+            d.session_id &&
+            d.patch &&
+            (d.originated_by == null || d.originated_by !== clientIdRef.current)
+          ) {
             onSessionMetadataUpdatedRef.current?.(d.session_id, d.patch);
           }
         }

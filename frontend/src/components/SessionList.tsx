@@ -2208,14 +2208,17 @@ export function SessionList({
   );
 
   // Pinned anchor: the currently-selected session, shown above the
-  // toolbar so it stays visible regardless of search/scroll. Looked up
-  // from the full prop list (not `filtered`) so an active search filter
-  // never hides it.
+  // toolbar when it belongs to the current backend-filtered result set.
   const selectedSession =
     (currentSessionId &&
-      (sessions.find((s) => s.id === currentSessionId) ??
-        allSessions?.find((s) => s.id === currentSessionId) ??
-        (selectedSessionProp?.id === currentSessionId ? selectedSessionProp : null))) ||
+      (filtered.find((s) => s.id === currentSessionId) ??
+        (!searchQueryActive &&
+        selectedSessionProp?.id === currentSessionId &&
+        (!selectedSessionProp.working_mode ||
+          (selectedSessionProp.working_mode === "file_editing" &&
+            selectedSessionProp.working_mode_meta?.persistent === true))
+          ? selectedSessionProp
+          : null))) ||
     null;
 
   return (
