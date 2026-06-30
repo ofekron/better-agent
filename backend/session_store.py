@@ -401,6 +401,16 @@ _SUMMARY_PROJECTION_FIELDS = (
 )
 
 
+def current_turn_error(session: dict) -> Optional[str]:
+    for msg in reversed(session.get("messages") or []):
+        if msg.get("role") != "assistant":
+            continue
+        error = msg.get("error")
+        return str(error) if error else None
+    error = session.get("unseen_error")
+    return str(error) if error else None
+
+
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
@@ -450,7 +460,7 @@ def _build_summary_for_root(
         "message_count": len(_msgs),
         "first_prompt": _first_user_prompt(root),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
-        "unseen_error": root.get("unseen_error"),
+        "unseen_error": current_turn_error(root),
         "orchestration_mode": _normalize_orchestration_mode(
             root.get("orchestration_mode")
         ),

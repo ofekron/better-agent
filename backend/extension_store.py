@@ -4656,6 +4656,24 @@ def _ui_hook_enabled(settings: dict[str, dict[str, Any]], extension_id: str, key
     return bool(settings.get(extension_id, {}).get(key, True))
 
 
+# Quick-button supersession: while the superseding extension is active
+# (installed + enabled + entitled), the superseded extension's quick button is
+# hidden so the superseder's button takes its place. The button reappears the
+# moment the superseder is uninstalled or disabled, provided the superseded
+# extension is itself active and runtime-ready. A None superseder id (absent
+# private registry in a pure-public checkout) never supersedes — fail open.
+_QUICK_BUTTON_SUPERSEDED_BY: dict[str, str | None] = {
+    BUILTIN_ASK_EXTENSION_ID: BUILTIN_ASSISTANT_EXTENSION_ID,
+}
+
+
+def _quick_button_superseded(extension_id: str) -> bool:
+    superseder = _QUICK_BUTTON_SUPERSEDED_BY.get(extension_id)
+    if not superseder:
+        return False
+    return is_extension_active(superseder)
+
+
 def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     """Quick buttons and pages for every active extension (built-ins
     included), filtered by per-extension UI-surface toggles."""
@@ -4675,7 +4693,11 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
         entrypoints = manifest.get("entrypoints") or {}
 
         quick_button = entrypoints.get("quick_button") or {}
-        if quick_button and _ui_hook_enabled(settings, extension_id, "quick_button_enabled"):
+        if (
+            quick_button
+            and _ui_hook_enabled(settings, extension_id, "quick_button_enabled")
+            and not _quick_button_superseded(extension_id)
+        ):
             item: dict[str, Any] = {
                 "extension_id": extension_id,
                 "extension_name": extension_name,
