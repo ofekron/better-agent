@@ -256,6 +256,42 @@ def _save_history(agent_session_id: str, messages: list[dict]) -> None:
     )
 
 
+def _resume_safe_messages(messages: list[dict]) -> list[dict]:
+    """Drop a dangling trailing assistant tool-call block whose tool
+    results are not all present.
+
+    Strict OpenAI-compatible endpoints reject a resume whose history ends
+    with an assistant `tool_calls` message that lacks a matching `tool`
+    message for every call id. Incremental persistence can capture exactly
+    that mid-flight shape (assistant emitted tool_calls; some/all results
+    not appended yet). Trimming the unbalanced tail keeps each on-disk
+    snapshot independently resumable; the post-tool-loop save restores the
+    block once every result is present.
+    """
+    if not messages:
+        return messages
+    # Collect tool_call_ids already answered by a trailing run of tool msgs.
+    answered: set[str] = set()
+    i = len(messages) - 1
+    while i >= 0 and messages[i].get("role") == "tool":
+        tcid = messages[i].get("tool_call_id")
+        if tcid:
+            answered.add(str(tcid))
+        i -= 1
+    # `i` now points at the message just before the trailing tool run.
+    if i < 0 or messages[i].get("role") != "assistant":
+        return messages
+    tool_calls = messages[i].get("tool_calls") or []
+    if not tool_calls:
+        return messages
+    required = {str(c.get("id")) for c in tool_calls if c.get("id")}
+    if required and required.issubset(answered):
+        return messages  # fully balanced — safe to persist as-is
+    # Unbalanced: drop the assistant tool-call block and its partial
+    # results so the snapshot ends on a clean assistant/user/tool-free turn.
+    return messages[:i]
+
+
 # --------------------------------------------------------------------------
 # prompt / attachment shaping
 # --------------------------------------------------------------------------
@@ -1737,6 +1773,12 @@ async def _stream_chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+        # Incremental history persistence trims an unbalanced trailing
+        # assistant-tool block so every on-disk snapshot is resumable. Keep
+        # provider rounds single-tool so that trimming is atomic: a restart can
+        # never drop one already-completed tool result from a multi-call block
+        # and then replay its side effect.
+        payload["parallel_tool_calls"] = False
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -1845,6 +1887,30 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if prompt or inputs.get("images"):
         messages.append({"role": "user", "content": _build_user_content(prompt, inputs.get("images") or [])})
 
+    def _persist_history() -> None:
+        # Durable context must survive a turn that never reaches normal
+        # completion (still in-flight when the next turn starts, cancelled,
+        # SIGKILLed, or a backend restart mid-turn). Saving only at the end
+        # of `_run` would lose the entire turn's context on any of those
+        # paths, so the next resume ("continue") would load empty history
+        # and report it has no context. Persist incrementally after every
+        # mutation, always excluding the transient per-turn capability
+        # system message so it is never baked into the durable transcript.
+        if transient_capability_message is not None:
+            durable = [m for m in messages if m is not transient_capability_message]
+        else:
+            durable = list(messages)
+        # Never persist an unbalanced trailing tool-call block: an assistant
+        # message with tool_calls whose results have not all been appended yet
+        # would 400 on resume ("tool_calls without matching tool responses").
+        # Trim that dangling block so each incremental write is resume-safe;
+        # the next save after the tool loop re-adds it once balanced.
+        _save_history(session_id, _resume_safe_messages(durable))
+
+    # Persist the user turn immediately so even a turn that dies before the
+    # first model round still leaves the prompt in durable history.
+    _persist_history()
+
     events_path = run_dir / "session_events.jsonl"
     emitter = EventEmitter(events_path)
     emitter.set_model(model)
@@ -1873,7 +1939,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             if (run_dir / "cancel").exists():
                 error = "cancelled"
                 break
-            steer_offset, _ = _drain_steer_messages(run_dir, steer_offset, messages)
+            steer_offset, steered = _drain_steer_messages(run_dir, steer_offset, messages)
+            if steered:
+                _persist_history()
             finish_reason, tool_calls, asst_text, chunk_usage = await _one_round(
                 base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
                 reasoning_effort=reasoning_effort,
@@ -1905,6 +1973,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         for c in tool_calls
                     ]
                 messages.append(asst_msg)
+                # Persist the assistant turn now: if the process is killed
+                # while tools run (or the next turn resumes mid-flight) the
+                # prior reasoning/tool_calls are still in durable history.
+                _persist_history()
 
             if not tool_calls or finish_reason == "stop":
                 # A steer can arrive while the final response is streaming.
@@ -1914,6 +1986,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 # silently dropping it.
                 steer_offset, steered = _drain_steer_messages(run_dir, steer_offset, messages)
                 if steered:
+                    _persist_history()
                     continue
                 break
 
@@ -1930,6 +2003,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
                 })
+                # Persist after each tool result so a kill between tool calls
+                # still leaves a resume-safe (balanced-so-far) transcript.
+                _persist_history()
             if error:
                 break
         else:
@@ -1943,12 +2019,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 "ending the turn; raise max_tool_loops or let the model finish"
             )
 
-        if transient_capability_message is not None:
-            messages = [msg for msg in messages if msg is not transient_capability_message]
-        _save_history(session_id, messages)
+        _persist_history()
     except Exception as e:
         logger.exception("openai runner loop failed")
         error = f"{type(e).__name__}: {e}"
+        # Best-effort durable save even on an unexpected loop failure, so the
+        # context accumulated before the crash survives for the next resume.
+        try:
+            _persist_history()
+        except Exception:
+            logger.exception("openai runner: history persist after failure failed")
 
     if error:
         emitter.emit_error(error)

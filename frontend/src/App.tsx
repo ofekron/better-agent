@@ -4303,8 +4303,19 @@ function AppMain({
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
         capabilityContexts,
       };
+      // Buffer to durable localStorage FIRST so a reconnect/reload can replay
+      // the action even if this tab never gets to dispatch it. `offlineQueued`
+      // is false only when localStorage could not persist it (quota / private
+      // mode); `persistFailed` then drives the degraded-buffering warning.
       const offlineQueued = offlineQueue.enqueue(offlineEntry);
-      if (!offlineQueued) {
+
+      // The action is neither deliverable now nor durably buffered, so
+      // accepting it would risk silent loss on reload. Fail closed: drop the
+      // optimistic surfaces and return false so InputArea restores the draft
+      // (text + attachments) and the user can retry after freeing space. A
+      // full buffer must NEVER block a deliverable online send, so this only
+      // fires on the two paths where the WS cannot carry the prompt.
+      const abandonUndeliverableUndurable = () => {
         logPromptSend("app_offline_persist_failed", {
           app_session_id: sessionId,
           client_id: clientIdForMsg,
@@ -4316,10 +4327,15 @@ function AppMain({
         setPendingForSession(sessionId, (prev) =>
           prev.filter((m) => m.id !== clientIdForMsg)
         );
-        return false;
-      }
+      };
 
       if (currentSession.offline_pending) {
+        // No backend session exists yet, so the WS path is unavailable by
+        // construction: localStorage is the ONLY carrier across a reload.
+        if (!offlineQueued) {
+          abandonUndeliverableUndurable();
+          return false;
+        }
         logPromptSend("app_offline_pending_session", {
           app_session_id: sessionId,
           client_id: clientIdForMsg,
@@ -4360,6 +4376,13 @@ function AppMain({
       // offline delivery. The optimistic bubble stays visible with
       // status "offline" and is promoted to "sending" on reconnect.
       if (!sent) {
+        // WS not open. If the action is also not durably buffered it cannot
+        // survive a reload — fail closed so the draft is preserved instead of
+        // a phantom "offline" bubble that will never actually send.
+        if (!offlineQueued) {
+          abandonUndeliverableUndurable();
+          return false;
+        }
         logPromptSend("app_ws_send_failed_offline", {
           app_session_id: sessionId,
           client_id: clientIdForMsg,

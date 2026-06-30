@@ -555,6 +555,34 @@ def test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan() -> bool:
     return ok
 
 
+def test_loaded_fork_metadata_write_skips_fork_index_sidecar() -> bool:
+    _reset_home()
+    fork = {
+        **_record("child-fork"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+    }
+    root = _record("target-root", forks=[fork])
+    _write(root)
+    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    session_store._ensure_index()
+    session_store._index_sidecar_write_queue.join()
+    sidecar = Path(_TMP_HOME) / "sessions" / ".fork-index.json"
+    before = sidecar.stat().st_mtime_ns
+
+    root["messages"] = [{"role": "user", "content": "hello"}]
+    session_store.write_session_full(root, bump_updated_at=False)
+    session_store._index_sidecar_write_queue.join()
+    after = sidecar.stat().st_mtime_ns
+
+    ok = before == after and session_store._resolve_root_id("child-fork") == "target-root"
+    print(
+        f"{PASS if ok else FAIL} loaded fork metadata write skips fork-index sidecar"
+        f"{'' if ok else f' before={before} after={after}'}"
+    )
+    return ok
+
+
 def test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write() -> bool:
     _reset_home()
     root = _record("target-root")
@@ -699,6 +727,7 @@ def main() -> int:
             test_concurrent_dir_fingerprint_cache_singleflights(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan(),
+            test_loaded_fork_metadata_write_skips_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),
             test_legacy_fork_summary_backfills_fork_ids(),

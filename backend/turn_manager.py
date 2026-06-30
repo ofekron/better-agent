@@ -54,6 +54,7 @@ from event_shape import (
 )
 from capability_contexts import provider_capability_contexts
 from extension_context_audit import runtime_context as extension_audit_context
+from extension_store import user_instruction_contexts as extension_user_instruction_contexts
 from runtime_skills import runtime_skill_contexts
 from i18n import t
 import llm_call_log
@@ -1748,6 +1749,10 @@ class TurnManager:
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
+        extension_instruction_contexts = await asyncio.to_thread(
+            extension_user_instruction_contexts,
+            bare_config=bool((_session_rec or {}).get("bare_config")),
+        )
         run_capability_contexts = _provider_capability_contexts(
             [*session_capability_contexts, *(capability_contexts or [])],
             provider_kind,
@@ -1755,6 +1760,7 @@ class TurnManager:
         run_capability_contexts = [
             *runtime_capability_contexts,
             *dynamic_capability_contexts,
+            *extension_instruction_contexts,
             *run_capability_contexts,
         ]
         transient_attempt = 0
@@ -1871,6 +1877,10 @@ class TurnManager:
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
+            extension_instruction_contexts = await asyncio.to_thread(
+                extension_user_instruction_contexts,
+                bare_config=bool(_session_rec.get("bare_config")),
+            )
             run_capability_contexts = _provider_capability_contexts(
                 [*session_capability_contexts, *(capability_contexts or [])],
                 provider_kind,
@@ -1878,6 +1888,7 @@ class TurnManager:
             run_capability_contexts = [
                 *runtime_capability_contexts,
                 *dynamic_capability_contexts,
+                *extension_instruction_contexts,
                 *run_capability_contexts,
             ]
 

@@ -4717,6 +4717,11 @@ def ui_hooks_cache_key() -> tuple[Any, ...]:
 _EXT_SETTINGS_SCHEMA_VERSION = 1
 _SETTING_SECRET_SERVICE = "better-agent-extension-setting"
 
+# Free-text, user-authored "how to use this extension" instructions. Distinct
+# from the author-shipped manifest instruction sections: this is the user's own
+# preference text, injected into agent runs only while the extension is active.
+_USER_INSTRUCTIONS_MAX_CHARS = 4_000
+
 
 def _ext_settings_path() -> Path:
     return ba_home() / "extensions" / "extension-settings.json"
@@ -4861,6 +4866,84 @@ def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
     return server_name not in set(disabled)
 
 
+def get_user_instructions(extension_id: str) -> str:
+    """The user's free-text "how to use this extension" preferences.
+
+    Empty string when never set. This is the user's own guidance, separate
+    from the extension author's manifest instruction sections.
+    """
+    if get_extension(extension_id) is None:
+        raise ExtensionError("Extension not installed")
+    entry = _load_ext_settings()["extensions"].get(extension_id, {})
+    raw = entry.get("user_instructions") if isinstance(entry, dict) else ""
+    return raw if isinstance(raw, str) else ""
+
+
+def set_user_instructions(extension_id: str, text: Any) -> str:
+    """Store the user's per-extension instruction text. Trims surrounding
+    whitespace; an empty result clears it. Capped server-side."""
+    if get_extension(extension_id) is None:
+        raise ExtensionError("Extension not installed")
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        raise ExtensionError("user_instructions must be a string")
+    cleaned = text.strip()
+    if len(cleaned) > _USER_INSTRUCTIONS_MAX_CHARS:
+        raise ExtensionError(
+            f"user_instructions is too long (max {_USER_INSTRUCTIONS_MAX_CHARS} characters)"
+        )
+    data = _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    if cleaned:
+        entry["user_instructions"] = cleaned
+    else:
+        entry.pop("user_instructions", None)
+    _save_ext_settings(data)
+    return cleaned
+
+
+def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, Any]]:
+    """Capability-context block carrying the user's per-extension instructions.
+
+    Only active (enabled + runtime-ready) extensions with non-empty user
+    instructions contribute. Returns the provider-uniform capability-context
+    shape consumed by every runner, so the same text reaches Claude, Codex, and
+    Gemini identically and is re-read fresh each turn (restart-tolerant).
+    """
+    if bare_config:
+        return []
+    settings = _load_ext_settings()["extensions"]
+    blocks: list[str] = []
+    for record in list_extensions():
+        if not _record_active(record) or not _record_runtime_ready(record):
+            continue
+        manifest = record.get("manifest") or {}
+        extension_id = str(manifest.get("id") or "")
+        if not extension_id:
+            continue
+        entry = settings.get(extension_id)
+        raw = entry.get("user_instructions") if isinstance(entry, dict) else ""
+        text = raw.strip() if isinstance(raw, str) else ""
+        if not text:
+            continue
+        name = str(manifest.get("name") or extension_id)
+        blocks.append(f"### {name} ({extension_id})\n{text}")
+    if not blocks:
+        return []
+    content = (
+        "Your personal instructions for how to use specific extensions. Follow "
+        "them whenever you use the matching extension's tools or features.\n\n"
+        + "\n\n".join(blocks)
+    )
+    return [{
+        "name": "Extension Instructions",
+        "category": "instructions",
+        "content_kind": "extension_user_instructions",
+        "content": content,
+    }]
+
+
 def harness_delivery_mode(extension_id: str, *, settings: dict[str, Any] | None = None) -> str:
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
@@ -4918,6 +5001,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "harness_delivery": harness_delivery_mode(extension_id),
         "harness_additions": extension_harness_additions(record),
         "internal_llm_tasks": extension_internal_llm_tasks(record),
+        "user_instructions": get_user_instructions(extension_id),
         "ui": get_ui_settings(extension_id),
         "mcp": extension_mcp_servers(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),

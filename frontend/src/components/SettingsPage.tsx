@@ -793,6 +793,7 @@ interface ExtensionConfigRow {
   pageEnabled: boolean;
   harnessAdditions: ExtensionHarnessAddition[];
   internalLlmTasks: string[];
+  userInstructions: string;
   mcp: Array<{ name: string; label: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
@@ -1013,6 +1014,7 @@ export function ExtensionUiSettingsSection() {
             internalLlmTasks: Array.isArray(cfg.internal_llm_tasks)
               ? cfg.internal_llm_tasks.filter((task: unknown): task is string => typeof task === "string" && task.length > 0)
               : [],
+            userInstructions: typeof cfg.user_instructions === "string" ? cfg.user_instructions : "",
             mcp: Array.isArray(cfg.mcp) ? cfg.mcp : [],
             remoteServices: Array.isArray(cfg.remote_services) ? cfg.remote_services : [],
             settingsSchema: Array.isArray(cfg.settings?.schema) ? cfg.settings.schema : [],
@@ -1054,7 +1056,8 @@ export function ExtensionUiSettingsSection() {
           if (!res.ok) throw new Error("patch failed");
         });
       } catch {
-        if (onError) void refresh();
+        if (onError) onError();
+        void refresh();
       }
     },
     [refresh],
@@ -1166,6 +1169,25 @@ export function ExtensionUiSettingsSection() {
     [patch],
   );
 
+  const setUserInstructions = useCallback(
+    (id: string, instructions: string) => {
+      let previous = "";
+      setRows((prev) =>
+        prev.map((r) => {
+          if (r.id !== id) return r;
+          previous = r.userInstructions;
+          return { ...r, userInstructions: instructions };
+        }),
+      );
+      void patch(
+        `/api/extensions/${encodeURIComponent(id)}/user-instructions`,
+        { instructions },
+        () => setRows((prev) => prev.map((r) => (r.id === id ? { ...r, userInstructions: previous } : r))),
+      );
+    },
+    [patch],
+  );
+
   const uninstallExtension = useCallback(
     async (id: string, name: string) => {
       if (!window.confirm(t("settings.extensionsUninstallConfirm", { name }))) return;
@@ -1271,6 +1293,16 @@ export function ExtensionUiSettingsSection() {
                 </div>
               </ExtensionConfigGroup>
             )}
+            <ExtensionConfigGroup
+              title={t("settings.extensionsUserInstructions")}
+              description={t("settings.extensionsUserInstructionsHelp")}
+            >
+              <ExtensionUserInstructionsField
+                value={row.userInstructions}
+                placeholder={t("settings.extensionsUserInstructionsPlaceholder")}
+                onSave={(text) => setUserInstructions(row.id, text)}
+              />
+            </ExtensionConfigGroup>
             {row.internalLlmTasks.length > 0 && (
               <ExtensionConfigGroup
                 title={t("settings.internalLlmTitle")}
@@ -1412,6 +1444,38 @@ export function ExtensionUiSettingsSection() {
         </div>
       ))}
     </div>
+  );
+}
+
+function ExtensionUserInstructionsField({
+  value,
+  placeholder,
+  onSave,
+}: {
+  value: string;
+  placeholder: string;
+  onSave: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Re-sync when the persisted value changes from elsewhere (e.g. refresh).
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+  const commit = useCallback(() => {
+    const next = draft.trim();
+    if (next === value.trim()) return;
+    onSave(next);
+  }, [draft, value, onSave]);
+  return (
+    <textarea
+      className="extension-ui-settings-instructions-input"
+      value={draft}
+      placeholder={placeholder}
+      rows={3}
+      maxLength={4000}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+    />
   );
 }
 
