@@ -4017,15 +4017,25 @@ _MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE"
 _RUNNING_STATES = ("active", "waiting_on_background")
 
 
+def _has_open_work_items(session: dict) -> bool:
+    items = (
+        list(session.get("current_todos") or [])
+        + list(session.get("current_tasks") or [])
+    )
+    return any(
+        (item or {}).get("status") != "completed"
+        for item in items
+        if isinstance(item, dict)
+    )
+
+
 def _session_status_rank(
     session: dict,
     monitoring_by_sid: dict[str, str],
     unread_by_sid: dict[str, int],
     pending_input_by_sid: dict[str, int] | None = None,
 ) -> int:
-    """Status bucket for the status-sort option (higher sorts first under
-    reverse=True): 5 waiting-for-user, 4 running, 3 needs-user-decision,
-    2 has-new, 1 all-tasks-done, 0 none. Highest applicable bucket wins."""
+    """Status bucket for the status-sort option. Higher sorts first."""
     sid = session.get("id") or ""
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
@@ -4040,24 +4050,28 @@ def _session_status_rank(
         pending_input_count = max(0, int(pending_inputs or 0))
     except (TypeError, ValueError):
         pending_input_count = 0
-    # A pending approval or explicit request_user_input question blocks
-    # everything else — it sorts above even a running turn so the user sees it.
-    if state == "blocked_on_user" or pending_input_count > 0:
-        return 5
-    if state in _RUNNING_STATES:
-        return 4
+    if session.get("has_error") or session.get("unseen_error"):
+        return 6
     markers = session.get("markers") or {}
     tags = {
         (m or {}).get("tag")
         for m in markers.values()
         if isinstance(m, dict)
     }
-    if _MARKER_TAG_NEEDS_DECISION in tags:
-        return 3
+    if (
+        state == "blocked_on_user"
+        or pending_input_count > 0
+        or _MARKER_TAG_NEEDS_DECISION in tags
+    ):
+        return 5
     unread = unread_by_sid.get(sid)
     if unread is None:
         unread = session.get("unread_count", 0)
     if (unread or 0) > 0:
+        return 4
+    if _has_open_work_items(session):
+        return 3
+    if state in _RUNNING_STATES:
         return 2
     if _MARKER_TAG_ALL_TASKS_DONE in tags:
         return 1

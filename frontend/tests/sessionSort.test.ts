@@ -88,8 +88,7 @@ describe("sortSessionsForList", () => {
   });
 
   describe("rankOf seam (status sort)", () => {
-    // rankOf mirrors the backend rank: 4 running … 0 none.
-    const rankById: Record<string, number> = { run: 4, decide: 3, neww: 2, done: 1, idle: 0 };
+    const rankById: Record<string, number> = { err: 6, decide: 5, neww: 4, todo: 3, run: 2, done: 1, idle: 0 };
     const rankOf = (s: Session) => rankById[s.id] ?? 0;
 
     it("no rankOf → byte-identical to the time-only sort", () => {
@@ -106,13 +105,13 @@ describe("sortSessionsForList", () => {
       const sessions = [
         // idle but far newer
         mk({ id: "idle", updated_at: "2030-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
-        // running but old
-        mk({ id: "run", updated_at: "2020-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
         // needs-decision, mid
         mk({ id: "decide", updated_at: "2024-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
+        // running but old
+        mk({ id: "run", updated_at: "2020-01-01T00:00:00Z", message_count: 5 } as Partial<Session> & Pick<Session, "id">),
       ];
       const out = sortSessionsForList(sessions, false, "updated_at", rankOf);
-      expect(out.map((s) => s.id)).toEqual(["run", "decide", "idle"]);
+      expect(out.map((s) => s.id)).toEqual(["decide", "run", "idle"]);
     });
 
     it("pinned beats status; empty-new beats both", () => {

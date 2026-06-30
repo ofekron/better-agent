@@ -58,6 +58,7 @@
 import { useSyncExternalStore } from "react";
 
 import { API } from "../api";
+import type { TaskItem, TodoItem } from "../types";
 import { subscribeMany } from "./eventBus";
 
 export type MonitoringState =
@@ -85,6 +86,8 @@ export interface SessionMeta {
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
   has_error: boolean;
+  current_todos: TodoItem[];
+  current_tasks: TaskItem[];
 }
 
 export interface ProjectAggregate {
@@ -102,6 +105,9 @@ type SessionRegistryRow = {
   monitoring_state?: string;
   markers?: Record<string, MarkerInfo>;
   has_error?: boolean;
+  unseen_error?: unknown;
+  current_todos?: TodoItem[];
+  current_tasks?: TaskItem[];
 };
 
 // Internal per-session record. `monitoring_state` is the SINGLE source of
@@ -119,6 +125,8 @@ interface SessionEntry {
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
   has_error: boolean;
+  current_todos: TodoItem[];
+  current_tasks: TaskItem[];
 }
 
 /** The one place `is_running` is defined: a session is running iff its
@@ -149,7 +157,9 @@ function entryFromRow(row: SessionRegistryRow): SessionEntry {
     node_id: row.node_id || "primary",
     markers: (row.markers && typeof row.markers === "object") ? row.markers : {},
     testape_active: false,
-    has_error: !!row.has_error,
+    has_error: !!row.has_error || !!row.unseen_error,
+    current_todos: Array.isArray(row.current_todos) ? row.current_todos : [],
+    current_tasks: Array.isArray(row.current_tasks) ? row.current_tasks : [],
   };
 }
 
@@ -162,6 +172,8 @@ const EMPTY_SESSION: SessionMeta = {
   markers: EMPTY_MARKERS,
   testape_active: false,
   has_error: false,
+  current_todos: [],
+  current_tasks: [],
 };
 const EMPTY_AGGREGATE: ProjectAggregate = {
   running_count: 0,
@@ -232,6 +244,8 @@ interface SessionCreatedPayload {
       is_running?: boolean;
       unread_count?: number;
       pending_user_input_count?: number;
+      current_todos?: TodoItem[];
+      current_tasks?: TaskItem[];
     };
   }
 interface SessionDeletedPayload {
@@ -242,6 +256,8 @@ interface SessionMetadataPayload {
   patch?: {
     cwd?: string;
     node_id?: string;
+    current_todos?: TodoItem[];
+    current_tasks?: TaskItem[];
   };
 }
 
@@ -576,6 +592,8 @@ class SessionRegistry {
         markers: {},
         testape_active: false,
         has_error: false,
+        current_todos: [],
+        current_tasks: [],
       };
       this.sessions.set(sid, inserted);
       this.recomputeProject(payloadCwd, payloadNode);
@@ -606,6 +624,8 @@ class SessionRegistry {
       markers: prev.markers,
       testape_active: prev.testape_active ?? false,
       has_error: prev.has_error,
+      current_todos: prev.current_todos,
+      current_tasks: prev.current_tasks,
     });
     this.version += 1;
     this.notifySession(sid);
@@ -642,6 +662,8 @@ class SessionRegistry {
       markers: {},
       testape_active: false,
       has_error: false,
+      current_todos: Array.isArray(sess.current_todos) ? sess.current_todos : [],
+      current_tasks: Array.isArray(sess.current_tasks) ? sess.current_tasks : [],
     };
     this.sessions.set(sess.id, entry);
     this.recomputeAndNotifySession(sess.id, entry.cwd, entry.node_id);
@@ -661,14 +683,26 @@ class SessionRegistry {
     const prev = this.sessions.get(d.session_id);
     if (!prev) return;
     const patch = d.patch ?? {};
-    // Only handle the per-project routing keys here. Other metadata
-    // fields (name, model, pinned, ...) don't affect aggregates and
-    // are consumed by App-level handlers elsewhere.
-    if (patch.cwd === undefined && patch.node_id === undefined) return;
+    const hasTodoPatch =
+      patch.current_todos !== undefined || patch.current_tasks !== undefined;
+    if (patch.cwd === undefined && patch.node_id === undefined && !hasTodoPatch) return;
     const newCwd = patch.cwd ?? prev.cwd;
     const newNode = patch.node_id ?? prev.node_id;
-    if (newCwd === prev.cwd && newNode === prev.node_id) return;
-    this.sessions.set(d.session_id, { ...prev, cwd: newCwd, node_id: newNode });
+    const nextTodos = patch.current_todos ?? prev.current_todos;
+    const nextTasks = patch.current_tasks ?? prev.current_tasks;
+    if (
+      newCwd === prev.cwd &&
+      newNode === prev.node_id &&
+      nextTodos === prev.current_todos &&
+      nextTasks === prev.current_tasks
+    ) return;
+    this.sessions.set(d.session_id, {
+      ...prev,
+      cwd: newCwd,
+      node_id: newNode,
+      current_todos: nextTodos,
+      current_tasks: nextTasks,
+    });
     // Migrate: recompute BOTH the old and new project's aggregate.
     this.recomputeProject(prev.cwd, prev.node_id);
     this.recomputeProject(newCwd, newNode);
@@ -778,7 +812,9 @@ class SessionRegistry {
       cached.monitoring_state === e.monitoring_state &&
       cached.markers === e.markers &&
       cached.testape_active === testapeActive &&
-      cached.has_error === e.has_error
+      cached.has_error === e.has_error &&
+      cached.current_todos === e.current_todos &&
+      cached.current_tasks === e.current_tasks
     ) {
       return cached;
     }
@@ -790,6 +826,8 @@ class SessionRegistry {
       markers: e.markers,
       testape_active: testapeActive,
       has_error: e.has_error,
+      current_todos: e.current_todos,
+      current_tasks: e.current_tasks,
     };
     this.metaCache.set(sid, next);
     return next;
@@ -889,20 +927,33 @@ interface StatusFields {
   unread_count?: number;
   pending_user_input_count?: number;
   markers?: Record<string, MarkerInfo>;
+  has_error?: boolean;
+  current_todos?: TodoItem[];
+  current_tasks?: TaskItem[];
 }
 
-/** Status bucket (5 waiting-for-user → 0 none) for a session's live or
- * row-snapshot status fields. Higher sorts first. Mirrors the backend rank
- * exactly. A pending approval/input request sorts above even a running turn. */
+function hasOpenWorkItems(s: StatusFields): boolean {
+  return [...(s.current_todos ?? []), ...(s.current_tasks ?? [])].some(
+    (item) => item.status !== "completed",
+  );
+}
+
+/** Status bucket for a session's live or row-snapshot status fields. Higher
+ * sorts first. Mirrors the backend rank exactly. */
 export function statusRankOf(s: StatusFields): number {
   const state = s.monitoring_state ?? "stopped";
-  if (state === "blocked_on_user" || (s.pending_user_input_count ?? 0) > 0) return 5;
-  if (RUNNING_STATES.has(state)) return 4;
+  if (s.has_error) return 6;
   const tags = new Set(
     Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
   );
-  if (tags.has(MARKER_TAG_NEEDS_DECISION)) return 3;
-  if ((s.unread_count ?? 0) > 0) return 2;
+  if (
+    state === "blocked_on_user" ||
+    (s.pending_user_input_count ?? 0) > 0 ||
+    tags.has(MARKER_TAG_NEEDS_DECISION)
+  ) return 5;
+  if ((s.unread_count ?? 0) > 0) return 4;
+  if (hasOpenWorkItems(s)) return 3;
+  if (RUNNING_STATES.has(state)) return 2;
   if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;
   return 0;
 }
@@ -916,6 +967,10 @@ export function statusRankForRow(session: {
   unread_count?: number;
   pending_user_input_count?: number;
   markers?: Record<string, MarkerInfo>;
+  has_error?: boolean;
+  unseen_error?: unknown;
+  current_todos?: TodoItem[];
+  current_tasks?: TaskItem[];
 }): number {
   const live = sessionRegistry.peekMeta(session.id);
   if (live) return statusRankOf(live);
@@ -924,6 +979,9 @@ export function statusRankForRow(session: {
     unread_count: session.unread_count,
     pending_user_input_count: session.pending_user_input_count,
     markers: session.markers,
+    has_error: !!session.has_error || !!session.unseen_error,
+    current_todos: session.current_todos,
+    current_tasks: session.current_tasks,
   });
 }
 
