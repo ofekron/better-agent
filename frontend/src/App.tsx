@@ -2257,30 +2257,6 @@ function AppMain({
     },
     [getNode, setQueuedForSession],
   );
-  const appendTagsToLatestQueuedPrompt = useCallback(
-    (sessionId: string, tagsToAppend: import("./types/inlineTag").InlineTag[]) => {
-      if (tagsToAppend.length === 0) return false;
-      const localQueued = queuedBySession[sessionId];
-      const base = localQueued && localQueued.length > 0 ? localQueued : persistedQueuedPrompts;
-      const latest = base[base.length - 1] ?? null;
-      if (!latest) return false;
-      // An empty/blank queued prompt isn't a composition in progress — it's a
-      // stale/orphan entry. Don't let it swallow the comment; fall through to a
-      // normal inline tag so the highlight + Comments panel entry still appear.
-      if (!String(latest.preview ?? "").trim()) return false;
-      const nextPreview = applyQueuedInlineTags(latest.preview, tagsToAppend);
-      const sent = sendUpdateQueued(sessionId, latest.id, nextPreview);
-      if (!sent) return false;
-      setQueuedForSession(sessionId, (prev) => {
-        const current = prev.length > 0 ? prev : base;
-        return current.map((item) =>
-          item.id === latest.id ? { ...item, preview: nextPreview } : item,
-        );
-      }, "comment_merge");
-      return true;
-    },
-    [persistedQueuedPrompts, queuedBySession, sendUpdateQueued, setQueuedForSession],
-  );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
   // tabs visibility and order chosen from Settings stay live.
@@ -2480,9 +2456,6 @@ function AppMain({
         comment,
         timestamp: new Date().toISOString(),
       };
-      if (appendTagsToLatestQueuedPrompt(currentSession.id, [tag])) {
-        return;
-      }
       applySessionMetadata(currentSession.id, (session) => ({
         inline_tags: [...(session.inline_tags ?? []), tag],
       }));
@@ -2498,7 +2471,7 @@ function AppMain({
         },
       ).catch(() => {});
     },
-    [currentSession, appendTagsToLatestQueuedPrompt, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId]
   );
   const handleRemoveTag = useCallback(
     (id: string) => {
@@ -2797,9 +2770,6 @@ function AppMain({
         timestamp: new Date().toISOString(),
         fileAnchor,
       };
-      if (appendTagsToLatestQueuedPrompt(currentSession.id, [tag])) {
-        return;
-      }
       applySessionMetadata(currentSession.id, (session) => ({
         inline_tags: [...(session.inline_tags ?? []), tag],
       }));
@@ -2813,7 +2783,7 @@ function AppMain({
         },
       ).catch(() => {});
     },
-    [currentSession, appendTagsToLatestQueuedPrompt, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId]
   );
 
   const handleStartFileDiscussion = useCallback(
