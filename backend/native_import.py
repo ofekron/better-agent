@@ -673,7 +673,7 @@ def _local_iso(raw: str) -> Optional[str]:
 
 
 def _fallback_prompt(sess: NativeSession) -> str:
-    return (sess.title or "").strip()
+    return _normalize_import_prompt(sess.title or "")
 
 
 _INTERNAL_IMPORT_PROMPT_SIGNATURES = (
@@ -696,13 +696,20 @@ _INTERNAL_IMPORT_PROMPT_PREFIXES = (
     "<search-worker-provision>",
     "<get-requirements-processor-prep>",
     "<file-editor-provision>",
+    "<project-structure-maintainer-provision>",
     "<verdict-prompt>",
     "<command-name>",
+    "<system_bootstrap>",
 )
 
 _INTERNAL_IMPORT_PROMPT_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE | re.DOTALL)
     for pattern in (
+        r"^use these selected capabilities for this run only\.",
+        r"^the following injected context is from better agent, not from the user\.",
+        r"^---\s*name:\s*test-ui-expert\b",
+        r"^=== your workspace ===",
+        r"^you are a technical analysis expert and a super ninja trader\b",
         r"^(adversarial(ly)? (re-)?review|read-only adversarial|final adversarial review|second adversarial review)",
         r"^you are a hostile adversarial code reviewer\b",
         r"^use hostile adversarial review stance",
@@ -723,14 +730,37 @@ _INTERNAL_IMPORT_PROMPT_PATTERNS = tuple(
 )
 
 
+_INJECTED_PROMPT_SUFFIX_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"\n\s*# global preferences\s*\n\s*## ",
+        r"\n\s*# agents\.md instructions for /users/",
+        r"\n\s*use these selected capabilities for this run only\. they are active context",
+        r"\n\s*the following injected context is from better agent, not from the user\.",
+    )
+)
+
+
 class SkippedNativeSession(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
 
 
+def _normalize_import_prompt(prompt: str) -> str:
+    text = (prompt or "").strip()
+    cut_at: Optional[int] = None
+    for pattern in _INJECTED_PROMPT_SUFFIX_PATTERNS:
+        match = pattern.search(text)
+        if match and match.start() > 0:
+            cut_at = match.start() if cut_at is None else min(cut_at, match.start())
+    if cut_at is None:
+        return text
+    return text[:cut_at].rstrip()
+
+
 def _is_internal_import_prompt(prompt: str) -> bool:
-    text = prompt.strip()
+    text = _normalize_import_prompt(prompt)
     return (
         text.startswith(_INTERNAL_IMPORT_PROMPT_PREFIXES)
         or any(sig in text for sig in _INTERNAL_IMPORT_PROMPT_SIGNATURES)
@@ -757,7 +787,7 @@ def _segment_turns(events: list[dict]) -> list[_Turn]:
     for event in events:
         data = _event_data(event)
         if _is_user_prompt(data):
-            prompt = _extract_text(data)
+            prompt = _normalize_import_prompt(_extract_text(data))
             timestamp = _event_timestamp(event)
             if turns and not turns[-1].events:
                 turns[-1].prompt = prompt  # collapse consecutive prompt-only turn
@@ -868,7 +898,8 @@ def repair_imported_roots() -> dict:
             m for m in (root.get("messages") or [])
             if isinstance(m, dict) and m.get("role") == "user"
         ]
-        first_prompt = _extract_text({"message": {"content": users[0].get("content")}}) if users else ""
+        first_raw_prompt = _extract_text({"message": {"content": users[0].get("content")}}) if users else ""
+        first_prompt = _normalize_import_prompt(first_raw_prompt)
         first_user_ts = _imported_first_user_prompt_iso(root)
         last_user_ts = _imported_last_user_prompt_iso(root)
         if not first_prompt or _is_internal_import_prompt(first_prompt) or not last_user_ts:
@@ -877,6 +908,11 @@ def repair_imported_roots() -> dict:
             deleted += 1
             continue
         changed = False
+        if first_raw_prompt != first_prompt:
+            users[0]["content"] = first_prompt
+            changed = True
+            if not root.get("name") or root.get("name") == first_raw_prompt[:80]:
+                root["name"] = first_prompt[:80]
         if first_user_ts and root.get("created_at") != first_user_ts:
             root["created_at"] = first_user_ts
             changed = True
@@ -896,8 +932,9 @@ def repair_imported_roots() -> dict:
 
 
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
-    if sess.title:
-        return sess.title[:80]
+    title = _normalize_import_prompt(sess.title or "")
+    if title and not _is_internal_import_prompt(title):
+        return title[:80]
     for turn in turns:
         if turn.prompt:
             return turn.prompt[:80]

@@ -185,8 +185,15 @@ def test_internal_import_prompt_filter() -> None:
         "<search-worker-provision>\nYou are a reusable session-search ranking worker.",
         "<get-requirements-processor-prep>\nYou are a reusable requirements lookup worker.",
         "<file-editor-provision>\nYou are the reusable base session for Better Agent file editing.",
+        "<project-structure-maintainer-provision>\nYou are the reusable project-structure maintainer.",
         "<verdict-prompt>\nYou are an adversarial supervisor.",
         "<command-name>/login</command-name>\n<command-message>login</command-message>",
+        "<system_bootstrap>\nYou are the manager half of a two-session coding assistant.",
+        "Use these selected capabilities for this run only. They are active context, not a task to modify config.",
+        "The following injected context is from Better Agent, not from the user.",
+        "---\nname: test-ui-expert\ndescription: Private operating contract",
+        "=== YOUR WORKSPACE ===\n/Users/ofekron/nns-windsurf/agents/agents_workspaces/x",
+        "You are a technical analysis expert and a super ninja trader optimizing a trading strategy.",
         "Better Agent requires a parent-session reply after subagent work.",
         "Better Agent run.sh startup checker for Z.AI",
         "You are adversarial reviewer for a Better Agent RCA. Keep report under 200 words.",
@@ -214,6 +221,20 @@ def test_internal_import_prompt_filter() -> None:
     check(not F("Fix imported session filtering"), "real user prompt filtered")
     check(not F("Use TestApe to debug this app issue"), "real user TestApe request filtered")
     check(not F("review this feature and fix problems"), "ordinary review request filtered")
+    N = native_import._normalize_import_prompt
+    check(N("fix this\n# Global preferences\n## Responsiveness first\nInjected") == "fix this",
+          "global prefs suffix stripped")
+    check(N("fix this\nThe following injected context is from Better Agent, not from the user.\nInjected") == "fix this",
+          "BA injected context suffix stripped")
+    check(N("fix this\nUse these selected capabilities for this run only. They are active context\nInjected") == "fix this",
+          "selected capability suffix stripped")
+    check(N("explain this heading:\n# Global preferences") == "explain this heading:\n# Global preferences",
+          "global prefs false positive preserved")
+    multipart = native_import._extract_text({"message": {"content": [
+        {"type": "text", "text": "real ask"},
+        {"type": "text", "text": "# Global preferences\n## Responsiveness first\nInjected"},
+    ]}})
+    check(N(multipart) == "real ask", "multipart injected suffix stripped")
 
 
 # --------------------------------------------------------------------------- #
@@ -682,6 +703,20 @@ def test_ingest_claude_matrix() -> None:
     check(repaired["repaired"] >= 1, "repair reports timestamp correction")
     check(fixed["created_at"].startswith("2026-01-01"), "repair restores created_at from first user prompt")
     check(fixed["updated_at"].startswith("2026-01-01"), "repair restores updated_at from last user prompt")
+    fixed["messages"][0]["content"] = "real ask\n# Global preferences\n## Responsiveness first\nInjected"
+    session_store.write_session_full(fixed, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(repaired["repaired"] >= 1, "repair reports injected suffix correction")
+    check(fixed["messages"][0]["content"] == "real ask", "repair strips injected suffix from first user prompt")
+    repaired = native_import.repair_imported_roots()
+    fixed = session_store.get_session(root_id)
+    check(fixed["messages"][0]["content"] == "real ask", "repair is idempotent after suffix strip")
+    fixed["messages"][0]["content"] = "=== YOUR WORKSPACE ===\n/Users/ofekron/nns-windsurf/agents/agents_workspaces/x"
+    session_store.write_session_full(fixed, bump_updated_at=False, preserve_projection_fields=True)
+    repaired = native_import.repair_imported_roots()
+    check(repaired["deleted"] >= 1, "repair reports generated prompt deletion")
+    check(session_store.get_session(root_id) is None, "repair deletes generated imported root")
 
 
 # --------------------------------------------------------------------------- #
