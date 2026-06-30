@@ -111,6 +111,7 @@ class SessionMiner:
     def __init__(self, state: dict, *, root: Path | None = None) -> None:
         self._state = state
         self._root = root or sessions_dir()
+        self._pending_watermarks: dict[str, float] = {}
         self.scanned_count = 0
 
     def __iter__(self) -> Iterable[SessionVisit]:
@@ -134,14 +135,15 @@ class SessionMiner:
             if not isinstance(data, dict):
                 continue
             sid = session_json.stem
-            yield SessionVisit(
+            visit = SessionVisit(
                 sid=sid,
                 cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else "",
                 data=data,
                 messages=data.get("messages", []) if isinstance(data.get("messages"), list) else [],
                 events_by_msg_id=event_rows_by_msg_id_with_orphans(data, sid),
             )
-            self._state[key] = {"mtime": current_mtime}
+            self._pending_watermarks[key] = current_mtime
+            yield visit
 
     def mine(self, consumers: list[SessionConsumer]) -> dict[str, int]:
         """One pass: begin all consumers, visit each changed session, commit all.
@@ -154,7 +156,10 @@ class SessionMiner:
         for visit in self:
             for consumer in consumers:
                 consumer.visit(visit)
-        return {consumer.name: consumer.commit() for consumer in consumers}
+        counts = {consumer.name: consumer.commit() for consumer in consumers}
+        for key, mtime in self._pending_watermarks.items():
+            self._state[key] = {"mtime": mtime}
+        return counts
 
 
 def mine_registered(state: dict) -> dict[str, int]:
