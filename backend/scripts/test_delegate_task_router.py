@@ -37,7 +37,7 @@ def _make_coord(
     coord = Coordinator()
     submit_calls: list[dict] = []
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         submit_calls.append({"sid": sid, "params": params})
         return params["_queued_id"]
 
@@ -336,3 +336,61 @@ def test_auto_with_no_search_result_creates_session(monkeypatch=None):
     assert join_calls == []
     assert submit_calls[0]["sid"] == res["target_session_id"]
     assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_auto_search_result_ignores_caller_and_creates_sub_session():
+    import session_search
+
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, join_calls, submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+        reasoning_effort="low",
+    )
+    config_store.set_delegate_task_policy("auto")
+    original_search = session_search.search
+    session_search.search = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": [sender["id"]]})  # type: ignore
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="self-looking task",
+            cwd="/repo",
+        ))
+    finally:
+        session_search.search = original_search
+
+    assert res["success"] is True
+    assert res["target_session_id"] != sender["id"]
+    assert res["created_session"] is True
+    assert res["created_sub_session"] is True
+    created = session_manager.get(res["target_session_id"])
+    assert created["kind"] == "sub_session"
+    assert created["parent_session_id"] == sender["id"]
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == res["target_session_id"]
+    assert submit_calls[0]["params"]["app_session_id"] == res["target_session_id"]
+
+
+def test_auto_search_result_skips_caller_and_uses_next_existing_session():
+    import session_search
+
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+    target = session_manager.create(name="existing", cwd="/repo", orchestration_mode="native")
+    original_search = session_search.search
+    session_search.search = lambda *a, **kw: asyncio.sleep(0, result={"session_ids": [sender["id"], target["id"]]})  # type: ignore
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="existing target task",
+            cwd="/repo",
+        ))
+    finally:
+        session_search.search = original_search
+
+    assert res["success"] is True
+    assert res["target_session_id"] == target["id"]
+    assert res["created_session"] is False
+    assert join_calls == []
+    assert submit_calls[0]["sid"] == target["id"]
+    assert submit_calls[0]["params"]["app_session_id"] == target["id"]
