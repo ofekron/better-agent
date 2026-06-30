@@ -1233,6 +1233,7 @@ export function useWebSocket(
               current_tasks?: import("../types").TaskItem[];
               messages?: import("../types").ChatMessage[];
               message_count?: number;
+              last_opened_at?: string;
               pagination?: import("../types").Session["pagination"];
               worker_creation_policy?: import("../types").WorkerCreationPolicy;
               right_panel_open?: boolean;

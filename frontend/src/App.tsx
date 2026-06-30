@@ -1653,7 +1653,7 @@ function AppMain({
       );
       applySessionMetadata(sessionId, toApply);
       setOpenSessionRecords((prev) => {
-        const session = prev[sessionId] || getNode(sessionId);
+        const session = prev[sessionId] || getNode(sessionId) || sessions.find((s) => s.id === sessionId);
         if (!session) return prev;
         return {
           ...prev,
@@ -3840,6 +3840,13 @@ function AppMain({
     [openSessionRecords, sessions],
   );
 
+  const stampOpenSessionLastOpened = useCallback((id: string, at: string) => {
+    const session = findOpenSessionRecord(id);
+    if (!session) return;
+    const nextSession = { ...session, last_opened_at: at };
+    setOpenSessionRecords((prev) => ({ ...prev, [id]: nextSession }));
+  }, [findOpenSessionRecord]);
+
   const handleToggleTopbarPin = useCallback(
     (id: string, pinned: boolean) => {
       const session = findOpenSessionRecord(id);
@@ -3936,6 +3943,7 @@ function AppMain({
 
   const handleSelectTab = useCallback(
     (id: string) => {
+      stampOpenSessionLastOpened(id, new Date().toISOString());
       const session = findOpenSessionRecord(id);
       if (session) {
         setSelectedProjectPath(session.cwd);
@@ -3943,7 +3951,7 @@ function AppMain({
       }
       navigate(sessionPath(id));
     },
-    [findOpenSessionRecord, navigate],
+    [findOpenSessionRecord, navigate, stampOpenSessionLastOpened],
   );
 
   // Sync user-editable state (model, cwd) from the session record only
@@ -6122,6 +6130,8 @@ function AppMain({
               selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
               onSelect={(id) => {
+                const openedAt = new Date().toISOString();
+                stampOpenSessionLastOpened(id, openedAt);
                 const s = sessions.find((s) => s.id === id);
                 if (s) {
                   setSelectedProjectPath(s.cwd);

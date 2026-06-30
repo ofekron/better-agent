@@ -14,6 +14,12 @@ async function waitFor(
   return false;
 }
 
+function tabIds(h: Awaited<ReturnType<typeof renderApp>>): string[] {
+  return h.$$(".session-tab-wrapper")
+    .map((el) => el.getAttribute("data-tab-movement-key") ?? "")
+    .filter(Boolean);
+}
+
 describe("session tabs with paged sessions", () => {
   afterEach(() => {
     vi.stubGlobal(
@@ -476,6 +482,112 @@ describe("session tabs with paged sessions", () => {
         );
       }),
     ).toBe(true);
+    h.unmount();
+  }, 10000);
+
+  it("moves a sidebar-selected open session to the left under last-opened tab sort", async () => {
+    const older = makeSession({
+      id: "older-session",
+      name: "Older session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-01T00:00:00.000Z",
+      last_opened_at: "2020-01-01T00:00:00.000Z",
+    });
+    const newer = makeSession({
+      id: "newer-session",
+      name: "Newer session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-02T00:00:00.000Z",
+      last_opened_at: "2020-01-02T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", "/s/newer-session");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([older.id, newer.id]),
+    );
+    const h = await renderApp({ seed: { sessions: [newer, older] } });
+
+    expect(await waitFor(h, () => tabIds(h)[0] === newer.id)).toBe(true);
+
+    await h.selectSession(older.id);
+
+    expect(await waitFor(h, () => tabIds(h)[0] === older.id)).toBe(true);
+    h.unmount();
+  }, 10000);
+
+  it("moves a cached sidebar-selected session to the left without waiting for REST", async () => {
+    const first = makeSession({
+      id: "cached-first-session",
+      name: "Cached first session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-01T00:00:00.000Z",
+      last_opened_at: "2020-01-01T00:00:00.000Z",
+    });
+    const second = makeSession({
+      id: "cached-second-session",
+      name: "Cached second session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-02T00:00:00.000Z",
+      last_opened_at: "2020-01-02T00:00:00.000Z",
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([first.id, second.id]),
+    );
+    const h = await renderApp({ seed: { sessions: [second, first] } });
+
+    await h.selectSession(first.id);
+    await h.selectSession(second.id);
+    expect(await waitFor(h, () => tabIds(h)[0] === second.id)).toBe(true);
+
+    const restCallsBefore = h.restCalls.filter(
+      (c) => c.method === "GET" && c.path === `/api/sessions/${first.id}`,
+    ).length;
+    await h.selectSession(first.id);
+
+    expect(await waitFor(h, () => tabIds(h)[0] === first.id)).toBe(true);
+    expect(
+      h.restCalls.filter(
+        (c) => c.method === "GET" && c.path === `/api/sessions/${first.id}`,
+      ),
+    ).toHaveLength(restCallsBefore);
+    h.unmount();
+  }, 10000);
+
+  it("applies last-opened metadata patches to open tab ordering", async () => {
+    const first = makeSession({
+      id: "ws-first-session",
+      name: "WS first session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-01T00:00:00.000Z",
+      last_opened_at: "2020-01-01T00:00:00.000Z",
+    });
+    const second = makeSession({
+      id: "ws-second-session",
+      name: "WS second session",
+      cwd: "/tmp/project-a",
+      updated_at: "2020-01-02T00:00:00.000Z",
+      last_opened_at: "2020-01-02T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", "/s/ws-second-session");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([first.id, second.id]),
+    );
+    const h = await renderApp({ seed: { sessions: [second, first] } });
+
+    expect(await waitFor(h, () => tabIds(h)[0] === second.id)).toBe(true);
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: first.id,
+        patch: { last_opened_at: "2030-01-01T00:00:00.000Z" },
+        originated_by: null,
+      },
+    });
+    await h.flush();
+
+    expect(await waitFor(h, () => tabIds(h)[0] === first.id)).toBe(true);
     h.unmount();
   }, 10000);
 
