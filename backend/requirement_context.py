@@ -38,6 +38,8 @@ MATCH_FIELD_ORDER = (
 )
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
+PROCESSOR_PARSE_ATTEMPTS = 3
+PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
@@ -114,11 +116,9 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
 
     def parse_result(self, text: str, ctx: dict) -> dict[str, Any]:
         obj = _parse_processor_json(text)
-        if not isinstance(obj, dict):
-            return {"requirements": [], "error": "parse_failed"}
-        requirements = obj.get("requirements")
-        if not isinstance(requirements, list):
-            return {"requirements": [], "error": "parse_failed"}
+        if not _is_valid_processor_payload(obj):
+            return _processor_parse_failed()
+        requirements = obj["requirements"]
         return {"requirements": _normalize_processed_requirements(requirements)}
 
 
@@ -188,12 +188,15 @@ def _run_requirements_processor(
         "all_projects": all_projects,
         "max_matches": max_matches,
     }
-    try:
-        result = provisioning.run_sync(GET_REQUIREMENTS_PROCESSOR_SPEC, query, ctx)
-    except Exception as exc:
-        return {"requirements": [], "error": _processor_failure_message(exc)}
-    value = result.value
-    return value if isinstance(value, dict) else {"requirements": [], "error": "parse_failed"}
+    for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
+        try:
+            result = provisioning.run_sync(GET_REQUIREMENTS_PROCESSOR_SPEC, query, ctx)
+        except Exception as exc:
+            return {"requirements": [], "error": _processor_failure_message(exc)}
+        value = result.value if isinstance(result.value, dict) else _processor_parse_failed()
+        if value.get("error") != "parse_failed":
+            return value
+    return _processor_parse_failed()
 
 
 _RATE_LIMIT_MARKERS = (
@@ -231,6 +234,10 @@ def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
     return any(marker in lower_error_text for marker in _RATE_LIMIT_MARKERS)
 
 
+def _processor_parse_failed() -> dict[str, Any]:
+    return {"requirements": [], "error": "parse_failed"}
+
+
 def _parse_processor_json(text: str) -> dict[str, Any] | None:
     if not text:
         return None
@@ -248,6 +255,25 @@ def _parse_processor_json(text: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
+
+
+def _is_valid_processor_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    requirements = value.get("requirements")
+    if not isinstance(requirements, list):
+        return False
+    return all(_is_valid_processor_requirement(item) for item in requirements)
+
+
+def _is_valid_processor_requirement(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(_is_nonempty_string(value.get(field)) for field in PROCESSOR_REQUIREMENT_FIELDS)
+
+
+def _is_nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]]:
