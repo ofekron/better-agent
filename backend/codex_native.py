@@ -18,6 +18,7 @@ from runner_codex import (
     _normalize_error_item,
     _normalize_event_msg_notice,
     _normalize_event_msg_patch_apply_end,
+    _normalize_event_msg_reasoning,
     _normalize_event_msg_text,
     _normalize_file_change,
     _normalize_mcp_tool_completed,
@@ -472,7 +473,7 @@ class CodexRolloutNormalizer:
                 if isinstance(message, str) and message:
                     return self._push_from_native(
                         raw_event,
-                        _normalize_event_msg_text(payload, self.parent_uuid, message)
+                        _normalize_event_msg_reasoning(payload, self.parent_uuid, message)
                     )
             if payload.get("type") == "web_search_end":
                 return self._normalize_web_search_payload(payload)

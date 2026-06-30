@@ -2208,6 +2208,20 @@ def _normalize_event_msg_text(payload: dict, parent_uuid: str, text: str) -> dic
     }, payload)
 
 
+def _normalize_event_msg_reasoning(payload: dict, parent_uuid: str, text: str) -> dict:
+    return _with_parent_tool_use_id({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": text}],
+            "model": "codex",
+        },
+        "uuid": _new_uuid(),
+        "parentUuid": parent_uuid,
+        "timestamp": datetime.now().isoformat(),
+    }, payload)
+
+
 def _normalize_event_msg_patch_apply_end(payload: dict, parent_uuid: str) -> dict:
     output = payload.get("stdout") or payload.get("stderr") or ""
     if not isinstance(output, str):
