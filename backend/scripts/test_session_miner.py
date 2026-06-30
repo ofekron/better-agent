@@ -58,7 +58,7 @@ def test_changed_session_yields_visit() -> None:
     assert visit.cwd == "/tmp/a"
     assert visit.messages == [{"role": "user", "content": "hi"}]
     assert isinstance(visit.events_by_msg_id, dict)
-    assert state["sess-a.json"]["mtime"] == 1000.0
+    assert "sess-a.json" not in state
     print(f"{PASS} changed session yields a normalized visit")
 
 
@@ -152,12 +152,76 @@ def test_mine_registered_runs_all_registered_consumers() -> None:
     print(f"{PASS} mine_registered() runs every registered consumer in one pass")
 
 
+class _FailingCommitConsumer(SessionConsumer):
+    name = "failing"
+
+    def begin(self) -> None:
+        self.visited = []
+
+    def visit(self, visit: SessionVisit) -> None:
+        self.visited.append(visit.sid)
+
+    def commit(self) -> int:
+        raise RuntimeError("commit failed")
+
+
+class _FailingVisitConsumer(SessionConsumer):
+    name = "failing_visit"
+
+    def begin(self) -> None:
+        pass
+
+    def visit(self, visit: SessionVisit) -> None:
+        raise RuntimeError("visit failed")
+
+    def commit(self) -> int:
+        return 0
+
+
+def test_failed_commit_does_not_advance_watermark() -> None:
+    state: dict = {}
+    path = _write_session("sess-fail", cwd="/tmp/fail", messages=[{"role": "user", "content": "x"}])
+    _touch(path, 3000.0)
+
+    try:
+        SessionMiner(state).mine([_FailingCommitConsumer()])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("consumer commit failure must propagate")
+
+    assert "sess-fail.json" not in state
+    visits = list(SessionMiner(state))
+    assert "sess-fail" in {v.sid for v in visits}
+    print(f"{PASS} failed consumer commit does not advance session watermark")
+
+
+def test_failed_visit_does_not_advance_watermark() -> None:
+    state: dict = {}
+    path = _write_session("sess-visit-fail", cwd="/tmp/fail", messages=[{"role": "user", "content": "x"}])
+    _touch(path, 4000.0)
+
+    try:
+        SessionMiner(state).mine([_ConsumerA(), _FailingVisitConsumer()])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("consumer visit failure must propagate")
+
+    assert "sess-visit-fail.json" not in state
+    visits = list(SessionMiner(state))
+    assert "sess-visit-fail" in {v.sid for v in visits}
+    print(f"{PASS} failed consumer visit does not advance session watermark")
+
+
 def main() -> int:
     test_changed_session_yields_visit()
     test_unchanged_session_is_delta_skipped()
     test_summary_and_unparseable_skipped()
     test_mine_drives_consumer_lifecycle_one_pass()
     test_mine_registered_runs_all_registered_consumers()
+    test_failed_commit_does_not_advance_watermark()
+    test_failed_visit_does_not_advance_watermark()
     print("\nOK: session_miner base behaves correctly")
     return 0
 
