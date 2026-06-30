@@ -3674,7 +3674,12 @@ def create_session(
         ),
         "bare_config": bool(bare_config),
         "worker_eligible": False,
-        "pinned": True,
+        # New sessions start UNPINNED. While a session is empty (0 messages)
+        # the sort key (`isEmpty, pinned, ...` in `_session_list_sort_key`)
+        # already floats it to the top, so it stays visible without a pin.
+        # Defaulting to pinned made every session stick to the top forever
+        # once it gained messages — not what the user wants.
+        "pinned": False,
         "topbar_pinned": False,
         "topbar_pinned_at": None,
         "archived": False,

@@ -839,9 +839,11 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
     return ok
 
 
-def test_new_session_defaults_to_pinned_and_sorts_above_pinned(client: TestClient) -> bool:
+def test_new_session_defaults_to_unpinned_but_empty_sorts_first(client: TestClient) -> bool:
     _reset_home()
-    _write(_record("older-pinned", "2026-06-19T00:00:00+00:00", pinned=True))
+    older_pinned = _record("older-pinned", "2026-06-19T00:00:00+00:00", pinned=True)
+    older_pinned["messages"] = [{"role": "user", "content": "already started"}]
+    _write(older_pinned)
 
     response = client.post(
         "/api/sessions",
@@ -856,11 +858,13 @@ def test_new_session_defaults_to_pinned_and_sorts_above_pinned(client: TestClien
     ids = [session["id"] for session in listing.get("sessions", [])]
     by_id = {session["id"]: session for session in listing.get("sessions", [])}
     ok = (
-        created.get("pinned") is True
-        and by_id.get(created.get("id"), {}).get("pinned") is True
+        created.get("pinned") is False
+        and by_id.get(created.get("id"), {}).get("pinned") is False
+        # Empty sessions still sort above pinned non-empty sessions, so the
+        # newly-created session stays visible without becoming sticky forever.
         and ids[:2] == [created.get("id"), "older-pinned"]
     )
-    print(f"{PASS if ok else FAIL} new sessions default pinned and sort above pinned")
+    print(f"{PASS if ok else FAIL} new sessions default unpinned but empty sorts first")
     return ok
 
 
@@ -1095,7 +1099,7 @@ def main_run() -> int:
         ok = test_metadata_trigram_search_preserves_substring_behavior() and ok
         ok = test_warm_metadata_search_scores_only_candidate_rows() and ok
         ok = test_unpin_others_ignores_backend_filters(client) and ok
-        ok = test_new_session_defaults_to_pinned_and_sorts_above_pinned(client) and ok
+        ok = test_new_session_defaults_to_unpinned_but_empty_sorts_first(client) and ok
         ok = test_pin_endpoint_unpins_specific_session(client) and ok
         ok = test_topbar_pin_endpoint_lists_pinned_sessions(client) and ok
         ok = test_sidebar_strips_heavy_working_mode_meta(client) and ok
