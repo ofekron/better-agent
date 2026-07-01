@@ -351,6 +351,12 @@ async def _dispatch_core_builtin_backend(
             if not extension_store.is_extension_enabled_cached(extension_id):
                 return None
             return await _dispatch_team_orchestration_core_backend(clean_path, request)
+        if extension_id == extension_store.BUILTIN_SCHEDULER_EXTENSION_ID:
+            if backend_spec is not None:
+                return None
+            if not extension_store.is_extension_enabled_cached(extension_id):
+                return None
+            return await _dispatch_scheduler_core_backend(clean_path, request)
         if extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
             return None
         if backend_spec is not None:
@@ -363,6 +369,31 @@ async def _dispatch_core_builtin_backend(
     if not extension_store.is_extension_enabled_cached(extension_id):
         return None
     return await _dispatch_machine_nodes_core_backend(clean_path, request)
+
+
+async def _dispatch_scheduler_core_backend(
+    path: str,
+    request: Request,
+) -> JSONResponse | None:
+    if request.method != "GET":
+        return None
+    parts = path.split("/")
+    if len(parts) != 3 or parts[0] != "sessions" or parts[2] != "schedules":
+        return None
+
+    import session_manager
+    from stores import schedule_store
+
+    app_session_id = parts[1]
+    exists = await asyncio.to_thread(session_manager.manager.exists, app_session_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail="session not found")
+    with perf.timed("extension.scheduler.schedules"):
+        schedules = await asyncio.to_thread(
+            schedule_store.list_for_session,
+            app_session_id,
+        )
+    return JSONResponse({"schedules": schedules})
 
 
 async def _dispatch_team_orchestration_core_backend(

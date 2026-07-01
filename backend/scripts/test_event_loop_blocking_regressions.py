@@ -2990,8 +2990,19 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     core_source = source[core_start:core_end]
     assert "extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in core_source
     assert "extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID" in core_source
+    assert "extension_store.BUILTIN_SCHEDULER_EXTENSION_ID" in core_source
+    assert "_dispatch_scheduler_core_backend" in core_source
     assert "extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID" in core_source
     assert "extension_store.is_extension_enabled_cached(extension_id)" in core_source
+    scheduler_start = source.index("async def _dispatch_scheduler_core_backend(")
+    scheduler_end = source.index("async def _dispatch_team_orchestration_core_backend(", scheduler_start)
+    scheduler_source = source[scheduler_start:scheduler_end]
+    assert 'request.method != "GET"' in scheduler_source
+    assert 'parts[0] != "sessions"' in scheduler_source
+    assert 'parts[2] != "schedules"' in scheduler_source
+    assert "session_manager.manager.exists" in scheduler_source
+    assert "schedule_store.list_for_session" in scheduler_source
+    assert "extension_backend_loader" not in scheduler_source
     team_start = source.index("async def _dispatch_team_orchestration_core_backend(")
     team_end = source.index("async def _dispatch_machine_nodes_core_backend(", team_start)
     team_source = source[team_start:team_end]
