@@ -110,6 +110,7 @@ def main() -> int:
         print(f"{FAIL}: {e}")
         return 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
