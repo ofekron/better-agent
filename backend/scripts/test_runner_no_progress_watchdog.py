@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.error
 from pathlib import Path
 
 _TMP_HOME = tempfile.mkdtemp(prefix="ba-test-runner-watchdog-")
@@ -36,6 +37,19 @@ class _OneResultResponse:
             raise StopAsyncIteration
         self._sent = True
         await asyncio.sleep(0.02)
+        return _FakeResultMessage()
+
+
+class _DelayedResultResponse:
+    def __init__(self, delay_s: float) -> None:
+        self._delay_s = delay_s
+        self._sent = False
+
+    async def __anext__(self):
+        if self._sent:
+            raise StopAsyncIteration
+        self._sent = True
+        await asyncio.sleep(self._delay_s)
         return _FakeResultMessage()
 
 
@@ -121,6 +135,90 @@ async def t_default_watchdog_is_bounded() -> None:
         raise AssertionError(f"default watchdog is {actual}s, expected {expected}s")
 
 
+async def t_loopback_activity_keeps_watchdog_alive() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    activity = runner._RunnerActivity()
+    stop = asyncio.Event()
+
+    async def mark_activity() -> None:
+        while not stop.is_set():
+            activity.mark()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.02)
+            except asyncio.TimeoutError:
+                pass
+
+    marker = asyncio.create_task(mark_activity())
+    try:
+        result = await runner._receive_response_message(
+            _DelayedResultResponse(0.18),
+            timeout_s=0.05,
+            activity=activity,
+        )
+    finally:
+        stop.set()
+        marker.cancel()
+        try:
+            await marker
+        except asyncio.CancelledError:
+            pass
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    if not isinstance(result, _FakeResultMessage):
+        raise AssertionError(f"unexpected result {result!r}")
+
+
+async def t_watchdog_times_out_after_loopback_activity_stops() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    activity = runner._RunnerActivity()
+    try:
+        try:
+            await runner._receive_response_message(
+                _SilentResponse(),
+                timeout_s=0.05,
+                activity=activity,
+            )
+        except runner.ResponseNoProgressError:
+            return
+    finally:
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    raise AssertionError("silent receive did not time out after activity stopped")
+
+
+async def t_loopback_retry_marks_activity() -> None:
+    activity = runner._RunnerActivity()
+    original_urlopen = runner.urllib.request.urlopen
+    runner._set_active_runner_activity(activity)
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise urllib.error.URLError("backend down")
+
+    runner.urllib.request.urlopen = fail_urlopen
+    before = activity.last_progress_at()
+    await asyncio.sleep(0.01)
+    try:
+        try:
+            runner._post_loopback_sync(
+                {"ok": True},
+                backend_url="http://127.0.0.1:1",
+                internal_token="token",
+                url_path="/missing",
+                timeout=0.02,
+                non_json_t_key="runner.mssg_non_json",
+                log_prefix="test POST",
+                backoff_cap=0.01,
+            )
+        except urllib.error.URLError:
+            pass
+    finally:
+        runner.urllib.request.urlopen = original_urlopen
+        runner._set_active_runner_activity(None)
+    after = activity.last_progress_at()
+    if after <= before:
+        raise AssertionError("loopback retry did not mark runner activity")
+
+
 async def t_claude_config_dir_expands_home_vars() -> None:
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = "/tmp/ba-runner-home-test"
@@ -141,6 +239,9 @@ async def main_run() -> int:
         ("silent receive times out", t_silent_receive_times_out),
         ("periodic progress is not timed out", t_periodic_progress_is_not_timed_out),
         ("default watchdog is bounded", t_default_watchdog_is_bounded),
+        ("loopback activity keeps watchdog alive", t_loopback_activity_keeps_watchdog_alive),
+        ("watchdog times out after loopback activity stops", t_watchdog_times_out_after_loopback_activity_stops),
+        ("loopback retry marks activity", t_loopback_retry_marks_activity),
         ("claude config dir expands home vars", t_claude_config_dir_expands_home_vars),
     ]
     failed = 0
