@@ -25,6 +25,8 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 class _ProviderHandler(BaseHTTPRequestHandler):
     calls = 0
     delay = 0.0
+    status = 200
+    text = "[0]"
     lock = threading.Lock()
 
     def do_POST(self):
@@ -35,8 +37,11 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             type(self).calls += 1
         if type(self).delay:
             time.sleep(type(self).delay)
-        body = json.dumps({"content": [{"text": "[0]"}]}).encode("utf-8")
-        self.send_response(200)
+        if type(self).status >= 400:
+            body = json.dumps({"error": "rate limited"}).encode("utf-8")
+        else:
+            body = json.dumps({"content": [{"text": type(self).text}]}).encode("utf-8")
+        self.send_response(type(self).status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -99,6 +104,39 @@ async def _run() -> bool:
         cached_slow = await shortcut_picker.pick_shortcuts("slow output")
         if cached_slow != ["TLDR"]:
             print(f"{FAIL} timed-out picker did not populate cache: {cached_slow!r}")
+            return False
+
+        errors = []
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        try:
+            _ProviderHandler.delay = 0.08
+            _ProviderHandler.status = 429
+            shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.01
+            failed = await shortcut_picker.pick_shortcuts("rate limited output")
+            if failed != ["TLDR", "/Adv"]:
+                print(f"{FAIL} rate-limited picker did not return fallback: {failed!r}")
+                return False
+            await asyncio.sleep(0.2)
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+            _ProviderHandler.delay = 0.0
+            _ProviderHandler.status = 200
+            shortcut_picker._PICK_WAIT_TIMEOUT_SECS = 0.2
+
+        if errors:
+            print(f"{FAIL} rate-limited background task leaked loop errors: {errors!r}")
+            return False
+        if shortcut_picker._inflight:
+            print(f"{FAIL} rate-limited picker left inflight tasks: {shortcut_picker._inflight!r}")
+            return False
+
+        _ProviderHandler.text = "[1]"
+        retried = await shortcut_picker.pick_shortcuts("rate limited output")
+        _ProviderHandler.text = "[0]"
+        if retried != ["/Adv"]:
+            print(f"{FAIL} rate-limited fallback was cached instead of retried: {retried!r}")
             return False
 
         print(f"{PASS} shortcut picker coalesces and caches exact duplicate requests")
