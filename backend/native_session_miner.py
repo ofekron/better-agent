@@ -850,6 +850,9 @@ class _NativeMinerBase(SessionMinerBase):
 
     def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
         for candidate in self.iter_candidates():
+            if not self.source_changed(candidate.key, candidate.mtime):
+                self.scanned_count += 1
+                continue
             visit = candidate.parse()
             if visit is None:
                 continue
