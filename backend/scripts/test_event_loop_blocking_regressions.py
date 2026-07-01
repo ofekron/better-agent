@@ -142,6 +142,21 @@ def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
     assert "return get_all()" not in remembered_source
 
 
+def test_ui_selection_routes_use_hot_path_executor() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    get_start = source.index("async def get_ui_selection(")
+    get_end = source.index("@app.patch(\"/api/ui-selection\")", get_start)
+    get_source = source[get_start:get_end]
+    assert 'await _run_hot_path("ui_selection.get_all", ui_selection.get_all)' in get_source
+    assert "asyncio.to_thread(" not in get_source
+
+    patch_start = source.index("async def patch_ui_selection(")
+    patch_end = source.index("# ---- Shortcut responses ----", patch_start)
+    patch_source = source[patch_start:patch_end]
+    assert 'await _run_hot_path("ui_selection.patch", _patch_sync)' in patch_source
+    assert "asyncio.to_thread(" not in patch_source
+
+
 def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
     source = (ROOT / "user_prefs.py").read_text(encoding="utf-8")
     assert "_PREFS_PATH = bc_home() / \"user_prefs.json\"" in source
@@ -167,6 +182,8 @@ def test_session_opened_avoids_full_session_copy() -> None:
     route_end = main_source.index("@app.", route_start)
     route_source = main_source[route_start:route_end]
     assert "return_session=False" in route_source
+    assert 'await _run_hot_path(\n        "session.opened.set_last_opened_at"' in route_source
+    assert "asyncio.to_thread(" not in route_source
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     method_start = manager_source.index("def set_last_opened_at(")
     method_end = manager_source.index("def set_archived(", method_start)
@@ -3276,6 +3293,7 @@ if __name__ == "__main__":
     test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
+    test_ui_selection_routes_use_hot_path_executor()
     test_user_prefs_uses_cached_path_for_hot_reads()
     test_auto_restart_pref_read_is_off_loop()
     test_session_opened_avoids_full_session_copy()
