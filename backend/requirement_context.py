@@ -168,10 +168,15 @@ def _processor_tool_unavailable(text: str) -> bool:
     markers = (
         "get_requirements_internal tool is not available",
         "get_requirements_internal mcp tool is not available",
+        "get_requirements_internal is not in my session toolset",
         "not bound to this processor turn",
         "no mcp servers connected",
+        "mcp server is down",
         "cannot run the ripgrep lookup",
+        "cannot execute the lookup",
         "cannot perform the lookup",
+        "not fabricating a result",
+        "no lookup could be performed",
     )
     return any(marker in lower for marker in markers)
 
