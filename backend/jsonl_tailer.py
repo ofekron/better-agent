@@ -410,9 +410,16 @@ class _FileTailFollower:
 class _AppendOnlyByteFollower:
     _POLL = 0.05
 
-    def __init__(self, path: Path, start_byte: int):
+    def __init__(
+        self,
+        path: Path,
+        start_byte: int,
+        *,
+        on_source_reset: Optional[Callable[[], None]] = None,
+    ):
         self._path = path
         self._start_byte = max(0, int(start_byte))
+        self._on_source_reset = on_source_reset
         self.stdout: asyncio.StreamReader = asyncio.StreamReader(limit=sys.maxsize)
         self.returncode: Optional[int] = None
         self._stop = asyncio.Event()
@@ -438,12 +445,15 @@ class _AppendOnlyByteFollower:
                 if self._inode is None:
                     self._inode = inode
                 if inode != self._inode or st.st_size < pos:
-                    logger.error(
+                    logger.warning(
                         "Claude jsonl changed while tailing %s "
-                        "(inode %s->%s, size=%d, cursor=%d); stopping",
+                        "(inode %s->%s, size=%d, cursor=%d); rewinding",
                         self._path, self._inode, inode, st.st_size, pos,
                     )
-                    return
+                    self._inode = inode
+                    pos = 0
+                    if self._on_source_reset is not None:
+                        self._on_source_reset()
                 if st.st_size > pos:
                     try:
                         data, pos = await self._read_from(pos)
@@ -499,8 +509,17 @@ class _AppendOnlyByteFollower:
         return self.returncode
 
 
-async def _spawn_byte_follower(path: Path, *, start_byte: int):
-    return await _AppendOnlyByteFollower(path, start_byte).start()
+async def _spawn_byte_follower(
+    path: Path,
+    *,
+    start_byte: int,
+    on_source_reset: Optional[Callable[[], None]] = None,
+):
+    return await _AppendOnlyByteFollower(
+        path,
+        start_byte,
+        on_source_reset=on_source_reset,
+    ).start()
 
 
 async def _spawn_tail(path: Path, *, start_line: int = 1):
@@ -607,7 +626,9 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     async def _open_source(self) -> bool:
         try:
             self._proc = await _spawn_byte_follower(
-                self.path, start_byte=self.start_offset,
+                self.path,
+                start_byte=self.start_offset,
+                on_source_reset=self._reset_processed_offset,
             )
         except Exception:
             logger.exception(
@@ -615,6 +636,11 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             )
             return False
         return True
+
+    def _reset_processed_offset(self) -> None:
+        self.processed_offset = 0
+        if self.on_cursor_advance is not None:
+            self.on_cursor_advance(0)
 
     async def _next_line(self) -> Optional[bytes]:
         if self._proc is None or self._proc.stdout is None:
@@ -1198,6 +1224,10 @@ class OwnedClaudeJsonlTailer:
         subsequent acquire (e.g. after backend restart) starts past the
         already-ingested prefix instead of re-reading the whole file."""
         n = int(line_count)
+        if n < self._cursor_pending:
+            self._cursor_pending = n
+            self._persist_cursor(n)
+            return
         self._cursor_pending = max(self._cursor_pending, n)
         if (
             self._cursor_pending - self._cursor_persisted < 32
@@ -1214,7 +1244,7 @@ class OwnedClaudeJsonlTailer:
                 int(line_count),
                 bump_updated_at=False,
             )
-            self._cursor_persisted = max(self._cursor_persisted, int(line_count))
+            self._cursor_persisted = int(line_count)
             self._cursor_persisted_at = time.monotonic()
         except Exception:
             logger.exception(

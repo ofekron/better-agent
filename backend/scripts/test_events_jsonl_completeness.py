@@ -57,7 +57,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester, EventIngester  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
-from jsonl_tailer import OwnedClaudeJsonlTailer  # noqa: E402
+from jsonl_tailer import ClaudeJsonlTailer, OwnedClaudeJsonlTailer  # noqa: E402
 from paths import ba_home  # noqa: E402
 from auth_test_helpers import authenticate_client  # noqa: E402
 
@@ -363,6 +363,65 @@ async def test_offline_catchup_and_restart_dedup() -> bool:
     return True
 
 
+async def test_claude_tailer_rewinds_oversized_cursor() -> bool:
+    jsonl = Path(_TMP_HOME) / "rewind" / f"{uuid.uuid4()}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    line = {
+        "type": "assistant",
+        "uuid": str(uuid.uuid4()),
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "rewound"}]},
+    }
+    raw = json.dumps(line) + "\n"
+    jsonl.write_text(raw, encoding="utf-8")
+
+    seen: list[dict] = []
+    cursors: list[int] = []
+    tailer = ClaudeJsonlTailer(
+        path=jsonl,
+        start_offset=len(raw) + 1000,
+        dispatch=seen.append,
+        on_cursor_advance=cursors.append,
+    )
+    task = asyncio.create_task(tailer.run())
+    try:
+        for _ in range(100):
+            if seen:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        tailer.stop()
+        await task
+
+    if not seen:
+        print("  oversized cursor did not rewind/read current file")
+        return False
+    if seen[0].get("uuid") != line["uuid"]:
+        print(f"  wrong event after rewind: {seen[0]!r}")
+        return False
+    if not cursors or cursors[0] != 0:
+        print(f"  cursor reset was not reported first: {cursors!r}")
+        return False
+    if cursors[-1] != len(raw):
+        print(f"  cursor did not advance to current file size: {cursors!r}")
+        return False
+
+    owned = OwnedClaudeJsonlTailer(
+        root_id="root",
+        app_session_id="app",
+        agent_sid="agent",
+        jsonl_path=jsonl,
+        start_offset=len(raw) + 1000,
+    )
+    persisted: list[int] = []
+    owned._persist_cursor = persisted.append  # type: ignore[method-assign]
+    owned._on_cursor(0)
+    if persisted != [0]:
+        print(f"  owned cursor did not persist reset: {persisted!r}")
+        return False
+    return True
+
+
 # ─── (e) torn-tail recovery ────────────────────────────────────────────
 async def test_torn_tail_recovery_both_variants() -> bool:
     # Use a fresh ingester to bypass the singleton's open handle cache.
@@ -613,6 +672,8 @@ TESTS = [
      test_tailer_halts_on_dispatch_failure_and_dedupes),
     ("(d) offline catch-up + restart dedup",
      test_offline_catchup_and_restart_dedup),
+    ("(d2) Claude tailer rewinds oversized persisted byte cursor",
+     test_claude_tailer_rewinds_oversized_cursor),
     ("(e) torn-tail recovery (both variants)",
      test_torn_tail_recovery_both_variants),
     ("(f) broadcast_global allowlist enforced",
