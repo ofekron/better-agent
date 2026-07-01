@@ -453,7 +453,8 @@ def quick_state() -> dict[str, Any]:
         }
     schema_is_ok = bool(version_row and version_row[0] == str(_SCHEMA_VERSION))
     covered = bool(schema_is_ok and covered_row and covered_row[0] == "1")
-    return {"schema_ok": schema_is_ok, "covered": covered, "usable": covered and is_usable()}
+    usable = bool(covered and _last_refresh_at > 0 and (time.time() - _last_refresh_at) <= _FRESH_WINDOW_SECONDS)
+    return {"schema_ok": schema_is_ok, "covered": covered, "usable": usable}
 
 
 def request_refresh() -> None:

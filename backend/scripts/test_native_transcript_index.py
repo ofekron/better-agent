@@ -237,10 +237,21 @@ def test_restart_covered_worker_does_not_immediately_full_walk() -> bool:
 
 def test_not_usable_until_covered() -> bool:
     _setup_roots()
-    ok = not idx.is_usable() and not idx.is_covered()
+    cold = idx.quick_state()
+    ok = not idx.is_usable() and not idx.is_covered() and cold == {
+        "schema_ok": False,
+        "covered": False,
+        "usable": False,
+    }
     idx.refresh_once()
-    ok = ok and idx.is_usable() and idx.is_covered()
-    print(f"{OK if ok else FAIL} is_usable gated on covered (cold=False, after refresh=True)")
+    covered = idx.quick_state()
+    ok = ok and idx.is_usable() and idx.is_covered() and covered == {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
+    print(f"{OK if ok else FAIL} quick_state/is_usable gated on covered "
+          f"(cold={cold}, covered={covered})")
     return ok
 
 
