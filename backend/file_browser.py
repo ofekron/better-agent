@@ -119,7 +119,7 @@ def list_directories(path: str) -> dict:
     return {"path": _norm(p), "parent": parent, "entries": entries, "exists": True}
 
 
-def get_file_tree(root: str, max_depth: int = 3) -> dict:
+def get_file_tree(root: str, max_depth: int = 1) -> dict:
     """Return nested dict representing the file tree."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -130,15 +130,19 @@ def get_file_tree(root: str, max_depth: int = 3) -> dict:
             "name": path.name,
             "path": _norm(path),
             "type": "directory",
+            "children_loaded": True,
+            "has_more_children": False,
         }
         if depth >= max_depth:
             node["children"] = []
+            node["children_loaded"] = False
+            node["has_more_children"] = True
             return node
 
         children = []
         try:
             entries = sorted(path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-        except PermissionError:
+        except (PermissionError, OSError):
             entries = []
 
         for entry in entries:

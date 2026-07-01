@@ -566,7 +566,9 @@ def _rpc_get_file_tree(params: dict) -> dict:
     root = params.get("root") or ""
     _validate_path(root)
     _assert_within_cwd_roots(root)
-    max_depth = int(params.get("max_depth") or 3)
+    max_depth = int(params.get("max_depth", 1))
+    if max_depth < 0 or max_depth > 5:
+        raise ValueError("max_depth must be between 0 and 5")
     from file_browser import get_file_tree
     return get_file_tree(root, max_depth=max_depth)
 

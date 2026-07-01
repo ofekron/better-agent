@@ -1159,6 +1159,8 @@ export interface FileNode {
   path: string;
   type: "file" | "directory";
   children?: FileNode[];
+  children_loaded?: boolean;
+  has_more_children?: boolean;
 }
 
 export type SearchMethod = "path" | "name" | "symbols";
