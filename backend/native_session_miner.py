@@ -644,7 +644,16 @@ def _run_index() -> dict[str, Path]:
         return {}
     if _RUN_INDEX is not None and root_mtime == _RUN_INDEX_MTIME:
         return _RUN_INDEX
-    index: dict[str, Path] = {}
+    try:
+        from runs_dir import run_dirs_by_app_session
+        index = run_dirs_by_app_session(root)
+    except Exception:
+        index = {}
+    if index:
+        _RUN_INDEX = index
+        _RUN_INDEX_MTIME = root_mtime
+        return index
+    index = {}
     for state_path in root.glob("*/state.json"):
         try:
             data = json.loads(state_path.read_text(encoding="utf-8"))

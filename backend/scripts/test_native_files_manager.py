@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio  # noqa: E402
 
 import jsonl_tailer  # noqa: E402
+import native_session_miner as nsm_mod  # noqa: E402
 import runs_dir as runs_dir_mod  # noqa: E402
 from event_bus import BusEvent, bus  # noqa: E402
 import native_files_manager as nfm_mod  # noqa: E402
@@ -903,6 +904,176 @@ async def test_run_state_ledger_concurrent_appends_extend_cache_without_lost_row
     finally:
         runs_dir_mod.json.loads = original_json_loads  # type: ignore
     print("PASS test_run_state_ledger_concurrent_appends_extend_cache_without_lost_rows")
+
+
+async def test_run_index_uses_ledger_cache_without_state_scan() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    for index in range(3):
+        sid = f"RUN-INDEX-SID-{index}"
+        app_sid = f"RUN-INDEX-APP-{index}"
+        run_dir = root / f"run-index-ledger-{index}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state_path = run_dir / "state.json"
+        data = {
+            "session_id": sid,
+            "app_session_id": app_sid,
+            "jsonl_path": f"/tmp/{sid}.jsonl",
+        }
+        state_path.write_text(runs_dir_mod.json.dumps(data), encoding="utf-8")
+        _append_run_state_ledger(state_path, data)
+    assert runs_dir_mod.run_dirs_by_app_session(root)["RUN-INDEX-APP-2"] == root / "run-index-ledger-2"
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    original_read_text = runs_dir_mod.Path.read_text
+
+    def fail_state_read(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if getattr(path, "name", "") == "state.json":
+            raise AssertionError("_run_index should not read state.json when ledger cache is current")
+        return original_read_text(path, *args, **kwargs)
+
+    runs_dir_mod.Path.read_text = fail_state_read  # type: ignore
+    nsm_mod.Path.read_text = fail_state_read  # type: ignore
+    try:
+        index = nsm_mod._run_index()
+    finally:
+        runs_dir_mod.Path.read_text = original_read_text  # type: ignore
+        nsm_mod.Path.read_text = original_read_text  # type: ignore
+    assert index["RUN-INDEX-APP-0"] == root / "run-index-ledger-0"
+    assert index["RUN-INDEX-APP-2"] == root / "run-index-ledger-2"
+    print("PASS test_run_index_uses_ledger_cache_without_state_scan")
+
+
+async def test_run_index_append_extends_ledger_cache_without_state_scan() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_a = root / "run-index-append-a"
+    run_a.mkdir(parents=True, exist_ok=True)
+    state_a = run_a / "state.json"
+    data_a = {
+        "session_id": "RUN-INDEX-APPEND-A-SID",
+        "app_session_id": "RUN-INDEX-APPEND-A",
+        "jsonl_path": "/tmp/run-index-append-a.jsonl",
+    }
+    state_a.write_text(runs_dir_mod.json.dumps(data_a), encoding="utf-8")
+    _append_run_state_ledger(state_a, data_a)
+    assert nsm_mod._run_index()["RUN-INDEX-APPEND-A"] == run_a
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    run_b = root / "run-index-append-b"
+    run_b.mkdir(parents=True, exist_ok=True)
+    state_b = run_b / "state.json"
+    data_b = {
+        "session_id": "RUN-INDEX-APPEND-B-SID",
+        "app_session_id": "RUN-INDEX-APPEND-B",
+        "jsonl_path": "/tmp/run-index-append-b.jsonl",
+    }
+    state_b.write_text(runs_dir_mod.json.dumps(data_b), encoding="utf-8")
+    _append_run_state_ledger(state_b, data_b)
+    original_read_text = runs_dir_mod.Path.read_text
+
+    def fail_state_read(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if getattr(path, "name", "") == "state.json":
+            raise AssertionError("append should extend ledger-backed run index")
+        return original_read_text(path, *args, **kwargs)
+
+    runs_dir_mod.Path.read_text = fail_state_read  # type: ignore
+    nsm_mod.Path.read_text = fail_state_read  # type: ignore
+    try:
+        index = nsm_mod._run_index()
+    finally:
+        runs_dir_mod.Path.read_text = original_read_text  # type: ignore
+        nsm_mod.Path.read_text = original_read_text  # type: ignore
+    assert index["RUN-INDEX-APPEND-A"] == run_a
+    assert index["RUN-INDEX-APPEND-B"] == run_b
+    print("PASS test_run_index_append_extends_ledger_cache_without_state_scan")
+
+
+async def test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app() -> None:
+    from runs_dir import _append_run_state_ledger, run_state_ledger_cache_path, runs_root
+    import uuid
+
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    suffix = uuid.uuid4().hex
+    app_sid = f"RUN-INDEX-DUPLICATE-APP-{suffix}"
+    older = root / f"run-index-duplicate-older-{suffix}"
+    newer = root / f"run-index-duplicate-newer-{suffix}"
+    for run_dir, sid in (
+        (older, "RUN-INDEX-DUPLICATE-OLDER"),
+        (newer, "RUN-INDEX-DUPLICATE-NEWER"),
+    ):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state_path = run_dir / "state.json"
+        data = {
+            "session_id": sid,
+            "app_session_id": app_sid,
+            "jsonl_path": f"/tmp/{sid}.jsonl",
+        }
+        state_path.write_text(runs_dir_mod.json.dumps(data), encoding="utf-8")
+        _append_run_state_ledger(state_path, data)
+        time.sleep(0.01)
+    run_state_ledger_cache_path(root).unlink()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    index = runs_dir_mod.run_dirs_by_app_session(root)
+    assert index[app_sid] == newer
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    assert nsm_mod._run_index()[app_sid] == newer
+    print("PASS test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app")
+
+
+async def test_run_index_app_backfill_orders_duplicate_app_by_state_mtime() -> None:
+    from runs_dir import run_state_ledger_cache_path, runs_root
+    import uuid
+
+    nsm_mod._RUN_INDEX = None
+    nsm_mod._RUN_INDEX_MTIME = 0.0
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    suffix = uuid.uuid4().hex
+    app_sid = f"RUN-INDEX-BACKFILL-APP-{suffix}"
+    older = root / f"zz-run-index-backfill-older-{suffix}"
+    newer = root / f"aa-run-index-backfill-newer-{suffix}"
+    for run_dir, sid in (
+        (older, "RUN-INDEX-BACKFILL-OLDER"),
+        (newer, "RUN-INDEX-BACKFILL-NEWER"),
+    ):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state_path = run_dir / "state.json"
+        data = {
+            "session_id": sid,
+            "app_session_id": app_sid,
+            "jsonl_path": f"/tmp/{sid}.jsonl",
+        }
+        state_path.write_text(runs_dir_mod.json.dumps(data), encoding="utf-8")
+    old_ts = 1_700_000_000
+    new_ts = old_ts + 100
+    os.utime(older / "state.json", (old_ts, old_ts))
+    os.utime(newer / "state.json", (new_ts, new_ts))
+    try:
+        run_state_ledger_cache_path(root).unlink()
+    except OSError:
+        pass
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    marker = runs_dir_mod.run_state_app_index_backfill_marker_path(root)
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+    index = runs_dir_mod.run_dirs_by_app_session(root)
+    assert index[app_sid] == newer
+    print("PASS test_run_index_app_backfill_orders_duplicate_app_by_state_mtime")
 
 
 async def test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback() -> None:
@@ -2242,6 +2413,10 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_sqlite_cache_skips_jsonl_parse())
     asyncio.run(test_run_state_ledger_sqlite_cache_invalidates_on_append())
     asyncio.run(test_run_state_ledger_concurrent_appends_extend_cache_without_lost_rows())
+    asyncio.run(test_run_index_uses_ledger_cache_without_state_scan())
+    asyncio.run(test_run_index_append_extends_ledger_cache_without_state_scan())
+    asyncio.run(test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app())
+    asyncio.run(test_run_index_app_backfill_orders_duplicate_app_by_state_mtime())
     asyncio.run(test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback())
     asyncio.run(test_run_state_ledger_sqlite_cache_rejects_poisoned_paths())
     asyncio.run(test_run_state_ledger_sqlite_cache_dedupes_duplicate_state_paths())
