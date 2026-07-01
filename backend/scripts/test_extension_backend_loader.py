@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -277,6 +278,160 @@ def _seed_core_builtin_without_backend(extension_id: str) -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
 
 
+async def _check_projection_response_singleflight_case(
+    *,
+    name: str,
+    route,
+    key_attr: str,
+    build_attr: str,
+    payload,
+    request_count: int,
+) -> None:
+    original_key = getattr(extension_store, key_attr)
+    original_build = getattr(extension_store, build_attr)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def fake_key():
+        return ("singleflight-test", name)
+
+    def fake_build():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("projection build was not released")
+        return payload
+
+    extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+    extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    setattr(extension_store, key_attr, fake_key)
+    setattr(extension_store, build_attr, fake_build)
+    try:
+        tasks = [asyncio.create_task(route()) for _ in range(request_count)]
+        check(await asyncio.to_thread(entered.wait, 1), f"{name} projection build entered")
+        release.set()
+        responses = await asyncio.gather(*tasks)
+    finally:
+        setattr(extension_store, key_attr, original_key)
+        setattr(extension_store, build_attr, original_build)
+        extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+        extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    check(calls == 1, f"{name} duplicate cold requests build once")
+    bodies = [response.body for response in responses]
+    check(all(body == bodies[0] for body in bodies), f"{name} duplicate cold requests share bytes")
+    check(
+        all(response.media_type == "application/json" for response in responses),
+        f"{name} duplicate cold requests return json media type",
+    )
+
+
+async def _check_projection_response_failure_cleanup() -> None:
+    original_key = extension_store.frontend_entrypoints_cache_key
+    original_build = extension_store.frontend_entrypoints
+    calls = 0
+
+    def fake_key():
+        return ("singleflight-failure",)
+
+    def fake_build():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        return []
+
+    extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+    extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    extension_store.frontend_entrypoints_cache_key = fake_key  # type: ignore[assignment]
+    extension_store.frontend_entrypoints = fake_build  # type: ignore[assignment]
+    try:
+        try:
+            await extension_api.get_frontend_entrypoints()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("failed projection build should propagate")
+        response = await extension_api.get_frontend_entrypoints()
+    finally:
+        extension_store.frontend_entrypoints_cache_key = original_key  # type: ignore[assignment]
+        extension_store.frontend_entrypoints = original_build  # type: ignore[assignment]
+        extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+        extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    check(calls == 2, "failed projection build is removed from in-flight map")
+    check(response.body == b'{"entrypoints":[]}', "projection succeeds after failure cleanup")
+
+
+async def _check_projection_response_cancellation_shield() -> None:
+    original_key = extension_store.frontend_entrypoints_cache_key
+    original_build = extension_store.frontend_entrypoints
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def fake_key():
+        return ("singleflight-cancel",)
+
+    def fake_build():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("projection build was not released")
+        return [{"extension_id": "x"}]
+
+    extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+    extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    extension_store.frontend_entrypoints_cache_key = fake_key  # type: ignore[assignment]
+    extension_store.frontend_entrypoints = fake_build  # type: ignore[assignment]
+    try:
+        leader = asyncio.create_task(extension_api.get_frontend_entrypoints())
+        check(await asyncio.to_thread(entered.wait, 1), "cancellation projection build entered")
+        follower = asyncio.create_task(extension_api.get_frontend_entrypoints())
+        await asyncio.sleep(0)
+        follower.cancel()
+        try:
+            await follower
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled projection waiter should raise CancelledError")
+        release.set()
+        response = await leader
+    finally:
+        extension_store.frontend_entrypoints_cache_key = original_key  # type: ignore[assignment]
+        extension_store.frontend_entrypoints = original_build  # type: ignore[assignment]
+        extension_api._projection_response_cache.clear()  # type: ignore[attr-defined]
+        extension_api._projection_response_inflight_by_loop.clear()  # type: ignore[attr-defined]
+    check(calls == 1, "cancelled projection waiter does not cancel shared build")
+    check(response.body == b'{"entrypoints":[{"extension_id":"x"}]}', "leader receives projection after waiter cancellation")
+
+
+def _check_projection_response_singleflight() -> None:
+    async def _run() -> None:
+        await _check_projection_response_singleflight_case(
+            name="frontend-entrypoints",
+            route=extension_api.get_frontend_entrypoints,
+            key_attr="frontend_entrypoints_cache_key",
+            build_attr="frontend_entrypoints",
+            payload=[{"extension_id": "a"}],
+            request_count=19,
+        )
+        await _check_projection_response_singleflight_case(
+            name="ui-hooks",
+            route=extension_api.get_ui_hooks,
+            key_attr="ui_hooks_cache_key",
+            build_attr="ui_hooks",
+            payload={"quick_buttons": [], "pages": []},
+            request_count=6,
+        )
+        await _check_projection_response_failure_cleanup()
+        await _check_projection_response_cancellation_shield()
+
+    asyncio.run(_run())
+
+
 def main() -> int:
     try:
         app = FastAPI()
@@ -286,6 +441,7 @@ def main() -> int:
         module_package = _seed_module_backend_extension()
         _seed_core_builtin_without_backend(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID)
         client = TestClient(app)
+        _check_projection_response_singleflight()
 
         response = client.get("/api/extensions/ofek.backend/backend/ping")
         check(response.status_code == 200, "backend extension route dispatches after runtime install")

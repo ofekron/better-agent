@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 _PROJECTION_RESPONSE_CACHE_TTL_SECONDS = 5.0
 _projection_response_cache: dict[tuple[str, tuple[Any, ...]], tuple[float, bytes]] = {}
+_projection_response_inflight_by_loop: dict[
+    int,
+    tuple[
+        asyncio.AbstractEventLoop,
+        asyncio.Lock,
+        dict[tuple[str, tuple[Any, ...]], asyncio.Task[bytes]],
+    ],
+] = {}
 _local_node_id_cache: str | None = None
 
 
@@ -131,6 +139,37 @@ def _projection_response_cache_put(
     return _json_projection_response(content)
 
 
+def _projection_response_inflight_state() -> tuple[
+    asyncio.Lock,
+    dict[tuple[str, tuple[Any, ...]], asyncio.Task[bytes]],
+]:
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    state = _projection_response_inflight_by_loop.get(loop_id)
+    if state is not None and state[0] is loop and not loop.is_closed():
+        return state[1], state[2]
+    stale = [
+        key for key, (stored_loop, _lock, _inflight) in _projection_response_inflight_by_loop.items()
+        if stored_loop.is_closed()
+    ]
+    for key in stale:
+        _projection_response_inflight_by_loop.pop(key, None)
+    lock = asyncio.Lock()
+    inflight: dict[tuple[str, tuple[Any, ...]], asyncio.Task[bytes]] = {}
+    _projection_response_inflight_by_loop[loop_id] = (loop, lock, inflight)
+    return lock, inflight
+
+
+async def _cleanup_projection_response_inflight(
+    cache_key: tuple[str, tuple[Any, ...]],
+    task: asyncio.Task[bytes],
+) -> None:
+    lock, inflight = _projection_response_inflight_state()
+    async with lock:
+        if inflight.get(cache_key) is task:
+            inflight.pop(cache_key, None)
+
+
 def _cached_json_projection_response(
     name: str,
     key: tuple[Any, ...],
@@ -151,8 +190,30 @@ async def _cached_json_projection_response_threaded(
     cached = _projection_response_cache_get(name, key)
     if cached is not None:
         return cached
-    value = await asyncio.to_thread(build)
-    return _projection_response_cache_put(name, key, value)
+    cache_key = (name, key)
+    lock, inflight = _projection_response_inflight_state()
+    async with lock:
+        cached = _projection_response_cache_get(name, key)
+        if cached is not None:
+            return cached
+        task = inflight.get(cache_key)
+        if task is None:
+            async def _build_and_cache() -> bytes:
+                value = await asyncio.to_thread(build)
+                response = _projection_response_cache_put(name, key, value)
+                return bytes(response.body)
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_build_and_cache())
+            inflight[cache_key] = task
+            def _schedule_cleanup(done_task: asyncio.Task[bytes], ck=cache_key) -> None:
+                if loop.is_closed():
+                    return
+                loop.create_task(_cleanup_projection_response_inflight(ck, done_task))
+
+            task.add_done_callback(_schedule_cleanup)
+    content = await asyncio.shield(task)
+    return _json_projection_response(content)
 
 
 @router.get("")
