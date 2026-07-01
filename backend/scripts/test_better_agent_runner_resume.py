@@ -52,19 +52,33 @@ def _reasoning_only_response() -> bytes:
     ])
 
 
-def _cumulative_text_and_reasoning_response() -> bytes:
+def _incremental_deltas_with_repeats_response() -> bytes:
+    # Z.AI streams INCREMENTAL deltas. This sequence mixes a partial-prefix
+    # progression ("a","ab","abc") and exact repeats ("\n","\n" and "x","x").
+    # Every delta MUST be concatenated verbatim -> "aabc\n\nxx". A prefix-diff
+    # "normalizer" would drop the repeats and collapse the prefix progression
+    # to "abc\nx".
     return _sse_chunks([
         {"choices": [{"delta": {
-            "reasoning_content": "Let",
-            "content": "Hel",
+            "reasoning_content": "a", "content": "a",
         }, "finish_reason": None}]},
         {"choices": [{"delta": {
-            "reasoning_content": "Let me",
-            "content": "Hello",
+            "reasoning_content": "ab", "content": "ab",
         }, "finish_reason": None}]},
         {"choices": [{"delta": {
-            "reasoning_content": "Let me analyze",
-            "content": "Hello world",
+            "reasoning_content": "abc", "content": "abc",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "\n", "content": "\n",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "\n", "content": "\n",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "x", "content": "x",
+        }, "finish_reason": None}]},
+        {"choices": [{"delta": {
+            "reasoning_content": "x", "content": "x",
         }, "finish_reason": None}]},
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
         {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3,
@@ -102,16 +116,27 @@ def _normal_delta_text_and_reasoning_response() -> bytes:
     ])
 
 
-def _cumulative_tool_args_then_text_response(*, call_idx: int) -> bytes:
+def _incremental_tool_args_with_repeat_response(*, call_idx: int) -> bytes:
+    # Incremental tool-argument deltas whose concatenation is valid JSON, with
+    # a repeated token ("a","a") -> {"command": "aa"}. A prefix-diff normalizer
+    # would drop the second "a" and yield {"command": "a"}.
     if call_idx == 0:
         return _sse_chunks([
             {"choices": [{"delta": {"tool_calls": [{
                 "index": 0, "id": "call_x", "type": "function",
-                "function": {"name": "Bash", "arguments": "{\"command\""},
+                "function": {"name": "Bash", "arguments": "{\"command\": \""},
             }]}, "finish_reason": None}]},
             {"choices": [{"delta": {"tool_calls": [{
                 "index": 0,
-                "function": {"arguments": "{\"command\": \"echo hi\"}"},
+                "function": {"arguments": "a"},
+            }]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "a"},
+            }]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "\"}"},
             }]}, "finish_reason": None}]},
             {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
             {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2,
@@ -402,21 +427,24 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
     assert any("please adjust" in str(t) for t in texts), texts
 
 
-def test_zai_cumulative_snapshots_are_normalized_for_events_and_history(monkeypatch):
+def test_zai_incremental_deltas_concatenated_verbatim(monkeypatch):
+    # Z.AI's coding endpoint streams INCREMENTAL deltas. Repeated tokens and
+    # partial-prefix progressions must be concatenated verbatim — never
+    # prefix-diffed, which would drop them. Gates on the real coding base_url.
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
-    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_cumulative_"))
+    tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_incremental_"))
     inputs = {
         "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
         "model": "stub-model", "reasoning_effort": None,
         "permission": {"default": "bypass"}, "session_id": None,
-        "mode": "native", "app_session_id": "zai-cumulative-app",
+        "mode": "native", "app_session_id": "zai-incremental-app",
         "backend_url": "", "internal_token": "",
     }
     rd = _make_run_dir(tmp, inputs)
 
     async def fake_stream(*_args, **_kwargs):
-        for raw in _cumulative_text_and_reasoning_response().split(b"\n\n"):
+        for raw in _incremental_deltas_with_repeats_response().split(b"\n\n"):
             if not raw.startswith(b"data: "):
                 continue
             payload = raw[len(b"data: "):]
@@ -432,11 +460,12 @@ def test_zai_cumulative_snapshots_are_normalized_for_events_and_history(monkeypa
         runner_better_agent._session_path(complete["session_id"]).read_text()
     )["messages"]
 
-    assert _event_texts(rd, "thinking", "thinking")[-1] == "Let me analyze"
-    assert _event_texts(rd, "text", "text")[-1] == "Hello world"
+    expected = "aababc\n\nxx"
+    assert _event_texts(rd, "thinking", "thinking")[-1] == expected
+    assert _event_texts(rd, "text", "text")[-1] == expected
     assistant = [m for m in history if m.get("role") == "assistant"][-1]
-    assert assistant["content"] == "Hello world"
-    assert assistant["reasoning_content"] == "Let me analyze"
+    assert assistant["content"] == expected
+    assert assistant["reasoning_content"] == expected
 
 
 def test_zai_normal_deltas_still_concatenate(monkeypatch):
@@ -476,13 +505,16 @@ def test_zai_normal_deltas_still_concatenate(monkeypatch):
     assert assistant["reasoning_content"] == "Let me analyze"
 
 
-def test_zai_cumulative_tool_arguments_are_normalized(monkeypatch):
+def test_zai_incremental_tool_args_concatenated_verbatim(monkeypatch):
+    # Incremental tool-argument deltas with a repeated token must concatenate
+    # verbatim into {"command": "aa"} — a prefix-diff normalizer would drop the
+    # second "a" and dispatch {"command": "a"}.
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
     calls = []
 
     async def fake_stream(*_args, **_kwargs):
-        response = _cumulative_tool_args_then_text_response(call_idx=len(calls))
+        response = _incremental_tool_args_with_repeat_response(call_idx=len(calls))
         for raw in response.split(b"\n\n"):
             if not raw.startswith(b"data: "):
                 continue
@@ -509,7 +541,7 @@ def test_zai_cumulative_tool_arguments_are_normalized(monkeypatch):
     rc = asyncio.run(runner_better_agent._run(rd, inputs))
 
     assert rc == 0, f"runner exited {rc}"
-    assert calls == [{"command": "echo hi"}]
+    assert calls == [{"command": "aa"}]
 
 
 def test_non_zai_prefix_looking_deltas_are_not_rewritten(monkeypatch):
