@@ -42,8 +42,18 @@ _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RunStateLedgerSignature = tuple[int, int, int, int]
+_RunStateRootSignature = tuple[int, int, int, int, int]
 _RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, Path]]]]] = {}
-_RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
+_RUN_STATE_RECENT_INDEX_CACHE: dict[
+    str,
+    tuple[
+        float,
+        tuple[tuple[int, int, str], ...],
+        dict[str, list[Path]],
+        _RunStateRootSignature,
+        tuple[str, ...],
+    ],
+] = {}
 _RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
 _RECONCILED_MARKER_INDEX_SEEN: set[tuple[str, str, int, int, int, int]] = set()
 _RECONCILED_MARKER_BACKFILL_LOCK = threading.Lock()
@@ -159,6 +169,37 @@ def _run_state_candidate_stat(path: Path, root: Path) -> os.stat_result | None:
     return st
 
 
+def _root_signature(root: Path) -> _RunStateRootSignature | None:
+    try:
+        st = root.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def _pending_run_dirs_have_state(root: Path, pending_run_dirs: tuple[str, ...]) -> bool:
+    for run_dir in pending_run_dirs:
+        if _run_state_candidate_stat(root / run_dir / "state.json", root) is not None:
+            return True
+    return False
+
+
+def _recent_candidates_unchanged(
+    candidates: tuple[tuple[int, int, str], ...],
+    root: Path,
+) -> bool:
+    for mtime_ns, size, state_path in candidates:
+        st = _run_state_candidate_stat(Path(state_path), root)
+        if st is None or st.st_mtime_ns != mtime_ns or st.st_size != size:
+            return False
+    return True
+
+
+def _invalidate_recent_state_index(root: Path) -> None:
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        _RUN_STATE_RECENT_INDEX_CACHE.pop(str(root), None)
+
+
 def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     try:
         ledger = run_state_ledger_path(root)
@@ -249,12 +290,32 @@ def _recent_state_index_for_root(
 ) -> dict[str, list[Path]]:
     now = time.monotonic()
     root_key = str(root)
+    root_signature = _root_signature(root)
+    if root_signature is None:
+        return {}
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
         if cached is not None:
-            ts, _fingerprint, index = cached
+            ts, _fingerprint, index, cached_root_signature, pending_run_dirs = cached
             if now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
                 return _filter_recent_state_index(index, root_resolved, agent_sid=agent_sid)
+            if (
+                cached_root_signature == root_signature
+                and now - ts < _RUN_STATE_RECENT_INDEX_MAX_AGE_S
+            ):
+                reuse_index = (
+                    _recent_candidates_unchanged(_fingerprint, root)
+                    and not _pending_run_dirs_have_state(root, pending_run_dirs)
+                )
+                if reuse_index:
+                    _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+                        now,
+                        _fingerprint,
+                        index,
+                        cached_root_signature,
+                        pending_run_dirs,
+                    )
+                    return _filter_recent_state_index(index, root_resolved, agent_sid=agent_sid)
         event = _RUN_STATE_RECENT_INDEX_INFLIGHT.get(root_key)
         if event is None:
             event = threading.Event()
@@ -271,22 +332,47 @@ def _recent_state_index_for_root(
                 if cached is not None else {}
             )
     try:
-        candidates = _recent_state_candidates(root, root_resolved)
+        scan = _recent_state_scan(root, root_resolved)
+        if scan is None:
+            return {}
+        candidates, pending_run_dirs = scan
         if not candidates:
+            with _RUN_STATE_LOOKUP_CACHE_LOCK:
+                _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+                    now,
+                    candidates,
+                    {},
+                    root_signature,
+                    pending_run_dirs,
+                )
             return {}
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
             cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
             if cached is not None:
-                ts, fingerprint, index = cached
+                ts, fingerprint, index, cached_root_signature, cached_pending_run_dirs = cached
                 if (
                     fingerprint == candidates
+                    and cached_root_signature == root_signature
+                    and cached_pending_run_dirs == pending_run_dirs
                     and now - ts < _RUN_STATE_RECENT_INDEX_MAX_AGE_S
                 ):
-                    _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, fingerprint, index)
+                    _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+                        now,
+                        fingerprint,
+                        index,
+                        cached_root_signature,
+                        cached_pending_run_dirs,
+                    )
                     return _filter_recent_state_index(index, root_resolved, agent_sid=agent_sid)
         index = _build_recent_state_index(candidates, root_resolved)
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
-            _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
+            _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+                now,
+                candidates,
+                index,
+                root_signature,
+                pending_run_dirs,
+            )
         return index
     finally:
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
@@ -299,12 +385,21 @@ def _recent_state_candidates(
     root: Path,
     root_resolved: Path | None = None,
 ) -> tuple[tuple[int, int, str], ...]:
+    scan = _recent_state_scan(root, root_resolved)
+    return scan[0] if scan is not None else ()
+
+
+def _recent_state_scan(
+    root: Path,
+    root_resolved: Path | None = None,
+) -> tuple[tuple[tuple[int, int, str], ...], tuple[str, ...]] | None:
     candidates: list[tuple[int, int, str]] = []
+    pending_run_dirs: list[str] = []
     if root_resolved is None:
         try:
             root_resolved = root.resolve()
         except OSError:
-            return ()
+            return None
     try:
         with os.scandir(root) as entries:
             for entry in entries:
@@ -313,11 +408,12 @@ def _recent_state_candidates(
                 state_path = Path(entry.path) / "state.json"
                 st = _run_state_candidate_stat(state_path, root)
                 if st is None:
+                    pending_run_dirs.append(entry.name)
                     continue
                 candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
     except OSError:
-        return ()
-    return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates))
+        return None
+    return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates)), tuple(sorted(pending_run_dirs))
 
 
 def _filter_recent_state_paths(paths: list[Path], root_resolved: Path) -> list[Path]:
@@ -873,6 +969,8 @@ def reap_run_dir(child: Path) -> bool:
 def atomic_write_json(path: Path, data: dict) -> None:
     """Crash-safe JSON write for run-dir state."""
     write_json(path, data)
+    if path.name == "state.json":
+        _invalidate_recent_state_index(path.parent.parent)
     _append_run_state_ledger(path, data)
 
 
