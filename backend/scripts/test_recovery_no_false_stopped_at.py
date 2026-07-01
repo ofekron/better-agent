@@ -249,6 +249,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed else f"all {len(TESTS)} tests passed")
