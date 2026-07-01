@@ -127,6 +127,7 @@ def _wire_loop_and_fns(
     *,
     reconcile_fn=None,
     emit_fn=None,
+    reconciled_fn=None,
 ) -> tuple[list, list]:
     """Bind a fresh loop + counter wrappers. Returns
     (reconcile_calls, emit_calls) — both lists you can inspect from
@@ -144,6 +145,9 @@ def _wire_loop_and_fns(
     session_manager.bind_loop(loop)
     session_manager.bind_reconcile_fn(reconcile_fn or _default_reconcile)
     session_manager.bind_processing_emitter(emit_fn or _default_emit)
+    session_manager.bind_reconciled_emitter(
+        reconciled_fn or (lambda root_id: None)
+    )
     return reconcile_calls, emit_calls
 
 
@@ -655,6 +659,187 @@ def test_ws_replay_cap_at_msg_limit() -> bool:
     return True
 
 
+def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, str, int]:
+    sess = session_manager.create(
+        name="replay-target", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    msg_id = str(uuid.uuid4())
+    msg = session_manager.append_assistant_msg(sid, {
+        "id": msg_id,
+        "role": "assistant",
+        "content": "a",
+        "events": [
+            {
+                "type": "assistant",
+                "data": {"type": "assistant", "uuid": str(uuid.uuid4())},
+            }
+            for _ in range(event_count)
+        ],
+        "isStreaming": False,
+    })
+    assert msg is not None
+    return sid, msg_id, int(msg.get("seq") or 0)
+
+
+def test_ws_replay_excludes_completed_seen_message() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sid, msg_id, seen_seq = _session_with_completed_replay_target()
+    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay_ids = {m.get("id") for m in delta["messages"]}
+    if msg_id in replay_ids:
+        print("  replay resent completed seq N message")
+        return False
+    payload_size = len(json.dumps(delta["messages"]))
+    if payload_size > 1000:
+        print(f"  completed/no-in-flight replay serialized huge payload: {payload_size} bytes")
+        return False
+    return True
+
+
+def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+    from turn_manager import TurnManager  # noqa: E402
+
+    sid, msg_id, seen_seq = _session_with_completed_replay_target(event_count=1)
+    tm = TurnManager(coordinator=None)
+    tm.current_assistant_msgs[sid] = {
+        "id": msg_id,
+        "role": "assistant",
+        "content": "streaming",
+        "events": [
+            {"type": "assistant", "data": {"uuid": "live-1"}},
+            {"type": "assistant", "data": {"uuid": "live-2"}},
+        ],
+        "isStreaming": True,
+    }
+    delta = _build_messages_replay_delta(
+        sid,
+        seen_seq,
+        limit=50,
+        get_in_flight=tm.get_in_flight_assistant_msg,
+    )
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = [m for m in delta["messages"] if m.get("id") == msg_id]
+    if len(replay) != 1:
+        print(f"  in-flight message missing/duplicated: {len(replay)}")
+        return False
+    msg = replay[0]
+    if msg.get("content") != "streaming" or len(msg.get("events") or []) != 2:
+        print(f"  in-flight replacement failed: {msg}")
+        return False
+    return True
+
+
+def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sid = "sid-race"
+    msg_id = "msg-race"
+    calls: list[int] = []
+    in_flight_holder = {"msg": None}
+
+    def _get_in_flight(_sid: str):
+        return in_flight_holder["msg"]
+
+    def _get_messages_since(_sid: str, since_seq: int, *, limit: int):
+        calls.append(since_seq)
+        if len(calls) == 1:
+            in_flight_holder["msg"] = {
+                "id": msg_id, "role": "assistant",
+                "events": [{"type": "assistant", "data": {"uuid": "live"}}],
+                "isStreaming": True,
+            }
+            return {"messages": [], "next_seq": 8}
+        return {
+            "messages": [{
+                "id": msg_id, "role": "assistant",
+                "events": [], "isStreaming": False, "seq": 7,
+            }],
+            "next_seq": 8,
+        }
+
+    delta = _build_messages_replay_delta(
+        sid,
+        7,
+        limit=50,
+        get_messages_since=_get_messages_since,
+        get_in_flight=_get_in_flight,
+    )
+    if calls != [8, 7]:
+        print(f"  expected exclusive then inclusive calls, got {calls}")
+        return False
+    replay = delta["messages"] if delta else []
+    if len(replay) != 1 or replay[0].get("id") != msg_id:
+        print(f"  in-flight race replay wrong: {replay}")
+        return False
+    if not replay[0].get("isStreaming"):
+        print("  in-flight race did not preserve streaming state")
+        return False
+    return True
+
+
+async def test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    loop = asyncio.get_running_loop()
+    reconciled: list[str] = []
+
+    def _reconcile(root_id: str, *, after_seq: int = 0) -> list:
+        return [{"app_session_id": root_id, "msg_id": "orphan", "stub": {}}]
+
+    _wire_loop_and_fns(
+        loop,
+        reconcile_fn=_reconcile,
+        reconciled_fn=lambda root_id: reconciled.append(root_id),
+    )
+    sid, msg_id, seen_seq = _session_with_completed_replay_target()
+    _ = session_manager.get(sid)
+    session_manager._reconcile_dirty[sid] = False
+    event_ingester.ingest(
+        sid, sid=sid, event_type="agent_message",
+        data={
+            "type": "assistant",
+            "uuid": str(uuid.uuid4()),
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "orphan"}],
+            },
+        },
+        source="claude_tailer", msg_id=None,
+    )
+    if session_manager._reconcile_dirty.get(sid) is not True:
+        print("  orphan did not arm reconcile dirty")
+        return False
+    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    if msg_id in {m.get("id") for m in delta["messages"]}:
+        print("  orphan reconnect resent completed huge message")
+        return False
+    task = session_manager.schedule_reconcile_if_needed(sid)
+    if task is None:
+        print("  dirty orphan did not schedule reconcile")
+        return False
+    await task
+    if sid not in reconciled:
+        print(f"  session_reconciled not emitted: {reconciled}")
+        return False
+    return True
+
+
 def test_ws_event_cursor_uses_server_floor() -> bool:
     sid = _fresh_session()
     event_ingester.ingest(
@@ -818,6 +1003,9 @@ async def _amain() -> int:
         ("render orphan updates warm root events", test_render_orphan_updates_warm_root_events_projection),
         ("stamped event updates warm root events", test_stamped_event_updates_warm_root_events_projection),
         ("ws replay cap at msg_limit", test_ws_replay_cap_at_msg_limit),
+        ("ws replay excludes completed seen message", test_ws_replay_excludes_completed_seen_message),
+        ("ws replay keeps preexisting in-flight message", test_ws_replay_keeps_preexisting_in_flight_message),
+        ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
         ("ws event cursor uses server floor", test_ws_event_cursor_uses_server_floor),
         ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),
         ("stubbed team tree skips full event hydration", test_stubbed_team_tree_skips_full_event_hydration),
@@ -830,6 +1018,7 @@ async def _amain() -> int:
         ("slow reconcile → started+finished", test_slow_reconcile_emits_started_then_finished),
         ("failing reconcile still emits finished", test_failing_reconcile_still_emits_finished),
         ("loop responsive during slow reconcile", test_loop_responsive_during_slow_reconcile),
+        ("ws replay orphan finalize uses reconcile", test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay),
     ]
 
     fails = 0
