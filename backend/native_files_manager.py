@@ -61,8 +61,8 @@ _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RUN_STATE_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 _RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
 _RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
-_RUN_STATE_LEDGER_CACHE_TTL_S = 1.0
-_RUN_STATE_LEDGER_CACHE: dict[str, tuple[float, int, dict[str, list[tuple[float, Path]]]]] = {}
+_RunStateLedgerSignature = tuple[int, int, int, int]
+_RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, Path]]]]] = {}
 
 
 @dataclass
@@ -136,18 +136,21 @@ def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
         st = ledger.stat()
     except OSError:
         return []
-    now = time.monotonic()
+    signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     root_key = str(root)
-    with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
-        if cached is not None:
-            ts, size, index = cached
-            if size == st.st_size and now - ts < _RUN_STATE_LEDGER_CACHE_TTL_S:
-                return [path for _, path in index.get(agent_sid, [])]
     try:
         root_resolved = root.resolve()
     except OSError:
         return []
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
+        if cached is not None:
+            cached_signature, index = cached
+            if cached_signature == signature:
+                return [
+                    path for _, path in index.get(agent_sid, [])
+                    if _run_state_path_under_root(path, root_resolved)
+                ]
     latest_by_key: dict[tuple[str, str], tuple[float, Path]] = {}
     try:
         with ledger.open(encoding="utf-8") as f:
@@ -161,11 +164,7 @@ def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 if not sid or not state_path:
                     continue
                 path = Path(str(state_path))
-                if path.name != "state.json":
-                    continue
-                try:
-                    path.resolve().relative_to(root_resolved)
-                except (OSError, ValueError):
+                if not _run_state_path_under_root(path, root_resolved):
                     continue
                 try:
                     written_at = float(row.get("written_at"))
@@ -181,8 +180,18 @@ def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     for (sid, _), value in latest_by_key.items():
         index.setdefault(sid, []).append(value)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        _RUN_STATE_LEDGER_CACHE[root_key] = (now, st.st_size, index)
+        _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
     return [path for _, path in index.get(agent_sid, [])]
+
+
+def _run_state_path_under_root(path: Path, root_resolved: Path) -> bool:
+    if path.name != "state.json":
+        return False
+    try:
+        path.resolve().relative_to(root_resolved)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
@@ -319,6 +328,10 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
     if not root.is_dir():
         return None
     key = str(root)
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return None
     cached = _run_state_cache_get(key, agent_sid)
     if cached is not False:
         return cached
@@ -331,6 +344,8 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
     try:
         with perf.timed("native_files.lookup_run_state"):
             for sp in _state_files_for_sid(root, agent_sid):
+                if not _run_state_path_under_root(sp, root_resolved):
+                    continue
                 try:
                     st = json.loads(sp.read_text(encoding="utf-8"))
                 except Exception:

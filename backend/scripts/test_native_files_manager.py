@@ -610,6 +610,112 @@ async def test_run_state_positive_cache_outlives_negative_cache() -> None:
     print("PASS test_run_state_positive_cache_outlives_negative_cache")
 
 
+async def test_run_state_ledger_cache_reuses_unchanged_index() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_a = root / "run-ledger-cache-a"
+    run_b = root / "run-ledger-cache-b"
+    for run_dir, sid in ((run_a, "LEDGER-CACHE-A"), (run_b, "LEDGER-CACHE-B")):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state_path = run_dir / "state.json"
+        state_path.write_text(
+            f'{{"session_id":"{sid}","jsonl_path":"/tmp/{sid}.jsonl"}}',
+            encoding="utf-8",
+        )
+        _append_run_state_ledger(
+            state_path,
+            {"session_id": sid, "jsonl_path": f"/tmp/{sid}.jsonl"},
+        )
+    assert nfm_mod._ledger_state_files_for_sid(root, "LEDGER-CACHE-A") == [
+        run_a / "state.json"
+    ]
+    original_json_loads = nfm_mod.json.loads
+
+    def fail_json_loads(*_args, **_kwargs):
+        raise AssertionError("unchanged ledger cache should not reparse jsonl")
+
+    nfm_mod.json.loads = fail_json_loads  # type: ignore
+    try:
+        path = nfm_mod._ledger_state_files_for_sid(root, "LEDGER-CACHE-B")
+    finally:
+        nfm_mod.json.loads = original_json_loads  # type: ignore
+    assert path == [run_b / "state.json"], path
+    print("PASS test_run_state_ledger_cache_reuses_unchanged_index")
+
+
+async def test_run_state_ledger_cache_invalidates_on_append() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_a = root / "run-ledger-append-a"
+    run_a.mkdir(parents=True, exist_ok=True)
+    state_a = run_a / "state.json"
+    state_a.write_text(
+        '{"session_id":"LEDGER-APPEND-A","jsonl_path":"/tmp/ledger-append-a.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_a,
+        {"session_id": "LEDGER-APPEND-A", "jsonl_path": "/tmp/ledger-append-a.jsonl"},
+    )
+    assert nfm_mod._ledger_state_files_for_sid(root, "LEDGER-APPEND-A") == [state_a]
+    run_b = root / "run-ledger-append-b"
+    run_b.mkdir(parents=True, exist_ok=True)
+    state_b = run_b / "state.json"
+    state_b.write_text(
+        '{"session_id":"LEDGER-APPEND-B","jsonl_path":"/tmp/ledger-append-b.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_b,
+        {"session_id": "LEDGER-APPEND-B", "jsonl_path": "/tmp/ledger-append-b.jsonl"},
+    )
+    assert nfm_mod._ledger_state_files_for_sid(root, "LEDGER-APPEND-B") == [state_b]
+    print("PASS test_run_state_ledger_cache_invalidates_on_append")
+
+
+async def test_run_state_ledger_cache_rejects_cached_symlink_escape() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-cache-escape"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"LEDGER-CACHE-ESCAPE","jsonl_path":"/tmp/ledger-cache-escape.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_path,
+        {
+            "session_id": "LEDGER-CACHE-ESCAPE",
+            "jsonl_path": "/tmp/ledger-cache-escape.jsonl",
+        },
+    )
+    assert nfm_mod._ledger_state_files_for_sid(root, "LEDGER-CACHE-ESCAPE") == [
+        state_path
+    ]
+    outside_dir = root.parent / "outside-ledger-cache-escape"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    state_path.unlink()
+    run_dir.rmdir()
+    run_dir.symlink_to(outside_dir, target_is_directory=True)
+    assert nfm_mod._ledger_state_files_for_sid(root, "LEDGER-CACHE-ESCAPE") == []
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    assert nfm_mod._scan_run_state_for_jsonl("LEDGER-CACHE-ESCAPE") is None
+    print("PASS test_run_state_ledger_cache_rejects_cached_symlink_escape")
+
+
 async def test_run_state_recent_index_is_reused_across_sids() -> None:
     from runs_dir import runs_root
 
@@ -1025,6 +1131,9 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_full_backfill_coalesces_concurrent_marker_writes())
     asyncio.run(test_run_state_stale_index_does_not_hide_new_state())
     asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
+    asyncio.run(test_run_state_ledger_cache_reuses_unchanged_index())
+    asyncio.run(test_run_state_ledger_cache_invalidates_on_append())
+    asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_recent_index_coalesces_concurrent_sid_scans())
