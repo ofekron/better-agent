@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import textwrap
 import urllib.error
 from pathlib import Path
 
@@ -653,6 +654,59 @@ def test_openai_runner_speaks_real_requirements_mcp_stdio():
     assert payload["success"] is False
     assert "better_agent_sdk" not in payload.get("error", "")
     assert "INTERNAL_TOKEN" not in payload.get("error", "")
+
+
+def test_openai_runner_accepts_large_extension_mcp_stdio_response():
+    runner = _mod("runner_better_agent")
+    with tempfile.TemporaryDirectory() as d:
+        server = Path(d) / "large_mcp_server.py"
+        server.write_text(textwrap.dedent(r"""
+            import json
+            import sys
+
+            def read_json_line():
+                line = sys.stdin.readline()
+                if not line:
+                    sys.exit(0)
+                return json.loads(line)
+
+            init = read_json_line()
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": init["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "large", "version": "1"},
+                },
+            }) + "\n")
+            sys.stdout.flush()
+            read_json_line()
+            call = read_json_line()
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": call["id"],
+                "result": {
+                    "content": [{"type": "text", "text": "x" * 70000}],
+                },
+            }) + "\n")
+            sys.stdout.flush()
+        """), encoding="utf-8")
+        result = asyncio.run(runner._mcp_call_tool(
+            {
+                "server_name": "large-extension",
+                "tool_name": "large_response",
+                "config": {
+                    "command": sys.executable,
+                    "args": [str(server)],
+                    "env": {},
+                },
+            },
+            {},
+        ))
+
+    assert len(result) > runner._MAX_OUTPUT_CHARS
+    assert result.endswith("...[truncated, 70000 total chars]")
 
 
 def test_openai_attach_recovered_run_schedules_bootstrap():
