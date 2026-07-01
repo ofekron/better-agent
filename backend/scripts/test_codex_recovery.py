@@ -41,6 +41,7 @@ if _BACKEND not in sys.path:
 
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
+from paths import ba_home  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
@@ -710,6 +711,61 @@ def test_loopback_post_retries_transient_reset() -> bool:
         return False
     if calls != 2:
         print(f"  expected retry once, got {calls} calls")
+        return False
+    return True
+
+
+def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
+    import runner_codex
+
+    token_file = ba_home() / "internal_token"
+    token_file.write_text("disk-token", encoding="utf-8")
+    runner_codex._token_cache["token"] = None
+    runner_codex._token_cache["mtime"] = 0.0
+    seen_tokens: list[str | None] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    original_urlopen = runner_codex.urllib.request.urlopen
+
+    def fake_urlopen(req, *_args, **_kwargs):
+        token = req.headers.get("X-internal-token")
+        seen_tokens.append(token)
+        if token == "spawn-token":
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+        return _Resp()
+
+    try:
+        runner_codex.urllib.request.urlopen = fake_urlopen
+        res = _post_loopback_sync(
+            {"x": 1},
+            backend_url="http://127.0.0.1:8000",
+            internal_token="spawn-token",
+            url_path="/api/internal/ask",
+            timeout_s=10,
+        )
+    finally:
+        runner_codex.urllib.request.urlopen = original_urlopen
+
+    if res != {"success": True}:
+        print(f"  expected success response, got {res!r}")
+        return False
+    if seen_tokens != ["spawn-token", "disk-token"]:
+        print(f"  expected spawn then disk token, got {seen_tokens!r}")
         return False
     return True
 
@@ -1565,6 +1621,7 @@ TESTS = [
     ("dead codex wrapper without terminal fails closed", test_dead_wrapper_without_terminal_still_fails_closed),
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
+    ("codex loopback POST retries disk token after forbidden", test_loopback_post_retries_disk_token_after_forbidden),
     ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
     ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),
     ("codex MCP string error normalizes", test_codex_mcp_string_error_normalizes),

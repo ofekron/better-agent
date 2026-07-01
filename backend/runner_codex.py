@@ -63,6 +63,7 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
 )
+from paths import ba_home
 from provider_run_config import toml_literal, write_skill_tree
 from proc_control import process_control as _process_control
 
@@ -74,6 +75,24 @@ _CODEX_SANDBOX_TO_TYPE = {
     "workspace-write": "workspaceWrite",
     "danger-full-access": "dangerFullAccess",
 }
+
+_token_cache = {"mtime": 0.0, "token": None}
+
+
+def _load_internal_token() -> Optional[str]:
+    try:
+        path = ba_home() / "internal_token"
+        st = path.stat()
+        if _token_cache["token"] is not None and _token_cache["mtime"] == st.st_mtime:
+            return _token_cache["token"]
+        token = path.read_text(encoding="utf-8").strip()
+        _token_cache["mtime"] = st.st_mtime
+        _token_cache["token"] = token or None
+        return _token_cache["token"]
+    except Exception:
+        _token_cache["mtime"] = 0.0
+        _token_cache["token"] = None
+        return None
 
 
 def _codex_sandbox_policy(sandbox: str = "danger-full-access") -> dict[str, str]:
@@ -375,26 +394,42 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout_s
     backoff = 1.0
+    tried_live_token_after_forbidden = False
 
-    while True:
+    def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             backend_url.rstrip("/") + url_path,
             data=body,
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "X-Internal-Token": internal_token,
+                "X-Internal-Token": token,
             },
         )
+        remaining = max(1.0, deadline - time.monotonic())
+        with urllib.request.urlopen(req, timeout=remaining) as resp:
+            raw = resp.read()
         try:
-            remaining = max(1.0, deadline - time.monotonic())
-            with urllib.request.urlopen(req, timeout=remaining) as resp:
-                raw = resp.read()
-            try:
-                return json.loads(raw.decode("utf-8"))
-            except Exception as e:
-                raise RuntimeError(t("runner.delegate_non_json", e=str(e), raw=repr(raw[:200])))
-        except urllib.error.HTTPError:
+            return json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            raise RuntimeError(t("runner.delegate_non_json", e=str(e), raw=repr(raw[:200])))
+
+    while True:
+        try:
+            return _request_once(internal_token)
+        except urllib.error.HTTPError as e:
+            live_token = _load_internal_token()
+            if (
+                e.code == 403
+                and live_token
+                and live_token != internal_token
+                and not tried_live_token_after_forbidden
+            ):
+                tried_live_token_after_forbidden = True
+                try:
+                    return _request_once(live_token)
+                except urllib.error.HTTPError:
+                    raise e
             raise
         except (
             urllib.error.URLError,
