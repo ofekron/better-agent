@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import extension_store
+import native_session_prompt_search
 import paths
 import session_bridge
 from session_manager import manager as session_manager
-import session_search
 
 _LOCK = threading.Lock()
 
@@ -256,13 +256,30 @@ def last_turn(sid: str) -> dict:
     }
 
 
-async def search(query: str, *, max_results: int = 10, timeout: float = 120.0) -> dict:
-    """Rank candidate target sessions for a prompt (reuses the ask provisioned
-    search worker). Hint-augmentation (comment + source-session map) is a
-    follow-up layered on the query."""
-    return await session_search.run_search_sessions_session(
-        query, max_results=max_results, timeout=timeout
+async def search(query: str, *, max_results: int = 10) -> dict:
+    """Find candidate target sessions for a prompt by grepping the raw
+    provider-native **user prompts** across every provider (claude / codex /
+    gemini / better-agent). Returns token-overlap-ranked matches — the assistant
+    reasons over these to pick a session. No LLM worker in the loop."""
+    matches = await asyncio.to_thread(
+        native_session_prompt_search.search_native_session_prompts,
+        query=query,
+        max_matches=max_results,
     )
+    return {"results": matches}
+
+
+async def grep_transcript(query: str, *, max_results: int = 20) -> dict:
+    """Dig into the raw provider-native transcripts for a query over the **whole
+    conversation** (user prompts + assistant replies), not just typed prompts.
+    Peer to :func:`search`; used once a session is chosen to pull the relevant
+    lines. Returns token-overlap-ranked matches."""
+    matches = await asyncio.to_thread(
+        native_session_prompt_search.search_native_session_transcripts,
+        query=query,
+        max_matches=max_results,
+    )
+    return {"results": matches}
 
 
 async def delegate(target_sid: str, prompt: str) -> dict:
