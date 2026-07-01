@@ -280,6 +280,97 @@ async def test_run_state_lookup_is_targeted_and_cached() -> None:
     print("PASS test_run_state_lookup_is_targeted_and_cached")
 
 
+async def test_run_state_lookup_uses_ledger_before_recent_scan() -> None:
+    from runs_dir import runs_root, atomic_write_json
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-fast"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        run_dir / "state.json",
+        {"session_id": "LEDGER-FAST-SID", "jsonl_path": "/tmp/ledger-fast.jsonl"},
+    )
+    original_candidates = nfm_mod._recent_state_candidates
+
+    def fail_candidates(*_args, **_kwargs):
+        raise AssertionError("run-state ledger should avoid recent-dir scan")
+
+    nfm_mod._recent_state_candidates = fail_candidates  # type: ignore
+    try:
+        path = nfm_mod._scan_run_state_for_jsonl("LEDGER-FAST-SID")
+    finally:
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
+    assert str(path) == "/tmp/ledger-fast.jsonl", path
+    print("PASS test_run_state_lookup_uses_ledger_before_recent_scan")
+
+
+async def test_run_state_ledger_rejects_paths_outside_runs_root() -> None:
+    from runs_dir import runs_root, run_state_ledger_path
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    outside = root.parent / "outside-state.json"
+    outside.write_text(
+        '{"session_id":"LEDGER-ESCAPE","jsonl_path":"/tmp/escape.jsonl"}',
+        encoding="utf-8",
+    )
+    run_state_ledger_path(root).write_text(
+        '{"session_id":"LEDGER-ESCAPE","jsonl_path":"/tmp/escape.jsonl",'
+        f'"state_path":"{outside}","written_at":1}}\n',
+        encoding="utf-8",
+    )
+    original_candidates = nfm_mod._recent_state_candidates
+
+    def no_candidates(*_args, **_kwargs):
+        return ()
+
+    nfm_mod._recent_state_candidates = no_candidates  # type: ignore
+    try:
+        path = nfm_mod._scan_run_state_for_jsonl("LEDGER-ESCAPE")
+    finally:
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
+    assert path is None, path
+    print("PASS test_run_state_ledger_rejects_paths_outside_runs_root")
+
+
+async def test_run_state_stale_index_does_not_hide_new_state() -> None:
+    from runs_dir import runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    old_dir = root / "run-stale-index-old"
+    old_dir.mkdir(parents=True, exist_ok=True)
+    (old_dir / "state.json").write_text(
+        '{"session_id":"STALE-OLD","jsonl_path":"/tmp/stale-old.jsonl"}',
+        encoding="utf-8",
+    )
+    assert nfm_mod._scan_run_state_for_jsonl("STALE-OLD") is not None
+    root_key = str(root)
+    ts, fingerprint, index = nfm_mod._RUN_STATE_RECENT_INDEX_CACHE[root_key]
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+        ts - nfm_mod._RUN_STATE_RECENT_INDEX_TTL_S - 0.1,
+        fingerprint,
+        index,
+    )
+    new_dir = root / "run-stale-index-new"
+    new_dir.mkdir(parents=True, exist_ok=True)
+    (new_dir / "state.json").write_text(
+        '{"session_id":"STALE-NEW","jsonl_path":"/tmp/stale-new.jsonl"}',
+        encoding="utf-8",
+    )
+    path = nfm_mod._scan_run_state_for_jsonl("STALE-NEW")
+    assert str(path) == "/tmp/stale-new.jsonl", path
+    print("PASS test_run_state_stale_index_does_not_hide_new_state")
+
+
 async def test_run_state_positive_cache_outlives_negative_cache() -> None:
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
     root_key = "/tmp/run-state-cache-root"
@@ -703,6 +794,9 @@ if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
+    asyncio.run(test_run_state_lookup_uses_ledger_before_recent_scan())
+    asyncio.run(test_run_state_ledger_rejects_paths_outside_runs_root())
+    asyncio.run(test_run_state_stale_index_does_not_hide_new_state())
     asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
