@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "../src/components/SessionList";
+import { MobileActionSheetProvider } from "../src/components/MobileActionSheet";
 import type { Provider, Session } from "../src/types";
 import { makeSession, makeWorker } from "./fixtures";
 
@@ -99,6 +100,34 @@ function longPressSession(id: string) {
     vi.advanceTimersByTime(500);
   });
   fireEvent.pointerUp(row);
+}
+
+function renderListWithMobileSheet(
+  sessions: Session[],
+  props: Partial<ComponentProps<typeof SessionList>> = {},
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => new Promise<Response>(() => {})),
+  );
+  return render(
+    <MobileActionSheetProvider>
+      <SessionList
+        sessions={sessions}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
+        onDetails={() => {}}
+        {...props}
+      />
+    </MobileActionSheetProvider>,
+  );
 }
 
 describe("SessionList advanced filters", () => {
@@ -797,6 +826,26 @@ describe("SessionList advanced filters", () => {
     expect(rowBySessionId("alpha").getAttribute("data-selected")).toBe("true");
     expect(screen.getByTestId("session-bulk-bar")).toBeTruthy();
     expect(screen.getAllByLabelText("session.selectSession")).toHaveLength(2);
+  });
+
+  it("opens the session action sheet by long pressing a session on mobile", async () => {
+    vi.stubGlobal("innerWidth", 390);
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    renderListWithMobileSheet(
+      [makeSession({ id: "alpha", name: "Alpha" })],
+      { onSelect },
+    );
+
+    longPressSession("alpha");
+    vi.useRealTimers();
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("session-bulk-bar")).toBeNull();
+    await waitFor(() => expect(document.querySelector(".mobile-action-sheet-header")?.textContent).toBe("Alpha"));
+    const sheet = document.querySelector(".mobile-action-sheet") as HTMLElement;
+    expect(within(sheet).getByRole("button", { name: "session.pinTitle" })).toBeTruthy();
+    expect(within(sheet).getByRole("button", { name: "session.copyAction" })).toBeTruthy();
   });
 
   it("bulk deletes selected sessions", () => {
