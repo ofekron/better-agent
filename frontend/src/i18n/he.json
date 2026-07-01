@@ -398,6 +398,8 @@
   "settings.extensionsUninstallConfirm": "להסיר את {{name}}?",
   "settings.extensionsUninstallFailed": "הסרת התוסף נכשלה",
   "settings.extensionsNone": "לא מותקנים תוספים.",
+  "settings.extensionsSearchPlaceholder": "חיפוש תוספים…",
+  "settings.extensionsSearchEmpty": "אין תוספים שתואמים לחיפוש.",
   "settings.fontFamily": "גופן",
   "settings.fontFamily.system": "מערכת",
   "settings.fontFamily.inter": "Inter",

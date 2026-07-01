@@ -393,6 +393,8 @@
   "settings.extensionsUninstallConfirm": "{{name}} verwijderen?",
   "settings.extensionsUninstallFailed": "Verwijderen van extensie mislukt",
   "settings.extensionsNone": "Geen extensies geïnstalleerd.",
+  "settings.extensionsSearchPlaceholder": "Extensies zoeken…",
+  "settings.extensionsSearchEmpty": "Geen extensies komen overeen met je zoekopdracht.",
   "settings.fontFamily": "Lettertype",
   "settings.fontFamily.system": "Systeem",
   "settings.fontFamily.inter": "Inter",

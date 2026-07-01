@@ -393,6 +393,8 @@
   "settings.extensionsUninstallConfirm": "{{name}} をアンインストールしますか？",
   "settings.extensionsUninstallFailed": "拡張機能のアンインストールに失敗しました",
   "settings.extensionsNone": "インストールされた拡張機能はありません。",
+  "settings.extensionsSearchPlaceholder": "拡張機能を検索…",
+  "settings.extensionsSearchEmpty": "検索に一致する拡張機能はありません。",
   "settings.fontFamily": "フォント",
   "settings.fontFamily.system": "システム",
   "settings.fontFamily.inter": "Inter",

@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "Удалить {{name}}?",
   "settings.extensionsUninstallFailed": "Не удалось удалить расширение",
   "settings.extensionsNone": "Расширения не установлены.",
+  "settings.extensionsSearchPlaceholder": "Поиск расширений…",
+  "settings.extensionsSearchEmpty": "Нет расширений, подходящих под поиск.",
   "settings.fontFamily": "Шрифт",
   "settings.fontFamily.system": "Системный",
   "settings.fontFamily.inter": "Inter",

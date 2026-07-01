@@ -180,6 +180,69 @@ describe("ExtensionUiSettingsSection uninstall", () => {
     });
   });
 
+  it("filters installed extensions by search text", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            { enabled: true, manifest: { id: "ofek.alpha-extension", entrypoints: {} } },
+            { enabled: true, manifest: { id: "ofek.beta-extension", entrypoints: {} } },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/ofek.alpha-extension/config")) {
+        return jsonResponse({
+          name: "Alpha Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      if (url.endsWith("/api/extensions/ofek.beta-extension/config")) {
+        return jsonResponse({
+          name: "Beta Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Alpha Extension")).toBeTruthy();
+    expect(screen.getByText("Beta Extension")).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search extensions…" }), {
+      target: { value: "beta" },
+    });
+
+    expect(screen.queryByText("Alpha Extension")).toBeNull();
+    expect(screen.getByText("Beta Extension")).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search extensions…" }), {
+      target: { value: "missing" },
+    });
+
+    expect(screen.queryByText("Beta Extension")).toBeNull();
+    expect(screen.getByText("No extensions match your search.")).toBeTruthy();
+  });
+
   it("shows harness additions on extension items", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
