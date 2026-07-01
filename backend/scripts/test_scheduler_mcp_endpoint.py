@@ -29,6 +29,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from starlette.testclient import TestClient  # noqa: E402
+import extension_backend_loader  # noqa: E402
+import extension_store  # noqa: E402
+import auth  # noqa: E402
 import main  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from stores import schedule_store  # noqa: E402
@@ -44,11 +47,43 @@ def check(cond, msg):
 
 CLIENT = TestClient(main.app, client=("localhost", 50000))
 TOKEN = main.coordinator.internal_token
+AUTH_HEADERS = {"Authorization": f"Bearer {auth.create_token('test')}"}
 
 
 def _post(body: dict, token: str | None = TOKEN):
     headers = {"X-Internal-Token": token} if token is not None else {}
     return CLIENT.post("/api/internal/schedules", json=body, headers=headers)
+
+
+def _patch_scheduler_extension_dispatch():
+    old_enabled = extension_store.is_extension_enabled_cached
+    old_spec = extension_backend_loader.backend_entrypoint_spec_cached
+    old_dispatch = extension_backend_loader.dispatch_extension_backend_request
+    scheduler_id = extension_store.BUILTIN_SCHEDULER_EXTENSION_ID
+
+    def enabled(extension_id: str) -> bool:
+        if extension_id == scheduler_id:
+            return True
+        return old_enabled(extension_id)
+
+    def spec(extension_id: str):
+        if extension_id == scheduler_id:
+            return {"extension_id": scheduler_id, "backend_module": "backend.routes"}
+        return old_spec(extension_id)
+
+    async def dispatch(*_args, **_kwargs):
+        raise AssertionError("scheduler GET should not hit extension subprocess dispatch")
+
+    extension_store.is_extension_enabled_cached = enabled
+    extension_backend_loader.backend_entrypoint_spec_cached = spec
+    extension_backend_loader.dispatch_extension_backend_request = dispatch
+
+    def restore() -> None:
+        extension_store.is_extension_enabled_cached = old_enabled
+        extension_backend_loader.backend_entrypoint_spec_cached = old_spec
+        extension_backend_loader.dispatch_extension_backend_request = old_dispatch
+
+    return restore
 
 
 def main_test() -> int:
@@ -138,7 +173,26 @@ def main_test() -> int:
         "public DELETE schedule route removed",
     )
 
-    print("T7 spawn-side strip is wired (source-level)")
+    print("T7 scheduler extension GET is core-fast")
+    restore_dispatch = _patch_scheduler_extension_dispatch()
+    try:
+        r = CLIENT.get(
+            f"/api/extensions/{extension_store.BUILTIN_SCHEDULER_EXTENSION_ID}"
+            f"/backend/sessions/{sid}/schedules",
+            headers=AUTH_HEADERS,
+        )
+        check(r.status_code == 200, f"extension GET schedules → 200 ({r.status_code})")
+        check(r.json().get("schedules") == [], "extension GET schedules returns current list")
+        r = CLIENT.get(
+            f"/api/extensions/{extension_store.BUILTIN_SCHEDULER_EXTENSION_ID}"
+            "/backend/sessions/no-such-session/schedules",
+            headers=AUTH_HEADERS,
+        )
+        check(r.status_code == 404, f"missing session GET → 404 ({r.status_code})")
+    finally:
+        restore_dispatch()
+
+    print("T8 spawn-side strip is wired (source-level)")
     from runs_dir import TIMER_TOOLS
     check(set(TIMER_TOOLS) == {
         "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
