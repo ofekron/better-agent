@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
+import {
+  extractVisibleChatPanelTree,
+  publishBetterAgentTestApeState,
+  publishBetterAgentVisibleChatPanelTree,
+} from "src/lib/testapeConsumer";
 import type { Session } from "src/types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -21,6 +25,7 @@ function session(overrides: Partial<Session> = {}): Session {
 describe("Better Agent TestApe consumer", () => {
   afterEach(() => {
     delete window.testape;
+    document.body.innerHTML = "";
   });
 
   it("publishes Better Agent state through the generic TestApe web SDK", () => {
@@ -63,5 +68,99 @@ describe("Better Agent TestApe consumer", () => {
     expect(sendState).toHaveBeenCalledWith("better_agent_right_panel", { open: true, tab: "files" });
     expect(sendState).toHaveBeenCalledWith("better_agent_native_file_panel_count", 1);
     expect(sendState).toHaveBeenCalledWith("better_agent_native_file_panel_paths", ["/repo/src/App.tsx"]);
+  });
+
+  it("extracts the visible linear chat panel tree on demand", () => {
+    document.body.innerHTML = `
+      <div class="chat-toolbar-title">Main</div>
+      <div data-testid="chat-messages">
+        <div data-testid="user-message" data-message-id="u1">
+          <div class="message-box-body">Hello</div>
+        </div>
+        <div data-testid="assistant-message" data-message-id="a1">
+          <div class="message-content">Answer</div>
+        </div>
+      </div>
+    `;
+    window.history.replaceState({}, "", "/s/s1");
+
+    expect(extractVisibleChatPanelTree()).toEqual({
+      visible: true,
+      session_id: "s1",
+      title: "Main",
+      regions: [
+        {
+          kind: "linear",
+          session_id: "s1",
+          messages: [
+            { id: "u1", role: "user", text: "Hello" },
+            { id: "a1", role: "assistant", text: "Answer" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("publishes the visible chat panel tree through the TestApe SDK on demand", () => {
+    const sendState = vi.fn();
+    window.testape = { sendState };
+    document.body.innerHTML = `
+      <div data-testid="chat-messages">
+        <div data-testid="user-message" data-message-id="u1">
+          <div class="message-box-body">Hello</div>
+        </div>
+      </div>
+    `;
+
+    const tree = publishBetterAgentVisibleChatPanelTree();
+
+    expect(tree?.regions[0]?.messages).toEqual([{ id: "u1", role: "user", text: "Hello" }]);
+    expect(sendState).toHaveBeenCalledWith("better_agent_visible_chat_panel_tree", tree);
+    expect(window.__betterAgentTestApe?.extractVisibleChatPanelTree()).toEqual(tree);
+  });
+
+  it("extracts fork shared and pane regions with session ids", () => {
+    document.body.innerHTML = `
+      <div data-testid="chat-messages">
+        <div data-testid="fork-shared">
+          <div data-testid="user-message" data-message-id="u1">
+            <div class="message-box-body">Shared</div>
+          </div>
+        </div>
+        <div data-testid="fork-grid">
+          <div data-testid="fork-pane" data-session-id="root" class="fork-pane-focused">
+            <div data-testid="assistant-message" data-message-id="a-root">
+              <div class="message-content">Root answer</div>
+            </div>
+          </div>
+          <div data-testid="fork-pane" data-session-id="fork">
+            <div data-testid="assistant-message" data-message-id="a-fork">
+              <div class="message-content">Fork answer</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    window.history.replaceState({}, "", "/s/root");
+
+    expect(extractVisibleChatPanelTree().regions).toEqual([
+      {
+        kind: "fork_shared",
+        session_id: "root",
+        messages: [{ id: "u1", role: "user", text: "Shared" }],
+      },
+      {
+        kind: "fork_pane",
+        session_id: "root",
+        focused: true,
+        messages: [{ id: "a-root", role: "assistant", text: "Root answer" }],
+      },
+      {
+        kind: "fork_pane",
+        session_id: "fork",
+        focused: false,
+        messages: [{ id: "a-fork", role: "assistant", text: "Fork answer" }],
+      },
+    ]);
   });
 });
