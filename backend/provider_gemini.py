@@ -741,6 +741,9 @@ class GeminiProvider(Provider):
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)
+            if rs.session_id:
+                import spawn_ledger
+                spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
 

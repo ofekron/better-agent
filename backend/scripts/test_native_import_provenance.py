@@ -86,6 +86,66 @@ def test_reap_harvests_from_backend_state() -> None:
           "reap harvests from backend_state.json fallback")
 
 
+def test_bootstrap_harvests_live_run_dirs_once() -> None:
+    rd = Path(_TMP_HOME) / "runs" / "run-live"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "state.json").write_text(json.dumps({"session_id": "live-sid"}), encoding="utf-8")
+    managed = ni._ba_managed_native_ids()
+    check("live-sid" in managed, "managed ids include bootstrapped live run sid")
+    check("live-sid" in spawn_ledger.all_sids(), "bootstrap records live run sid in ledger")
+
+    (rd / "state.json").unlink()
+    managed_again = ni._ba_managed_native_ids()
+    check("live-sid" in managed_again, "managed ids keep live run sid from ledger after state removal")
+
+    rd2 = Path(_TMP_HOME) / "runs" / "run-after-marker"
+    rd2.mkdir(parents=True, exist_ok=True)
+    (rd2 / "state.json").write_text(json.dumps({"session_id": "after-marker-sid"}), encoding="utf-8")
+    managed_after_marker = ni._ba_managed_native_ids()
+    check("after-marker-sid" not in managed_after_marker,
+          "bootstrap marker prevents repeated live run scans")
+
+
+def test_bootstrap_harvests_fallback_files() -> None:
+    marker = Path(_TMP_HOME) / "native_spawn_ledger.bootstrapped"
+    marker.unlink(missing_ok=True)
+    rd = Path(_TMP_HOME) / "runs" / "run-complete"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "complete.json").write_text(json.dumps({"session_id": "complete-sid"}), encoding="utf-8")
+    spawn_ledger.bootstrap_from_run_dirs_once()
+    check("complete-sid" in spawn_ledger.all_sids(), "bootstrap harvests complete.json fallback")
+
+
+def test_bootstrap_does_not_mark_after_append_failure() -> None:
+    marker = Path(_TMP_HOME) / "native_spawn_ledger.bootstrapped"
+    marker.unlink(missing_ok=True)
+    rd = Path(_TMP_HOME) / "runs" / "run-append-fails"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "state.json").write_text(json.dumps({"session_id": "append-fails-sid"}), encoding="utf-8")
+    original = spawn_ledger.add_many
+
+    def fail_add_many(_sids):
+        return False
+
+    spawn_ledger.add_many = fail_add_many  # type: ignore[assignment]
+    try:
+        spawn_ledger.bootstrap_from_run_dirs_once()
+    finally:
+        spawn_ledger.add_many = original  # type: ignore[assignment]
+    check(not marker.exists(), "bootstrap marker is not written after append failure")
+    spawn_ledger.bootstrap_from_run_dirs_once()
+    check("append-fails-sid" in spawn_ledger.all_sids(),
+          "bootstrap retries after append failure")
+
+
+def test_record_discovered_covers_post_marker_runs() -> None:
+    marker = Path(_TMP_HOME) / "native_spawn_ledger.bootstrapped"
+    marker.write_text("1\n", encoding="utf-8")
+    spawn_ledger.record_discovered("provider-write-sid")
+    check("provider-write-sid" in ni._ba_managed_native_ids(),
+          "provider write-through records sid after bootstrap marker")
+
+
 def test_managed_unions_ledger() -> None:
     spawn_ledger.add("managed-via-ledger")
     check("managed-via-ledger" in ni._ba_managed_native_ids(),
@@ -139,6 +199,10 @@ def main() -> None:
     test_ledger()
     test_reap_harvests()
     test_reap_harvests_from_backend_state()
+    test_bootstrap_harvests_live_run_dirs_once()
+    test_bootstrap_harvests_fallback_files()
+    test_bootstrap_does_not_mark_after_append_failure()
+    test_record_discovered_covers_post_marker_runs()
     test_managed_unions_ledger()
     test_is_junk_session()
     test_enumerate_drops_junk()
