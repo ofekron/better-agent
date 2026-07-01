@@ -129,7 +129,11 @@ async def assert_client_backend_allows_large_ws_frames() -> None:
         else:
             sys.modules["websockets"] = original
 
-    assert calls == [{"url": cli._ws_chat_url(8124), "max_size": None}]
+    assert calls == [{
+        "url": cli._ws_chat_url(8124),
+        "max_size": None,
+        "ping_timeout": None,
+    }]
 
 
 def main() -> int:

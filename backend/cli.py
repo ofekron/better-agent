@@ -527,7 +527,11 @@ class ClientBackend(Backend):
 
     async def start(self) -> None:
         import websockets
-        self._ws = await websockets.connect(_ws_chat_url(self.port), max_size=None)
+        self._ws = await websockets.connect(
+            _ws_chat_url(self.port),
+            max_size=None,
+            ping_timeout=None,
+        )
 
     def set_worker_creation_policy(self, session_id: str, policy: str) -> None:
         req = urllib.request.Request(
