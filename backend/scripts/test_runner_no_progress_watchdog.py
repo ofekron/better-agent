@@ -114,10 +114,34 @@ async def t_periodic_progress_is_not_timed_out() -> None:
         raise AssertionError(f"progressing turn failed: {result['error']!r}")
 
 
+async def t_default_watchdog_is_bounded() -> None:
+    expected = 5 * 60
+    actual = runner._RESPONSE_NO_PROGRESS_TIMEOUT_S
+    if actual != expected:
+        raise AssertionError(f"default watchdog is {actual}s, expected {expected}s")
+
+
+async def t_claude_config_dir_expands_home_vars() -> None:
+    old_home = os.environ.get("HOME")
+    os.environ["HOME"] = "/tmp/ba-runner-home-test"
+    try:
+        resolved = runner._resolve_claude_config_dir("$HOME/.claude-zai")
+    finally:
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+    expected = Path("/tmp/ba-runner-home-test/.claude-zai")
+    if resolved != expected:
+        raise AssertionError(f"resolved {resolved}, expected {expected}")
+
+
 async def main_run() -> int:
     tests = [
         ("silent receive times out", t_silent_receive_times_out),
         ("periodic progress is not timed out", t_periodic_progress_is_not_timed_out),
+        ("default watchdog is bounded", t_default_watchdog_is_bounded),
+        ("claude config dir expands home vars", t_claude_config_dir_expands_home_vars),
     ]
     failed = 0
     for name, fn in tests:

@@ -135,11 +135,17 @@ from tool_approval_client import request_tool_approval
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
-_RESPONSE_NO_PROGRESS_TIMEOUT_S = 45 * 60
+_RESPONSE_NO_PROGRESS_TIMEOUT_S = 5 * 60
 
 
 class ResponseNoProgressError(RuntimeError):
     pass
+
+
+def _resolve_claude_config_dir(raw: str) -> Path:
+    if raw:
+        return Path(os.path.expanduser(os.path.expandvars(raw)))
+    return Path.home() / ".claude"
 
 
 def _materialize_claude_skill_plugin(
@@ -2170,11 +2176,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     # Resolve the Claude config directory (respects CLAUDE_CONFIG_DIR env).
     _cfg_dir_raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    _claude_config_dir = (
-        Path(os.path.expandvars(_cfg_dir_raw))
-        if _cfg_dir_raw
-        else Path.home() / ".claude"
-    )
+    _claude_config_dir = _resolve_claude_config_dir(_cfg_dir_raw)
 
     # Build MCP server config
     mcp_servers: dict = {}
