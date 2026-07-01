@@ -15,6 +15,7 @@ from pathlib import Path
 from paths import ba_home
 from typing import Awaitable, Callable, Iterable, Iterator, Optional
 import trace_grep_index
+import trace_metadata_index
 
 logger = logging.getLogger(__name__)
 
@@ -250,10 +251,30 @@ class TraceCollector:
             trace_path = session_trace_dir / f"{self.trace_id}.json"
             trace_path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
 
-            # Index (append)
             index_path = _traces_dir() / "index.jsonl"
-            with open(index_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(self.to_index_entry()) + "\n")
+            index_entry = self.to_index_entry()
+            index_line = json.dumps(index_entry)
+            with trace_metadata_index.index_lock():
+                append_state = trace_metadata_index.prepare_append_under_lock(index_path)
+                repaired = trace_metadata_index.repair_append_boundary_under_lock(index_path)
+                if repaired:
+                    append_state = trace_metadata_index.AppendState(False, None)
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(index_path, "a", encoding="utf-8") as f:
+                    f.write(index_line + "\n")
+                if append_state.fresh and append_state.line_no is not None:
+                    try:
+                        trace_metadata_index.index_appended_entry_under_lock(
+                            index_line,
+                            line_no=append_state.line_no,
+                            index_path=index_path,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to update trace metadata index %s",
+                            self.trace_id,
+                            exc_info=True,
+                        )
 
             try:
                 trace_grep_index.index_trace(self.to_dict(), trace_path)
@@ -423,18 +444,7 @@ def search_traces(query: str, limit: int = 50) -> list[dict]:
     index_path = _traces_dir() / "index.jsonl"
     if not index_path.exists():
         return []
-
-    results = []
-    query_lower = query.lower()
-    for line in reversed(index_path.read_text(encoding="utf-8").splitlines()):
-        if query_lower in line.lower():
-            try:
-                results.append(json.loads(line.strip()))
-                if len(results) >= limit:
-                    break
-            except json.JSONDecodeError:
-                continue
-    return results
+    return trace_metadata_index.search(query, limit, index_path)
 
 
 def grep_traces(
