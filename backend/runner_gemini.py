@@ -37,6 +37,7 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
 from provider_run_config import symlink_home_overlay, write_skill_tree
+from runtime_skills import has_runtime_skills, materialize_runtime_skills
 from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
@@ -51,10 +52,17 @@ def _gemini_terminal_error(raw_event: dict) -> Optional[str]:
     return None
 
 
-def _materialize_gemini_run_home(run_dir: Path, provider_run_config: dict) -> Optional[dict[str, str]]:
+def _materialize_gemini_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    cwd: str,
+    bare_config: bool = False,
+) -> Optional[dict[str, str]]:
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
-    if not mcp_servers and not skills:
+    has_ext_skills = has_runtime_skills(cwd, bare_config=bare_config)
+    if not mcp_servers and not skills and not has_ext_skills:
         return None
 
     real_home = Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()).expanduser()
@@ -63,10 +71,17 @@ def _materialize_gemini_run_home(run_dir: Path, provider_run_config: dict) -> Op
     symlink_home_overlay(real_home / ".gemini", overlay_home / ".gemini", skip={"settings.json", "skills"})
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
+    ext_count = materialize_runtime_skills(
+        overlay_home / ".gemini" / "skills", cwd, bare_config=bare_config
+    )
+    materialize_runtime_skills(
+        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config
+    )
+
     settings = _load_json_object(real_home / ".gemini" / "settings.json")
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
-    if skills:
+    if skills or ext_count:
         settings["skills"] = {"enabled": True}
 
     if settings:
@@ -618,7 +633,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     run_env = os.environ.copy()
     run_env.update(native_mcp_runtime_env(inputs))
-    scoped_env = _materialize_gemini_run_home(run_dir, provider_run_config)
+    scoped_env = _materialize_gemini_run_home(
+        run_dir,
+        provider_run_config,
+        cwd=cwd,
+        bare_config=bool(inputs.get("bare_config")),
+    )
     if scoped_env:
         run_env.update(scoped_env)
 

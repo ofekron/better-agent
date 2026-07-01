@@ -833,7 +833,7 @@ def t_gemini_materializes_isolated_home() -> None:
         env = runner_gemini._materialize_gemini_run_home(run_dir, {
             "mcp_servers": {"demo": {"command": "echo"}},
             "skills": {"reviewer": "Review.\n"},
-        })
+        }, cwd=str(real_home))
     finally:
         if old is None:
             os.environ.pop("GEMINI_CLI_HOME", None)
