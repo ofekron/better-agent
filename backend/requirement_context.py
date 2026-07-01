@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -123,8 +122,8 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
         )
 
     def parse_result(self, text: str, ctx: dict) -> dict[str, Any]:
-        obj = _parse_processor_json(text)
-        if not _is_valid_processor_payload(obj):
+        obj = _parse_valid_processor_json(text)
+        if obj is None:
             return _processor_parse_failed()
         requirements = obj["requirements"]
         return {"requirements": _normalize_processed_requirements(requirements)}
@@ -291,23 +290,47 @@ def _processor_parse_failed() -> dict[str, Any]:
     return {"requirements": [], "error": "parse_failed"}
 
 
-def _parse_processor_json(text: str) -> dict[str, Any] | None:
+def _parse_valid_processor_json(text: str) -> dict[str, Any] | None:
     if not text:
         return None
     try:
         parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
+        return parsed if _is_valid_processor_payload(parsed) else None
     except json.JSONDecodeError:
         pass
-    matches = list(re.finditer(r"\{[\s\S]*\}", text))
-    for match in reversed(matches):
+    for candidate in _json_object_candidates_from_end(text):
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict):
+        if _is_valid_processor_payload(parsed):
             return parsed
     return None
+
+
+def _json_object_candidates_from_end(text: str) -> list[str]:
+    candidates: list[str] = []
+    stack: list[int] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            start = stack.pop()
+            if not stack:
+                candidates.append(text[start:index + 1])
+    return list(reversed(candidates))
 
 
 def _is_valid_processor_payload(value: Any) -> bool:
