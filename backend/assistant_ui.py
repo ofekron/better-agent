@@ -283,6 +283,20 @@ async def search_in_native_sessions(sql: str, *, row_limit: int = 200) -> dict:
     )
 
 
+async def resolve_ba_session(native_session_id: str) -> dict:
+    """Map a session id returned by ``search_in_native_sessions`` (a PROVIDER
+    native/agent session id for claude/codex/gemini, or already a BA id for the
+    better-agent runner) to the Better Agent session id that ask/delegate operate
+    on. Returns ``{"ba_session_id": <app id>}`` or ``{"ba_session_id": None}``
+    when the transcript belongs to no BA session (raw native history never run
+    through Better Agent — the caller must create a session to act on it)."""
+    sid = (native_session_id or "").strip()
+    if not sid:
+        return {"ba_session_id": None}
+    root = await asyncio.to_thread(session_manager.root_id_for, sid)
+    return {"ba_session_id": root}
+
+
 async def delegate(target_sid: str, prompt: str) -> dict:
     """Send a prompt to a target session and run its turn; returns the
     session_bridge result (final assistant message + metadata). The target does
