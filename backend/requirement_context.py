@@ -80,7 +80,7 @@ RG_OPTIONS_WITH_VALUE = {
 
 class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 5
+    version = 6
     name = "worker:requirements:query-processor"
     env_prefix = "GET_REQUIREMENTS_PROCESSOR"
     task_key = "requirement_analysis"
@@ -104,12 +104,14 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
         return render_prompt("get_requirements_processor.md", {})
 
     def build_instructions(self, query: str, ctx: dict) -> str:
+        search_hints = _processor_search_hints(query)
         request = {
             "query": query,
             "cwd": ctx.get("cwd") or "",
             "cwds": ctx.get("cwds") or [],
             "all_projects": bool(ctx.get("all_projects")),
             "max_matches": ctx.get("max_matches"),
+            "search_hints": search_hints,
         }
         return (
             "Find the related stored requirements for this request.\n"
@@ -119,7 +121,7 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
             "never file paths. For multiple patterns use -e/--regexp for every pattern, for example "
             "['-i', '-e', 'session search', '-e', 'parse_failed']; do not pass bare token lists like "
             "['session', 'search', 'parse_failed'].\n"
-            "Use broad key phrases from request.query. Extra query words may be noisy, so do not require "
+            "Use broad key phrases from request.query and request.search_hints. Extra query words may be noisy, so do not require "
             "every term to match. Treat raw matches as candidate requirements and return any match that is "
             "semantically related to the request or to a concrete failure/tool/provider named in it. "
             "Matches with kind=native_transcript_bundle are raw transcript evidence: read the assistant "
@@ -135,6 +137,8 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
         )
 
     def parse_result(self, text: str, ctx: dict) -> dict[str, Any]:
+        if _processor_tool_unavailable(text):
+            return _processor_parse_failed()
         obj = _parse_valid_processor_json(text)
         if obj is None:
             return _processor_parse_failed()
@@ -143,6 +147,33 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
 
 
 GET_REQUIREMENTS_PROCESSOR_SPEC = provisioning.register(GetRequirementsProcessorSpec())
+
+
+def _processor_search_hints(query: str) -> list[str]:
+    normalized = (query or "").lower()
+    if not any(term in normalized for term in ("delayed", "confirmation", "confirms", "proposal", "adopts")):
+        return []
+    if not any(term in normalized for term in ("assistant", "transcript", "requirement")):
+        return []
+    return [
+        "lag between assistant proposition and user confirmation",
+        "assistant defines requirements",
+        "user confirms requirements",
+        "non-user transcript rows",
+    ]
+
+
+def _processor_tool_unavailable(text: str) -> bool:
+    lower = (text or "").lower()
+    markers = (
+        "get_requirements_internal tool is not available",
+        "get_requirements_internal mcp tool is not available",
+        "not bound to this processor turn",
+        "no mcp servers connected",
+        "cannot run the ripgrep lookup",
+        "cannot perform the lookup",
+    )
+    return any(marker in lower for marker in markers)
 
 
 def _requirements_package_root() -> Path:
