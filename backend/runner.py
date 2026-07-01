@@ -135,6 +135,11 @@ from tool_approval_client import request_tool_approval
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
+_RESPONSE_NO_PROGRESS_TIMEOUT_S = 45 * 60
+
+
+class ResponseNoProgressError(RuntimeError):
+    pass
 
 
 def _materialize_claude_skill_plugin(
@@ -1729,6 +1734,21 @@ async def _drain_until_result(
             return True
 
 
+async def _receive_response_message(
+    resp_iter,
+    *,
+    timeout_s: float,
+) -> object:
+    if timeout_s <= 0:
+        return await resp_iter.__anext__()
+    try:
+        return await asyncio.wait_for(resp_iter.__anext__(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise ResponseNoProgressError(
+            f"Claude runner made no response progress for {timeout_s:.0f}s"
+        ) from exc
+
+
 async def _run_one_turn(
     *,
     client: ClaudeSDKClient,
@@ -1745,6 +1765,8 @@ async def _run_one_turn(
     log: logging.Logger,
     cancel_path: Optional[Path] = None,
     interactive_permissions: bool = False,
+    current_turn_holder: Optional[list] = None,
+    no_progress_timeout_s: float = _RESPONSE_NO_PROGRESS_TIMEOUT_S,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -1830,6 +1852,8 @@ async def _run_one_turn(
     watcher_task: Optional[asyncio.Task] = None
 
     try:
+        if current_turn_holder is not None:
+            current_turn_holder[0] = turn_id
         # Inject file contents into the prompt for non-image attachments.
         if files:
             file_sections: list[str] = []
@@ -1896,7 +1920,10 @@ async def _run_one_turn(
         resp_iter = client.receive_response()
         while True:
             try:
-                msg = await resp_iter.__anext__()
+                msg = await _receive_response_message(
+                    resp_iter,
+                    timeout_s=no_progress_timeout_s,
+                )
             except StopAsyncIteration:
                 break
             if cancelled_cell[0]:
@@ -1996,12 +2023,17 @@ async def _run_one_turn(
     except asyncio.CancelledError:
         cancelled_cell[0] = True
         error = t("runner.cancelled")
+    except ResponseNoProgressError as e:
+        log.warning("%s", e)
+        error = f"{type(e).__name__}: {e}"
     except Exception as e:
         if _is_network_error(e):
             raise
         logger.exception("SDK run failed")
         error = f"{type(e).__name__}: {e}"
     finally:
+        if current_turn_holder is not None:
+            current_turn_holder[0] = None
         cancel_seen.set()
         if watcher_task and not watcher_task.done():
             watcher_task.cancel()
@@ -2539,8 +2571,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # vs a healthy one (long tool call, streaming). The heartbeat
     # stops if the event loop is blocked (stuck SDK receive_response).
     _heartbeat_shutdown = asyncio.Event()
+    _current_turn_holder = [None]
     _heartbeat_task = asyncio.create_task(
-        _heartbeat_writer(run_dir, [None], _heartbeat_shutdown),
+        _heartbeat_writer(run_dir, _current_turn_holder, _heartbeat_shutdown),
         name="runner-heartbeat",
     )
 
@@ -2585,6 +2618,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 claude_config_dir=_claude_config_dir,
                 log=log,
                 interactive_permissions=interactive_permissions,
+                current_turn_holder=_current_turn_holder,
             )
         except Exception as e:
             if not _is_network_error(e):
