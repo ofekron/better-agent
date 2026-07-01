@@ -440,6 +440,7 @@
   "session.deleteTitle": "حذف الجلسة",
   "session.menuTitle": "إجراءات",
   "session.copyAction": "نسخ المعرّف",
+  "session.copyEventAction": "نسخ معرّف الحدث",
   "session.detailsTitle": "التفاصيل",
   "session.markUnreadTitle": "وضع علامة كغير مقروء",
   "session.archiveTitle": "أرشفة الجلسة",

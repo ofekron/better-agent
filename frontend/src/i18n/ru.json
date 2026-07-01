@@ -440,6 +440,7 @@
   "session.deleteTitle": "Удалить сессию",
   "session.menuTitle": "Действия",
   "session.copyAction": "Копировать id",
+  "session.copyEventAction": "Копировать id события",
   "session.detailsTitle": "Подробности",
   "session.markUnreadTitle": "Отметить как непрочитанное",
   "session.archiveTitle": "Архивировать сессию",

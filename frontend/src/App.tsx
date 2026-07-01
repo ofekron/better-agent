@@ -5843,7 +5843,7 @@ function AppMain({
 
   return (
     <MobileActionSheetProvider>
-    <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id} activeSessionCwd={currentSession?.cwd}>
+    <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id}>
     <>
       {(!sessionsLoaded || authStatus === "loading") && (
         <div className="app-splash-overlay">

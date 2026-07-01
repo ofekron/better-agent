@@ -440,6 +440,7 @@
   "session.deleteTitle": "Excluir sessão",
   "session.menuTitle": "Ações",
   "session.copyAction": "Copiar id",
+  "session.copyEventAction": "Copiar id do evento",
   "session.detailsTitle": "Detalhes",
   "session.markUnreadTitle": "Marcar como não lida",
   "session.archiveTitle": "Arquivar sessão",

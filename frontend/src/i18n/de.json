@@ -436,6 +436,7 @@
   "session.deleteTitle": "Sitzung löschen",
   "session.menuTitle": "Aktionen",
   "session.copyAction": "ID kopieren",
+  "session.copyEventAction": "Ereignis-ID kopieren",
   "session.detailsTitle": "Details",
   "session.markUnreadTitle": "Als ungelesen markieren",
   "session.archiveTitle": "Sitzung archivieren",

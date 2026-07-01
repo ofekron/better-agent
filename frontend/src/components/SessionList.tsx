@@ -24,6 +24,7 @@ import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
+import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
@@ -255,7 +256,7 @@ interface NodeProps {
   contentScore?: number | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onCopy: (id: string) => void;
+  onCopy: (session: Session) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onUnpinOthers: (keepId: string) => void;
@@ -417,7 +418,6 @@ function SessionNode({
   };
 
   const buildSessionActions = (includePin = false, includeSelect = false): ActionItem[] => {
-    const copyTarget = session.file_path || session.id;
     return [
       ...(includeSelect
         ? [
@@ -531,7 +531,7 @@ function SessionNode({
         id: "copy",
         label: t("session.copyAction"),
         icon: <Icon name="clipboard" size={14} />,
-        onClick: () => onCopy(copyTarget),
+        onClick: () => onCopy(session),
       },
       {
         id: "details",
@@ -953,14 +953,14 @@ function SessionNode({
           </button>
           <button
             className="session-item-copy"
-            title={copiedId === (session.file_path || session.id) ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
+            title={copiedId === session.id ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
             aria-label="Copy session id"
             onClick={(e) => {
               e.stopPropagation();
-              onCopy(session.file_path || session.id);
+              onCopy(session);
             }}
           >
-            {copiedId === (session.file_path || session.id) ? "\u2713" : "\u29C9"}
+            {copiedId === session.id ? "\u2713" : "\u29C9"}
           </button>
           <button
             className="session-item-archive"
@@ -1085,7 +1085,7 @@ interface FolderSectionProps {
   scoreMap: Map<string, number>;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onCopy: (id: string) => void;
+  onCopy: (session: Session) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onUnpinOthers: (keepId: string) => void;
@@ -2231,13 +2231,17 @@ export function SessionList({
     }
   };
 
-  const copyId = async (id: string) => {
+  // Copy a session as a `[[ba-session:...]]` marker: pastes as a clickable
+  // in-app link and carries the session id as a reference an agent can
+  // resolve. Copied-state feedback is keyed on the stable session id.
+  const copyId = async (session: Session) => {
+    const marker = sessionLinkMarker(session.id, session.name || "Untitled");
     try {
-      await navigator.clipboard.writeText(id);
+      await navigator.clipboard.writeText(marker);
     } catch {
       // Fallback for insecure contexts / older browsers.
       const ta = document.createElement("textarea");
-      ta.value = id;
+      ta.value = marker;
       ta.style.position = "fixed";
       ta.style.left = "-9999px";
       document.body.appendChild(ta);
@@ -2249,9 +2253,9 @@ export function SessionList({
       }
       document.body.removeChild(ta);
     }
-    setCopiedId(id);
+    setCopiedId(session.id);
     window.setTimeout(() => {
-      setCopiedId((prev) => (prev === id ? null : prev));
+      setCopiedId((prev) => (prev === session.id ? null : prev));
     }, 1200);
   };
 

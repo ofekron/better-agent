@@ -8,7 +8,7 @@ import {
   linkifyFilePaths,
   parseMarkdownFileHref,
   sessionLinkMarker,
-  sessionMarkersToMarkdown,
+  baMarkersToMarkdown,
 } from "../src/utils/linkifyFilePaths";
 
 // Regression lock for the Windows file-ref bug: handleOpenFilePanel
@@ -123,7 +123,7 @@ describe("linkifyFilePaths", () => {
   });
 
   it("converts session markers for markdown renderers", () => {
-    expect(sessionMarkersToMarkdown(sessionLinkMarker("session-abcdef", "Linked Session")))
+    expect(baMarkersToMarkdown(sessionLinkMarker("session-abcdef", "Linked Session")))
       .toBe("[Linked Session · sess](/s/session-abcdef)");
   });
 

@@ -440,6 +440,7 @@
   "session.deleteTitle": "세션 삭제",
   "session.menuTitle": "작업",
   "session.copyAction": "ID 복사",
+  "session.copyEventAction": "이벤트 ID 복사",
   "session.detailsTitle": "상세 정보",
   "session.markUnreadTitle": "읽지 않음으로 표시",
   "session.archiveTitle": "세션 보관",
