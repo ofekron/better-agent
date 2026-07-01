@@ -692,7 +692,7 @@ def test_message_summary_reader_filters_requested_message_ids() -> None:
     summary_source = ingester_source[start:end]
     assert "msg_ids: Optional[set[str]] = None" in summary_source
     assert "if not sid_filter and msg_ids is None:" in summary_source
-    assert "if (msg_ids is None or k in msg_ids)" in summary_source
+    assert "self._summary_matches_filter(k, v, sid_filter=sid_filter, msg_ids=msg_ids)" in summary_source
     journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
     start = journal_source.index("def message_event_summaries(")
     end = journal_source.index("def current_seq(", start)
@@ -706,16 +706,18 @@ def test_event_summary_sidecar_load_populates_memory_cache() -> None:
     start = source.index("def _summaries_state(")
     end = source.index("def _seq_byte_range(", start)
     state_source = source[start:end]
-    loaded_start = state_source.index("if loaded is not None:")
-    loaded_end = state_source.index("else:", loaded_start)
-    loaded_source = state_source[loaded_start:loaded_end]
-    assert "if summaries or resolutions:" in loaded_source
-    assert "self._rebuild_seq_offsets_locked(path, root_id)" in loaded_source
-    assert loaded_source.index("if summaries or resolutions:") < loaded_source.index(
+    assert "sid_filter: Optional[str] = None" in state_source
+    assert "msg_ids: Optional[set[str]] = None" in state_source
+    assert "filter_has_no_summary_match = (" in state_source
+    assert "self._summary_matches_filter(" in state_source
+    assert "if loaded is not None:" in state_source
+    assert "if (summaries or resolutions) and not filter_has_no_summary_match:" in state_source
+    assert "self._rebuild_seq_offsets_locked(path, root_id)" in state_source
+    assert state_source.index("if (summaries or resolutions) and not filter_has_no_summary_match:") < state_source.index(
         "self._rebuild_seq_offsets_locked(path, root_id)"
     )
-    assert "elif offsets is not None and self._next_offset.get(root_id) != file_size:" in loaded_source
-    assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in loaded_source
+    assert "elif offsets is not None and self._next_offset.get(root_id) != file_size:" in state_source
+    assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in state_source
 
 
 def test_connected_session_fallback_sorts_only_requested_page() -> None:
