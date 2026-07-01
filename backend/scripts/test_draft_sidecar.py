@@ -51,6 +51,11 @@ def _tree_json(root_id: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _reset_opened_cache() -> None:
+    with session_store._opened_cache_lock:
+        session_store._opened_cache.clear()
+
+
 def _evict(sid: str) -> None:
     rid = session_manager._root_id_for(sid)
     with session_manager._lock_for_root(rid):
@@ -112,6 +117,84 @@ def main() -> int:
             mid != "batched" and after == "batched",
             "batch-exit persist flushes the draft sidecar",
             f"mid={mid!r} after={after!r}",
+        ) and ok
+
+        opened_sid = session_store.create_session(name="opened", model="m", cwd="/tmp")["id"]
+        _reset_opened_cache()
+        session_store.write_last_opened(opened_sid, opened_sid, "2026-01-01T00:00:00")
+        first = session_store.read_last_opened(opened_sid)
+        first[opened_sid] = "mutated"
+        ok = _check(
+            session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-01T00:00:00",
+            "opened cache returns isolated copies",
+            str(first),
+        ) and ok
+
+        original_loads = session_store.json.loads
+        loads = 0
+
+        def counting_loads(raw, *args, **kwargs):
+            nonlocal loads
+            loads += 1
+            return original_loads(raw, *args, **kwargs)
+
+        _reset_opened_cache()
+        session_store.json.loads = counting_loads
+        try:
+            assert session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-01T00:00:00"
+            assert session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-01T00:00:00"
+        finally:
+            session_store.json.loads = original_loads
+        ok = _check(loads == 1, "opened cache skips repeated json parse", f"loads={loads}") and ok
+
+        session_store.write_last_opened(opened_sid, opened_sid, "2026-01-02T00:00:00")
+        ok = _check(
+            session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-02T00:00:00",
+            "opened write refreshes cache",
+            str(session_store.read_last_opened(opened_sid)),
+        ) and ok
+
+        opened_path = session_store._opened_path(opened_sid)
+        opened_path.write_text(
+            json.dumps({"version": 1, "opened": {opened_sid: "2026-01-03T00:00:00"}}),
+            encoding="utf-8",
+        )
+        ok = _check(
+            session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-03T00:00:00",
+            "opened cache invalidates on file signature change",
+            str(session_store.read_last_opened(opened_sid)),
+        ) and ok
+
+        opened_path.unlink()
+        ok = _check(
+            session_store.read_last_opened(opened_sid) == {},
+            "opened cache observes deleted sidecar",
+            str(session_store.read_last_opened(opened_sid)),
+        ) and ok
+        opened_path.write_text(
+            json.dumps({"version": 1, "opened": {opened_sid: "2026-01-04T00:00:00"}}),
+            encoding="utf-8",
+        )
+        ok = _check(
+            session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-04T00:00:00",
+            "opened cache recovers after missing sidecar is recreated",
+            str(session_store.read_last_opened(opened_sid)),
+        ) and ok
+
+        opened_path.write_text("{bad-json", encoding="utf-8")
+        ok = _check(
+            session_store.read_last_opened(opened_sid) == {},
+            "opened cache treats corrupt sidecar as empty",
+            str(session_store.read_last_opened(opened_sid)),
+        ) and ok
+        opened_path.write_text(
+            json.dumps({"version": 1, "opened": {opened_sid: "2026-01-05T00:00:00"}}),
+            encoding="utf-8",
+        )
+        ok = _check(
+            session_store.read_last_opened(opened_sid)[opened_sid] == "2026-01-05T00:00:00",
+            "opened cache recovers after corrupt sidecar becomes valid",
+            str(session_store.read_last_opened(opened_sid)),
         ) and ok
 
         # Legacy session: draft baked into the tree json with NO sidecar
