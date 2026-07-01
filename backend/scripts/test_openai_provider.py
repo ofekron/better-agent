@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 from pathlib import Path
 
@@ -647,6 +648,54 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
     assert calls[0][0]["server_name"] == "better-agent-requirements"
     assert calls[0][0]["tool_name"] == "get_requirements"
     assert calls[0][1] == {"query": "assistant requirements"}
+
+
+def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
+    runner = _mod("runner_better_agent")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {
+            "alpha": {"command": sys.executable},
+            "beta": {"command": sys.executable},
+            "gamma": {"command": sys.executable},
+        }
+
+    async def fake_list(server_name, config):
+        await asyncio.sleep(0.15)
+        return [{
+            "name": "tool",
+            "description": f"{server_name} tool",
+            "inputSchema": {"type": "object", "properties": {}},
+        }]
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        started = time.monotonic()
+        schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
+            {"cwd": "/repo"},
+            user_facing=True,
+            bare=False,
+            used_names=set(),
+        ))
+        elapsed = time.monotonic() - started
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+
+    assert elapsed < 0.30
+    assert [schema["function"]["name"] for schema in schemas] == [
+        "tool",
+        "mcp__beta__tool",
+        "mcp__gamma__tool",
+    ]
+    assert [handlers[name]["server_name"] for name in [
+        "tool",
+        "mcp__beta__tool",
+        "mcp__gamma__tool",
+    ]] == ["alpha", "beta", "gamma"]
 
 
 def test_openai_runner_speaks_real_requirements_mcp_stdio():

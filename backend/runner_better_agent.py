@@ -1264,10 +1264,15 @@ async def _extension_mcp_tools_for_run(
 ) -> tuple[list[dict], dict[str, dict[str, Any]]]:
     schemas: list[dict] = []
     handlers: dict[str, dict[str, Any]] = {}
-    for server_name, config in _extension_mcp_server_configs_for_run(
+    configs = list(_extension_mcp_server_configs_for_run(
         inputs, user_facing=user_facing, bare=bare,
-    ).items():
-        for tool in await _mcp_list_tools(server_name, config):
+    ).items())
+    tool_lists = await asyncio.gather(*(
+        _mcp_list_tools(server_name, config)
+        for server_name, config in configs
+    ))
+    for (server_name, config), tools in zip(configs, tool_lists):
+        for tool in tools:
             raw_tool_name = str(tool.get("name") or "").strip()
             if not raw_tool_name:
                 continue
