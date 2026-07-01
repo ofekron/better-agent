@@ -7379,6 +7379,7 @@ function AppMain({
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
             browserHarnessEnabled={builtinExtensions.browserHarness}
+            allowOfflineCreate={!connected}
           />
         </Suspense>
       )}
