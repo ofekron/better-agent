@@ -224,12 +224,16 @@ def test_deterministic_order_for_empty_ts_ties() -> bool:
         first = [r["text"] for r in nsp.search_native_session_prompts(query="offline")]
     finally:
         _reset_candidates()
-    _patch_candidates(build())
+    # Reverse the input order for the second run: with a bare stable sort the
+    # output would follow input order and diverge — only the sid+text tiebreaker
+    # forces both runs to the same concrete order.
+    _patch_candidates(list(reversed(build())))
     try:
         second = [r["text"] for r in nsp.search_native_session_prompts(query="offline")]
     finally:
         _reset_candidates()
-    ok = first == second and len(first) == 3
+    expected = ["offline alpha", "offline beta", "offline gamma"]
+    ok = first == expected and second == expected
     print(f"{OK if ok else FAIL} empty-ts ties order deterministically (got {first} vs {second})")
     return ok
 
