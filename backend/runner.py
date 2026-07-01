@@ -266,6 +266,14 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
                 "default — available node_ids appear in <known_workers>."
             ),
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": (
+                "OPTIONAL: working directory for the new worker session. "
+                "Defaults to (inherits) the creating session's cwd; set it "
+                "only to target a different project root."
+            ),
+        },
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
 }
@@ -341,6 +349,10 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the new session. Defaults to the creating session's effort.",
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
+        },
     },
     "required": ["name"],
 }
@@ -368,6 +380,10 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the sub-session. Defaults to the creating session's effort.",
+        },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — working directory for the sub-session. Defaults to (inherits) the creating session's cwd.",
         },
     },
     "required": [],
@@ -853,6 +869,12 @@ def _recover_delegate_result(client_delegation_id: str) -> Optional[dict]:
     }
 
 
+def _resolve_tool_cwd(args: dict[str, Any], inherited_cwd: str) -> str:
+    """cwd override-or-inherit: use the caller-supplied cwd if provided,
+    otherwise inherit the creating session's cwd."""
+    return str(args.get("cwd") or "").strip() or inherited_cwd
+
+
 def _build_create_worker_tool(
     *,
     app_session_id: str,
@@ -895,7 +917,7 @@ def _build_create_worker_tool(
             "worker_description": worker_description,
             "justification": justification,
             "orchestration_mode": orchestration_mode,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "client_request_id": f"cw_{_uuid.uuid4().hex[:10]}",
             "node_id": node_id,
         }
@@ -910,6 +932,7 @@ def _build_create_worker_tool(
 
 def _build_ensure_named_worker_tool(
     *,
+    cwd: str,
     backend_url: str,
     internal_token: str,
 ):
@@ -928,11 +951,11 @@ def _build_ensure_named_worker_tool(
     @tool("ensure_named_worker", _ENSURE_NAMED_WORKER_DESCRIPTION, _ENSURE_NAMED_WORKER_INPUT_SCHEMA)
     async def ensure_named_worker(args: dict[str, Any]) -> dict[str, Any]:
         name = str(args.get("name") or "").strip()
-        cwd = str(args.get("cwd") or "").strip()
+        worker_cwd = _resolve_tool_cwd(args, cwd)
         orchestration_mode = str(args.get("orchestration_mode") or "").strip()
-        if not name or not cwd or not orchestration_mode:
+        if not name or not orchestration_mode:
             return {
-                "content": [{"type": "text", "text": "name, cwd and orchestration_mode are required"}],
+                "content": [{"type": "text", "text": "name and orchestration_mode are required"}],
                 "is_error": True,
             }
         if orchestration_mode == "manager":
@@ -956,7 +979,7 @@ def _build_ensure_named_worker_tool(
             "node_id": node_id,
             "tags": [name],
         }
-        payload = {"cwd": cwd, "workers": [spec]}
+        payload = {"cwd": worker_cwd, "workers": [spec]}
         try:
             result = await asyncio.to_thread(_post_ensure_sync, payload)
         except Exception as e:
@@ -1070,7 +1093,7 @@ def _build_delegate_task_tool(
             "sender_session_id": sender_session_id,
             "task": task,
             "target_session_id": target,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
@@ -1207,7 +1230,7 @@ def _build_create_session_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "name": name,
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
@@ -1251,7 +1274,7 @@ def _build_create_sub_session_tool(
         payload = {
             "sender_session_id": sender_session_id,
             "description": str(args.get("description") or "").strip(),
-            "cwd": cwd,
+            "cwd": _resolve_tool_cwd(args, cwd),
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
@@ -2367,6 +2390,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             ))
         if "ensure_named_worker" not in disabled_builtin_tools:
             communicate_tools.append(_build_ensure_named_worker_tool(
+                cwd=cwd,
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))

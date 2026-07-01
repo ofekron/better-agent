@@ -151,6 +151,12 @@ def mssg_response(
     return _post_json("/api/internal/mssg", payload, timeout=30.0)
 
 
+def _resolve_cwd(cwd: str) -> str:
+    """cwd override-or-inherit: use the caller-supplied cwd if provided,
+    otherwise inherit the calling session's cwd."""
+    return (cwd or "").strip() or _env("BETTER_CLAUDE_CWD")
+
+
 def delegate_task_response(
     task: str,
     target_session_id: str = "",
@@ -158,6 +164,7 @@ def delegate_task_response(
     model: str = "",
     reasoning_effort: str = "",
     sub_session: bool = True,
+    cwd: str = "",
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -174,7 +181,7 @@ def delegate_task_response(
         "sender_session_id": sender_session_id,
         "task": task,
         "target_session_id": target or None,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
@@ -263,6 +270,7 @@ def create_worker_response(
     justification: str,
     orchestration_mode: str,
     node_id: str = "",
+    cwd: str = "",
 ) -> dict[str, Any]:
     worker_description = (worker_description or "").strip()
     justification = (justification or "").strip()
@@ -283,7 +291,7 @@ def create_worker_response(
         "worker_description": worker_description,
         "justification": justification,
         "orchestration_mode": orchestration_mode,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "client_request_id": client_request_id,
         "node_id": node_id.strip() or None,
     }, timeout=_LONG_TIMEOUT)
@@ -291,8 +299,8 @@ def create_worker_response(
 
 def ensure_named_worker_response(
     name: str,
-    cwd: str,
     orchestration_mode: str,
+    cwd: str = "",
     provision_prompt: str = "",
     description: str = "",
     provider_id: str = "",
@@ -301,10 +309,10 @@ def ensure_named_worker_response(
     node_id: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
-    cwd = (cwd or "").strip()
+    cwd = _resolve_cwd(cwd)
     mode = (orchestration_mode or "").strip()
-    if not name or not cwd or not mode:
-        return {"success": False, "error": "name, cwd and orchestration_mode are required"}
+    if not name or not mode:
+        return {"success": False, "error": "name and orchestration_mode are required"}
     if mode == "manager":
         mode = "team"
     if mode not in ("team", "native"):
@@ -349,6 +357,7 @@ def create_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    cwd: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -361,7 +370,7 @@ def create_session_response(
     return _post_json("/api/internal/create-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
         "name": name,
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
@@ -376,11 +385,12 @@ def create_sub_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    cwd: str = "",
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
         "description": (description or "").strip(),
-        "cwd": _env("BETTER_CLAUDE_CWD"),
+        "cwd": _resolve_cwd(cwd),
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
@@ -445,6 +455,7 @@ def build_server() -> FastMCP:
             model: str = "",
             reasoning_effort: str = "",
             sub_session: bool = True,
+            cwd: str = "",
         ) -> dict[str, Any]:
             return _safe_result(delegate_task_response)(
                 task,
@@ -453,6 +464,7 @@ def build_server() -> FastMCP:
                 model,
                 reasoning_effort,
                 sub_session,
+                cwd,
             )
 
     if "create_session" not in disabled_tools:
@@ -464,6 +476,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            cwd: str = "",
         ) -> dict[str, Any]:
             return _safe_result(create_session_response)(
                 name,
@@ -472,6 +485,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                cwd,
             )
 
     if "create_sub_session" not in disabled_tools:
@@ -482,6 +496,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            cwd: str = "",
         ) -> dict[str, Any]:
             return _safe_result(create_sub_session_response)(
                 description,
@@ -489,6 +504,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                cwd,
             )
 
     if "ask" not in disabled_tools:
@@ -530,17 +546,18 @@ def build_server() -> FastMCP:
         justification: str,
         orchestration_mode: str,
         node_id: str = "",
+        cwd: str = "",
     ) -> dict[str, Any]:
         return _safe_result(create_worker_response)(
-            worker_description, justification, orchestration_mode, node_id,
+            worker_description, justification, orchestration_mode, node_id, cwd,
         )
 
     if "ensure_named_worker" not in disabled_tools:
         @server.tool(description=ENSURE_NAMED_WORKER_DESCRIPTION)
         def ensure_named_worker(
             name: str,
-            cwd: str,
             orchestration_mode: str,
+            cwd: str = "",
             provision_prompt: str = "",
             description: str = "",
             provider_id: str = "",
@@ -549,7 +566,7 @@ def build_server() -> FastMCP:
             node_id: str = "",
         ) -> dict[str, Any]:
             return _safe_result(ensure_named_worker_response)(
-                name, cwd, orchestration_mode, provision_prompt, description,
+                name, orchestration_mode, cwd, provision_prompt, description,
                 provider_id, model, reasoning_effort, node_id,
             )
 
