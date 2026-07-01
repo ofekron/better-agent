@@ -30,6 +30,14 @@ from native_session_miner import (
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _MAX_WORKERS = min(32, (os.cpu_count() or 4) * 4)
 
+# Common English function words carry no query signal — a prompt matching only
+# one of these would score 1 on pure noise, so they are dropped from the tokens.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for",
+    "how", "if", "in", "is", "it", "me", "my", "no", "of", "on", "or", "so",
+    "that", "the", "this", "to", "up", "was", "we", "with", "you", "your",
+})
+
 
 def _native_miners() -> list:
     """One miner per provider, each with an empty state so nothing is skipped.
@@ -47,7 +55,17 @@ def _native_miners() -> list:
 
 
 def _query_tokens(query: str) -> list[str]:
-    return [tok for tok in _TOKEN_RE.findall(query.lower()) if len(tok) >= 2]
+    return [
+        tok
+        for tok in _TOKEN_RE.findall(query.lower())
+        if len(tok) >= 2 and tok not in _STOPWORDS
+    ]
+
+
+def _token_patterns(tokens: list[str]) -> list[re.Pattern]:
+    """One whole-word matcher per token so ``in`` matches the word ``in`` and
+    not the substring inside ``building``."""
+    return [re.compile(r"\b" + re.escape(tok) + r"\b") for tok in tokens]
 
 
 def _candidates(allowed: set[str]) -> list[NativeCandidate]:
@@ -67,11 +85,16 @@ def _candidates(allowed: set[str]) -> list[NativeCandidate]:
 
 def _match_candidate(
     candidate: NativeCandidate,
-    tokens: list[str],
+    patterns: list[re.Pattern],
     is_noise: Callable[[str], bool] | None,
 ) -> list[tuple[int, dict[str, Any]]]:
-    """Parse one transcript and score its user prompts against the tokens."""
-    visit = candidate.parse()
+    """Parse one transcript and score its user prompts by distinct whole-word
+    token hits. A single bad transcript must not sink the whole concurrent
+    search, so any parse/scoring error is contained to this candidate."""
+    try:
+        visit = candidate.parse()
+    except Exception:
+        return []
     if visit is None:
         return []
     scored: list[tuple[int, dict[str, Any]]] = []
@@ -85,7 +108,7 @@ def _match_candidate(
         if not text or (is_noise is not None and is_noise(text)):
             continue
         lowered = text.lower()
-        score = sum(1 for tok in tokens if tok in lowered)
+        score = sum(1 for pattern in patterns if pattern.search(lowered))
         if score == 0:
             continue
         scored.append((score, {
@@ -112,12 +135,13 @@ def search_native_session_prompts(
     ``cwds`` (when non-empty) restricts to those working directories.
     ``is_noise`` is the caller's programmatic-preamble filter (BA-injected
     worker/processor/auditor prompts) so the fallback drops the same noise the
-    main corpus does. A match keeps a prompt when at least one query token is a
-    substring of it; the score is the count of distinct tokens hit.
+    main corpus does. A match keeps a prompt when at least one query token
+    appears in it as a whole word; the score is the count of distinct tokens hit.
     """
     tokens = _query_tokens(query)
     if not tokens:
         return []
+    patterns = _token_patterns(tokens)
     allowed = {c for c in cwds if isinstance(c, str) and c.strip()}
     candidates = _candidates(allowed)
     if not candidates:
@@ -127,12 +151,22 @@ def search_native_session_prompts(
     workers = max(1, min(_MAX_WORKERS, len(candidates)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for chunk in pool.map(
-            lambda candidate: _match_candidate(candidate, tokens, is_noise),
+            lambda candidate: _match_candidate(candidate, patterns, is_noise),
             candidates,
         ):
             scored.extend(chunk)
 
-    scored.sort(key=lambda item: (item[0], item[1].get("ts") or ""), reverse=True)
+    # Select the most relevant matches (token-overlap score) up to the cap;
+    # sid+text break score/ts ties so the surviving set is deterministic.
+    scored.sort(
+        key=lambda item: (
+            item[0],
+            item[1].get("ts") or "",
+            item[1].get("sid") or "",
+            item[1]["text"],
+        ),
+        reverse=True,
+    )
     matches: list[dict[str, Any]] = []
     seen_text: set[str] = set()
     for _score, record in scored:
@@ -142,4 +176,10 @@ def search_native_session_prompts(
         matches.append(record)
         if max_matches is not None and len(matches) >= max_matches:
             break
+    # ...then present them oldest-first so the consuming LLM can read the
+    # requirement's evolution over time (missing timestamps sort last; sid+text
+    # keep that order deterministic across the many empty-ts providers).
+    matches.sort(
+        key=lambda m: (not m.get("ts"), m.get("ts") or "", m.get("sid") or "", m.get("text") or "")
+    )
     return matches
