@@ -2566,8 +2566,9 @@ async def pick_shortcuts(body: dict = Body(...)):
 async def get_files(
     path: str = Query(...),
     node_id: str = Query("primary"),
+    max_depth: int = Query(1, ge=0, le=5),
 ):
-    return await _file_op(node_id, "get_file_tree", {"root": path})
+    return await _file_op(node_id, "get_file_tree", {"root": path, "max_depth": max_depth})
 
 
 @app.get("/api/browse")
