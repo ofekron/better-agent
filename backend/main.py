@@ -2817,8 +2817,17 @@ def _local_session_page_for_sidebar_preserving_order(
         content_scores=content_scores,
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
+            expected_summary_index_version = session_store.summary_index_version()
             visible_ids, total = _local_visible_order_ids(sort_by, project_path)
             page_ids = visible_ids[offset:offset + limit]
+            indexed_page = session_store.get_indexed_session_summaries_by_ids_if_current(
+                page_ids,
+                expected_summary_index_version,
+            )
+            if indexed_page is not None:
+                perf.record("sessions.list.local.visible_order_page.indexed_hit", 1.0)
+                return indexed_page, total
+            perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
             return session_store.get_session_summaries_by_ids(page_ids), total
     with perf.timed("sessions.list.local.ordered_ids"):
         ordered_ids = session_manager.ordered_summary_ids(sort_by)
