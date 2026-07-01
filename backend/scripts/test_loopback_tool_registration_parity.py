@@ -51,6 +51,7 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
             "sdk_output_parts": [],
             "final_success": True,
             "context_window": None,
+            "outstanding_tasks": set(),
         }
 
     async def fake_linger(*_args, **_kwargs):

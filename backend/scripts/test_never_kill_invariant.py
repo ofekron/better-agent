@@ -104,15 +104,21 @@ def test_babysitter_linger_kill_free():
     allowed_globals = {
         "Exception",
         "OSError",
+        "Optional",
+        "_drain_background_tasks",
         "Path",
         "asyncio",
+        "bool",
         "float",
         "frozenset",
+        "len",
         "logger",
         "logging",
         "log",
         "os",
         "process_control",
+        "set",
+        "str",
     }
     undefined = loaded - assigned - allowed_globals
     _check("ignore" not in undefined and not undefined,
