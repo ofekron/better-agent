@@ -843,6 +843,56 @@ async def test_run_state_ledger_parse_defers_resolve_to_target_sid() -> None:
     print("PASS test_run_state_ledger_parse_defers_resolve_to_target_sid")
 
 
+async def test_run_state_ledger_parse_defers_path_construction_to_target_sid() -> None:
+    from runs_dir import run_state_ledger_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    rows = []
+    for index in range(50):
+        rows.append(
+            {
+                "session_id": f"LEDGER-PATH-OTHER-{index}",
+                "jsonl_path": f"/tmp/ledger-path-other-{index}.jsonl",
+                "state_path": str(root / f"run-ledger-path-other-{index}" / "state.json"),
+                "written_at": index,
+            }
+        )
+    target_state = root / "run-ledger-path-target" / "state.json"
+    rows.append(
+        {
+            "session_id": "LEDGER-PATH-TARGET",
+            "jsonl_path": "/tmp/ledger-path-target.jsonl",
+            "state_path": str(target_state),
+            "written_at": 100,
+        }
+    )
+    run_state_ledger_path(root).write_text(
+        "\n".join(nfm_mod.json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    original_path = runs_dir_mod.Path
+    path_calls: list[str] = []
+
+    def counting_path(value):
+        path_calls.append(str(value))
+        return original_path(value)
+
+    if runs_dir_mod.os.sep != "/" or runs_dir_mod.os.altsep is not None:
+        return
+    runs_dir_mod.Path = counting_path  # type: ignore
+    try:
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-PATH-MISSING") == []
+        assert path_calls == []
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-PATH-TARGET") == [target_state]
+        assert path_calls == [str(target_state)]
+    finally:
+        runs_dir_mod.Path = original_path  # type: ignore
+    print("PASS test_run_state_ledger_parse_defers_path_construction_to_target_sid")
+
+
 async def test_run_state_recent_cache_revalidates_cached_paths() -> None:
     from runs_dir import runs_root
 
@@ -1678,6 +1728,7 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
     asyncio.run(test_run_state_ledger_string_shape_is_strict())
     asyncio.run(test_run_state_ledger_parse_defers_resolve_to_target_sid())
+    asyncio.run(test_run_state_ledger_parse_defers_path_construction_to_target_sid())
     asyncio.run(test_run_state_recent_cache_revalidates_cached_paths())
     asyncio.run(test_run_state_recent_candidates_skip_per_entry_resolve())
     asyncio.run(test_run_state_recent_scan_skips_per_entry_path_helper())
