@@ -39,6 +39,7 @@ _RECONCILED_MARKER_INDEX_NAME = "reconciled_marker_index.jsonl"
 _RECONCILED_MARKER_BACKFILL_MARKER_NAME = "reconciled_marker_index.backfilled.json"
 _RECONCILED_MARKER_BACKFILL_VERSION = 1
 _RUN_STATE_LEDGER_SEEN: set[tuple[str, str, str]] = set()
+_RUN_STATE_LEDGER_APPEND_LOCK = threading.Lock()
 _RUN_STATE_LEDGER_BACKFILL_LOCK = threading.Lock()
 _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
@@ -113,23 +114,33 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
     if not session_id or not jsonl_path:
         return
     try:
-        key = (str(path), str(session_id), str(jsonl_path))
-        if key in _RUN_STATE_LEDGER_SEEN:
-            return
-        row = {
-            "session_id": str(session_id),
-            "jsonl_path": str(jsonl_path),
-            "state_path": str(path),
-            "written_at": time.time(),
-        }
-        ledger = run_state_ledger_path(path.parent.parent)
-        ledger.parent.mkdir(parents=True, exist_ok=True)
-        if _run_state_ledger_has_key(ledger, key):
+        with _RUN_STATE_LEDGER_APPEND_LOCK:
+            key = (str(path), str(session_id), str(jsonl_path))
+            if key in _RUN_STATE_LEDGER_SEEN:
+                return
+            row = {
+                "session_id": str(session_id),
+                "jsonl_path": str(jsonl_path),
+                "state_path": str(path),
+                "written_at": time.time(),
+            }
+            ledger = run_state_ledger_path(path.parent.parent)
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            if _run_state_ledger_has_key(ledger, key):
+                _RUN_STATE_LEDGER_SEEN.add(key)
+                return
+            prior_signature = _run_state_ledger_signature(ledger)
+            with ledger.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+            current_signature = _run_state_ledger_signature(ledger)
+            if prior_signature is not None and current_signature is not None:
+                _extend_run_state_cache_after_append(
+                    ledger.parent,
+                    prior_signature,
+                    current_signature,
+                    row,
+                )
             _RUN_STATE_LEDGER_SEEN.add(key)
-            return
-        with ledger.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, separators=(",", ":")) + "\n")
-        _RUN_STATE_LEDGER_SEEN.add(key)
     except Exception:
         logger.exception("runs_dir: failed to append run-state ledger")
 
@@ -362,6 +373,78 @@ def _write_run_state_cache(
         except OSError:
             pass
         logger.debug("runs_dir: failed to write run-state ledger cache", exc_info=True)
+
+
+def _upsert_run_state_index_row(
+    index: dict[str, list[tuple[float, str]]],
+    row: dict,
+) -> None:
+    sid = str(row.get("session_id") or "")
+    state_path = str(row.get("state_path") or "")
+    if not sid or not state_path:
+        return
+    try:
+        written_at = float(row.get("written_at"))
+    except (TypeError, ValueError):
+        written_at = 0.0
+    values = [
+        (existing_written_at, existing_state_path)
+        for existing_written_at, existing_state_path in index.get(sid, [])
+        if existing_state_path != state_path
+    ]
+    values.append((written_at, state_path))
+    values.sort(key=lambda item: item[0])
+    index[sid] = values
+
+
+def _extend_run_state_cache_after_append(
+    root: Path,
+    prior_signature: _RunStateLedgerSignature,
+    current_signature: _RunStateLedgerSignature,
+    row: dict,
+) -> None:
+    state_path = str(row.get("state_path") or "")
+    if not _run_state_path_string_has_ledger_shape(state_path, root):
+        return
+    root_key = str(root)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        if root_key in _RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT:
+            return
+        cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
+        if cached is not None and cached[0] == prior_signature:
+            index = {
+                sid: list(paths)
+                for sid, paths in cached[1].items()
+            }
+            _upsert_run_state_index_row(index, row)
+            _RUN_STATE_LEDGER_CACHE[root_key] = (current_signature, index)
+    try:
+        with _sqlite_connect(run_state_ledger_cache_path(root)) as conn:
+            if not _run_state_cache_signature_current(conn, prior_signature):
+                return
+            sid = str(row.get("session_id") or "")
+            try:
+                written_at = float(row.get("written_at"))
+            except (TypeError, ValueError):
+                written_at = 0.0
+            conn.execute(
+                "INSERT OR REPLACE INTO entries (sid, state_path, written_at) "
+                "VALUES (?, ?, ?)",
+                (sid, state_path, written_at),
+            )
+            conn.executemany(
+                "UPDATE meta SET value=? WHERE key=?",
+                (
+                    (current_signature[0], "dev"),
+                    (current_signature[1], "ino"),
+                    (current_signature[2], "size"),
+                    (current_signature[3], "mtime_ns"),
+                    (current_signature[4], "ctime_ns"),
+                ),
+            )
+            conn.commit()
+    except (sqlite3.DatabaseError, OSError):
+        return
 
 
 def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
