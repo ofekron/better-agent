@@ -533,7 +533,7 @@ def _search_requirements_prepared(
         rg_args=normalized_args,
         cwds=normalized_cwds,
         fields=normalized_fields,
-        enabled=include_unprocessed_prompts and fields is None and not include_all_fields,
+        enabled=include_unprocessed_prompts and fields is None,
         remaining=_remaining_matches(normalized_max_matches, len(matches)),
     )
     matches.extend(native_result.pop("matches"))
