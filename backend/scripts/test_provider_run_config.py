@@ -21,6 +21,7 @@ import runner  # noqa: E402
 import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_gemini  # noqa: E402
+import runtime_skills  # noqa: E402
 import open_file_panel_mcp  # noqa: E402
 import builtin_mcp_config  # noqa: E402
 import extension_registry  # noqa: E402
@@ -609,17 +610,61 @@ def t_normalizes_unified_mcp_key() -> None:
 
 
 def t_codex_materializes_mcp_and_skills() -> None:
-    run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-    overrides = runner_codex._codex_config_overrides(run_dir, {
-        "mcp_servers": {"demo": {"command": "echo", "args": ["hello"]}},
-        "skills": {"reviewer": {"description": "Review code", "instructions": "Review carefully.\n"}},
-    })
+    old_home = os.environ.get("HOME")
+    home = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+    os.environ["HOME"] = str(home)
+    runtime_skills._DISCOVERY_CACHE.clear()
+    try:
+        runtime_skill = home / ".agents" / "skills" / "runtime-reviewer" / "SKILL.md"
+        runtime_skill.parent.mkdir(parents=True)
+        runtime_skill.write_text(
+            "---\nname: runtime-reviewer\ndescription: Runtime review.\n---\nRuntime review.\n",
+            encoding="utf-8",
+        )
+        (home / ".codex").mkdir()
+        run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        env = runner_codex._materialize_codex_run_home(
+            run_dir,
+            {
+                "skills": {"reviewer": {"description": "Review code", "instructions": "Review carefully.\n"}},
+            },
+            cwd=str(home),
+        )
+        overrides = runner_codex._codex_config_overrides(run_dir, {
+            "mcp_servers": {"demo": {"command": "echo", "args": ["hello"]}},
+        })
+        bare_run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        bare_env = runner_codex._materialize_codex_run_home(
+            bare_run_dir,
+            {},
+            cwd=str(home),
+            bare_config=True,
+        )
+    finally:
+        runtime_skills._DISCOVERY_CACHE.clear()
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+
     check(len(overrides) == 1 and overrides[0].startswith("mcp_servers="), "Codex MCP becomes config override")
     parsed = tomllib.loads(overrides[0])
     check(parsed["mcp_servers"]["demo"]["args"] == ["hello"], "Codex MCP override is valid TOML")
-    skill = run_dir / "codex-skills" / ".agents" / "skills" / "reviewer" / "SKILL.md"
+    overlay_home = Path(env["HOME"])
+    skill_root = overlay_home / ".agents" / "skills"
+    check(overlay_home == run_dir / "codex-home", "Codex HOME points at run-local overlay")
+    check(Path(env["CODEX_HOME"]).is_symlink(), "Codex config home is linked into overlay")
+    skill = skill_root / "reviewer" / "SKILL.md"
     check(skill.is_file(), "Codex per-run skill file is materialized")
     check("Review carefully." in skill.read_text(encoding="utf-8"), "Codex skill body is written")
+    check(
+        (skill_root / "runtime-reviewer" / "SKILL.md").is_file(),
+        "Codex runtime skill file is materialized",
+    )
+    check(
+        not (Path(bare_env["HOME"]) / ".agents" / "skills" / "runtime-reviewer" / "SKILL.md").exists(),
+        "Codex bare config skips runtime skills",
+    )
 
 
 def t_codex_runner_inputs_self_identify_provider_kind() -> None:
