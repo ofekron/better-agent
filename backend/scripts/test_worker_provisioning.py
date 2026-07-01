@@ -710,6 +710,7 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
         {"role_key": "singleton", "orchestration_mode": "native"}]}
     created_names: set[tuple[str, str]] = set()
     create_order: list[str] = []
+    force_unlocked_race = False
 
     def fake_find(cwd, name):
         return (
@@ -722,11 +723,11 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
 
     async def fake_create(b, *_args, **_kwargs):
         create_order.append(b["name"])
-        # Yield so a second unlocked coroutine can also enter create before
-        # either records the worker — this is the race window. With the lock
-        # held, the second coroutine is parked on lock acquisition here, not
-        # inside create, so only one create runs.
-        await _asyncio.sleep(0)
+        if force_unlocked_race:
+            for _ in range(100):
+                if len(create_order) >= 2:
+                    break
+                await _asyncio.sleep(0)
         created_names.add((b["name"], b["cwd"]))
         return {"agent_session_id": f"bc-{len(create_order)}", "name": b["name"],
                 "cwd": b["cwd"], "registry_cwd": b["cwd"],
@@ -767,6 +768,7 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
         # Unlocked (neutered): the race window is reachable -> 2 creates.
         created_names.clear()
         create_order.clear()
+        force_unlocked_race = True
         main._provision_lock = lambda _name, _cwd: _NoLock()
         _asyncio.run(_two_provisions())
         assert len(create_order) == 2, f"unlocked: expected 2 creates (race), got {len(create_order)}"
