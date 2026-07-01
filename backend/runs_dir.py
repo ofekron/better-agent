@@ -133,6 +133,20 @@ def _run_state_path_has_ledger_shape(path: Path, root: Path) -> bool:
     return path.parent != root_absolute and path.parent.parent == root_absolute
 
 
+def _run_state_path_string_has_ledger_shape(state_path: str, root: Path) -> bool:
+    if os.sep != "/" or os.altsep is not None:
+        return _run_state_path_has_ledger_shape(Path(state_path), root)
+    root_path = str(root.absolute()).rstrip("/")
+    prefix = f"{root_path}/"
+    if not state_path.startswith(prefix):
+        return False
+    rest = state_path[len(prefix):]
+    if not rest.endswith("/state.json"):
+        return False
+    run_name = rest[: -len("/state.json")]
+    return bool(run_name) and "/" not in run_name
+
+
 def _run_state_candidate_stat(path: Path, root: Path) -> os.stat_result | None:
     if not _run_state_path_has_ledger_shape(path, root):
         return None
@@ -178,9 +192,10 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 state_path = row.get("state_path")
                 if not sid or not state_path:
                     continue
-                path = Path(str(state_path))
-                if not _run_state_path_has_ledger_shape(path, root):
+                state_path_str = str(state_path)
+                if not _run_state_path_string_has_ledger_shape(state_path_str, root):
                     continue
+                path = Path(state_path_str)
                 try:
                     written_at = float(row.get("written_at"))
                 except (TypeError, ValueError):
