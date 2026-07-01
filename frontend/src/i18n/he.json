@@ -441,6 +441,7 @@
   "session.deleteTitle": "מחק סשן",
   "session.menuTitle": "פעולות",
   "session.copyAction": "העתק id",
+  "session.copyEventAction": "העתק id אירוע",
   "session.detailsTitle": "פרטים",
   "session.markUnreadTitle": "סמן כלא נקרא",
   "session.archiveTitle": "העבר לארכיון",

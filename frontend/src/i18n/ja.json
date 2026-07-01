@@ -436,6 +436,7 @@
   "session.deleteTitle": "セッションを削除",
   "session.menuTitle": "操作",
   "session.copyAction": "ID をコピー",
+  "session.copyEventAction": "イベント ID をコピー",
   "session.detailsTitle": "詳細",
   "session.markUnreadTitle": "未読にする",
   "session.archiveTitle": "セッションをアーカイブ",

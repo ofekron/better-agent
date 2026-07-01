@@ -440,6 +440,7 @@
   "session.deleteTitle": "删除会话",
   "session.menuTitle": "操作",
   "session.copyAction": "复制 id",
+  "session.copyEventAction": "复制事件 id",
   "session.detailsTitle": "详情",
   "session.markUnreadTitle": "标记为未读",
   "session.archiveTitle": "归档会话",

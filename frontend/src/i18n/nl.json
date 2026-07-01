@@ -436,6 +436,7 @@
   "session.deleteTitle": "Sessie verwijderen",
   "session.menuTitle": "Acties",
   "session.copyAction": "Id kopiëren",
+  "session.copyEventAction": "Gebeurtenis-id kopiëren",
   "session.detailsTitle": "Details",
   "session.markUnreadTitle": "Markeren als ongelezen",
   "session.archiveTitle": "Sessie archiveren",

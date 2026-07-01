@@ -5,6 +5,8 @@ import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
+import { useTranslation } from "react-i18next";
+import { eventLinkMarker } from "../utils/linkifyFilePaths";
 import Icon from "./Icon";
 
 /** Long-press on a non-text target (image, video) → action sheet.
@@ -40,7 +42,6 @@ export interface InvestigationData {
 interface Props {
   onInvestigate: (data: InvestigationData) => void;
   activeSessionId?: string;
-  activeSessionCwd?: string;
   children: React.ReactNode;
 }
 
@@ -138,7 +139,7 @@ const MENU_W = 200;
 /** Extra padding for menu bottom. */
 const MENU_PAD = 16;
 
-export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeSessionCwd, children }: Props) {
+export function InvestigateContextMenu({ onInvestigate, activeSessionId, children }: Props) {
   const [desktopItems, setDesktopItems] = useState<ActionItem[] | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [capturing, setCapturing] = useState(false);
@@ -146,10 +147,9 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
   const clickPosRef = useRef<{ x: number; y: number }>(null!);
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
-  const activeSessionCwdRef = useRef(activeSessionCwd);
-  activeSessionCwdRef.current = activeSessionCwd;
 
   const { show: showSheet } = useMobileActionSheet();
+  const { t } = useTranslation();
 
   // Long-press state refs.
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -233,20 +233,20 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         });
       }
 
-      // Copy ID — available on any message.
+      // Copy event id — available on any message with a known session. Copies
+      // a `[[ba-event:...]]` marker so it pastes as a clickable link that
+      // scrolls to this message, and carries the session + message ids as a
+      // reference an agent can resolve.
       const msgEl = target.closest("[data-message-id]") as HTMLElement | null;
-      if (msgEl) {
+      const sessionIdForCopy = activeSessionIdRef.current ?? "";
+      if (msgEl && sessionIdForCopy) {
         const messageId = msgEl.getAttribute("data-message-id")!;
-        const sessionId = activeSessionIdRef.current ?? "";
-        const cwd = activeSessionCwdRef.current ?? "";
-        const parts = [messageId];
-        if (sessionId) parts.push(sessionId);
-        if (cwd) parts.push(cwd);
+        const marker = eventLinkMarker(sessionIdForCopy, messageId, "");
         items.push({
           id: "copy-id",
-          label: "Copy ID",
+          label: t("session.copyEventAction"),
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => navigator.clipboard.writeText(parts.join(" ")).catch(() => {}),
+          onClick: () => navigator.clipboard.writeText(marker).catch(() => {}),
         });
       }
 
@@ -301,7 +301,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
       return items;
     },
-    [handleInvestigate],
+    [handleInvestigate, t],
   );
 
   // Desktop right-click → show custom floating toolbar WITHOUT suppressing

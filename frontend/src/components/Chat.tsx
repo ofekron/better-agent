@@ -37,6 +37,12 @@ import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
+import { eventBus } from "../lib/eventBus";
+import {
+  peekPendingMessageFocus,
+  clearPendingMessageFocus,
+  scrollMessageIntoView,
+} from "../utils/messageFocus";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
 import {
   extractAssistantOutputTextFromEvents,
@@ -666,6 +672,34 @@ export function Chat({
     });
     return () => { clearMobileHandlers(); };
   });
+
+  // Consume a pending "focus message" request (from an event copy-id link).
+  // Re-runs as messages arrive so a cross-session jump lands once the target
+  // message renders; retries a few frames for late layout, and a bus nudge
+  // handles the same-session case where `messages` didn't change.
+  const sessionIdForFocus = session?.id;
+  useEffect(() => {
+    if (!sessionIdForFocus) return;
+    let cancelled = false;
+    const attempt = (frame: number) => {
+      if (cancelled) return;
+      const target = peekPendingMessageFocus(sessionIdForFocus);
+      if (!target) return;
+      if (scrollMessageIntoView(target)) {
+        clearPendingMessageFocus(target);
+        return;
+      }
+      if (frame < 20) requestAnimationFrame(() => attempt(frame + 1));
+    };
+    const off = eventBus.subscribe("focus_message", (p) => {
+      if (p.session_id === sessionIdForFocus) attempt(0);
+    });
+    attempt(0);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [sessionIdForFocus, messages]);
 
   // Pending fresh-worker approvals for the current session. Populated
   // from `worker_creation_requested` WS events AND (on mount / cwd
