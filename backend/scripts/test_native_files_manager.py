@@ -341,7 +341,7 @@ async def test_run_state_ledger_rejects_paths_outside_runs_root() -> None:
     print("PASS test_run_state_ledger_rejects_paths_outside_runs_root")
 
 
-async def test_run_state_recent_scan_backfills_ledger() -> None:
+async def test_run_state_recent_lookup_does_not_backfill_ledger() -> None:
     from runs_dir import runs_root
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
@@ -354,22 +354,19 @@ async def test_run_state_recent_scan_backfills_ledger() -> None:
         '{"session_id":"BACKFILL-SID","jsonl_path":"/tmp/backfill.jsonl"}',
         encoding="utf-8",
     )
-    assert str(nfm_mod._scan_run_state_for_jsonl("BACKFILL-SID")) == "/tmp/backfill.jsonl"
-    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
-    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
-    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
-    original_candidates = runs_dir_mod._recent_state_candidates
+    original_backfill = runs_dir_mod._backfill_run_state_ledger
 
-    def fail_candidates(*_args, **_kwargs):
-        raise AssertionError("backfilled ledger should avoid recent-dir scan")
+    def fail_backfill(*_args, **_kwargs):
+        raise AssertionError("recent lookup should not backfill the ledger")
 
-    runs_dir_mod._recent_state_candidates = fail_candidates  # type: ignore
+    runs_dir_mod._backfill_run_state_ledger = fail_backfill  # type: ignore
     try:
-        path = nfm_mod._scan_run_state_for_jsonl("BACKFILL-SID")
+        assert str(nfm_mod._scan_run_state_for_jsonl("BACKFILL-SID")) == "/tmp/backfill.jsonl"
+        nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+        assert nfm_mod._scan_run_state_for_jsonl("MISSING-BACKFILL-SID") is None
     finally:
-        runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore
-    assert str(path) == "/tmp/backfill.jsonl", path
-    print("PASS test_run_state_recent_scan_backfills_ledger")
+        runs_dir_mod._backfill_run_state_ledger = original_backfill  # type: ignore
+    print("PASS test_run_state_recent_lookup_does_not_backfill_ledger")
 
 
 async def test_run_state_backfill_rejects_symlink_escape() -> None:
@@ -453,10 +450,11 @@ async def test_run_state_full_backfill_finds_old_state_outside_recent_window() -
             run_dir / "state.json",
             {"session_id": f"FULL-BACKFILL-NEW-{index}", "jsonl_path": f"/tmp/new-{index}.jsonl"},
         )
+    assert runs_dir_mod.ensure_run_state_ledger_backfilled(root) is True
     original_candidates = runs_dir_mod._recent_state_candidates
 
     def fail_candidates(*_args, **_kwargs):
-        raise AssertionError("full ledger backfill should avoid recent-dir fallback")
+        raise AssertionError("explicit full ledger backfill should avoid recent-dir fallback")
 
     runs_dir_mod._recent_state_candidates = fail_candidates  # type: ignore
     try:
@@ -561,6 +559,18 @@ async def test_run_state_full_backfill_coalesces_concurrent_marker_writes() -> N
     assert results.count(True) == 1, results
     assert results.count(False) == 1, results
     print("PASS test_run_state_full_backfill_coalesces_concurrent_marker_writes")
+
+
+async def test_run_state_backfill_is_scheduled_at_startup() -> None:
+    source = (nfm_mod.Path(__file__).resolve().parents[1] / "main.py").read_text(
+        encoding="utf-8"
+    )
+    startup_start = source.index("async def on_startup()")
+    startup_source = source[startup_start:]
+    assert "from runs_dir import ensure_run_state_ledger_backfilled" in startup_source
+    assert '"run_state_ledger_backfill"' in startup_source
+    assert "ensure_run_state_ledger_backfilled" in startup_source
+    print("PASS test_run_state_backfill_is_scheduled_at_startup")
 
 
 async def test_run_state_stale_index_does_not_hide_new_state() -> None:
@@ -978,6 +988,33 @@ async def test_run_state_lookup_checks_recent_dirs_first() -> None:
     print("PASS test_run_state_lookup_checks_recent_dirs_first")
 
 
+async def test_run_state_recent_unledgered_state_is_found_without_backfill() -> None:
+    from runs_dir import runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-recent-unledgered"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        '{"session_id":"RECENT-UNLEDGERED","jsonl_path":"/tmp/recent-unledgered.jsonl"}',
+        encoding="utf-8",
+    )
+    original_backfill = runs_dir_mod.ensure_run_state_ledger_backfilled
+
+    def fail_backfill(*_args, **_kwargs):
+        raise AssertionError("recent crash-window lookup should not run full backfill")
+
+    runs_dir_mod.ensure_run_state_ledger_backfilled = fail_backfill  # type: ignore
+    try:
+        path = nfm_mod._scan_run_state_for_jsonl("RECENT-UNLEDGERED")
+    finally:
+        runs_dir_mod.ensure_run_state_ledger_backfilled = original_backfill  # type: ignore
+    assert str(path) == "/tmp/recent-unledgered.jsonl", path
+    print("PASS test_run_state_recent_unledgered_state_is_found_without_backfill")
+
+
 async def test_run_state_lookup_miss_stays_bounded() -> None:
     from runs_dir import runs_root
     from orchs import jsonl_helpers
@@ -993,6 +1030,8 @@ async def test_run_state_lookup_miss_stays_bounded() -> None:
             encoding="utf-8",
         )
     original_candidates = runs_dir_mod._recent_state_candidates
+    original_backfill = runs_dir_mod.ensure_run_state_ledger_backfilled
+    original_recent_backfill = runs_dir_mod._backfill_run_state_ledger
     original_compute = jsonl_helpers.compute_jsonl_read_path
     candidate_calls = 0
 
@@ -1004,7 +1043,12 @@ async def test_run_state_lookup_miss_stays_bounded() -> None:
     def resolved_by_provider(*_args, **_kwargs):
         return "/tmp/provider-fallback.jsonl"
 
+    def fail_backfill(*_args, **_kwargs):
+        raise AssertionError("lookup miss should not run ledger backfill")
+
     runs_dir_mod._recent_state_candidates = counted_candidates  # type: ignore
+    runs_dir_mod.ensure_run_state_ledger_backfilled = fail_backfill  # type: ignore
+    runs_dir_mod._backfill_run_state_ledger = fail_backfill  # type: ignore
     jsonl_helpers.compute_jsonl_read_path = resolved_by_provider  # type: ignore
     try:
         path = nfm_mod._resolve_primary_jsonl(
@@ -1013,6 +1057,8 @@ async def test_run_state_lookup_miss_stays_bounded() -> None:
         )
     finally:
         runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore
+        runs_dir_mod.ensure_run_state_ledger_backfilled = original_backfill  # type: ignore
+        runs_dir_mod._backfill_run_state_ledger = original_recent_backfill  # type: ignore
         jsonl_helpers.compute_jsonl_read_path = original_compute
     assert str(path) == "/tmp/provider-fallback.jsonl", path
     assert candidate_calls == 1, f"expected bounded recent scan only, got {candidate_calls}"
@@ -1234,13 +1280,14 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
     asyncio.run(test_run_state_lookup_uses_ledger_before_recent_scan())
     asyncio.run(test_run_state_ledger_rejects_paths_outside_runs_root())
-    asyncio.run(test_run_state_recent_scan_backfills_ledger())
+    asyncio.run(test_run_state_recent_lookup_does_not_backfill_ledger())
     asyncio.run(test_run_state_backfill_rejects_symlink_escape())
     asyncio.run(test_run_state_ledger_dedupes_duplicate_rows())
     asyncio.run(test_run_state_full_backfill_finds_old_state_outside_recent_window())
     asyncio.run(test_run_state_full_backfill_marker_dedupes_rows())
     asyncio.run(test_run_state_full_backfill_skips_symlink_escape())
     asyncio.run(test_run_state_full_backfill_coalesces_concurrent_marker_writes())
+    asyncio.run(test_run_state_backfill_is_scheduled_at_startup())
     asyncio.run(test_run_state_stale_index_does_not_hide_new_state())
     asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
     asyncio.run(test_run_state_ledger_cache_reuses_unchanged_index())
@@ -1252,6 +1299,7 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
     asyncio.run(test_run_state_recent_index_coalesces_concurrent_sid_scans())
     asyncio.run(test_run_state_lookup_checks_recent_dirs_first())
+    asyncio.run(test_run_state_recent_unledgered_state_is_found_without_backfill())
     asyncio.run(test_run_state_lookup_miss_stays_bounded())
     asyncio.run(test_persisted_native_path_skips_run_state_lookup())
     asyncio.run(test_primary_jsonl_positive_cache_skips_path_stat())

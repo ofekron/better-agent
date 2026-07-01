@@ -9815,6 +9815,15 @@ async def on_startup():
             ),
             name="startup-adv-sync-recovery",
         )
+        from runs_dir import ensure_run_state_ledger_backfilled
+        asyncio.create_task(
+            run_task(
+                "run_state_ledger_backfill",
+                "startup_tasks.run_state_ledger_backfill",
+                ensure_run_state_ledger_backfilled,
+            ),
+            name="startup-run-state-ledger-backfill",
+        )
 
     # Launch the orchestrator.
     asyncio.create_task(_on_startup_bg_orchestrator(), name="startup-orchestrator")

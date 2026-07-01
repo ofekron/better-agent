@@ -193,29 +193,40 @@ def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     ledger_paths = ledger_state_files_for_sid(root, agent_sid)
     if ledger_paths:
         return ledger_paths
-    did_backfill = ensure_run_state_ledger_backfilled(root)
-    if did_backfill:
-        with _RUN_STATE_LOOKUP_CACHE_LOCK:
-            _RUN_STATE_LEDGER_CACHE.pop(str(root), None)
-        ledger_paths = ledger_state_files_for_sid(root, agent_sid)
-        if ledger_paths:
-            return ledger_paths
-    return recent_state_index_for_root(root).get(agent_sid, [])
+    return recent_state_files_for_sid(root, agent_sid)
+
+
+def recent_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return []
+    index = _recent_state_index_for_root(root, root_resolved, agent_sid=agent_sid)
+    return _filter_recent_state_paths(index.get(agent_sid, []), root_resolved)
 
 
 def recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
-    now = time.monotonic()
-    root_key = str(root)
     try:
         root_resolved = root.resolve()
     except OSError:
         return {}
+    return _recent_state_index_for_root(root, root_resolved, agent_sid=None)
+
+
+def _recent_state_index_for_root(
+    root: Path,
+    root_resolved: Path,
+    *,
+    agent_sid: str | None,
+) -> dict[str, list[Path]]:
+    now = time.monotonic()
+    root_key = str(root)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
         if cached is not None:
             ts, _fingerprint, index = cached
             if now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
-                return _filter_recent_state_index(index, root_resolved)
+                return _filter_recent_state_index(index, root_resolved, agent_sid=agent_sid)
         event = _RUN_STATE_RECENT_INDEX_INFLIGHT.get(root_key)
         if event is None:
             event = threading.Event()
@@ -227,7 +238,10 @@ def recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
         event.wait(1.0)
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
             cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
-            return _filter_recent_state_index(cached[2], root_resolved) if cached is not None else {}
+            return (
+                _filter_recent_state_index(cached[2], root_resolved, agent_sid=agent_sid)
+                if cached is not None else {}
+            )
     try:
         candidates = _recent_state_candidates(root, root_resolved)
         if not candidates:
@@ -241,9 +255,8 @@ def recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
                     and now - ts < _RUN_STATE_RECENT_INDEX_MAX_AGE_S
                 ):
                     _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, fingerprint, index)
-                    return _filter_recent_state_index(index, root_resolved)
+                    return _filter_recent_state_index(index, root_resolved, agent_sid=agent_sid)
         index = _build_recent_state_index(candidates, root_resolved)
-        _backfill_run_state_ledger(root, index)
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
             _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
         return index
@@ -282,16 +295,25 @@ def _recent_state_candidates(
     return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates))
 
 
+def _filter_recent_state_paths(paths: list[Path], root_resolved: Path) -> list[Path]:
+    return [
+        path for path in paths
+        if _run_state_path_under_root(path, root_resolved)
+    ]
+
+
 def _filter_recent_state_index(
     index: dict[str, list[Path]],
     root_resolved: Path,
+    *,
+    agent_sid: str | None = None,
 ) -> dict[str, list[Path]]:
+    if agent_sid is not None:
+        safe_paths = _filter_recent_state_paths(index.get(agent_sid, []), root_resolved)
+        return {agent_sid: safe_paths} if safe_paths else {}
     filtered: dict[str, list[Path]] = {}
     for sid, paths in index.items():
-        safe_paths = [
-            path for path in paths
-            if _run_state_path_under_root(path, root_resolved)
-        ]
+        safe_paths = _filter_recent_state_paths(paths, root_resolved)
         if safe_paths:
             filtered[sid] = safe_paths
     return filtered
