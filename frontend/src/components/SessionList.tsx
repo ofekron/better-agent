@@ -682,25 +682,21 @@ function SessionNodeImpl({
         onClick: () =>
           onAgentRenameAllowed(session.id, !session.agent_rename_allowed),
       },
-      ...(tags.length > 0
-        ? [
-            {
-              id: "tags",
-              label: t("session.tagsControl"),
-              icon: <Icon name="tag" size={14} />,
-              onClick: () => {
-                // Match the rename timer: wait for the action sheet's
-                // fade-out so the popover mounts after the backdrop is
-                // gone, else its click-away fires on the closing sheet.
-                if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
-                tagPopoverTimerRef.current = setTimeout(
-                  () => setTagPopover(menuAnchorRef.current),
-                  220,
-                );
-              },
-            },
-          ]
-        : []),
+      {
+        id: "tags",
+        label: t("session.tagsControl"),
+        icon: <Icon name="tag" size={14} />,
+        onClick: () => {
+          // Match the rename timer: wait for the action sheet's
+          // fade-out so the popover mounts after the backdrop is
+          // gone, else its click-away fires on the closing sheet.
+          if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
+          tagPopoverTimerRef.current = setTimeout(
+            () => setTagPopover(menuAnchorRef.current),
+            220,
+          );
+        },
+      },
       {
         id: "rename",
         label: t("session.renameTitle"),
@@ -1135,19 +1131,17 @@ function SessionNodeImpl({
           >
             <Icon name="folder" size={12} />
           </button>
-          {tags.length > 0 && (
-            <button
-              className="session-item-tag-control"
-              title={t("session.tagsControl")}
-              aria-label={t("session.tagsControl")}
-              onClick={(e) => {
-                e.stopPropagation();
-                setTagPopover(e.currentTarget.getBoundingClientRect());
-              }}
-            >
-              <Icon name="tag" size={12} />
-            </button>
-          )}
+          <button
+            className="session-item-tag-control"
+            title={t("session.tagsControl")}
+            aria-label={t("session.tagsControl")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setTagPopover(e.currentTarget.getBoundingClientRect());
+            }}
+          >
+            <Icon name="tag" size={12} />
+          </button>
           <button
             className="session-item-rename"
             title={t("session.renameTitle")}
