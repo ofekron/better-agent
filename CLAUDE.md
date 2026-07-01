@@ -470,14 +470,27 @@ state when sharing the default home. Every persistence module
 through `bc_home()`.
 
 When writing tests:
-1. Set `os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(...)`
-   BEFORE importing any backend module. Legacy `BETTER_CLAUDE_HOME`
-   remains supported for older tests.
+1. Isolate via `paths.engage_test_home(tempdir)` BEFORE importing any
+   backend module — it sets `BETTER_AGENT_HOME` (PRIMARY), the legacy
+   `BETTER_CLAUDE_HOME`, AND `BETTER_AGENT_TEST_MODE` in one call. Do
+   NOT set only `BETTER_CLAUDE_HOME`: `ba_home()` resolves PRIMARY first,
+   so a dev shell that exports a real `BETTER_AGENT_HOME` silently
+   shadows the legacy var and routes fixture writes into production
+   state. This is exactly how requirements tests once overwrote the real
+   `requirement_units.jsonl` and emptied `get_requirements` results.
 2. `rmtree(bc_home)` on exit — safe because it's a tempdir.
 3. Never `rm -rf ~/.better-claude/anything` or
    `rm -rf ~/.better-agent/anything` from a script. If you want a
    clean test, set `BETTER_AGENT_HOME` to a fresh tempdir and the
    entire env is fresh by construction.
+
+**Tests must never read, write, or delete real Better Agent data —
+cross-provider (Claude, Codex, Gemini).** A test that touches production
+state corrupts live sessions, stores, and projections for every provider
+and is indistinguishable from data loss. Always run against an isolated
+`engage_test_home` tempdir; if a test cannot pass without the real home's
+installed extensions or seeded data, it is broken — fix the fixture, do
+not point the test at production.
 
 When writing dev/admin scripts: same rule. If a script needs the
 real home, it should accept an explicit path argument, not assume
