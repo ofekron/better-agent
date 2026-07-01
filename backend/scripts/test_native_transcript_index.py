@@ -91,16 +91,57 @@ def test_indexes_corpus_and_drops_tool_result() -> bool:
     r = idx.refresh_once()
     rows = idx.search_rows(["zulifrangible"], limit=10)
     kinds = {x["element_kind"] for x in rows}
+    metadata_ok = all(
+        {"role", "element_id", "element_index"} <= set(row)
+        for row in rows
+    )
+    ordered_indexes = [row["element_index"] for row in rows]
     ok = (
         r["walked"] >= 1
         and idx.is_covered()
         and idx.is_usable()
         and kinds == {"user_prompt", "assistant_text", "tool_call"}
+        and metadata_ok
+        and ordered_indexes == [0, 1, 2]
         # tool_result content ("dump output bulk") was deliberately not indexed
         and not any("dump output bulk" in x["text"] for x in rows)
     )
     print(f"{OK if ok else FAIL} indexes lean elements, drops tool_result "
           f"(kinds={kinds}, refresh={r})")
+    return ok
+
+
+def test_old_schema_cache_rebuilds() -> bool:
+    _setup_roots()
+    conn = idx._writer_connection()
+    conn.execute("DROP TABLE native_element_fts")
+    conn.executescript(
+        """
+        CREATE VIRTUAL TABLE native_element_fts USING fts5(
+            text,
+            path UNINDEXED,
+            sid UNINDEXED,
+            cwd UNINDEXED,
+            tag UNINDEXED,
+            element_kind UNINDEXED,
+            tool_name UNINDEXED,
+            ts UNINDEXED,
+            tokenize='unicode61'
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO native_file_state(path, mtime, size, tag, sid, cwd, indexed_at) "
+        "VALUES ('stale.jsonl', 1, 1, 'claude', 'stale', '/stale', 1)"
+    )
+    conn.commit()
+    idx.shutdown()
+
+    conn = idx._writer_connection()
+    columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
+    stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
+    ok = columns == idx._FTS_COLUMNS and stale_rows == 0
+    print(f"{OK if ok else FAIL} old schema cache rebuilds (columns={columns}, stale_rows={stale_rows})")
     return ok
 
 
@@ -198,6 +239,7 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
+        test_old_schema_cache_rebuilds,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
         test_not_usable_until_covered,
