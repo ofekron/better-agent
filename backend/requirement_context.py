@@ -171,15 +171,60 @@ def get_processed_requirements(
     requirements = processed.get("requirements") if isinstance(processed, dict) else []
     if not isinstance(requirements, list):
         requirements = []
+    error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
+    if error:
+        fallback = _native_session_fallback(
+            query=normalized_query,
+            cwd=cwd,
+            cwds=cwds,
+            all_projects=all_projects,
+            max_matches=max_matches,
+        )
+        if fallback:
+            return {
+                "success": True,
+                "requirements": fallback,
+                "count": len(fallback),
+                "fallback": "native_sessions",
+                "processor_error": error,
+            }
     response = {
-        "success": not bool(processed.get("error")) if isinstance(processed, dict) else False,
+        "success": not bool(error),
         "requirements": requirements,
         "count": len(requirements),
     }
-    error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
     if error:
         response["error"] = error
     return response
+
+
+def _native_session_fallback(
+    *,
+    query: str,
+    cwd: str,
+    cwds: list[str] | None,
+    all_projects: bool,
+    max_matches: int | None,
+) -> list[dict[str, Any]]:
+    """Raw grep of the provider-native transcripts — used when the processor is
+    unavailable. Reuses the canonical native miners and the same
+    programmatic-preamble noise filter the main corpus applies, so the degraded
+    answer stays consistent with the fresh path."""
+    try:
+        import native_session_prompt_search
+
+        normalized_cwds, _cwds_error = _normalize_cwd_filters(
+            cwd, cwds, all_projects=all_projects
+        )
+        records = native_session_prompt_search.search_native_session_prompts(
+            query=query,
+            cwds=normalized_cwds,
+            max_matches=max_matches,
+            is_noise=_load_sync_user_prompts()._is_noise,
+        )
+    except Exception:
+        return []
+    return _normalize_processed_requirements(records)
 
 
 def _run_requirements_processor(
