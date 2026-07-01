@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 
 import _test_home
 _test_home.isolate("bc-test-testape-login-")
@@ -77,6 +78,35 @@ def test_loopback_guard_rejects_external():
             det._assert_loopback(bad)
 
 
+def test_auto_adapter_skips_unusable_connected_adapter():
+    calls = []
+    original_list = det.list_web_adapters
+    original_session = det._web_session
+
+    class Web:
+        def eval_js(self, _script):
+            return {"auth": {"ok": True, "status": 200}, "loginShell": False}
+
+    @contextmanager
+    def fake_session(adapter_id, _fs_url):
+        calls.append(adapter_id)
+        if adapter_id == "stale":
+            raise RuntimeError("device server is gone")
+        yield Web()
+
+    det.list_web_adapters = lambda _fs_url: [("stale", "Stale"), ("live", "Live")]
+    det._web_session = fake_session
+    try:
+        state = det.detect_login_state()
+    finally:
+        det.list_web_adapters = original_list
+        det._web_session = original_session
+
+    assert calls == ["stale", "live"]
+    assert state.adapter_id == "live"
+    assert state.state == "authenticated"
+
+
 # ── live SDK round-trip (skipped without a connected web adapter) ───────────
 
 def _live_adapter():
@@ -88,12 +118,13 @@ def _live_adapter():
 
 
 def test_detect_live_adapter():
-    adapter_id = _live_adapter()
-    if not adapter_id:
+    if not _live_adapter():
         pytest.skip("no connected TestApe web adapter")
 
-    state = det.detect_login_state(adapter_id)
-    assert state.adapter_id == adapter_id
+    state = det.detect_login_state()
+    if state.reason and state.reason.startswith("no usable connected TestApe web adapter"):
+        pytest.skip(state.reason)
+    assert state.adapter_id
     assert state.state in ALLOWED_STATES
     # logged_in must be consistent with the detected state.
     if state.state == "authenticated":
@@ -108,11 +139,11 @@ def test_detect_live_adapter():
 def _run_one(name):
     fn = globals()[name]
     try:
-        if name == "test_detect_live_adapter" and not _live_adapter():
-            print(f"{SKIP} {name} (no connected web adapter)")
-            return True
         fn()
         print(f"{PASS} {name}")
+        return True
+    except pytest.skip.Exception as exc:
+        print(f"{SKIP} {name} ({exc})")
         return True
     except Exception as exc:  # noqa: BLE001 — standalone reporter
         print(f"{FAIL} {name}: {exc!r}")
