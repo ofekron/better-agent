@@ -720,6 +720,88 @@ async def test_run_state_ledger_cache_rejects_cached_symlink_escape() -> None:
     print("PASS test_run_state_ledger_cache_rejects_cached_symlink_escape")
 
 
+async def test_run_state_ledger_parse_defers_resolve_to_target_sid() -> None:
+    from runs_dir import run_state_ledger_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    target_dir = root / "run-ledger-target"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_state = target_dir / "state.json"
+    target_state.write_text(
+        '{"session_id":"LEDGER-TARGET","jsonl_path":"/tmp/ledger-target.jsonl"}',
+        encoding="utf-8",
+    )
+    rows = []
+    for index in range(50):
+        rows.append(
+            {
+                "session_id": f"LEDGER-OTHER-{index}",
+                "jsonl_path": f"/tmp/ledger-other-{index}.jsonl",
+                "state_path": str(root / f"run-ledger-other-{index}" / "state.json"),
+                "written_at": index,
+            }
+        )
+    rows.extend(
+        [
+            {
+                "session_id": "LEDGER-TARGET",
+                "jsonl_path": "/tmp/ledger-target.jsonl",
+                "state_path": str(target_state),
+                "written_at": 100,
+            },
+            {
+                "session_id": "LEDGER-BAD",
+                "jsonl_path": "/tmp/ledger-bad-outside.jsonl",
+                "state_path": str(root.parent / "outside-ledger-bad" / "state.json"),
+                "written_at": 101,
+            },
+            {
+                "session_id": "LEDGER-BAD",
+                "jsonl_path": "/tmp/ledger-bad-nested.jsonl",
+                "state_path": str(root / "run-ledger-bad" / "nested" / "state.json"),
+                "written_at": 102,
+            },
+            {
+                "session_id": "LEDGER-BAD",
+                "jsonl_path": "/tmp/ledger-bad-relative.jsonl",
+                "state_path": "run-ledger-relative/state.json",
+                "written_at": 103,
+            },
+        ]
+    )
+    run_state_ledger_path(root).write_text(
+        "\n".join(nfm_mod.json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    original_validator = runs_dir_mod._run_state_path_under_root
+    validated_paths: list[nfm_mod.Path] = []
+
+    def counting_validator(path, root_resolved):  # type: ignore[no-untyped-def]
+        validated_paths.append(path)
+        return original_validator(path, root_resolved)
+
+    runs_dir_mod._run_state_path_under_root = counting_validator  # type: ignore
+    try:
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-TARGET") == [
+            target_state
+        ]
+        assert validated_paths == [target_state]
+        validated_paths.clear()
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-TARGET") == [
+            target_state
+        ]
+        assert validated_paths == [target_state]
+        validated_paths.clear()
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-BAD") == []
+        assert validated_paths == []
+    finally:
+        runs_dir_mod._run_state_path_under_root = original_validator  # type: ignore
+    print("PASS test_run_state_ledger_parse_defers_resolve_to_target_sid")
+
+
 async def test_run_state_recent_cache_revalidates_cached_paths() -> None:
     from runs_dir import runs_root
 
@@ -1164,6 +1246,7 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_cache_reuses_unchanged_index())
     asyncio.run(test_run_state_ledger_cache_invalidates_on_append())
     asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
+    asyncio.run(test_run_state_ledger_parse_defers_resolve_to_target_sid())
     asyncio.run(test_run_state_recent_cache_revalidates_cached_paths())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
     asyncio.run(test_run_state_lookup_coalesces_concurrent_scans())
