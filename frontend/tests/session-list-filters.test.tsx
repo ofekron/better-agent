@@ -170,6 +170,24 @@ describe("SessionList advanced filters", () => {
     expect(onPin).toHaveBeenCalledWith("pinned", false);
   });
 
+  it("opens the tag editor from a session row before any project tags exist", async () => {
+    renderList([
+      makeSession({ id: "untagged", name: "Untagged", cwd: "/tmp/project" }),
+    ]);
+
+    const row = rowBySessionId("untagged");
+    fireEvent.click(within(row).getByRole("button", { name: "session.tagsControl" }));
+
+    expect(await screen.findByRole("dialog", { name: "session.tags" })).toBeTruthy();
+    expect(screen.getByText("session.noTagsYet")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("session.tagSearch"), {
+      target: { value: "Urgent" },
+    });
+
+    expect(screen.getByRole("button", { name: "session.createTag" })).toBeTruthy();
+  });
+
   it("embeds bound workers and policy controls inside team session rows", () => {
     const onWorkerCreationPolicyChange = vi.fn();
     renderList(
@@ -845,6 +863,7 @@ describe("SessionList advanced filters", () => {
     await waitFor(() => expect(document.querySelector(".mobile-action-sheet-header")?.textContent).toBe("Alpha"));
     const sheet = document.querySelector(".mobile-action-sheet") as HTMLElement;
     expect(within(sheet).getByRole("button", { name: "session.pinTitle" })).toBeTruthy();
+    expect(within(sheet).getByRole("button", { name: "session.tagsControl" })).toBeTruthy();
     expect(within(sheet).getByRole("button", { name: "session.copyAction" })).toBeTruthy();
   });
 
