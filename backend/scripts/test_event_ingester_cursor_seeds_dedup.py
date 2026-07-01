@@ -388,6 +388,134 @@ def _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() -> bool:
     return ok
 
 
+def _write_summary_sidecar(
+    root: str,
+    sid: str,
+    *,
+    msg_id: str = "msg-1",
+    resolutions: dict[str, str] | None = None,
+) -> dict:
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": f"u-{root}"},
+        source="prior-run", msg_id=msg_id,
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    summary = {
+        "sid": sid,
+        "event_count": 1,
+        "last_events": [{"seq": 1, "type": "agent_message", "data": {"ok": True}}],
+        "seq_start": 1,
+        "seq_end": 1,
+        "byte_start": 0,
+        "byte_end": stat.st_size,
+    }
+    (ba_home() / "sessions" / root / "event_summaries.json").write_text(
+        json.dumps({
+            "summary_version": 2,
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "tail": 25,
+            "summaries": {msg_id: summary},
+            "resolutions": resolutions or {},
+        }),
+        encoding="utf-8",
+    )
+    return summary
+
+
+def _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() -> bool:
+    root = "root-message-summary-filter-miss-sidecar-test"
+    sid = "sid-message-summary-filter-miss-sidecar-test"
+    _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
+
+    fresh = EventIngester()
+    original_rebuild = fresh._rebuild_seq_offsets_locked
+
+    def fail_rebuild(*_args, **_kwargs):
+        raise AssertionError("filtered summary miss should not rebuild seq offsets")
+
+    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    try:
+        by_sid = fresh.message_event_summaries(root, sid_filter="missing-sid", tail=25)
+        by_msg = fresh.message_event_summaries(root, msg_ids={"missing-msg"}, tail=25)
+        by_empty_msg_ids = fresh.message_event_summaries(root, msg_ids=set(), tail=25)
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    ok = by_sid == {} and by_msg == {} and by_empty_msg_ids == {}
+    print(
+        f"  {PASS if ok else FAIL} filtered message summary miss skips seq-offset rebuild"
+        f"{'' if ok else f' — sid={by_sid} msg={by_msg} empty={by_empty_msg_ids}'}"
+    )
+    return ok
+
+
+def _run_message_summaries_filtered_match_rebuilds_seq_offsets() -> bool:
+    root = "root-message-summary-filter-match-sidecar-test"
+    sid = "sid-message-summary-filter-match-sidecar-test"
+    expected_summary = _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
+
+    fresh = EventIngester()
+    calls = 0
+    original_rebuild = fresh._rebuild_seq_offsets_locked
+
+    def counted_rebuild(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_rebuild(*args, **kwargs)
+
+    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    try:
+        summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    ok = summaries == {"msg-1": expected_summary} and calls == 1
+    print(
+        f"  {PASS if ok else FAIL} filtered message summary match rebuilds seq offsets"
+        f"{'' if ok else f' — summaries={summaries} rebuilds={calls}'}"
+    )
+    return ok
+
+
+def _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() -> bool:
+    root = "root-message-summary-filter-miss-ownership-test"
+    sid = "sid-message-summary-filter-miss-ownership-test"
+    _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
+
+    fresh = EventIngester()
+    original_rebuild = fresh._rebuild_seq_offsets_locked
+
+    def fail_rebuild(*_args, **_kwargs):
+        raise AssertionError("filtered summary miss should not rebuild seq offsets")
+
+    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    try:
+        assert fresh.message_event_summaries(root, sid_filter="missing-sid", tail=25) == {}
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    fresh._summaries_cache.pop(root, None)
+    calls = 0
+
+    def counted_rebuild(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_rebuild(*args, **kwargs)
+
+    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    try:
+        resolutions = fresh.ownership_resolutions_range(root, seq_start=1, seq_end=1)
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    ok = resolutions == {1: "msg-1"} and calls == 1
+    print(
+        f"  {PASS if ok else FAIL} ownership resolution read rebuilds after filtered miss"
+        f"{'' if ok else f' — resolutions={resolutions} rebuilds={calls}'}"
+    )
+    return ok
+
+
 def _run_message_summaries_ignores_stale_sidecar() -> bool:
     root = "root-message-summary-stale-sidecar-test"
     sid = "sid-message-summary-stale-sidecar-test"
@@ -437,6 +565,9 @@ def main() -> int:
         ok = _run_message_summaries_uses_valid_sidecar() and ok
         ok = _run_message_summaries_empty_sidecar_skips_seq_rebuild() and ok
         ok = _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() and ok
+        ok = _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() and ok
+        ok = _run_message_summaries_filtered_match_rebuilds_seq_offsets() and ok
+        ok = _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() and ok
         ok = _run_message_summaries_ignores_stale_sidecar() and ok
         return 0 if ok else 1
     finally:

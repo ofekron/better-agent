@@ -1660,14 +1660,19 @@ class EventIngester:
         path = self._events_path(root_id)
         if not path.exists():
             return {}
-        with self._summaries_state(root_id, path, tail) as (all_summaries, _):
+        with self._summaries_state(
+            root_id,
+            path,
+            tail,
+            sid_filter=sid_filter,
+            msg_ids=msg_ids,
+        ) as (all_summaries, _):
             if not sid_filter and msg_ids is None:
                 return self._public_message_summaries(all_summaries)
             return {
                 k: self._public_message_summary(v)
                 for k, v in all_summaries.items()
-                if (not sid_filter or v.get("sid") == sid_filter)
-                if (msg_ids is None or k in msg_ids)
+                if self._summary_matches_filter(k, v, sid_filter=sid_filter, msg_ids=msg_ids)
             }
 
     @staticmethod
@@ -1683,6 +1688,18 @@ class EventIngester:
             msg_id: cls._public_message_summary(summary)
             for msg_id, summary in summaries.items()
         }
+
+    @staticmethod
+    def _summary_matches_filter(
+        msg_id: str,
+        summary: dict,
+        *,
+        sid_filter: Optional[str],
+        msg_ids: Optional[set[str]],
+    ) -> bool:
+        if sid_filter and summary.get("sid") != sid_filter:
+            return False
+        return msg_ids is None or msg_id in msg_ids
 
     def latest_render_event_uid(
         self,
@@ -1746,7 +1763,15 @@ class EventIngester:
             }
 
     @contextmanager
-    def _summaries_state(self, root_id: str, path: Path, tail: int = 25):
+    def _summaries_state(
+        self,
+        root_id: str,
+        path: Path,
+        tail: int = 25,
+        *,
+        sid_filter: Optional[str] = None,
+        msg_ids: Optional[set[str]] = None,
+    ):
         """Yield (summaries, resolutions) for `root_id`, refreshing the
         cache from disk under the per-root lock. Both reflect effective
         ownership (resolutions folded into summary bounds)."""
@@ -1782,7 +1807,19 @@ class EventIngester:
                 loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
                 if loaded is not None:
                     summaries, resolutions = loaded
-                    if summaries or resolutions:
+                    filter_has_no_summary_match = (
+                        (sid_filter or msg_ids is not None)
+                        and not any(
+                            self._summary_matches_filter(
+                                msg_id,
+                                summary,
+                                sid_filter=sid_filter,
+                                msg_ids=msg_ids,
+                            )
+                            for msg_id, summary in summaries.items()
+                        )
+                    )
+                    if (summaries or resolutions) and not filter_has_no_summary_match:
                         self._rebuild_seq_offsets_locked(path, root_id)
                     elif offsets is not None and self._next_offset.get(root_id) != file_size:
                         self._seq_offsets.pop(root_id, None)
