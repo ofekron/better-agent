@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "卸载 {{name}}？",
   "settings.extensionsUninstallFailed": "扩展卸载失败",
   "settings.extensionsNone": "未安装扩展。",
+  "settings.extensionsSearchPlaceholder": "搜索扩展…",
+  "settings.extensionsSearchEmpty": "没有扩展匹配你的搜索。",
   "settings.fontFamily": "字体",
   "settings.fontFamily.system": "系统",
   "settings.fontFamily.inter": "Inter",

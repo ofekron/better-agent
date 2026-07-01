@@ -409,6 +409,8 @@
   "settings.extensionsUninstallConfirm": "Uninstall {{name}}?",
   "settings.extensionsUninstallFailed": "Extension uninstall failed",
   "settings.extensionsNone": "No extensions installed.",
+  "settings.extensionsSearchPlaceholder": "Search extensions…",
+  "settings.extensionsSearchEmpty": "No extensions match your search.",
   "settings.fontFamily": "Font",
   "settings.fontFamily.system": "System",
   "settings.fontFamily.inter": "Inter",

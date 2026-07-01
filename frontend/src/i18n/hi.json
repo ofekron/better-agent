@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "{{name}} अस्थापित करें?",
   "settings.extensionsUninstallFailed": "एक्सटेंशन अस्थापना विफल",
   "settings.extensionsNone": "कोई एक्सटेंशन स्थापित नहीं।",
+  "settings.extensionsSearchPlaceholder": "एक्सटेंशन खोजें…",
+  "settings.extensionsSearchEmpty": "कोई एक्सटेंशन आपकी खोज से मेल नहीं खाता।",
   "settings.fontFamily": "फ़ॉन्ट",
   "settings.fontFamily.system": "सिस्टम",
   "settings.fontFamily.inter": "Inter",

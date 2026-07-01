@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "Disinstallare {{name}}?",
   "settings.extensionsUninstallFailed": "Disinstallazione dell'estensione non riuscita",
   "settings.extensionsNone": "Nessuna estensione installata.",
+  "settings.extensionsSearchPlaceholder": "Cerca estensioni…",
+  "settings.extensionsSearchEmpty": "Nessuna estensione corrisponde alla ricerca.",
   "settings.fontFamily": "Carattere",
   "settings.fontFamily.system": "Sistema",
   "settings.fontFamily.inter": "Inter",

@@ -12,6 +12,7 @@ import { SessionAutoDeleteSetting } from "./SessionAutoDeleteSetting";
 import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
+import { SearchInput } from "./SearchInput";
 import { LanguageSelector } from "./LanguageSelector";
 import {
   availableModesForForm,
@@ -981,6 +982,7 @@ function ExtensionPermissionRow({
 export function ExtensionUiSettingsSection() {
   const { t } = useTranslation();
   const [rows, setRows] = useState<ExtensionConfigRow[]>([]);
+  const [search, setSearch] = useState("");
   const [primaryProjects, setPrimaryProjects] = useState<{ path: string; name?: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -1252,13 +1254,39 @@ export function ExtensionUiSettingsSection() {
     [refresh, t],
   );
 
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleRows = useMemo(() => {
+    if (!normalizedSearch) return rows;
+    return rows.filter((row) =>
+      [
+        row.name,
+        row.id,
+        ...row.mcp.flatMap((server) => [server.name, server.label]),
+        ...row.harnessAdditions.flatMap((item) => [item.name, item.detail ?? ""]),
+        ...row.remoteServices.flatMap((service) => [service.name, service.base_url, service.purpose]),
+        ...row.settingsSchema.flatMap((spec) => [spec.key, spec.label, spec.help ?? ""]),
+      ].some((value) => value.toLowerCase().includes(normalizedSearch)),
+    );
+  }, [normalizedSearch, rows]);
+
   if (loading) return <div className="settings-hint">…</div>;
   if (!rows.length) return <div className="settings-hint">{t("settings.extensionsNone")}</div>;
 
   return (
     <div className="extension-ui-settings">
+      <label className="extension-ui-settings-search">
+        <Icon name="search" size={14} />
+        <SearchInput
+          className="extension-ui-settings-search-input"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t("settings.extensionsSearchPlaceholder")}
+          aria-label={t("settings.extensionsSearchPlaceholder")}
+        />
+      </label>
       {error && <div className="settings-error">{error}</div>}
-      {rows.map((row) => (
+      {!visibleRows.length && <div className="settings-hint extension-ui-settings-empty-search">{t("settings.extensionsSearchEmpty")}</div>}
+      {visibleRows.map((row) => (
         <div key={row.id} className={`extension-ui-settings-row${row.enabled ? "" : " is-disabled"}`}>
           <div className="extension-ui-settings-header">
             <div className="extension-ui-settings-title">

@@ -393,6 +393,8 @@
   "settings.extensionsUninstallConfirm": "{{name}} deinstallieren?",
   "settings.extensionsUninstallFailed": "Deinstallieren der Erweiterung fehlgeschlagen",
   "settings.extensionsNone": "Keine Erweiterungen installiert.",
+  "settings.extensionsSearchPlaceholder": "Erweiterungen suchen…",
+  "settings.extensionsSearchEmpty": "Keine Erweiterungen passen zur Suche.",
   "settings.fontFamily": "Schriftart",
   "settings.fontFamily.system": "System",
   "settings.fontFamily.inter": "Inter",

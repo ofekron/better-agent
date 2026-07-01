@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "Désinstaller {{name}} ?",
   "settings.extensionsUninstallFailed": "Échec de la désinstallation de l'extension",
   "settings.extensionsNone": "Aucune extension installée.",
+  "settings.extensionsSearchPlaceholder": "Rechercher des extensions…",
+  "settings.extensionsSearchEmpty": "Aucune extension ne correspond à la recherche.",
   "settings.fontFamily": "Police",
   "settings.fontFamily.system": "Système",
   "settings.fontFamily.inter": "Inter",

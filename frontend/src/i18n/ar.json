@@ -397,6 +397,8 @@
   "settings.extensionsUninstallConfirm": "إزالة تثبيت {{name}}؟",
   "settings.extensionsUninstallFailed": "فشلت إزالة تثبيت الامتداد",
   "settings.extensionsNone": "لا امتدادات مثبّتة.",
+  "settings.extensionsSearchPlaceholder": "ابحث في الامتدادات…",
+  "settings.extensionsSearchEmpty": "لا توجد امتدادات تطابق البحث.",
   "settings.fontFamily": "الخط",
   "settings.fontFamily.system": "النظام",
   "settings.fontFamily.inter": "Inter",
