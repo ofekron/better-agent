@@ -111,9 +111,8 @@ import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
 import type { FileEditingState } from "./types/fileEditing";
-import { mergeTagsIntoPrompt } from "./utils/inlineTagsPrompt";
-import { applyQueuedInlineTags } from "./utils/queuedPreview";
-import { buildOpenFilesPreamble } from "./utils/openFilesPreamble";
+import { buildFinalPrompt } from "./utils/finalPrompt";
+import type { OpenFileSnapshot } from "./utils/openFilesPreamble";
 import { patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
 import { appendPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
@@ -4235,6 +4234,19 @@ function AppMain({
   // `messages_replay` carrying everything we missed (including the
   // live in-flight assistant message). No REST refetch needed here.
 
+  const getCurrentOpenFileSnapshots = useCallback((): OpenFileSnapshot[] => {
+    if (!currentSession || !rightPanelVisible) return [];
+    return (currentSession.open_file_panels ?? []).map((panel) => {
+      const handle = openFileEditorsRef.current.get(panel.path);
+      return {
+        path: panel.path,
+        visible: handle?.getVisibleRange() ?? null,
+        caret: handle?.getCaretPosition() ?? null,
+        selection: handle?.getSelection() ?? null,
+      };
+    });
+  }, [currentSession, rightPanelVisible]);
+
   const sendPrompt = useCallback(
     async (
       prompt: string,
@@ -4329,36 +4341,16 @@ function AppMain({
         ? queuedBySession[currentSession.id]!
         : persistedQueuedPrompts;
       const latestQueued = queuedBase[queuedBase.length - 1] ?? null;
-      const mergeIntoQueued = sendMode === "queue" && sessionTags.length > 0 && latestQueued;
-      if (mergeIntoQueued) {
-        sendMode = "alter";
-      }
-      let finalPrompt: string;
-      if (mergeIntoQueued) {
-        const queuedWithTags = applyQueuedInlineTags(latestQueued.preview, sessionTags);
-        finalPrompt = prompt.trim()
-          ? `${queuedWithTags}\n\n${prompt.trim()}`
-          : queuedWithTags;
-      } else {
-        const withTags = mergeTagsIntoPrompt(prompt, sessionTags);
-        const openFileSnapshots = rightPanelVisible
-          ? (currentSession.open_file_panels ?? []).map((p) => {
-              const h = openFileEditorsRef.current.get(p.path);
-              return {
-                path: p.path,
-                visible: h?.getVisibleRange() ?? null,
-                caret: h?.getCaretPosition() ?? null,
-                selection: h?.getSelection() ?? null,
-              };
-            })
-          : [];
-        const openFilesPreamble = buildOpenFilesPreamble(openFileSnapshots);
-        finalPrompt = openFilesPreamble
-          ? `${openFilesPreamble}\n${withTags}`
-          : withTags;
-      }
+      const final = buildFinalPrompt({
+        prompt,
+        tags: sessionTags,
+        sendMode,
+        latestQueued,
+        openFileSnapshots: getCurrentOpenFileSnapshots(),
+      });
+      sendMode = final.sendMode;
 
-      const sendForm = { prompt: finalPrompt };
+      const sendForm = { prompt: final.prompt };
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
       const clientIdForMsg = `pending-${Date.now()}`;
@@ -4559,7 +4551,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, rightPanelVisible, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user
@@ -5202,14 +5194,23 @@ function AppMain({
       files: import("./components/InputArea").FileAttachment[],
     ) => {
       if (!currentSession) return false;
-      setInvestigationCtx({ prompt, images, files });
+      const final = buildFinalPrompt({
+        prompt,
+        tags: currentSession.inline_tags ?? [],
+        sendMode: "interrupt",
+        openFileSnapshots: getCurrentOpenFileSnapshots(),
+      });
+      setInvestigationCtx({ prompt: final.prompt, images, files });
       setAskProposedProjectPath(undefined);
       setAskProposedProjectNodeId(undefined);
       handleDraftClearImmediate(currentSession.id);
+      if ((currentSession.inline_tags ?? []).length > 0) {
+        clearSessionInlineTags(currentSession.id);
+      }
       setNewSessionModalOpen(true);
       return true;
     },
-    [currentSession, handleDraftClearImmediate],
+    [currentSession, clearSessionInlineTags, getCurrentOpenFileSnapshots, handleDraftClearImmediate],
   );
 
   /** Ask entry. Ensure the singleton exists backend-side, then route

@@ -58,6 +58,42 @@ describe("notes and inline comments", () => {
     h.unmount();
   });
 
+  it("loads inline comments into the new-session modal prompt", async () => {
+    const tag: InlineTag = {
+      id: "tag-1",
+      messageId: "u1",
+      selectedText: "selected text",
+      comment: "carry this comment",
+      timestamp: "2026-07-01T00:00:00.000Z",
+    };
+    const session = makeSession({
+      messages: [{
+        id: "u1",
+        role: "user",
+        content: "selected text",
+        events: [],
+        timestamp: "2026-07-01T00:00:00.000Z",
+      }],
+      inline_tags: [tag],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    fireEvent.change(h.$('[data-testid="input-textarea"]')!, {
+      target: { value: "start this separately" },
+    });
+    await h.flush();
+    await h.click('[aria-label="More actions"]');
+    await h.click('[data-testid="send-to-new-session-btn"]');
+
+    const modalPrompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement | null;
+    expect(modalPrompt?.value).toContain("<inline-tags>");
+    expect(modalPrompt?.value).toContain("carry this comment");
+    expect(modalPrompt?.value).toContain("start this separately");
+
+    h.unmount();
+  });
+
   it("clears inline comments when the final applied note is deleted before send", async () => {
     const note: Note = {
       id: "note-1",
