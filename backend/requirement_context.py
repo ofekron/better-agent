@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -12,8 +13,6 @@ from typing import Any
 import provisioning
 import extension_package_loader
 import extension_store
-from provisioning import DirtyPolicy, ProvisionedSessionSpec
-from provisioning.prompts import render_prompt
 
 RG_TIMEOUT_SECONDS = 30
 DEFAULT_MATCH_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd", "ts")
@@ -78,75 +77,45 @@ RG_OPTIONS_WITH_VALUE = {
 }
 
 
-class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
-    key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 6
-    name = "worker:requirements:query-processor"
-    env_prefix = "GET_REQUIREMENTS_PROCESSOR"
-    task_key = "requirement_analysis"
-    orchestration_mode = "native"
-    bare_config = False
-    worker_creation_policy = "deny"
-    machine_completion = False
-    run_mode = "fork"
-    ephemeral_forks = True
-    dispatch = "http"
-    on_no_fork = "error"
-    provision_timeout = 90.0
-    retry_attempts = 1
-    dirty_policy = DirtyPolicy(
-        max_base_bytes=5_000_000,
-        max_user_turns=None,
-        max_assistant_turns=None,
+class _ProvisionedSpecHandle:
+    def __init__(self, key: str, module_name: str) -> None:
+        self.key = key
+        self._module_name = module_name
+
+    def _resolve(self):
+        return _get_provisioned_spec(self.key, self._module_name)
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+
+def _get_provisioned_spec(key: str, module_name: str):
+    try:
+        return provisioning.get(key)
+    except KeyError:
+        pass
+    try:
+        _ensure_requirements_importable()
+        importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(f"provisioned spec {key!r} is unavailable") from exc
+    try:
+        return provisioning.get(key)
+    except KeyError as exc:
+        raise RuntimeError(f"provisioned spec {key!r} was not registered") from exc
+
+
+def _get_requirements_processor_spec():
+    return _get_provisioned_spec(
+        GET_REQUIREMENTS_PROCESSOR_KEY,
+        "requirement_analysis.processor_spec",
     )
 
-    def build_provision_prompt(self, ctx: dict) -> str:
-        return render_prompt("get_requirements_processor.md", {})
 
-    def build_instructions(self, query: str, ctx: dict) -> str:
-        search_hints = _processor_search_hints(query)
-        request = {
-            "query": query,
-            "cwd": ctx.get("cwd") or "",
-            "cwds": ctx.get("cwds") or [],
-            "all_projects": bool(ctx.get("all_projects")),
-            "max_matches": ctx.get("max_matches"),
-            "search_hints": search_hints,
-        }
-        return (
-            "Find the related stored requirements for this request.\n"
-            "Call the get_requirements_internal MCP tool directly. Do not call the get-requirements skill "
-            "or public get_requirements tool from inside this processor.\n"
-            "Build rg_args for ripgrep over a backend-owned corpus: pass search options and patterns only, "
-            "never file paths. For multiple patterns use -e/--regexp for every pattern, for example "
-            "['-i', '-e', 'session search', '-e', 'parse_failed']; do not pass bare token lists like "
-            "['session', 'search', 'parse_failed'].\n"
-            "Use broad key phrases from request.query and request.search_hints. Extra query words may be noisy, so do not require "
-            "every term to match. Treat raw matches as candidate requirements and return any match that is "
-            "semantically related to the request or to a concrete failure/tool/provider named in it. "
-            "Matches with kind=native_transcript_bundle are raw transcript evidence: read the assistant "
-            "proposal and following user turns in the bundle, then return the requirement only when the "
-            "user confirms, adopts, or refines it; return the refined user-approved requirement text. "
-            "Use cwd/cwds/all_projects/max_matches from the request.\n"
-            "Each match carries its full timestamp in the `ts` field, and matches are ordered oldest-first "
-            "by `ts`. Read them in that chronological order: it shows how the requirement evolved over time, "
-            "so a later prompt refines or overrides an earlier one on the same topic — weight the latest "
-            "statement accordingly.\n"
-            "Return only the required JSON object.\n"
-            f"<request>\n{json.dumps(request, ensure_ascii=False)}\n</request>"
-        )
-
-    def parse_result(self, text: str, ctx: dict) -> dict[str, Any]:
-        if _processor_tool_unavailable(text):
-            return _processor_parse_failed()
-        obj = _parse_valid_processor_json(text)
-        if obj is None:
-            return _processor_parse_failed()
-        requirements = obj["requirements"]
-        return {"requirements": _normalize_processed_requirements(requirements)}
-
-
-GET_REQUIREMENTS_PROCESSOR_SPEC = provisioning.register(GetRequirementsProcessorSpec())
+GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
+    GET_REQUIREMENTS_PROCESSOR_KEY,
+    "requirement_analysis.processor_spec",
+)
 
 
 def _processor_search_hints(query: str) -> list[str]:
@@ -244,9 +213,13 @@ def _run_requirements_processor(
         "all_projects": all_projects,
         "max_matches": max_matches,
     }
+    try:
+        spec = _get_requirements_processor_spec()
+    except Exception as exc:
+        return {"requirements": [], "error": _processor_failure_message(exc)}
     for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
         try:
-            result = provisioning.run_sync(GET_REQUIREMENTS_PROCESSOR_SPEC, query, ctx)
+            result = provisioning.run_sync(spec, query, ctx)
         except Exception as exc:
             return {"requirements": [], "error": _processor_failure_message(exc)}
         value = result.value if isinstance(result.value, dict) else _processor_parse_failed()

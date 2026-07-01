@@ -209,13 +209,18 @@ def test_raw_search_keeps_processor_off_sync_path() -> None:
 def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
 
-    prompt = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_provision_prompt({})
-    instructions = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_instructions("session search parse_failed", {
-        "cwd": "/repo",
-        "cwds": [],
-        "all_projects": False,
-        "max_matches": 5,
-    })
+    saved = rc._ensure_requirements_importable
+    rc._ensure_requirements_importable = lambda: PKG_ROOT
+    try:
+        prompt = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_provision_prompt({})
+        instructions = rc.GET_REQUIREMENTS_PROCESSOR_SPEC.build_instructions("session search parse_failed", {
+            "cwd": "/repo",
+            "cwds": [],
+            "all_projects": False,
+            "max_matches": 5,
+        })
+    finally:
+        rc._ensure_requirements_importable = saved
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
@@ -235,14 +240,47 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
 def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     import requirement_context as rc
 
-    spec = rc.GET_REQUIREMENTS_PROCESSOR_SPEC
+    saved = rc._ensure_requirements_importable
+    rc._ensure_requirements_importable = lambda: PKG_ROOT
+    try:
+        spec = rc.GET_REQUIREMENTS_PROCESSOR_SPEC
+        version = spec.version
+        run_mode = spec.run_mode
+        ephemeral_forks = spec.ephemeral_forks
+    finally:
+        rc._ensure_requirements_importable = saved
     server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
 
-    check(spec.version >= 3, "processor spec version invalidates stale processor prompt and parser bases")
-    check(spec.run_mode == "fork", "processor uses fork mode for lookup isolation")
-    check(spec.ephemeral_forks is True, "processor uses ephemeral fork per lookup")
+    check(version >= 3, "processor spec version invalidates stale processor prompt and parser bases")
+    check(run_mode == "fork", "processor uses fork mode for lookup isolation")
+    check(ephemeral_forks is True, "processor uses ephemeral fork per lookup")
     check("_GET_REQUIREMENTS_TIMEOUT = 330.0" in server, "MCP get-requirements timeout covers three processor attempts")
     check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
+
+
+def test_processor_spec_fails_closed_without_private_registration() -> None:
+    import requirement_context as rc
+
+    saved_get = rc.provisioning.get
+    saved_importable = rc._ensure_requirements_importable
+
+    def missing_get(key):
+        raise KeyError(key)
+
+    def unavailable():
+        raise RuntimeError("extension is not active")
+
+    rc.provisioning.get = missing_get
+    rc._ensure_requirements_importable = unavailable
+    try:
+        result = rc._run_requirements_processor(query="missing private", cwd="/repo")
+    finally:
+        rc.provisioning.get = saved_get
+        rc._ensure_requirements_importable = saved_importable
+
+    check(result["requirements"] == [], "missing private processor returns no requirements")
+    check(result["error"].startswith("processor_failed: RuntimeError: provisioned spec"),
+          "missing private processor fails closed through processor_failed")
 
 
 def test_prepare_orchestration_is_cheap_and_nonblocking() -> None:
@@ -326,6 +364,7 @@ def run() -> None:
     test_raw_search_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()
+    test_processor_spec_fails_closed_without_private_registration()
     test_prepare_orchestration_is_cheap_and_nonblocking()
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
