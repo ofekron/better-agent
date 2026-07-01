@@ -53,31 +53,49 @@ def _run() -> int:
         results.append(ok)
         print(f"{OK if ok else FAIL} empty input -> None without lookup (got {empty})")
 
-        # adopt_native_session: already-BA short-circuits (no import).
+        # adopt_native_session: enumerate yields a claude session (native_id ==
+        # file stem) and a codex session (native_id == DB thread id != the FTS
+        # sid == rollout stem), so path-matching is the only accurate key.
         import native_import
         orig_enum, orig_imp = native_import.enumerate_native_sessions, native_import.import_session
         imported = []
 
         class _Sess:
-            def __init__(self, nid): self.native_id = nid
+            def __init__(self, nid, path):
+                self.native_id = nid
+                self.jsonl_path = path
 
-        native_import.enumerate_native_sessions = lambda *a, **k: [_Sess("orphan-native")]
-        native_import.import_session = lambda sess, **k: (imported.append(sess.native_id) or "ba-imported-1")
+        native_import.enumerate_native_sessions = lambda *a, **k: [
+            _Sess("claude-abc", "/proj/claude-abc.jsonl"),
+            _Sess("codex-thread-99", "/store/rollout-xyz.jsonl"),
+        ]
+        native_import.import_session = lambda sess, **k: (
+            imported.append((sess.native_id, sess.jsonl_path)) or "ba-imported-1"
+        )
         try:
             already = asyncio.run(assistant_ui.adopt_native_session("native-abc"))
             ok = already == {"ba_session_id": "ba-root-1"} and imported == []
             results.append(ok)
             print(f"{OK if ok else FAIL} adopt: already-BA returns id, no import (got {already}, imported={imported})")
 
-            adopted = asyncio.run(assistant_ui.adopt_native_session("orphan-native"))
-            ok = adopted == {"ba_session_id": "ba-imported-1"} and imported == ["orphan-native"]
+            # Codex-style: sid (rollout stem) != native_id; match by PATH.
+            by_path = asyncio.run(assistant_ui.adopt_native_session(
+                "rollout-xyz", "/store/rollout-xyz.jsonl"))
+            ok = by_path == {"ba_session_id": "ba-imported-1"} and imported == [("codex-thread-99", "/store/rollout-xyz.jsonl")]
             results.append(ok)
-            print(f"{OK if ok else FAIL} adopt: unmapped native imported to BA (got {adopted})")
+            print(f"{OK if ok else FAIL} adopt: path match handles sid != native_id (got {by_path}, imported={imported})")
 
-            missing = asyncio.run(assistant_ui.adopt_native_session("nowhere"))
+            # Claude fallback: no path -> match by native_id.
+            imported.clear()
+            by_id = asyncio.run(assistant_ui.adopt_native_session("claude-abc"))
+            ok = by_id == {"ba_session_id": "ba-imported-1"} and imported == [("claude-abc", "/proj/claude-abc.jsonl")]
+            results.append(ok)
+            print(f"{OK if ok else FAIL} adopt: native_id fallback when no path (got {by_id})")
+
+            missing = asyncio.run(assistant_ui.adopt_native_session("nope", "/store/none.jsonl"))
             ok = missing.get("ba_session_id") is None and missing.get("error") == "native_session_not_found"
             results.append(ok)
-            print(f"{OK if ok else FAIL} adopt: native id not found -> error (got {missing})")
+            print(f"{OK if ok else FAIL} adopt: path not found -> error (got {missing})")
         finally:
             native_import.enumerate_native_sessions = orig_enum
             native_import.import_session = orig_imp
