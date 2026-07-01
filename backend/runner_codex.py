@@ -1235,6 +1235,21 @@ class _AppServerProcess:
         self.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
         await self.stdin.drain()
 
+    @staticmethod
+    def _is_closed_send_error(error: BaseException) -> bool:
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            return True
+        return isinstance(error, RuntimeError) and "stdin is closed" in str(error)
+
+    async def _try_send_response(self, message: dict) -> bool:
+        try:
+            await self._send(message)
+            return True
+        except Exception as e:
+            if self._is_closed_send_error(e):
+                return False
+            raise
+
     async def _read_messages(self) -> None:
         pending_terminal: Optional[dict] = None
         try:
@@ -1308,7 +1323,7 @@ class _AppServerProcess:
         tool_name = params.get("tool")
         handler = self._tool_handlers.get(tool_name)
         if handler is None:
-            await self._send({
+            await self._try_send_response({
                 "id": request_id,
                 "error": {
                     "code": -32601,
@@ -1318,15 +1333,16 @@ class _AppServerProcess:
             return True
         try:
             result = await handler(params)
-            await self._send({"id": request_id, "result": result})
         except Exception as e:
-            await self._send({
+            await self._try_send_response({
                 "id": request_id,
                 "error": {
                     "code": -32000,
                     "message": str(e),
                 },
             })
+            return True
+        await self._try_send_response({"id": request_id, "result": result})
         return True
 
     async def _handle_codex_approval(self, message: dict) -> None:
@@ -1356,10 +1372,13 @@ class _AppServerProcess:
         except Exception:
             logging.getLogger("runner_codex").exception("codex approval handler failed (denying)")
             decision = "denied"
-        await self._send({
-            "id": request_id,
-            "result": {"decision": decision},
-        })
+        try:
+            await self._try_send_response({
+                "id": request_id,
+                "result": {"decision": decision},
+            })
+        except Exception:
+            logging.getLogger("runner_codex").exception("codex approval response send failed")
 
     def _map_notification(self, message: dict) -> Optional[dict]:
         method = message.get("method")
@@ -1415,6 +1434,16 @@ class _AppServerProcess:
         code = await self._proc.wait()
         self.returncode = code
         self._steer_task.cancel()
+        try:
+            await asyncio.wait_for(self._reader_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        except Exception:
+            logging.getLogger("runner_codex").exception("codex app-server reader failed")
         return code
 
 
