@@ -1387,7 +1387,7 @@ body {
 }
 
 /* Hover-revealed "edit tags" trigger inside the action row. Inherits the
-   row's opacity:0 → 1 reveal; only meaningful when project tags exist. */
+   row's opacity:0 → 1 reveal. */
 .session-item-tag-control {
   background: none;
   border: none;
