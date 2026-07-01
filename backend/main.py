@@ -585,6 +585,19 @@ def _sessions_list_response_maybe_cache(
     )
 
 
+def _sessions_snapshot_payload(value: dict) -> dict:
+    snapshot_complete = session_store.summary_index_snapshot_complete()
+    index_warming = (
+        not snapshot_complete
+        and session_store.summary_index_has_roots_on_disk()
+    )
+    return {
+        **value,
+        "snapshot_complete": snapshot_complete or not index_warming,
+        "index_warming": index_warming,
+    }
+
+
 def _session_detail_cache_get(key: tuple) -> Response | None:
     content = _session_detail_response_cache.get(key)
     if content is None:
@@ -5238,8 +5251,7 @@ async def get_sessions(
                 for session in page
             ]
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_response_maybe_cache(
-            cache_key,
+        response_payload = _sessions_snapshot_payload(
             {
                 "sessions": page,
                 "offset": offset,
@@ -5248,8 +5260,12 @@ async def get_sessions(
                 "has_more": offset + limit < total,
                 "sort_by": effective_sort_by,
                 "status_sort": effective_status_sort,
-            },
-            cache_response=cache_response,
+            }
+        )
+        return _sessions_list_response_maybe_cache(
+            cache_key,
+            response_payload,
+            cache_response=cache_response and response_payload.get("snapshot_complete") is True,
         )
     if not connected:
         page, total = await _run_session_list_hot_path(
@@ -5258,7 +5274,7 @@ async def get_sessions(
             **filters,
         )
         _schedule_session_event_meta_warm(page)
-        response_payload = {
+        response_payload = _sessions_snapshot_payload({
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -5266,11 +5282,11 @@ async def get_sessions(
             "has_more": offset + limit < total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        }
+        })
         return _sessions_list_response_maybe_cache(
             cache_key,
             response_payload,
-            cache_response=cache_response,
+            cache_response=cache_response and response_payload.get("snapshot_complete") is True,
         )
 
     content_scores: dict[str, int] = {}
@@ -5511,7 +5527,7 @@ async def get_sessions(
                 None,
             )
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_response_maybe_cache(cache_key, {
+        response_payload = _sessions_snapshot_payload({
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -5519,7 +5535,12 @@ async def get_sessions(
             "has_more": end < local_total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        }, cache_response=cache_response)
+        })
+        return _sessions_list_response_maybe_cache(
+            cache_key,
+            response_payload,
+            cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+        )
 
     if (
         can_page_remote_local_order
@@ -5536,7 +5557,7 @@ async def get_sessions(
                 None,
             )
         _schedule_session_event_meta_warm(page)
-        return _sessions_list_response_maybe_cache(cache_key, {
+        response_payload = _sessions_snapshot_payload({
             "sessions": page,
             "offset": offset,
             "limit": limit,
@@ -5544,7 +5565,12 @@ async def get_sessions(
             "has_more": end < local_total,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
-        }, cache_response=cache_response)
+        })
+        return _sessions_list_response_maybe_cache(
+            cache_key,
+            response_payload,
+            cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+        )
 
     state_snapshot = (
         await asyncio.to_thread(_sidebar_state_snapshot)
@@ -5639,7 +5665,7 @@ async def get_sessions(
             for session in page
         ]
     _schedule_session_event_meta_warm(page)
-    response_payload = {
+    response_payload = _sessions_snapshot_payload({
         "sessions": page,
         "offset": offset,
         "limit": limit,
@@ -5647,7 +5673,7 @@ async def get_sessions(
         "has_more": end < total,
         "sort_by": effective_sort_by,
         "status_sort": effective_status_sort,
-    }
+    })
     if deferred_sidebar_projection:
         return _sessions_list_response(
             json.dumps(
@@ -5660,7 +5686,7 @@ async def get_sessions(
     return _sessions_list_response_maybe_cache(
         cache_key,
         response_payload,
-        cache_response=cache_response,
+        cache_response=cache_response and response_payload.get("snapshot_complete") is True,
     )
 
 
