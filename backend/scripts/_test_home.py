@@ -31,7 +31,6 @@ from pathlib import Path
 # NOTE: do NOT import `paths` (or any backend module) at module top — standalone
 # test files `import _test_home` BEFORE they add the backend dir to sys.path.
 # Import it lazily inside the functions that need the prod-home reference.
-_TEST_MODE_ENV = "BETTER_AGENT_TEST_MODE"
 _GUARD_INSTALLED = False
 _PROD_LOCK_COUNT = 0
 
@@ -161,9 +160,8 @@ def unlock_prod_home() -> None:
 # Entry points
 # --------------------------------------------------------------------------- #
 def engage(home: str, lock: bool = False) -> None:
-    os.environ[_TEST_MODE_ENV] = "1"
-    os.environ["BETTER_AGENT_HOME"] = home
-    os.environ["BETTER_CLAUDE_HOME"] = home
+    import paths
+    paths.engage_test_home(home)
     install_deletion_guard()
     if lock:
         lock_prod_home()
