@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from session_manager import manager as session_manager
 from testape_login_detector import (
     FS_DEFAULT,
     _assert_loopback,
@@ -22,26 +24,11 @@ _CHAT_PANEL_JS_TEMPLATE = """
   const pathMatch = location.pathname.match(/^\\/s\\/([^/]+)(?:\\/.*)?$/);
   const pathSessionId = pathMatch ? decodeURIComponent(pathMatch[1]) : null;
   const sessionId = requestedSessionId || (tree && tree.session_id) || pathSessionId;
-  let session = null;
-  let sessionFetch = null;
-  if (sessionId) {
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=200`, {
-        credentials: "include",
-      });
-      sessionFetch = { ok: response.ok, status: response.status };
-      if (response.ok) session = await response.json();
-    } catch (error) {
-      sessionFetch = { ok: false, error: String(error) };
-    }
-  }
   return {
     url: location.href,
     title: document.title,
     session_id: sessionId,
     tree,
-    session,
-    sessionFetch,
   };
 })()
 """
@@ -107,11 +94,14 @@ def _validate_for_adapter(
         raw = web.eval_js(script)
 
     payload = _coerce_markers(raw)
+    detected_session_id = _string_or_none(payload.get("session_id")) or session_id
+    if detected_session_id:
+        payload["session"] = session_manager.get_root_tree(detected_session_id)
     mismatches = compare_chat_panel_payload(payload)
     return ChatPanelValidation(
         ok=len(mismatches) == 0,
         adapter_id=adapter_id,
-        session_id=_string_or_none(payload.get("session_id")) or session_id,
+        session_id=detected_session_id,
         url=_string_or_none(payload.get("url")),
         title=_string_or_none(payload.get("title")),
         tree=payload.get("tree") if isinstance(payload.get("tree"), dict) else None,
@@ -128,7 +118,7 @@ def compare_chat_panel_payload(payload: dict[str, Any]) -> list[str]:
     if tree.get("visible") is not True:
         return ["chat panel is not visible"]
     if not isinstance(session, dict):
-        return [f"session snapshot unavailable: {payload.get('sessionFetch')}"]
+        return ["session snapshot unavailable"]
 
     session_id = _string_or_none(payload.get("session_id")) or _string_or_none(tree.get("session_id"))
     nodes = _nodes_by_id(session)
@@ -158,7 +148,7 @@ def compare_chat_panel_payload(payload: dict[str, Any]) -> list[str]:
 def _compare_region(
     index: int,
     region: dict[str, Any],
-    expected: list[dict[str, str]],
+    expected: list[dict[str, str | None]],
 ) -> list[str]:
     rendered = region.get("messages")
     if not isinstance(rendered, list):
@@ -183,6 +173,10 @@ def _compare_region(
             out.append(
                 f"region {index} message {message_id} role {role!r} != {expected_message['role']!r}"
             )
+        rendered_text = _normalize_text(_string_or_none(item.get("text")) or "")
+        expected_texts = expected_message.get("texts") or []
+        if expected_texts and not any(text in rendered_text for text in expected_texts):
+            out.append(f"region {index} message {message_id} text does not contain expected content")
         next_cursor = _find_message_index(expected, message_id, cursor)
         if next_cursor is None:
             out.append(f"region {index} message {message_id} is out of session order")
@@ -196,7 +190,7 @@ def _expected_messages_for_region(
     current_session_id: str | None,
     root: dict[str, Any],
     nodes: dict[str, dict[str, Any]],
-) -> list[dict[str, str]] | None:
+) -> list[dict[str, str | None]] | None:
     kind = _string_or_none(region.get("kind")) or "linear"
     if kind == "fork_shared":
         fork_point = _earliest_fork_point(root)
@@ -235,11 +229,11 @@ def _nodes_by_id(root: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _message_entries(
     node: dict[str, Any],
     include: Any | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, str | None]]:
     messages = node.get("messages")
     if not isinstance(messages, list):
         return []
-    out: list[dict[str, str]] = []
+    out: list[dict[str, str | None]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -248,7 +242,7 @@ def _message_entries(
         message_id = _string_or_none(message.get("id"))
         role = _string_or_none(message.get("role"))
         if message_id and role in {"user", "assistant"}:
-            out.append({"id": message_id, "role": role})
+            out.append({"id": message_id, "role": role, "texts": _message_text_candidates(message)})
     return out
 
 
@@ -271,7 +265,7 @@ def _earliest_fork_point(root: dict[str, Any]) -> int | None:
 
 
 def _find_message_index(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, str | None]],
     message_id: str,
     start: int,
 ) -> int | None:
@@ -288,3 +282,89 @@ def _seq(message: dict[str, Any]) -> int | None:
 
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _message_text_candidates(message: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    content = message.get("content")
+    if isinstance(content, str):
+        texts.extend(_display_text_candidates(content))
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        texts.extend(_display_text_candidates(" ".join(parts)))
+    for event in _message_events(message):
+        texts.extend(_display_text_candidates(_assistant_event_text(event)))
+    return [text for index, text in enumerate(texts) if text and text not in texts[:index]]
+
+
+def _message_events(message: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    events = message.get("events")
+    if isinstance(events, list):
+        out.extend(event for event in events if isinstance(event, dict))
+    manager = message.get("manager")
+    if isinstance(manager, dict):
+        manager_events = manager.get("events")
+        if isinstance(manager_events, list):
+            out.extend(event for event in manager_events if isinstance(event, dict))
+    workers = message.get("workers")
+    if isinstance(workers, list):
+        for worker in workers:
+            if not isinstance(worker, dict):
+                continue
+            worker_events = worker.get("events")
+            if isinstance(worker_events, list):
+                out.extend(event for event in worker_events if isinstance(event, dict))
+    return out
+
+
+def _assistant_event_text(event: dict[str, Any]) -> str:
+    data = event.get("data")
+    if isinstance(data, dict) and data.get("type") == "assistant":
+        message = data.get("message")
+        if isinstance(message, dict):
+            return _content_parts_text(message.get("content"))
+    if event.get("type") == "agent_message" and isinstance(data, dict):
+        inner = data.get("message")
+        if isinstance(inner, dict):
+            return _content_parts_text(inner.get("content"))
+    return ""
+
+
+def _content_parts_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _display_text_candidates(value: str) -> list[str]:
+    normalized = _normalize_text(value)
+    stripped = _normalize_text(_strip_markdown(value))
+    return [candidate for candidate in (normalized, stripped) if candidate]
+
+
+def _strip_markdown(value: str) -> str:
+    text = re.sub(r"`([^`]*)`", r"\1", value)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[*_~>#-]+", " ", text)
+    return text
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.split())
