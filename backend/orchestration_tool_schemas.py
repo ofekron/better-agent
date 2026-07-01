@@ -33,6 +33,10 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "OPTIONAL - default true. If false, auto-created targets are standalone native sessions instead of hidden sub-sessions.",
         },
+        "cwd": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL - working directory for a newly-created target session. Defaults to (inherits) the creating session's cwd. Ignored when delegating to an existing target_session_id.",
+        },
     },
     "required": ["task"],
 }
@@ -51,10 +55,11 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
         "cwd": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
-                "Registry cwd for the worker. Together with name it identifies "
-                "the singleton. Usually the project root the worker operates in."
+                "OPTIONAL - registry cwd for the worker. Together with name it "
+                "identifies the singleton. Defaults to (inherits) the creating "
+                "session's cwd; set it only to target a different project root."
             ),
         },
         "orchestration_mode": {
@@ -94,5 +99,5 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             "description": "OPTIONAL - worker node id. Defaults to the session's node_id.",
         },
     },
-    "required": ["name", "cwd", "orchestration_mode"],
+    "required": ["name", "orchestration_mode"],
 }
