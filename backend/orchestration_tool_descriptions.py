@@ -44,11 +44,10 @@ ASK_DESCRIPTION = (
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
     "discard the fork after). Do NOT fork to create a brand-new session. Unlike "
     "delegate_task, ask keeps the target explicit. Unlike the session-bridge "
-    "delegate_to_session tool, ask has NO approval picker, cannot create a session, "
-    "and requires the target to be a reachable team member (session/worker/pool) — "
-    "use delegate_to_session when you need user consent, a brand-new session, or to "
-    "reach an arbitrary non-team session. With target_worker_pool, pass "
-    "pool_affinity_key to continue the same thread on the same pool worker."
+    "delegate_to_session tool, ask has NO approval picker and cannot create a "
+    "session — the target session must already exist — so use delegate_to_session "
+    "when you need user consent or a brand-new session. With target_worker_pool, "
+    "pass pool_affinity_key to continue the same thread on the same pool worker."
 )
 
 DELEGATE_TASK_DESCRIPTION = (
