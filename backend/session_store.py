@@ -1295,6 +1295,7 @@ def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
     removed = [
         sid for sid in list(_summary_index)
         if sid not in root_ids
+        and not (_sessions_dir() / f"{sid}.json").exists()
     ]
     if not removed:
         return False
@@ -1316,16 +1317,15 @@ def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
 
 def _reconcile_summary_index_roots() -> None:
     global _summary_roots_fingerprint
-    if not _summary_index_loaded:
-        return
     root_ids_tuple = _root_summary_ids_on_disk()
     root_ids = set(root_ids_tuple)
     with _summary_index_lock:
-        if root_ids_tuple == _summary_roots_fingerprint:
+        if _summary_index_loaded and root_ids_tuple == _summary_roots_fingerprint:
             return
         _purge_missing_summary_roots_locked(root_ids)
-        _summary_roots_fingerprint = root_ids_tuple
-        _summary_sorted_id_caches.clear()
+        if _summary_index_loaded:
+            _summary_roots_fingerprint = root_ids_tuple
+            _summary_sorted_id_caches.clear()
     _cleanup_orphan_summary_sidecars(root_ids)
 
 
