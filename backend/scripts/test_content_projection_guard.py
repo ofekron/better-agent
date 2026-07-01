@@ -183,6 +183,43 @@ def test_apply_event_trailing_tools_keep_content() -> None:
     )
 
 
+def test_hydrate_restart_keeps_content() -> None:
+    """Backend-restart path: `hydrate_msg_events_from_jsonl` re-derives
+    content for finalized messages from events.jsonl. Events ending on a
+    trailing tool run must not blank the persisted answer (round-1
+    reviewer's restart re-blank scenario)."""
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl
+
+    sess = session_manager.create(
+        name="t3", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    msg = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, msg)
+    ctx = ApplyEventCtx(root_id=sid)
+    # Journaled live turn: final answer, then a linger late-flush tail.
+    for ev in (_text_event("restart answer"), _thinking_event(), _tool_event()):
+        strategy.apply_event(
+            app_session_id=sid, msg=msg, event=ev,
+            ctx=ctx, source_is_provider_stream=True,
+        )
+    msg["isStreaming"] = False
+
+    tree = session_manager.get_ref(sid)
+    hydrate_msg_events_from_jsonl(tree)
+    m = next(
+        (mm for mm in tree.get("messages") or [] if mm.get("id") == msg["id"]),
+        {},
+    )
+    _check(
+        "hydrate restart: trailing tool tail keeps persisted answer",
+        m.get("content") == "restart answer",
+        f"content={m.get('content')!r}",
+    )
+
+
 def test_journal_refresh_keeps_content() -> None:
     sess = session_manager.create(
         name="t2", model="sonnet", cwd="/tmp",
@@ -213,6 +250,7 @@ def main() -> int:
     test_strip_synthetic_semantics()
     test_recovery_and_strip_tree_guards_wired()
     test_apply_event_trailing_tools_keep_content()
+    test_hydrate_restart_keeps_content()
     test_journal_refresh_keeps_content()
     failed = [r for r in _results if not r[1]]
     if failed:
