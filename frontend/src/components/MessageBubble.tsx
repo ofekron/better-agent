@@ -792,6 +792,26 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+/** Renders model_switched banners hoisted to a turn boundary — above the
+ * initiator prompt they take effect on, or trailing the latest group as a
+ * preface to the upcoming prompt. */
+function ModelSwitchBanners({ events, placement }: { events: WSEvent[]; placement: "preceding" | "trailing" }) {
+  if (events.length === 0) return null;
+  return (
+    <div
+      className={`model-switch-banners model-switch-banners--${placement}`}
+      data-testid={`model-switch-${placement}`}
+    >
+      {events.map((e, i) => (
+        <ModelSwitchedEvent
+          key={(e.data?.uuid as string | undefined) ?? i}
+          data={e.data ?? {}}
+        />
+      ))}
+    </div>
+  );
+}
+
 /** Normalize text for dedup comparison (strip leading emoji/whitespace) */
 function normalizeForDedup(text: string): string {
   return text.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\u200D]+\s*/u, "").trim();
@@ -2764,9 +2784,15 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitches, trailingModelSwitches, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
+  /** model_switched banners heading this group (a switch that took effect on
+   * this turn). Rendered above the initiator prompt. */
+  precedingModelSwitches?: WSEvent[];
+  /** model_switched banners trailing the latest group (a switch with no next
+   * prompt yet). Rendered at the tail as a preface to the upcoming prompt. */
+  trailingModelSwitches?: WSEvent[];
   /** Child turn groups nested under the supervisor/main turn. */
   childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
@@ -3075,6 +3101,9 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       transition={{ duration: 0.55, ease: "easeInOut" }}
     >
       <div className="turn-group" ref={groupRef}>
+      {precedingModelSwitches && (
+        <ModelSwitchBanners events={precedingModelSwitches} placement="preceding" />
+      )}
       {/* Synthetic turn-initiator stub (id starts with "__synth-") is created by
           the Chat grouping logic when an orphan assistant message has
           no persisted turn initiator. Hide the user box entirely — the
@@ -3396,6 +3425,9 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               </div>
             ))}
         </div>
+      )}
+      {trailingModelSwitches && (
+        <ModelSwitchBanners events={trailingModelSwitches} placement="trailing" />
       )}
       </div>
     </motion.div>

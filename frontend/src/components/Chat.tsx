@@ -55,7 +55,36 @@ import {
  *  Frozen so an accidental `.push` on the shared instance throws loudly
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
+const EMPTY_MODEL_SWITCHES: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
+
+/** A model switch is recorded against the previous turn's assistant message
+ * (the only message that exists at switch time) but takes effect on the NEXT
+ * turn, so its banner must head the following group. Split each response into
+ * its own events (switch-free) and the hoisted switches. Cached by the source
+ * message object so a switch-bearing finished group keeps a stable clone
+ * identity across streaming-token recomputes — otherwise the fresh clone would
+ * defeat TurnGroup's memo and re-render that group on every token. */
+const strippedResponseCache = new WeakMap<
+  ChatMessage,
+  { response: ChatMessage; switches: WSEvent[] }
+>();
+function splitModelSwitches(response: ChatMessage): {
+  response: ChatMessage;
+  switches: WSEvent[];
+} {
+  const cached = strippedResponseCache.get(response);
+  if (cached) return cached;
+  const events = response.events ?? [];
+  const result = events.some((e) => e.type === "model_switched")
+    ? {
+        response: { ...response, events: events.filter((e) => e.type !== "model_switched") },
+        switches: events.filter((e) => e.type === "model_switched"),
+      }
+    : { response, switches: EMPTY_MODEL_SWITCHES };
+  strippedResponseCache.set(response, result);
+  return result;
+}
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
 function assistantSpeechText(message: ChatMessage | undefined): string {
@@ -321,6 +350,14 @@ export interface TurnGroupData {
   responseMessage?: ChatMessage;
   turnRuns: RunInfo[];
   isLatest: boolean;
+  /** model_switched events that occurred between the previous turn and this
+   * one — rendered as a banner ABOVE this group's initiator prompt, since a
+   * switch takes effect on the upcoming turn, not the finished one. */
+  precedingModelSwitches?: WSEvent[];
+  /** model_switched events that occurred after the latest turn with no
+   * following prompt yet — rendered at the tail as a preface to the next
+   * (not-yet-sent) prompt. Only ever set on the latest group. */
+  trailingModelSwitches?: WSEvent[];
 }
 
 
@@ -1071,6 +1108,9 @@ export function Chat({
     if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
 
     const lastGroupIdx = pairs.length - 1;
+    // Carry hoisted model switches forward so they head the following group
+    // (see splitModelSwitches) instead of trailing the finished one.
+    let pendingSwitches: WSEvent[] = EMPTY_MODEL_SWITCHES;
     return pairs.map((pair, idx) => {
       const mids = new Set<string>();
       mids.add(pair.initiatorMessage.id);
@@ -1082,10 +1122,26 @@ export function Chat({
       if (idx === lastGroupIdx) {
         collected.push(...visibleRuns.filter(isUnanchoredRun));
       }
+
+      const precedingModelSwitches = pendingSwitches;
+      let responseMessage = pair.responseMessage;
+      if (responseMessage) {
+        const split = splitModelSwitches(responseMessage);
+        responseMessage = split.response;
+        pendingSwitches = split.switches;
+      } else {
+        pendingSwitches = EMPTY_MODEL_SWITCHES;
+      }
+
       return {
         ...pair,
+        responseMessage,
         turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
         isLatest: idx === lastGroupIdx,
+        precedingModelSwitches:
+          precedingModelSwitches.length > 0 ? precedingModelSwitches : undefined,
+        trailingModelSwitches:
+          idx === lastGroupIdx && pendingSwitches.length > 0 ? pendingSwitches : undefined,
       };
     });
   }, [allMessages, visibleRuns]);
@@ -1398,6 +1454,8 @@ export function Chat({
                       enterAnimation={enteringGroupIds.has(g.initiatorMessage.id)}
                       initiatorMessage={g.initiatorMessage}
                       responseMessage={g.responseMessage}
+                      precedingModelSwitches={g.precedingModelSwitches}
+                      trailingModelSwitches={g.trailingModelSwitches}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
                       isLatestTurnGroup={g.isLatest}
