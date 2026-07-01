@@ -748,21 +748,32 @@ def resolve_internal_llm(task_key: str) -> dict:
     doesn't pin it, so a fully-unconfigured task resolves to the active
     provider + its default model + its default effort. `reasoning_effort`
     is "" when the resolved provider has no effort support."""
-    assignment = get_internal_llm_task(task_key)
+    state = _load_state()
+    raw_assignments = _normalize_internal_llm(state.get("internal_llm"))
+    assignment = dict(raw_assignments.get(task_key, {})) if task_key in INTERNAL_LLM_TASKS else {}
     provider = None
     provider_id = assignment.get("provider_id")
     if provider_id:
-        provider = get_provider(provider_id)
+        provider = next(
+            (p for p in state.get("providers", []) if p.get("id") == provider_id),
+            None,
+        )
         if provider and _provider_is_suspended(provider):
             provider = None
             provider_id = None
     if provider is None:
-        provider = get_default_provider()
+        active_id = state.get("default_provider_id")
+        provider = next(
+            (p for p in state.get("providers", []) if p.get("id") == active_id),
+            None,
+        )
+        if provider and _provider_is_suspended(provider):
+            provider = None
         provider_id = provider["id"] if provider else None
     model = assignment.get("model") or (provider.get("default_model") if provider else "")
     effort = ""
-    if provider and provider.get("supports_reasoning_effort"):
-        options = provider.get("reasoning_effort_options") or []
+    if provider and _capabilities_for(provider).get("supports_reasoning_effort"):
+        options = reasoning_effort_options_for_provider(provider)
         chosen = assignment.get("reasoning_effort")
         if chosen in options:
             effort = chosen
