@@ -6251,6 +6251,15 @@ async def internal_assistant_ui_resolve_ba_session(
     return await assistant_ui.resolve_ba_session(str(body.get("session_id") or ""))
 
 
+@app.post("/api/internal/assistant-ui/adopt-native-session")
+async def internal_assistant_ui_adopt_native_session(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    return await assistant_ui.adopt_native_session(str(body.get("session_id") or ""))
+
+
 @app.post("/api/internal/assistant-ui/search-native-sql")
 async def internal_assistant_ui_search_native_sql(
     body: dict = Body(default={}),

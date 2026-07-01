@@ -297,6 +297,32 @@ async def resolve_ba_session(native_session_id: str) -> dict:
     return {"ba_session_id": root}
 
 
+def _adopt_by_import(native_id: str) -> dict:
+    import native_import
+    for sess in native_import.enumerate_native_sessions():
+        if sess.native_id == native_id:
+            # Idempotent: a session already imported returns its existing id.
+            return {"ba_session_id": native_import.import_session(sess)}
+    return {"ba_session_id": None, "error": "native_session_not_found"}
+
+
+async def adopt_native_session(native_session_id: str) -> dict:
+    """Bring a native session that has NO Better Agent session into BA so it can
+    be acted on: import its transcript into a new BA ``native`` session
+    (preserving the full conversation as context) and return that BA session id.
+
+    Idempotent: a session that is already BA-managed or previously imported
+    returns its existing id — never a duplicate. Returns
+    ``{"ba_session_id": None, "error": ...}`` when the native id can't be found."""
+    sid = (native_session_id or "").strip()
+    if not sid:
+        return {"ba_session_id": None, "error": "empty_session_id"}
+    root = await asyncio.to_thread(session_manager.root_id_for, sid)
+    if root:
+        return {"ba_session_id": root}
+    return await asyncio.to_thread(_adopt_by_import, sid)
+
+
 async def delegate(target_sid: str, prompt: str) -> dict:
     """Send a prompt to a target session and run its turn; returns the
     session_bridge result (final assistant message + metadata). The target does
