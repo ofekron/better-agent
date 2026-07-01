@@ -74,6 +74,43 @@ def delegate_error_payload(
     }
 
 
+async def _cleanup_ephemeral_delegate_fork(
+    *,
+    app_session_id: str,
+    worker_agent_session_id: str,
+    fork_agent_session_id: Optional[str],
+    fork_agent_sid: Optional[str],
+    ephemeral: bool,
+) -> None:
+    if (
+        not ephemeral
+        or not fork_agent_session_id
+        or fork_agent_session_id == worker_agent_session_id
+    ):
+        return
+
+    def _cleanup() -> None:
+        if fork_agent_sid:
+            fork = session_manager.get(fork_agent_session_id)
+            cursor = int(
+                ((fork or {}).get("processed_line_by_sid") or {}).get(fork_agent_sid)
+                or 0
+            )
+            if cursor > 0:
+                session_manager.advance_processed_lines(
+                    app_session_id,
+                    fork_agent_sid,
+                    cursor,
+                    bump_updated_at=False,
+                )
+        session_manager.delete(fork_agent_session_id)
+
+    try:
+        await asyncio.to_thread(_cleanup)
+    except Exception:
+        logger.exception("ephemeral delegate fork cleanup failed")
+
+
 def missing_parent_should_run_direct(run_mode: str, worker_session: dict) -> bool:
     return bool(worker_session.get("bare_config") and run_mode != "fork")
 
@@ -1225,6 +1262,14 @@ async def run_delegation_locked(
     if fork_agent_sid:
         panel["fork_agent_sid"] = fork_agent_sid
     panel["token_usage"] = token_usage
+
+    await _cleanup_ephemeral_delegate_fork(
+        app_session_id=app_session_id,
+        worker_agent_session_id=worker_agent_session_id,
+        fork_agent_session_id=fork_agent_session_id,
+        fork_agent_sid=fork_agent_sid,
+        ephemeral=ephemeral,
+    )
 
     # Clean up run_id from active list now that the worker completed.
     _remove_run_id()
