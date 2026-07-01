@@ -3181,6 +3181,7 @@ class SessionManager:
                     sess,
                     bump_updated_at=False,
                     preserve_projection_fields=True,
+                    already_persistable=True,
                 )
             self._note_root_file_written(root_id)
         except Exception:

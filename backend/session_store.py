@@ -4207,6 +4207,7 @@ def write_session_full(
     *,
     bump_updated_at: bool = True,
     preserve_projection_fields: bool = False,
+    already_persistable: bool = False,
 ) -> None:
     """Write the whole ROOT tree to disk. Caller MUST pass a root dict
     (the top-level record), not an embedded fork — embedded fork writes
@@ -4263,8 +4264,10 @@ def write_session_full(
             suffix=".json.tmp",
             dir=path.parent,
         )
-    with perf.timed("store.session.write_full.strip"):
-        popped = _strip_volatile_from_tree(root)
+    popped = None
+    if not already_persistable:
+        with perf.timed("store.session.write_full.strip"):
+            popped = _strip_volatile_from_tree(root)
     try:
         with perf.timed("store.session.write_full.dump"):
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -4281,8 +4284,9 @@ def write_session_full(
                 pass
         raise
     finally:
-        with perf.timed("store.session.write_full.restore"):
-            _restore_volatile_to_tree(popped)
+        if popped is not None:
+            with perf.timed("store.session.write_full.restore"):
+                _restore_volatile_to_tree(popped)
     with perf.timed("store.session.write_full.index_signature"):
         if file_signature is not None:
             with _index_lock:
