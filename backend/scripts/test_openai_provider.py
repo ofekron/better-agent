@@ -12,6 +12,7 @@ Uses a temp BETTER_AGENT_HOME so no real session state is touched.
 """
 
 import asyncio
+import io
 import json
 import os
 import sys
@@ -533,6 +534,37 @@ def test_openai_loopback_recovers_completed_ask_result():
         runner.time.sleep = original_sleep
 
     assert recovered == result
+
+
+def test_openai_loopback_surfaces_http_error_detail():
+    runner = _mod("runner_better_agent")
+
+    def fake_urlopen(req, *args, **kwargs):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b'{"detail":"no idle worker in target_worker_pool"}'),
+        )
+
+    original_urlopen = runner.urllib.request.urlopen
+    try:
+        runner.urllib.request.urlopen = fake_urlopen
+        try:
+            runner._post_loopback_sync(
+                {},
+                backend_url="http://127.0.0.1:9999",
+                internal_token="token",
+                url_path="/api/internal/ask",
+                timeout_s=30.0,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "HTTP 409: no idle worker in target_worker_pool"
+        else:
+            raise AssertionError("expected HTTP error detail to be surfaced")
+    finally:
+        runner.urllib.request.urlopen = original_urlopen
 
 
 def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():

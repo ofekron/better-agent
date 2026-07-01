@@ -54,6 +54,7 @@ from communication_modes import (
     normalize_ask_mode,
 )
 from env_compat import get_env
+from loopback_http import raise_loopback_http_error
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
@@ -79,8 +80,6 @@ from orchestration_tool_schemas import (
 # call, not one read(). Closures fall back to their captured value if
 # the file read fails (e.g. unset BETTER_CLAUDE_HOME, fs error).
 _token_cache: dict = {"token": None, "mtime": 0.0}
-
-
 def _load_internal_token() -> Optional[str]:
     try:
         from paths import ba_home as _ba_home
@@ -147,7 +146,6 @@ def _materialize_claude_skill_plugin(
 ) -> Optional[dict[str, str]]:
     if bare_config:
         return None
-
     plugin_dir = run_dir / "claude-runtime-skills-plugin"
     skills_root = plugin_dir / "skills"
     count = materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
@@ -705,6 +703,8 @@ def _post_loopback_sync(
                     return _request_once(live_token)
                 except urllib.error.HTTPError:
                     raise e
+            if e.code != 403:
+                raise_loopback_http_error(e)
             raise
         except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
             recovered = recover() if recover is not None else None
