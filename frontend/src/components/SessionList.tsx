@@ -54,6 +54,7 @@ interface Props {
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession?: Record<string, WorkerInfo[]>;
   onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   /** Opens the session-level Details panel (monitoring state, provenance,
@@ -128,6 +129,42 @@ type SessionFileEditModeFilter = "any" | "yes" | "no";
 const SESSION_FILE_EDIT_MODE_FILTERS: SessionFileEditModeFilter[] = ["any", "yes", "no"];
 type SessionSource = "user" | "system" | "web" | "cli" | "import" | "extension" | "internal";
 const SESSION_SOURCES: SessionSource[] = ["user", "system", "web", "cli", "import", "extension", "internal"];
+
+type PersistedSessionFilters = {
+  search: string;
+  showArchived: boolean;
+  selectedFolderIds: string[];
+  selectedTagIds: string[];
+  selectedProviderIds: string[];
+  selectedModelIds: string[];
+  selectedModes: OrchestrationMode[];
+  selectedSources: SessionSource[];
+  fileEditModeFilter: SessionFileEditModeFilter;
+  selectedSearchFields: SessionSearchField[];
+};
+
+const SESSION_FILTERS_BY_PROJECT_LS_KEY = "better-agent-session-filters-by-project";
+/** Bucket key for filters when no project is selected. */
+const SESSION_FILTERS_NO_PROJECT_KEY = "__none__";
+
+function readSessionFiltersByProject(): Record<string, PersistedSessionFilters> {
+  try {
+    const raw = localStorage.getItem(SESSION_FILTERS_BY_PROJECT_LS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, PersistedSessionFilters>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionFiltersForProject(projectPath: string, filters: PersistedSessionFilters): void {
+  try {
+    const all = readSessionFiltersByProject();
+    all[projectPath || SESSION_FILTERS_NO_PROJECT_KEY] = filters;
+    localStorage.setItem(SESSION_FILTERS_BY_PROJECT_LS_KEY, JSON.stringify(all));
+  } catch {
+    // localStorage unavailable (private mode, quota) — filters just won't persist.
+  }
+}
 
 type FolderRenderNode = {
   folder: SessionFolder;
@@ -226,6 +263,7 @@ interface NodeProps {
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession: Record<string, WorkerInfo[]>;
   onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
@@ -268,6 +306,7 @@ function SessionNode({
   onContextMenuOpen,
   onArchive,
   onWorkerEligible,
+  onAgentRenameAllowed,
   teamWorkersBySession,
   onWorkerCreationPolicyChange,
   onDetails,
@@ -429,6 +468,15 @@ function SessionNode({
           : t("session.workerEligibleOn"),
         icon: <Icon name="check-circle" size={14} />,
         onClick: () => onWorkerEligible(session.id, !session.worker_eligible),
+      },
+      {
+        id: "agent-rename-allowed",
+        label: session.agent_rename_allowed
+          ? t("session.agentRenameAllowedOff")
+          : t("session.agentRenameAllowedOn"),
+        icon: <Icon name="edit" size={14} />,
+        onClick: () =>
+          onAgentRenameAllowed(session.id, !session.agent_rename_allowed),
       },
       ...(tags.length > 0
         ? [
@@ -986,6 +1034,7 @@ function SessionNode({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
           onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
@@ -1028,6 +1077,7 @@ interface FolderSectionProps {
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
+  onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession: Record<string, WorkerInfo[]>;
   onWorkerCreationPolicyChange?: (id: string, policy: WorkerCreationPolicy) => void;
   onDetails: (id: string) => void;
@@ -1068,6 +1118,7 @@ function FolderSection({
   onContextMenuOpen,
   onArchive,
   onWorkerEligible,
+  onAgentRenameAllowed,
   teamWorkersBySession,
   onWorkerCreationPolicyChange,
   onDetails,
@@ -1143,6 +1194,7 @@ function FolderSection({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
           onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
@@ -1183,6 +1235,7 @@ function FolderSection({
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
           onWorkerEligible={onWorkerEligible}
+          onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
           onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
           onDetails={onDetails}
@@ -1221,6 +1274,7 @@ export function SessionList({
   onPin,
   onArchive,
   onWorkerEligible,
+  onAgentRenameAllowed,
   teamWorkersBySession = {},
   onWorkerCreationPolicyChange,
   onDetails,
@@ -1321,6 +1375,56 @@ export function SessionList({
   const [fileEditModeFilter, setFileEditModeFilter] = useState<SessionFileEditModeFilter>("any");
   const [selectedSearchFields, setSelectedSearchFields] = useState<SessionSearchField[]>(SESSION_SEARCH_FIELDS);
   const [orgError, setOrgError] = useState<string | null>(null);
+
+  // Search text + advanced filters are stored per project so switching
+  // projects restores that project's own filter state instead of
+  // leaking the previous project's filters. `null` sentinel forces the
+  // load to run on mount (an empty-string project path is itself a
+  // valid bucket key for "no project selected").
+  const filtersProjectKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = backendProjectPath || SESSION_FILTERS_NO_PROJECT_KEY;
+    if (filtersProjectKeyRef.current === key) return;
+    filtersProjectKeyRef.current = key;
+    const stored = readSessionFiltersByProject()[key];
+    setSearch(stored?.search ?? "");
+    setShowArchived(stored?.showArchived ?? false);
+    setSelectedFolderIds(stored?.selectedFolderIds ?? []);
+    setSelectedTagIds(stored?.selectedTagIds ?? []);
+    setSelectedProviderIds(stored?.selectedProviderIds ?? []);
+    setSelectedModelIds(stored?.selectedModelIds ?? []);
+    setSelectedModes(stored?.selectedModes ?? []);
+    setSelectedSources(stored?.selectedSources ?? []);
+    setFileEditModeFilter(stored?.fileEditModeFilter ?? "any");
+    setSelectedSearchFields(stored?.selectedSearchFields ?? SESSION_SEARCH_FIELDS);
+  }, [backendProjectPath]);
+  useEffect(() => {
+    const key = filtersProjectKeyRef.current;
+    if (key === null) return;
+    writeSessionFiltersForProject(key, {
+      search,
+      showArchived,
+      selectedFolderIds,
+      selectedTagIds,
+      selectedProviderIds,
+      selectedModelIds,
+      selectedModes,
+      selectedSources,
+      fileEditModeFilter,
+      selectedSearchFields,
+    });
+  }, [
+    search,
+    showArchived,
+    selectedFolderIds,
+    selectedTagIds,
+    selectedProviderIds,
+    selectedModelIds,
+    selectedModes,
+    selectedSources,
+    fileEditModeFilter,
+    selectedSearchFields,
+  ]);
   // Folder view: group sessions into folders (on) vs flat list (off).
   // Persistent backend pref (`folder_view_enabled`) is the source of truth;
   // this state is its reflection. `undefined` until the pref loads — until
@@ -2187,6 +2291,7 @@ export function SessionList({
       onContextMenuOpen={openSessionContextMenu}
       onArchive={onArchive}
       onWorkerEligible={onWorkerEligible}
+      onAgentRenameAllowed={onAgentRenameAllowed}
       teamWorkersBySession={teamWorkersBySession}
       onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
       onDetails={onDetails}
@@ -2789,6 +2894,7 @@ export function SessionList({
             onContextMenuOpen={openSessionContextMenu}
             onArchive={onArchive}
             onWorkerEligible={onWorkerEligible}
+            onAgentRenameAllowed={onAgentRenameAllowed}
             teamWorkersBySession={teamWorkersBySession}
             onWorkerCreationPolicyChange={onWorkerCreationPolicyChange}
             onDetails={onDetails}

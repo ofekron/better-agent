@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "Cerrar otras pestañas",
   "session.workerEligibleOn": "Marcar como apta para worker",
   "session.workerEligibleOff": "Quitar aptitud para worker",
+  "session.agentRenameAllowedOn": "Permitir que el agente renombre la sesión",
+  "session.agentRenameAllowedOff": "Impedir que el agente renombre la sesión",
   "session.copyTitleNot": "Copiar id {{id}}",
   "session.copyTitle": "¡Copiado!",
   "session.deleteTitle": "Eliminar sesión",

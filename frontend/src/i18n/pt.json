@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "Fechar outras abas",
   "session.workerEligibleOn": "Marcar como elegível para trabalho",
   "session.workerEligibleOff": "Remover elegibilidade para trabalho",
+  "session.agentRenameAllowedOn": "Permitir que o agente renomeie a sessão",
+  "session.agentRenameAllowedOff": "Impedir que o agente renomeie a sessão",
   "session.copyTitleNot": "Copiar id {{id}}",
   "session.copyTitle": "Copiado!",
   "session.deleteTitle": "Excluir sessão",

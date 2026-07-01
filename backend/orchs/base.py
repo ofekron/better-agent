@@ -549,6 +549,8 @@ class OrchestrationStrategy(ABC):
         sess = session_manager.get_lite(app_session_id)
         if sess is None:
             return
+        if not sess.get("agent_rename_allowed"):
+            return
         if sess.get("name") == title:
             return
         session_manager.rename(app_session_id, title)

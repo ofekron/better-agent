@@ -429,6 +429,8 @@
   "session.closeOtherTabsTitle": "Andere tabbladen sluiten",
   "session.workerEligibleOn": "Markeren als worker-geschikt",
   "session.workerEligibleOff": "Worker-geschiktheid verwijderen",
+  "session.agentRenameAllowedOn": "Agent mag sessie hernoemen",
+  "session.agentRenameAllowedOff": "Agent mag sessie niet hernoemen",
   "session.copyTitleNot": "Id kopiëren {{id}}",
   "session.copyTitle": "Gekopieerd!",
   "session.deleteTitle": "Sessie verwijderen",

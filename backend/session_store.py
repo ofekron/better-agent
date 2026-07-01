@@ -414,6 +414,16 @@ _SUMMARY_PROJECTION_FIELDS = (
 )
 
 
+def current_turn_error(session: dict) -> Optional[str]:
+    for msg in reversed(session.get("messages") or []):
+        if msg.get("role") != "assistant":
+            continue
+        error = msg.get("error")
+        return str(error) if error else None
+    error = session.get("unseen_error")
+    return str(error) if error else None
+
+
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
@@ -463,7 +473,7 @@ def _build_summary_for_root(
         "message_count": len(_msgs),
         "first_prompt": _first_user_prompt(root),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
-        "unseen_error": root.get("unseen_error"),
+        "unseen_error": current_turn_error(root),
         "orchestration_mode": _normalize_orchestration_mode(
             root.get("orchestration_mode")
         ),
@@ -1227,18 +1237,56 @@ def _summary_sidecar_writer_loop() -> None:
         if item is None:
             _summary_sidecar_write_queue.task_done()
             return
-        root_id, summary, root_mtime_ns = item
+        should_stop = _process_summary_sidecar_batch(item)
+        if should_stop:
+            return
+
+
+def _process_summary_sidecar_batch(
+    first_item: tuple[str, dict, int | None],
+) -> bool:
+    pending: dict[str, tuple[str, dict, int | None]] = {first_item[0]: first_item}
+    consumed = 1
+    should_stop = False
+    while True:
         try:
-            with perf.timed("store.session.summary.sidecar_write"):
-                _write_summary_file(
-                    root_id,
-                    summary,
-                    root_mtime_ns=root_mtime_ns,
-                )
-        except Exception:
-            _logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
-        finally:
+            next_item = _summary_sidecar_write_queue.get_nowait()
+        except queue.Empty:
+            break
+        consumed += 1
+        if next_item is None:
+            should_stop = True
+            break
+        pending[next_item[0]] = next_item
+    try:
+        for root_id, summary, root_mtime_ns in pending.values():
+            if _summary_sidecar_write_item_stale(root_id, root_mtime_ns):
+                continue
+            try:
+                with perf.timed("store.session.summary.sidecar_write"):
+                    _write_summary_file(
+                        root_id,
+                        summary,
+                        root_mtime_ns=root_mtime_ns,
+                    )
+            except Exception:
+                _logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
+    finally:
+        for _ in range(consumed):
             _summary_sidecar_write_queue.task_done()
+    return should_stop
+
+
+def _summary_sidecar_write_item_stale(
+    root_id: str,
+    root_mtime_ns: int | None,
+) -> bool:
+    if root_mtime_ns is None:
+        return False
+    try:
+        return (_sessions_dir() / f"{root_id}.json").stat().st_mtime_ns > root_mtime_ns
+    except OSError:
+        return False
 
 
 def _schedule_summary_sidecar_write(
@@ -3515,6 +3563,10 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("topbar_pinned", False)
     session.setdefault("topbar_pinned_at", None)
     session.setdefault("archived", False)
+    # Whether the agent itself is allowed to rename this session's title
+    # after creation (e.g. via the "ai-title" auto-naming event). Does not
+    # gate the user's own manual rename endpoint or `name_locked`.
+    session.setdefault("agent_rename_allowed", False)
     # node_id: which machine in topology.yaml hosts this session's
     # workers by default. Defaults to "primary" so single-machine
     # deployments (and pre-v7 records) keep working unchanged.
@@ -4049,20 +4101,29 @@ def _overlay_queue_projection(root: dict) -> None:
     import session_queue_projection
 
     stack = [root]
+    nodes: list[dict] = []
+    sids: list[str] = []
     while stack:
         node = stack.pop()
+        nodes.append(node)
         sid = node.get("id")
         if isinstance(sid, str) and sid:
-            record = session_queue_projection.get(sid)
-            if isinstance(record, dict) and "queued_prompts" in record:
-                node["queued_prompts"] = [
-                    copy.deepcopy(prompt)
-                    for prompt in record.get("queued_prompts") or []
-                    if isinstance(prompt, dict)
-                ]
+            sids.append(sid)
         for fork in node.get("forks") or []:
             if isinstance(fork, dict):
                 stack.append(fork)
+    records = session_queue_projection.get_many(sids)
+    for node in nodes:
+        sid = node.get("id")
+        if not isinstance(sid, str):
+            continue
+        record = records.get(sid)
+        if isinstance(record, dict) and "queued_prompts" in record:
+            node["queued_prompts"] = [
+                copy.deepcopy(prompt)
+                for prompt in record.get("queued_prompts") or []
+                if isinstance(prompt, dict)
+            ]
 
 
 @perf.timed_fn("store.session.write_full")

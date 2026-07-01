@@ -1059,6 +1059,9 @@ export interface Session {
   /** User opted this session in as eligible for the Team worker picker.
    * Only sessions with this flag appear in the "mark existing" picker. */
   worker_eligible?: boolean;
+  /** Whether the agent itself may rename this session's title after
+   * creation (e.g. via ai-title auto-naming). Defaults to false. */
+  agent_rename_allowed?: boolean;
   /** Per-session scratchpad notes. Persisted on the backend, pushed
    * via `session_metadata_updated` for cross-tab convergence. */
   notes?: Note[];

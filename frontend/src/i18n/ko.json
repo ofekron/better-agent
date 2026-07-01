@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "다른 탭 닫기",
   "session.workerEligibleOn": "워커 자격으로 표시",
   "session.workerEligibleOff": "워커 자격 제거",
+  "session.agentRenameAllowedOn": "에이전트가 세션 이름을 변경하도록 허용",
+  "session.agentRenameAllowedOff": "에이전트의 세션 이름 변경 차단",
   "session.copyTitleNot": "ID 복사 {{id}}",
   "session.copyTitle": "복사됨!",
   "session.deleteTitle": "세션 삭제",

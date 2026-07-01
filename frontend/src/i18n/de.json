@@ -429,6 +429,8 @@
   "session.closeOtherTabsTitle": "Andere Tabs schließen",
   "session.workerEligibleOn": "Als worker-geeignet markieren",
   "session.workerEligibleOff": "Worker-Eignung entfernen",
+  "session.agentRenameAllowedOn": "Agent darf Sitzung umbenennen",
+  "session.agentRenameAllowedOff": "Agent darf Sitzung nicht umbenennen",
   "session.copyTitleNot": "ID {{id}} kopieren",
   "session.copyTitle": "Kopiert!",
   "session.deleteTitle": "Sitzung löschen",

@@ -429,6 +429,8 @@
   "session.closeOtherTabsTitle": "他のタブを閉じる",
   "session.workerEligibleOn": "ワーカー適格としてマーク",
   "session.workerEligibleOff": "ワーカー適格を解除",
+  "session.agentRenameAllowedOn": "エージェントによるセッション名変更を許可",
+  "session.agentRenameAllowedOff": "エージェントによるセッション名変更を禁止",
   "session.copyTitleNot": "ID {{id}} をコピー",
   "session.copyTitle": "コピーしました！",
   "session.deleteTitle": "セッションを削除",

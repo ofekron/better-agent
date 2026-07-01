@@ -63,6 +63,7 @@ export type SessionMetadataPatch = {
   topbar_pinned_at?: string | null;
   archived?: boolean;
   worker_eligible?: boolean;
+  agent_rename_allowed?: boolean;
   working_mode?: Session["working_mode"];
   working_mode_meta?: Session["working_mode_meta"];
   notes?: import("../types").Note[];
@@ -930,6 +931,7 @@ export function useSession(authStatus?: string) {
       if (patch.topbar_pinned_at !== undefined) next.topbar_pinned_at = patch.topbar_pinned_at;
       if (patch.archived !== undefined) next.archived = patch.archived;
       if (patch.worker_eligible !== undefined) next.worker_eligible = patch.worker_eligible;
+      if (patch.agent_rename_allowed !== undefined) next.agent_rename_allowed = patch.agent_rename_allowed;
       if (patch.working_mode !== undefined) next.working_mode = patch.working_mode;
       if (patch.working_mode_meta !== undefined) next.working_mode_meta = patch.working_mode_meta;
       if (patch.notes !== undefined) next.notes = patch.notes;
@@ -2318,6 +2320,21 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  const toggleAgentRenameAllowed = useCallback(
+    async (sessionId: string, agent_rename_allowed: boolean) => {
+      await fetch(`${API}/api/sessions/${sessionId}/agent_rename_allowed`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_rename_allowed }),
+      });
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, agent_rename_allowed } : s))
+      );
+    },
+    []
+  );
+
   const renameSession = useCallback(
     async (sessionId: string, name: string) => {
       const opId = `session:rename:${sessionId}`;
@@ -2708,6 +2725,7 @@ export function useSession(authStatus?: string) {
     unpinOtherSessions,
     archiveSession,
     toggleWorkerEligible,
+    toggleAgentRenameAllowed,
     updateRearranger,
     applySessionMetadata,
     appendSessionIfNew,

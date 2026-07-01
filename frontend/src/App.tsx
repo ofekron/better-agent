@@ -817,6 +817,7 @@ function AppMain({
     unpinOtherSessions,
     archiveSession,
     toggleWorkerEligible,
+    toggleAgentRenameAllowed,
     updateRearranger,
     applySessionMetadata,
     appendSessionIfNew,
@@ -6335,6 +6336,7 @@ function AppMain({
               onUnpinOthers={unpinOtherSessions}
               onArchive={archiveSession}
               onWorkerEligible={toggleWorkerEligible}
+              onAgentRenameAllowed={toggleAgentRenameAllowed}
               teamWorkersBySession={teamWorkersBySession}
               onWorkerCreationPolicyChange={updateWorkerCreationPolicy}
               onDetails={setDetailsSessionId}

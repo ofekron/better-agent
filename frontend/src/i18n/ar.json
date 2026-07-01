@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "إغلاق التبويبات الأخرى",
   "session.workerEligibleOn": "وضع علامة كعامل مؤهَّل",
   "session.workerEligibleOff": "إزالة أهلية العامل",
+  "session.agentRenameAllowedOn": "السماح للوكيل بإعادة تسمية الجلسة",
+  "session.agentRenameAllowedOff": "منع الوكيل من إعادة تسمية الجلسة",
   "session.copyTitleNot": "نسخ المعرّف {{id}}",
   "session.copyTitle": "تم النسخ!",
   "session.deleteTitle": "حذف الجلسة",

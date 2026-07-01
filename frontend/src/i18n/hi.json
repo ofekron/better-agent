@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "अन्य टैब बंद करें",
   "session.workerEligibleOn": "वर्कर-योग्य के रूप में चिह्नित करें",
   "session.workerEligibleOff": "वर्कर योग्यता हटाएँ",
+  "session.agentRenameAllowedOn": "एजेंट को सत्र का नाम बदलने दें",
+  "session.agentRenameAllowedOff": "एजेंट को सत्र का नाम बदलने से रोकें",
   "session.copyTitleNot": "id कॉपी करें {{id}}",
   "session.copyTitle": "कॉपी हो गया!",
   "session.deleteTitle": "सत्र हटाएँ",

@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "Fermer les autres onglets",
   "session.workerEligibleOn": "Marquer comme éligible comme worker",
   "session.workerEligibleOff": "Retirer l'éligibilité comme worker",
+  "session.agentRenameAllowedOn": "Autoriser l'agent à renommer la session",
+  "session.agentRenameAllowedOff": "Empêcher l'agent de renommer la session",
   "session.copyTitleNot": "Copier l'id {{id}}",
   "session.copyTitle": "Copié !",
   "session.deleteTitle": "Supprimer la session",

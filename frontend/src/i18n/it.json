@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "Chiudi altre schede",
   "session.workerEligibleOn": "Contrassegna come idonea per worker",
   "session.workerEligibleOff": "Rimuovi idoneità worker",
+  "session.agentRenameAllowedOn": "Consenti all'agente di rinominare la sessione",
+  "session.agentRenameAllowedOff": "Impedisci all'agente di rinominare la sessione",
   "session.copyTitleNot": "Copia id {{id}}",
   "session.copyTitle": "Copiato!",
   "session.deleteTitle": "Elimina sessione",

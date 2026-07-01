@@ -7602,6 +7602,17 @@ async def unpin_other_sessions(session_id: str, body: dict = Body(default={})):
     }
 
 
+@app.put("/api/sessions/{session_id}/agent_rename_allowed")
+async def set_agent_rename_allowed(session_id: str, body: dict):
+    value = bool((body or {}).get("agent_rename_allowed", False))
+    session = await asyncio.to_thread(
+        session_manager.set_agent_rename_allowed, session_id, value,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    return {"id": session_id, "agent_rename_allowed": value}
+
+
 @app.put("/api/sessions/{session_id}/worker_eligible")
 async def set_worker_eligible(session_id: str, body: dict):
     _require_builtin_runtime_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)

@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "关闭其他标签",
   "session.workerEligibleOn": "标记为可用作 worker",
   "session.workerEligibleOff": "取消 worker 资格",
+  "session.agentRenameAllowedOn": "允许代理重命名会话",
+  "session.agentRenameAllowedOff": "禁止代理重命名会话",
   "session.copyTitleNot": "复制 id {{id}}",
   "session.copyTitle": "已复制！",
   "session.deleteTitle": "删除会话",

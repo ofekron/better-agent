@@ -1243,6 +1243,9 @@ def test_ai_title_ingested_but_not_rendered() -> bool:
     """ai-title events must trigger session rename (side-effect) and land
     in events.jsonl (for recovery replay), but NOT on msg.events."""
     sid, msg = _mk_session("native")
+    # This test locks the metadata/render-tree pipeline, not the
+    # agent-rename permission gate — opt in explicitly.
+    session_manager.set_agent_rename_allowed(sid, True)
     strategy = get_strategy("native")
     ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
                         user_msg=None, root_id=sid)
