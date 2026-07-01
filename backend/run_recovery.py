@@ -904,6 +904,14 @@ async def _integrate_one(
     target_is_latest = bool(
         last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
     )
+    if not target_is_latest and not (alive and not has_complete):
+        await _mark_reconciled_if_safe_async(
+            run_id,
+            desc,
+            "target no longer latest",
+            summary=summary,
+        )
+        return
     if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
         _is_consistent, sess, desc,
     ):

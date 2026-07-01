@@ -81,6 +81,7 @@ def _seed_run(
     cumulative_jsonl: Path,
     pre_query_byte_offset: int,
     started_at: str,
+    target_message_id: str | None = None,
 ) -> str:
     """A dead-orphan run dir whose state.json points at the SHARED
     cumulative jsonl. complete.json present (recover_in_flight will tag
@@ -112,6 +113,7 @@ def _seed_run(
         "started_at": started_at,
         "processed_byte": 0,
         "cancelled": False,
+        **({"target_message_id": target_message_id} if target_message_id else {}),
     }))
     (run_dir / "complete.json").write_text(json.dumps({
         "success": True, "session_id": claude_sid,
@@ -209,9 +211,86 @@ async def test_no_cross_turn_event_leak() -> bool:
     return True
 
 
+async def test_single_recovered_old_target_does_not_redigest() -> bool:
+    claude_sid = str(uuid.uuid4())
+    cumulative_dir = Path(_TMP_HOME) / "claude_sessions_single"
+    cumulative_dir.mkdir(parents=True, exist_ok=True)
+    cumulative_jsonl = cumulative_dir / f"{claude_sid}.jsonl"
+
+    turn1_raw = [_line("old-target")]
+    turn2_raw = [_line("newer-prompt")]
+    with cumulative_jsonl.open("w") as f:
+        for raw in turn1_raw + turn2_raw:
+            f.write(json.dumps(raw) + "\n")
+
+    turn1_uuids = {raw["uuid"] for raw in turn1_raw}
+    turn2_uuids = {raw["uuid"] for raw in turn2_raw}
+
+    sess = session_manager.create(
+        name="t", model="glm-5.1", cwd="/tmp", orchestration_mode="native",
+    )
+    app_sid = sess["id"]
+    session_manager.set_agent_sid(app_sid, "native", claude_sid)
+
+    a1 = {"id": str(uuid.uuid4()), "role": "assistant",
+          "content": "old-target", "events": [_wrap(raw) for raw in turn1_raw],
+          "isStreaming": False}
+    a2 = {"id": str(uuid.uuid4()), "role": "assistant",
+          "content": "newer-prompt", "events": [_wrap(raw) for raw in turn2_raw],
+          "isStreaming": False}
+    session_manager.append_user_msg(app_sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "turn 1",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(app_sid, a1)
+    session_manager.append_user_msg(app_sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "turn 2",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(app_sid, a2)
+
+    run_id = _seed_run(
+        app_sid,
+        claude_sid,
+        cumulative_jsonl,
+        0,
+        "2026-05-20T01:00:00.000000",
+        target_message_id=a1["id"],
+    )
+
+    recovered = default_provider().recover_in_flight()
+    recovered = [desc for desc in recovered if desc.get("run_id") == run_id]
+    if len(recovered) != 1:
+        print(f"  expected one recovered descriptor, got {len(recovered)}")
+        return False
+
+    await integrate_recovered_runs(coordinator=None, recovered=recovered)
+
+    sess = session_manager.get(app_sid)
+    msgs = {m["id"]: m for m in (sess or {}).get("messages", [])}
+    old_uuids = _uuids(msgs.get(a1["id"], {}).get("events"))
+    newer_uuids = _uuids(msgs.get(a2["id"], {}).get("events"))
+    leaked = old_uuids & turn2_uuids
+    if leaked:
+        print(f"  old target absorbed newer prompt uuids: {sorted(leaked)}")
+        return False
+    if old_uuids != turn1_uuids:
+        print(f"  old target changed: {sorted(old_uuids)}")
+        return False
+    if newer_uuids != turn2_uuids:
+        print(f"  newer assistant changed: {sorted(newer_uuids)}")
+        return False
+    if not (_runs_root() / run_id / "reconciled.marker").exists():
+        print("  recovered old-target run was not marked reconciled")
+        return False
+    return True
+
+
 TESTS = [
     ("recovery does not leak a prior turn's events onto a later turn",
      test_no_cross_turn_event_leak),
+    ("single recovered old target does not redigest cumulative stream",
+     test_single_recovered_old_target_does_not_redigest),
 ]
 
 
