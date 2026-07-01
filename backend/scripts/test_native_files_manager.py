@@ -730,6 +730,27 @@ async def test_run_state_ledger_cache_rejects_cached_symlink_escape() -> None:
     print("PASS test_run_state_ledger_cache_rejects_cached_symlink_escape")
 
 
+async def test_run_state_ledger_string_shape_is_strict() -> None:
+    from runs_dir import runs_root
+
+    root = runs_root()
+    assert runs_dir_mod._run_state_path_string_has_ledger_shape(
+        str(root / "run-direct" / "state.json"),
+        root,
+    )
+    rejected = [
+        str(root / "run-direct" / "nested" / "state.json"),
+        str(root / "state.json"),
+        str(root.parent / f"{root.name}2" / "run-direct" / "state.json"),
+        str(root.parent / "outside" / "state.json"),
+        "run-direct/state.json",
+        str(root / "run-direct" / "other.json"),
+    ]
+    for state_path in rejected:
+        assert not runs_dir_mod._run_state_path_string_has_ledger_shape(state_path, root), state_path
+    print("PASS test_run_state_ledger_string_shape_is_strict")
+
+
 async def test_run_state_ledger_parse_defers_resolve_to_target_sid() -> None:
     from runs_dir import run_state_ledger_path, runs_root
 
@@ -787,13 +808,19 @@ async def test_run_state_ledger_parse_defers_resolve_to_target_sid() -> None:
         encoding="utf-8",
     )
     original_validator = runs_dir_mod._run_state_path_under_root
+    original_shape = runs_dir_mod._run_state_path_has_ledger_shape
     validated_paths: list[nfm_mod.Path] = []
 
     def counting_validator(path, root_resolved):  # type: ignore[no-untyped-def]
         validated_paths.append(path)
         return original_validator(path, root_resolved)
 
+    def fail_shape(*_args, **_kwargs):
+        raise AssertionError("ledger parse should use string shape before Path construction")
+
     runs_dir_mod._run_state_path_under_root = counting_validator  # type: ignore
+    if runs_dir_mod.os.sep == "/" and runs_dir_mod.os.altsep is None:
+        runs_dir_mod._run_state_path_has_ledger_shape = fail_shape  # type: ignore
     try:
         assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-TARGET") == [
             target_state
@@ -809,6 +836,7 @@ async def test_run_state_ledger_parse_defers_resolve_to_target_sid() -> None:
         assert validated_paths == []
     finally:
         runs_dir_mod._run_state_path_under_root = original_validator  # type: ignore
+        runs_dir_mod._run_state_path_has_ledger_shape = original_shape  # type: ignore
     print("PASS test_run_state_ledger_parse_defers_resolve_to_target_sid")
 
 
@@ -1404,6 +1432,7 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_cache_reuses_unchanged_index())
     asyncio.run(test_run_state_ledger_cache_invalidates_on_append())
     asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
+    asyncio.run(test_run_state_ledger_string_shape_is_strict())
     asyncio.run(test_run_state_ledger_parse_defers_resolve_to_target_sid())
     asyncio.run(test_run_state_recent_cache_revalidates_cached_paths())
     asyncio.run(test_run_state_recent_candidates_skip_per_entry_resolve())
