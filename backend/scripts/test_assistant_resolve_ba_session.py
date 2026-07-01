@@ -52,6 +52,35 @@ def _run() -> int:
         ok = empty == {"ba_session_id": None}
         results.append(ok)
         print(f"{OK if ok else FAIL} empty input -> None without lookup (got {empty})")
+
+        # adopt_native_session: already-BA short-circuits (no import).
+        import native_import
+        orig_enum, orig_imp = native_import.enumerate_native_sessions, native_import.import_session
+        imported = []
+
+        class _Sess:
+            def __init__(self, nid): self.native_id = nid
+
+        native_import.enumerate_native_sessions = lambda *a, **k: [_Sess("orphan-native")]
+        native_import.import_session = lambda sess, **k: (imported.append(sess.native_id) or "ba-imported-1")
+        try:
+            already = asyncio.run(assistant_ui.adopt_native_session("native-abc"))
+            ok = already == {"ba_session_id": "ba-root-1"} and imported == []
+            results.append(ok)
+            print(f"{OK if ok else FAIL} adopt: already-BA returns id, no import (got {already}, imported={imported})")
+
+            adopted = asyncio.run(assistant_ui.adopt_native_session("orphan-native"))
+            ok = adopted == {"ba_session_id": "ba-imported-1"} and imported == ["orphan-native"]
+            results.append(ok)
+            print(f"{OK if ok else FAIL} adopt: unmapped native imported to BA (got {adopted})")
+
+            missing = asyncio.run(assistant_ui.adopt_native_session("nowhere"))
+            ok = missing.get("ba_session_id") is None and missing.get("error") == "native_session_not_found"
+            results.append(ok)
+            print(f"{OK if ok else FAIL} adopt: native id not found -> error (got {missing})")
+        finally:
+            native_import.enumerate_native_sessions = orig_enum
+            native_import.import_session = orig_imp
     finally:
         assistant_ui.session_manager.root_id_for = orig
 
