@@ -552,16 +552,24 @@ def test_enumerate_codex() -> None:
 def test_registry() -> None:
     native_import._registry_save({})  # start clean
     check(native_import._registry_get("claude:nope") is None, "absent → None")
-    native_import._registry_set("claude:a", "root-a")
-    check(native_import._registry_get("claude:a") == "root-a", "set/get")
-    native_import._registry_set("claude:a", "root-a2")  # overwrite
-    check(native_import._registry_get("claude:a") == "root-a2", "overwrite")
-    native_import._registry_set("codex:b", "root-b")
+    root_a = session_manager.create(name="root-a", cwd="/tmp", model="sonnet")["id"]
+    root_a2 = session_manager.create(name="root-a2", cwd="/tmp", model="sonnet")["id"]
+    root_b = session_manager.create(name="root-b", cwd="/tmp", model="sonnet")["id"]
+    session_manager.flush_pending_persists()
+    native_import._registry_set("claude:a", root_a)
+    check(native_import._registry_get("claude:a") == root_a, "set/get")
+    native_import._registry_set("claude:a", root_a2)  # overwrite
+    check(native_import._registry_get("claude:a") == root_a2, "overwrite")
+    native_import._registry_set("codex:b", root_b)
     check(native_import.already_imported_keys() == {"claude:a", "codex:b"}, "keys set")
 
     # persists across reload
     loaded = native_import._registry_load()
-    check(loaded == {"claude:a": "root-a2", "codex:b": "root-b"}, "persisted json")
+    check(loaded == {"claude:a": root_a2, "codex:b": root_b}, "persisted json")
+
+    session_manager.delete(root_a2)
+    check(native_import._registry_get("claude:a") is None, "stale get pruned")
+    check(native_import.already_imported_keys() == {"codex:b"}, "stale key pruned from key set")
 
     # corrupt registry file → recovers to empty, no crash
     native_import._registry_path().write_text("{not json", encoding="utf-8")
@@ -652,6 +660,12 @@ def test_ingest_claude_matrix() -> None:
         before = len(session_store.list_sessions())
         check(native_import.import_session(sess) == root_id, f"[{name}] idempotent root")
         check(len(session_store.list_sessions()) == before, f"[{name}] no dup session")
+        if name == "single turn":
+            session_manager.delete(root_id)
+            reimported = native_import.import_session(sess)
+            check(reimported != root_id, f"[{name}] stale registry re-import creates live root")
+            check(session_manager.get(reimported) is not None, f"[{name}] re-imported root exists")
+            root_id = reimported
         # force re-import creates a NEW session
         forced = native_import.import_session(sess, force=True)
         check(forced != root_id, f"[{name}] force creates new")

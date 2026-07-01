@@ -1170,7 +1170,15 @@ def _registry_save(data: dict) -> None:
 
 def _registry_get(key: str) -> Optional[str]:
     with _REGISTRY_LOCK:
-        return _registry_load().get(key) or None
+        data = _registry_load()
+        root_id = data.get(key)
+        if not root_id:
+            return None
+        if _registry_root_exists(root_id):
+            return root_id
+        data.pop(key, None)
+        _registry_save(data)
+        return None
 
 
 def _registry_set(key: str, root_id: str) -> None:
@@ -1180,10 +1188,34 @@ def _registry_set(key: str, root_id: str) -> None:
         _registry_save(data)
 
 
+def _registry_root_exists(root_id: str) -> bool:
+    if not root_id:
+        return False
+    return (paths.ba_home() / "sessions" / f"{root_id}.json").exists()
+
+
+def _prune_stale_registry_locked(data: dict) -> bool:
+    stale = [
+        key for key, root_id in data.items()
+        if not isinstance(root_id, str) or not _registry_root_exists(root_id)
+    ]
+    for key in stale:
+        data.pop(key, None)
+    return bool(stale)
+
+
 def _registry_get_for(sess: NativeSession) -> Optional[str]:
     with _REGISTRY_LOCK:
         data = _registry_load()
-        return data.get(sess.registry_key) or data.get(sess.legacy_registry_key) or None
+        for key in (sess.registry_key, sess.legacy_registry_key):
+            root_id = data.get(key)
+            if not root_id:
+                continue
+            if _registry_root_exists(root_id):
+                return root_id
+            data.pop(key, None)
+            _registry_save(data)
+        return None
 
 
 def _registry_set_for(sess: NativeSession, root_id: str) -> None:
@@ -1200,7 +1232,10 @@ def _is_imported(sess: NativeSession, keys: set[str]) -> bool:
 
 def already_imported_keys() -> set[str]:
     with _REGISTRY_LOCK:
-        return set(_registry_load().keys())
+        data = _registry_load()
+        if _prune_stale_registry_locked(data):
+            _registry_save(data)
+        return set(data.keys())
 
 
 def count_native_sessions(

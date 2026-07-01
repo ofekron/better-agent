@@ -37,6 +37,7 @@ logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)
 logging.getLogger("config_store").setLevel(logging.CRITICAL)
 logging.getLogger("keyring").setLevel(logging.CRITICAL)
 import config_store  # noqa: E402
+from session_manager import manager as session_manager  # noqa: E402
 
 CASES = {"n": 0}
 
@@ -80,8 +81,11 @@ def main() -> None:
     pid = prov["id"]
     try:
         # Mark two of the four as already imported.
-        native_import._registry_set("claude:s1", str(uuid.uuid4()))
-        native_import._registry_set("claude:s2", str(uuid.uuid4()))
+        root1 = session_manager.create(name="s1", cwd="/work/proj", model="sonnet")["id"]
+        root2 = session_manager.create(name="s2", cwd="/work/proj", model="sonnet")["id"]
+        session_manager.flush_pending_persists()
+        native_import._registry_set("claude:s1", root1)
+        native_import._registry_set("claude:s2", root2)
 
         summary = native_import.count_native_sessions([pid])
         check(summary["total"] == 4, f"total {summary['total']} != 4")
@@ -97,6 +101,11 @@ def main() -> None:
 
         # The summary must be counts, not rows — no per-session list leaks out.
         check("sessions" not in summary, "summary must not embed a sessions list")
+
+        session_manager.delete(root1)
+        stale = native_import.count_native_sessions([pid])
+        check(stale["imported"] == 1, f"stale imported {stale['imported']} != 1")
+        check(stale["pending"] == 3, f"stale pending {stale['pending']} != 3")
 
         # hydrate=False skips the per-jsonl cwd read; hydrate=True populates it.
         lite = native_import.enumerate_native_sessions([pid], hydrate=False)
