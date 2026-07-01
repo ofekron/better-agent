@@ -48,6 +48,8 @@ async def test_multi_lock_accumulates_until_all_locked() -> None:
 
     check(accumulated and token, "multi lock accumulates available keys while waiting")
     check(result.get("success") is True, "multi lock waits until all requested keys are locked")
+    check(result.get("waited") is True, "multi lock reports waited=true when it had to block for a holder")
+    check(float(result.get("waited_seconds") or 0) > 0, "multi lock reports positive waited_seconds when contended")
     check(result.get("keys") == ["file-a", "file-b", "file-c"], "multi lock returns requested keys")
     check(
         all(
@@ -61,6 +63,24 @@ async def test_multi_lock_accumulates_until_all_locked() -> None:
         keys=result["keys"],
         release=True,
         holder_token=str(result["holder_token"]),
+    )
+    coordination._locks.clear()
+
+
+async def test_immediate_acquire_reports_no_wait() -> None:
+    coordination._locks.clear()
+
+    single = await coordination.lock_ops(key="file-a")
+    check(single.get("success") is True, "uncontended single-key acquire succeeds")
+    check(single.get("waited") is False, "uncontended single-key acquire reports waited=false")
+    check(single.get("waited_seconds") == 0.0, "uncontended single-key acquire reports zero waited_seconds")
+    await coordination.lock_ops(key="file-a", release=True, holder_token=str(single["holder_token"]))
+
+    multi = await coordination.lock_ops(keys=["file-a", "file-b"], key="", timeout_seconds=1)
+    check(multi.get("success") is True, "uncontended multi-key acquire succeeds")
+    check(multi.get("waited") is False, "uncontended multi-key acquire reports waited=false")
+    await coordination.lock_ops(
+        key="", keys=multi["keys"], release=True, holder_token=str(multi["holder_token"])
     )
     coordination._locks.clear()
 
@@ -131,6 +151,7 @@ def test_better_agent_runner_requires_own_live_file_lock() -> None:
 
 async def main() -> int:
     await test_multi_lock_accumulates_until_all_locked()
+    await test_immediate_acquire_reports_no_wait()
     await test_multi_lock_timeout_releases_partial_locks()
     await test_multi_release_is_atomic()
     test_better_agent_runner_requires_own_live_file_lock()

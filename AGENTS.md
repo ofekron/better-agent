@@ -12,14 +12,27 @@ other configured providers. Do not edit only one provider-native config when
 the capability has equivalents in Claude, Codex, or Gemini.
 
 In multi-agent work, lock files before editing them. As soon as the files to
-touch are known, call `lock_ops` with `keys=["file_edit:<absolute-path>", ...]`
-and a reasonable `timeout_seconds`; do not edit files whose locks were not
-acquired. If more files become necessary later, acquire their locks before
-writing. Release file locks immediately after the edit/test/commit phase no
-longer needs them, and always release them before the final response when the
-runtime is still available. Use short leases so interrupted turns or tool
-errors do not block other agents for long; after any resume or interruption,
-re-check current state and reacquire locks before continuing writes.
+touch are known, call `lock_ops` with
+`keys=["git_ops:<absolute-repo-root>", "file_edit:<absolute-path>", ...]` and a
+reasonable `timeout_seconds` — always include the repo-scoped `git_ops` key
+(canonical root from `git rev-parse --show-toplevel`) alongside the `file_edit`
+keys and hold it across the edit/commit phase, so a concurrent git operation
+cannot mutate the tree mid-edit. Do not edit files whose locks were not
+acquired. If more files become necessary later, acquire their locks (again
+together with `git_ops`) before writing. Release every lock immediately after
+the edit/test/commit phase no longer needs it, and always release them before
+the final response when the runtime is still available. Use short leases so
+interrupted turns or tool errors do not block other agents for long; after any
+resume or interruption, re-check current state and reacquire locks before
+continuing writes.
+
+If `lock_ops` does not grant the locks immediately — the response has
+`waited: true` (it had to wait for another holder), or a single-key acquire
+first returned `error: "locked"`/`"timeout"` — then another agent just held
+those paths and the files on disk have probably changed. Re-read every locked
+file before editing, re-validate your assumptions against the new content, and
+if the change conflicts with what you were about to do, flag it to the user
+instead of overwriting.
 
 Never RESTART an already-running backend server or frontend dev server
 without explicit approval from the user, for ANY provider (Claude, Codex,
