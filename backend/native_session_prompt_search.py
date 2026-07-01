@@ -1,18 +1,27 @@
-"""Raw provider-native session prompt search.
+"""Raw provider-native transcript search.
 
-Each provider is read by its own native transcript store — Claude
-``projects/<cwd>/<sid>.jsonl``, Codex / Gemini / Better Agent run-dir
-``session_events.jsonl`` — so this is the "every provider with its own grepping
-method" fan-out. Discovery walks both stores directly via
-:func:`native_session_miner.iter_all_native_candidates` (NOT the BA-indexed
-miners, which miss direct-CLI and extension-spawned sessions with no BA record),
-then greps the typed user prompts for the query tokens. Public requirements
-lookup does not use this as a success fallback; requirements still come from
-the LLM processor.
+Generalized grep over EVERY provider's native transcripts (Claude
+``projects/<cwd>/<sid>.jsonl``, Codex ``~/.codex/sessions`` rollouts, Gemini
+``~/.gemini/tmp`` chats, and the Better-Agent run-dir ``session_events.jsonl``).
+Each provider is read by its own element extractor
+(:func:`native_session_miner._claude_elements` / ``_codex_elements`` /
+``_gemini_elements``) — the only provider-specific code — emitting a shared
+:class:`NativeElement` stream. Everything else (discovery, token-overlap grep,
+dedup, ranking, the :class:`Categorizer`) is provider-agnostic and reused
+across all four.
+
+Entry points all share one optimized core (:func:`_search_elements`):
+
+- :func:`search_in_native_session_transcript` — grep ANYTHING in the transcript
+  (prompts, replies, reasoning, tool calls, tool results, …), categorized.
+- :func:`search_native_session_prompts` / :func:`search_native_session_transcripts`
+  — thin category-filtered facades (prompt-only / prompt+reply).
 
 Discovery (cheap) is separated from parsing (expensive: read + JSON-parse each
 transcript). Parsing + matching runs concurrently across a thread pool, since
-the workload is I/O bound over many small transcript files.
+the workload is I/O bound over many small transcript files. Public requirements
+lookup does not use this as a success fallback; requirements still come from
+the LLM processor.
 """
 from __future__ import annotations
 
@@ -74,67 +83,153 @@ def _token_patterns(tokens: list[str]) -> list[re.Pattern]:
     return [re.compile(r"\b" + re.escape(tok) + r"\b") for tok in tokens]
 
 
-def _match_candidate(
+class ElementCategory:
+    """Semantic categories the :class:`Categorizer` maps elements to. Higher
+    level than the structural ``element_kind`` — e.g. a ``tool_call`` element
+    becomes ``file_edit`` / ``shell`` / ``file_read`` / ``search`` / ``subagent``
+    depending on the tool."""
+
+    PROMPT = "prompt"
+    REPLY = "reply"
+    REASONING = "reasoning"
+    FILE_EDIT = "file_edit"
+    SHELL = "shell"
+    FILE_READ = "file_read"
+    SEARCH = "search"
+    SUBAGENT = "subagent"
+    TOOL_OUTPUT = "tool_output"
+    ERROR = "error"
+    COMMAND = "command"
+    META = "meta"
+    OTHER = "other"
+
+
+_EDIT_TOOLS = frozenset({
+    "edit", "multiedit", "write", "notebookedit", "replace", "write_file",
+    "apply_patch", "create_file", "str_replace_editor", "federated_write",
+})
+_SHELL_TOOLS = frozenset({"bash", "shell", "exec_command", "run", "execute", "terminal", "computer"})
+_READ_TOOLS = frozenset({"read", "read_file", "view"})
+_SEARCH_TOOLS = frozenset({"grep", "glob", "websearch", "toolsearch", "search", "search_files", "webfetch"})
+_AGENT_TOOLS = frozenset({"task", "agent", "spawn_agent", "delegate", "delegate_task", "spawnagent"})
+# Tool outputs that read like a failure surface as the ERROR category.
+_ERROR_RE = re.compile(
+    r"\b(traceback|exception|error:|errno|failed|command not found|exited with|fatal)\b",
+    re.I,
+)
+
+
+class Categorizer:
+    """Provider-agnostic element → category mapping.
+
+    Operates only on the shared :class:`NativeElement` shape (structural
+    ``kind``, ``tool_name``, ``text``), so adding a provider never touches this
+    — only its extractor. Tool names are matched case-insensitively after
+    ``-``/``_``/``/`` normalization so ``WebSearch``, ``exec_command``, and
+    ``str_replace_editor`` all resolve regardless of provider casing."""
+
+    def categorize(self, element) -> str:
+        kind = element.kind
+        if kind == "user_prompt":
+            return ElementCategory.PROMPT
+        if kind == "command":
+            return ElementCategory.COMMAND
+        if kind == "assistant_text":
+            return ElementCategory.REPLY
+        if kind == "reasoning":
+            return ElementCategory.REASONING
+        if kind == "meta":
+            return ElementCategory.META
+        if kind == "tool_call":
+            return self._tool_category(element.tool_name)
+        if kind == "tool_result":
+            return ElementCategory.ERROR if _ERROR_RE.search(element.text) else ElementCategory.TOOL_OUTPUT
+        return ElementCategory.OTHER
+
+    @staticmethod
+    def _tool_category(tool_name: str) -> str:
+        norm = re.sub(r"[-/_]", "_", (tool_name or "").lower())
+        if norm in _EDIT_TOOLS:
+            return ElementCategory.FILE_EDIT
+        if norm in _SHELL_TOOLS:
+            return ElementCategory.SHELL
+        if norm in _READ_TOOLS:
+            return ElementCategory.FILE_READ
+        if norm in _SEARCH_TOOLS:
+            return ElementCategory.SEARCH
+        if norm in _AGENT_TOOLS:
+            return ElementCategory.SUBAGENT
+        return ElementCategory.OTHER
+
+
+def _match_elements(
     candidate: NativeCandidate,
     patterns: list[re.Pattern],
     is_noise: Callable[[str], bool] | None,
-    roles: tuple[str, ...],
-    kind: str,
+    categorizer: Categorizer,
+    categories: frozenset[str] | None,
+    kinds: frozenset[str] | None,
+    record_kind: str,
     source: str,
 ) -> list[tuple[int, dict[str, Any]]]:
-    """Parse one transcript and score its messages (of the requested ``roles``)
-    by distinct whole-word token hits. A single bad transcript must not sink the
-    whole concurrent search, so any parse/scoring error is contained to this
-    candidate."""
+    """Parse one transcript to its element stream and score each element by
+    distinct whole-word token hits, after category/kind/noise filtering. A
+    single bad transcript must not sink the whole concurrent search, so any
+    parse/scoring error is contained to this candidate."""
     try:
-        visit = candidate.parse()
+        elements = candidate.parse_elements()
     except Exception:
         return []
-    if visit is None:
-        return []
     scored: list[tuple[int, dict[str, Any]]] = []
-    for msg in visit.messages:
-        if not isinstance(msg, dict) or msg.get("role") not in roles:
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str):
-            continue
-        text = content.strip()
+    for element in elements:
+        text = element.text.strip()
         if not text or (is_noise is not None and is_noise(text)):
             continue
-        lowered = text.lower()
-        score = sum(1 for pattern in patterns if pattern.search(lowered))
+        if kinds is not None and element.kind not in kinds:
+            continue
+        category = categorizer.categorize(element)
+        if categories is not None and category not in categories:
+            continue
+        score = sum(1 for pattern in patterns if pattern.search(text.lower()))
         if score == 0:
             continue
         scored.append((score, {
             "text": text,
-            "role": msg.get("role"),
-            "kind": kind,
+            "role": element.role,
+            "kind": record_kind,
             "source": source,
-            "cwd": visit.cwd,
-            "sid": visit.sid,
-            "ts": msg.get("timestamp") if isinstance(msg.get("timestamp"), str) else "",
+            "category": category,
+            "element_kind": element.kind,
+            "tool_name": element.tool_name,
+            "cwd": candidate.cwd,
+            "sid": candidate.sid,
+            "ts": element.timestamp,
         }))
     return scored
 
 
-def _search(
+def _search_elements(
     *,
     query: str,
-    roles: tuple[str, ...],
-    kind: str,
+    record_kind: str,
     source: str,
     cwds: tuple[str, ...] | list[str] = (),
+    categories: tuple[str, ...] | list[str] | None = None,
+    kinds: tuple[str, ...] | list[str] | None = None,
     max_matches: int | None = 20,
     is_noise: Callable[[str], bool] | None = None,
+    categorizer: Categorizer | None = None,
 ) -> list[dict[str, Any]]:
-    """Single fan-out grep over the raw provider-native transcripts.
+    """Single optimized fan-out grep over the raw provider-native transcripts at
+    the ELEMENT level — the one core every public entry point reuses.
 
-    ``roles`` selects which turns are grepped (``("user",)`` for typed prompts;
-    ``("user", "assistant")`` for the whole conversation transcript). ``kind`` /
-    ``source`` label the returned records so consumers can tell the two scopes
-    apart. All other behavior (whole-word matching, token-overlap ranking, cwd
-    filter, ``is_noise``, dedup, oldest-first presentation) is shared."""
+    ``categories`` / ``kinds`` optionally restrict matches to a semantic category
+    set (``ElementCategory``) and/or a structural element-kind set. ``None`` means
+    no restriction on that axis (``search_in_native_session_transcript`` passes
+    both ``None`` to grep everything). ``record_kind`` / ``source`` label the
+    records so consumers can tell scopes apart. Whole-word matching, token-overlap
+    ranking, cwd filter, ``is_noise``, dedup, and oldest-first presentation are
+    shared by all callers."""
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -144,12 +239,16 @@ def _search(
     if not candidates:
         return []
 
+    categorizer = categorizer or Categorizer()
+    cat_set = frozenset(categories) if categories else None
+    kind_set = frozenset(kinds) if kinds else None
+
     scored: list[tuple[int, dict[str, Any]]] = []
     workers = max(1, min(_MAX_WORKERS, len(candidates)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for chunk in pool.map(
-            lambda candidate: _match_candidate(
-                candidate, patterns, is_noise, roles, kind, source
+            lambda candidate: _match_elements(
+                candidate, patterns, is_noise, categorizer, cat_set, kind_set, record_kind, source
             ),
             candidates,
         ):
@@ -184,6 +283,40 @@ def _search(
     return matches
 
 
+def search_in_native_session_transcript(
+    *,
+    query: str,
+    cwds: tuple[str, ...] | list[str] = (),
+    categories: tuple[str, ...] | list[str] | None = None,
+    kinds: tuple[str, ...] | list[str] | None = None,
+    max_matches: int | None = 20,
+    is_noise: Callable[[str], bool] | None = None,
+    categorizer: Categorizer | None = None,
+) -> list[dict[str, Any]]:
+    """Grep ANYTHING in the raw provider-native transcripts for ``query`` —
+    prompts, assistant replies, reasoning, tool calls, tool results, commands —
+    and return categorized matches, highest token-overlap first.
+
+    Each match carries ``category`` (semantic — see :class:`ElementCategory`),
+    ``element_kind`` (structural), and ``tool_name`` (for tool calls/results) so
+    callers can group/filter results without re-parsing. Narrow the scope with
+    ``categories`` (e.g. ``("shell", "file_edit")`` for only actions) or
+    ``kinds`` (e.g. ``("tool_call",)``). ``cwds`` restricts to working dirs.
+    A match scores at least one query token as a whole word; the score is the
+    count of distinct tokens hit."""
+    return _search_elements(
+        query=query,
+        record_kind="native_session_element",
+        source="native_transcript",
+        cwds=cwds,
+        categories=categories,
+        kinds=kinds,
+        max_matches=max_matches,
+        is_noise=is_noise,
+        categorizer=categorizer,
+    )
+
+
 def search_native_session_prompts(
     *,
     query: str,
@@ -192,7 +325,9 @@ def search_native_session_prompts(
     is_noise: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Grep the raw provider-native transcripts for ``query`` and return the
-    matching typed **user prompts**, highest token-overlap first.
+    matching typed **user prompts**, highest token-overlap first. Thin facade
+    over :func:`search_in_native_session_transcript` restricted to the
+    ``prompt`` category.
 
     ``cwds`` (when non-empty) restricts to those working directories.
     ``is_noise`` is the caller's programmatic-preamble filter (BA-injected
@@ -200,12 +335,12 @@ def search_native_session_prompts(
     main corpus does. A match keeps a prompt when at least one query token
     appears in it as a whole word; the score is the count of distinct tokens hit.
     """
-    return _search(
+    return _search_elements(
         query=query,
-        roles=("user",),
-        kind="native_session_prompt",
+        record_kind="native_session_prompt",
         source="native_session_fallback",
         cwds=cwds,
+        categories=(ElementCategory.PROMPT,),
         max_matches=max_matches,
         is_noise=is_noise,
     )
@@ -219,16 +354,17 @@ def search_native_session_transcripts(
     is_noise: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Grep the raw provider-native transcripts for ``query`` over the **whole
-    conversation** — both typed user prompts and assistant replies — highest
-    token-overlap first. Peer to :func:`search_native_session_prompts`; the only
-    difference is scope (all turns vs. user prompts only). Same ranking, cwd
-    filter, dedup, and oldest-first presentation."""
-    return _search(
+    conversation** — typed user prompts and assistant replies — highest
+    token-overlap first. Thin facade over
+    :func:`search_in_native_session_transcript` restricted to the ``prompt`` and
+    ``reply`` categories. Same ranking, cwd filter, dedup, and oldest-first
+    presentation."""
+    return _search_elements(
         query=query,
-        roles=("user", "assistant"),
-        kind="native_session_transcript",
+        record_kind="native_session_transcript",
         source="native_session_transcript",
         cwds=cwds,
+        categories=(ElementCategory.PROMPT, ElementCategory.REPLY),
         max_matches=max_matches,
         is_noise=is_noise,
     )
