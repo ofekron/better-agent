@@ -13,7 +13,6 @@ import os
 import time
 import json
 import logging
-import heapq
 import threading
 from pathlib import Path
 from typing import Optional
@@ -23,12 +22,9 @@ log = logging.getLogger(__name__)
 _JSONL_PATH_CACHE: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
 _JSONL_PATH_NEGATIVE_TTL_S = 5.0
 _JSONL_INDEX_TTL_S = 5.0
-_RUN_STATE_RECENT_SCAN_LIMIT = 256
-_RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _CLAUDE_PATH_INDEX: tuple[str, float, dict[str, Path]] | None = None
 _CLAUDE_PATH_INDEX_LOCK = threading.Lock()
 _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
-_RUN_STATE_RECENT_INDEX: tuple[str, float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]] | None = None
 _JSONL_LINE_COUNT_LOCK = threading.Lock()
 _JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
 _JSONL_LINE_COUNT_INFLIGHT: dict[str, threading.Lock] = {}
@@ -157,55 +153,9 @@ def _run_state_cache_put(root_key: str, agent_sid: str, path: Optional[Path]) ->
     return path
 
 
-def _recent_state_candidates(root: Path) -> tuple[tuple[int, int, str], ...]:
-    candidates: list[tuple[int, int, str]] = []
-    try:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                state_path = Path(entry.path) / "state.json"
-                try:
-                    st = state_path.stat()
-                except OSError:
-                    continue
-                candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
-    except OSError:
-        return ()
-    return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates))
-
-
-def _recent_state_index(root: Path) -> dict[str, list[Path]]:
-    global _RUN_STATE_RECENT_INDEX
-    key = str(root)
-    now = time.monotonic()
-    if _RUN_STATE_RECENT_INDEX is not None:
-        cached_key, ts, _cached_candidates, index = _RUN_STATE_RECENT_INDEX
-        if cached_key == key and now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
-            return index
-    candidates = _recent_state_candidates(root)
-    if not candidates:
-        return {}
-    if _RUN_STATE_RECENT_INDEX is not None:
-        cached_key, ts, cached_candidates, index = _RUN_STATE_RECENT_INDEX
-        if cached_key == key and cached_candidates == candidates and now - ts < _JSONL_INDEX_TTL_S:
-            return index
-    index: dict[str, list[Path]] = {}
-    for _, _, state_path in candidates:
-        path = Path(state_path)
-        try:
-            st = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        sid = str(st.get("session_id") or "")
-        if sid:
-            index.setdefault(sid, []).append(path)
-    _RUN_STATE_RECENT_INDEX = (key, now, candidates, index)
-    return index
-
-
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
-    return _recent_state_index(root).get(agent_sid, [])
+    from runs_dir import state_files_for_sid
+    return state_files_for_sid(root, agent_sid)
 
 
 def _run_state_path_for_sid(agent_sid: str) -> Optional[Path]:

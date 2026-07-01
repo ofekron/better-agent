@@ -20,6 +20,7 @@ import os
 import shutil
 import threading
 import time
+import heapq
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,14 @@ _RECONCILED_MARKER_BACKFILL_MARKER_NAME = "reconciled_marker_index.backfilled.js
 _RECONCILED_MARKER_BACKFILL_VERSION = 1
 _RUN_STATE_LEDGER_SEEN: set[tuple[str, str, str]] = set()
 _RUN_STATE_LEDGER_BACKFILL_LOCK = threading.Lock()
+_RUN_STATE_RECENT_SCAN_LIMIT = 256
+_RUN_STATE_RECENT_INDEX_TTL_S = 1.0
+_RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
+_RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
+_RunStateLedgerSignature = tuple[int, int, int, int]
+_RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, Path]]]]] = {}
+_RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
+_RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
 _RECONCILED_MARKER_INDEX_SEEN: set[tuple[str, str, int, int, int, int]] = set()
 _RECONCILED_MARKER_BACKFILL_LOCK = threading.Lock()
 
@@ -104,6 +113,215 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
         _RUN_STATE_LEDGER_SEEN.add(key)
     except Exception:
         logger.exception("runs_dir: failed to append run-state ledger")
+
+
+def _run_state_path_under_root(path: Path, root_resolved: Path) -> bool:
+    if path.name != "state.json":
+        return False
+    try:
+        path.resolve().relative_to(root_resolved)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    try:
+        ledger = run_state_ledger_path(root)
+        st = ledger.stat()
+    except OSError:
+        return []
+    signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    root_key = str(root)
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return []
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
+        if cached is not None:
+            cached_signature, index = cached
+            if cached_signature == signature:
+                return [
+                    path for _, path in index.get(agent_sid, [])
+                    if _run_state_path_under_root(path, root_resolved)
+                ]
+    latest_by_key: dict[tuple[str, str], tuple[float, Path]] = {}
+    try:
+        with ledger.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                sid = str(row.get("session_id") or "")
+                state_path = row.get("state_path")
+                if not sid or not state_path:
+                    continue
+                path = Path(str(state_path))
+                if not _run_state_path_under_root(path, root_resolved):
+                    continue
+                try:
+                    written_at = float(row.get("written_at"))
+                except (TypeError, ValueError):
+                    written_at = 0.0
+                key = (sid, str(path))
+                current = latest_by_key.get(key)
+                if current is None or written_at >= current[0]:
+                    latest_by_key[key] = (written_at, path)
+    except OSError:
+        return []
+    index: dict[str, list[tuple[float, Path]]] = {}
+    for (sid, _), value in latest_by_key.items():
+        index.setdefault(sid, []).append(value)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
+    return [path for _, path in index.get(agent_sid, [])]
+
+
+def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    ledger_paths = ledger_state_files_for_sid(root, agent_sid)
+    if ledger_paths:
+        return ledger_paths
+    did_backfill = ensure_run_state_ledger_backfilled(root)
+    if did_backfill:
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            _RUN_STATE_LEDGER_CACHE.pop(str(root), None)
+        ledger_paths = ledger_state_files_for_sid(root, agent_sid)
+        if ledger_paths:
+            return ledger_paths
+    return recent_state_index_for_root(root).get(agent_sid, [])
+
+
+def recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
+    now = time.monotonic()
+    root_key = str(root)
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return {}
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+        if cached is not None:
+            ts, _fingerprint, index = cached
+            if now - ts < _RUN_STATE_RECENT_INDEX_TTL_S:
+                return _filter_recent_state_index(index, root_resolved)
+        event = _RUN_STATE_RECENT_INDEX_INFLIGHT.get(root_key)
+        if event is None:
+            event = threading.Event()
+            _RUN_STATE_RECENT_INDEX_INFLIGHT[root_key] = event
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        event.wait(1.0)
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+            return _filter_recent_state_index(cached[2], root_resolved) if cached is not None else {}
+    try:
+        candidates = _recent_state_candidates(root, root_resolved)
+        if not candidates:
+            return {}
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            cached = _RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+            if cached is not None:
+                ts, fingerprint, index = cached
+                if (
+                    fingerprint == candidates
+                    and now - ts < _RUN_STATE_RECENT_INDEX_MAX_AGE_S
+                ):
+                    _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, fingerprint, index)
+                    return _filter_recent_state_index(index, root_resolved)
+        index = _build_recent_state_index(candidates, root_resolved)
+        _backfill_run_state_ledger(root, index)
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
+        return index
+    finally:
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            done = _RUN_STATE_RECENT_INDEX_INFLIGHT.pop(root_key, None)
+        if done is not None:
+            done.set()
+
+
+def _recent_state_candidates(
+    root: Path,
+    root_resolved: Path | None = None,
+) -> tuple[tuple[int, int, str], ...]:
+    candidates: list[tuple[int, int, str]] = []
+    if root_resolved is None:
+        try:
+            root_resolved = root.resolve()
+        except OSError:
+            return ()
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                state_path = Path(entry.path) / "state.json"
+                if not _run_state_path_under_root(state_path, root_resolved):
+                    continue
+                try:
+                    st = state_path.stat()
+                except OSError:
+                    continue
+                candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
+    except OSError:
+        return ()
+    return tuple(heapq.nlargest(_RUN_STATE_RECENT_SCAN_LIMIT, candidates))
+
+
+def _filter_recent_state_index(
+    index: dict[str, list[Path]],
+    root_resolved: Path,
+) -> dict[str, list[Path]]:
+    filtered: dict[str, list[Path]] = {}
+    for sid, paths in index.items():
+        safe_paths = [
+            path for path in paths
+            if _run_state_path_under_root(path, root_resolved)
+        ]
+        if safe_paths:
+            filtered[sid] = safe_paths
+    return filtered
+
+
+def _build_recent_state_index(
+    candidates: tuple[tuple[int, int, str], ...],
+    root_resolved: Path | None = None,
+) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for _, _, state_path in candidates:
+        path = Path(state_path)
+        if root_resolved is not None and not _run_state_path_under_root(path, root_resolved):
+            continue
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        agent_sid = str(st.get("session_id") or "")
+        if not agent_sid:
+            continue
+        index.setdefault(agent_sid, []).append(path)
+    return index
+
+
+def _backfill_run_state_ledger(root: Path, index: dict[str, list[Path]]) -> None:
+    try:
+        root_resolved = root.resolve()
+    except Exception:
+        return
+    for paths in index.values():
+        for path in paths:
+            try:
+                if not _run_state_path_under_root(path, root_resolved):
+                    continue
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                _append_run_state_ledger(path, data)
 
 
 def ensure_run_state_ledger_backfilled(root: Optional[Path] = None) -> bool:

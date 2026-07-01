@@ -17,6 +17,8 @@ _BACKEND = _HERE.parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+import runs_dir as runs_dir_mod  # noqa: E402
+
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
@@ -154,7 +156,7 @@ def test_jsonl_path_positive_cache(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         project = claude_home / "projects" / "encoded"
         project.mkdir(parents=True)
         target = project / "agent-sid.jsonl"
@@ -169,7 +171,7 @@ def test_jsonl_path_positive_cache(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -196,7 +198,7 @@ def test_jsonl_path_encoded_cwd_fast_path(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         target_dir = claude_home / "projects" / encode_cwd(str(project_root))
         target_dir.mkdir(parents=True)
         target = target_dir / "agent-sid.jsonl"
@@ -210,7 +212,7 @@ def test_jsonl_path_encoded_cwd_fast_path(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -238,7 +240,7 @@ def test_jsonl_read_path_uses_session_provider_config(failures: list[str]) -> No
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         target_dir = claude_home / "projects" / encode_cwd(str(project_root))
         target_dir.mkdir(parents=True)
         target = target_dir / "agent-sid.jsonl"
@@ -261,7 +263,7 @@ def test_jsonl_read_path_uses_session_provider_config(failures: list[str]) -> No
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         shutil.rmtree(claude_home, ignore_errors=True)
         shutil.rmtree(project_root, ignore_errors=True)
 
@@ -284,7 +286,7 @@ def test_jsonl_path_negative_cache(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers.Path.glob = counted_glob  # type: ignore[method-assign]
         first = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
         second = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
@@ -295,7 +297,7 @@ def test_jsonl_path_negative_cache(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -321,7 +323,7 @@ def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers.Path.glob = counted_glob  # type: ignore[method-assign]
         first = helpers.compute_jsonl_path("/tmp", "missing-agent-a")
         second = helpers.compute_jsonl_path("/tmp", "missing-agent-b")
@@ -332,7 +334,7 @@ def test_jsonl_path_indexes_multiple_misses(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -361,7 +363,7 @@ def test_jsonl_path_coalesces_concurrent_provider_index(failures: list[str]) -> 
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers.Path.glob = counted_glob  # type: ignore[method-assign]
 
         results: list[Path | None] = []
@@ -393,7 +395,7 @@ def test_jsonl_path_coalesces_concurrent_provider_index(failures: list[str]) -> 
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -433,7 +435,7 @@ def test_jsonl_path_targets_run_state_by_sid(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
 
         found = helpers.compute_jsonl_path("/tmp", "agent-sid")
         check(found == newer_jsonl, "jsonl helper targets run-state by sid", failures)
@@ -441,7 +443,52 @@ def test_jsonl_path_targets_run_state_by_sid(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        if old_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_config_dir
+        shutil.rmtree(claude_home, ignore_errors=True)
+
+
+def test_jsonl_path_uses_run_state_ledger_before_recent_scan(failures: list[str]) -> None:
+    import orchs.jsonl_helpers as helpers
+    from paths import ba_home
+
+    claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-ledger-"))
+    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    original_candidates = runs_dir_mod._recent_state_candidates
+
+    def fail_candidates(*_args, **_kwargs):
+        raise AssertionError("ledger-known sid should not scan recent run dirs")
+
+    try:
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+        (claude_home / "projects").mkdir(parents=True)
+        runs = ba_home() / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        run_dir = runs / "ledger-known"
+        run_dir.mkdir()
+        jsonl = run_dir / "session_events.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+        runs_dir_mod.atomic_write_json(
+            run_dir / "state.json",
+            {"session_id": "ledger-agent", "jsonl_path": str(jsonl)},
+        )
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        runs_dir_mod._recent_state_candidates = fail_candidates  # type: ignore[assignment]
+
+        found = helpers.compute_jsonl_path("/tmp", "ledger-agent")
+        check(found == jsonl, "jsonl helper uses run-state ledger before recent scan", failures)
+    finally:
+        runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore[assignment]
+        helpers._JSONL_PATH_CACHE.clear()
+        helpers._CLAUDE_PATH_INDEX = None
+        helpers._RUN_STATE_PATH_CACHE.clear()
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -455,7 +502,7 @@ def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
 
     claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-cache-"))
     old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    original_candidates = helpers._recent_state_candidates
+    original_candidates = runs_dir_mod._recent_state_candidates
     calls = {"candidates": 0}
 
     def counted_candidates(*args, **kwargs):
@@ -479,19 +526,19 @@ def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
-        helpers._recent_state_candidates = counted_candidates  # type: ignore[assignment]
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+        runs_dir_mod._recent_state_candidates = counted_candidates  # type: ignore[assignment]
 
         first = helpers.compute_jsonl_path("/tmp", "agent-a")
         second = helpers.compute_jsonl_path("/tmp", "agent-b")
         check(first is not None and second is not None, "jsonl helper resolves cached run-state sids", failures)
         check(calls["candidates"] == 1, "jsonl helper reuses recent run-state index", failures)
     finally:
-        helpers._recent_state_candidates = original_candidates  # type: ignore[assignment]
+        runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore[assignment]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -510,7 +557,7 @@ def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
         (claude_home / "projects").mkdir(parents=True)
         runs = ba_home() / "runs"
         runs.mkdir(parents=True, exist_ok=True)
-        for idx in range(helpers._RUN_STATE_RECENT_SCAN_LIMIT + 8):
+        for idx in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 8):
             run_dir = runs / f"run-{idx}"
             run_dir.mkdir()
             (run_dir / "state.json").write_text(
@@ -520,13 +567,13 @@ def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
 
         found = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
         check(found is None, "jsonl helper returns missing run-state sid", failures)
-        _, _, candidates, _ = helpers._RUN_STATE_RECENT_INDEX or ("", 0.0, (), {})
+        _, candidates, _ = next(iter(runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.values()), (0.0, (), {}))
         check(
-            len(candidates) == helpers._RUN_STATE_RECENT_SCAN_LIMIT,
+            len(candidates) == runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT,
             "jsonl helper bounds run-state miss to recent index",
             failures,
         )
@@ -534,7 +581,7 @@ def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -555,7 +602,7 @@ def test_missing_jsonl_warning_is_throttled(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers._MISSING_JSONL_WARNED_AT.clear()
         helpers.log.warning = lambda *args, **kwargs: warnings.append(args)  # type: ignore[assignment]
 
@@ -570,7 +617,7 @@ def test_missing_jsonl_warning_is_throttled(failures: list[str]) -> None:
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
-        helpers._RUN_STATE_RECENT_INDEX = None
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
         helpers._MISSING_JSONL_WARNED_AT.clear()
         if old_config_dir is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -593,6 +640,7 @@ def main() -> int:
         test_jsonl_path_indexes_multiple_misses(failures)
         test_jsonl_path_coalesces_concurrent_provider_index(failures)
         test_jsonl_path_targets_run_state_by_sid(failures)
+        test_jsonl_path_uses_run_state_ledger_before_recent_scan(failures)
         test_jsonl_path_reuses_recent_run_state_index(failures)
         test_jsonl_path_run_state_miss_stays_bounded(failures)
         test_missing_jsonl_warning_is_throttled(failures)
