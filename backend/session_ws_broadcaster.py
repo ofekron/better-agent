@@ -18,6 +18,8 @@ import asyncio
 import logging
 from typing import Optional
 
+from messages_delta_compaction import compact_message_delta_payload
+
 logger = logging.getLogger(__name__)
 
 # Per-process set of unknown change kinds we've already warned about.
@@ -255,7 +257,7 @@ class SessionWSBroadcaster:
                     "type": "messages_delta",
                     "data": {
                         "app_session_id": sid,
-                        "messages": [msg],
+                        "messages": [compact_message_delta_payload(msg)],
                     },
                 })
             return
@@ -283,7 +285,7 @@ class SessionWSBroadcaster:
                     "type": "messages_delta",
                     "data": {
                         "app_session_id": sid,
-                        "messages": [msg],
+                        "messages": [compact_message_delta_payload(msg)],
                     },
                 })
             return
@@ -294,7 +296,7 @@ class SessionWSBroadcaster:
                     "type": "messages_delta",
                     "data": {
                         "app_session_id": sid,
-                        "messages": [msg],
+                        "messages": [compact_message_delta_payload(msg)],
                     },
                 })
             return
