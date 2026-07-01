@@ -78,6 +78,37 @@ class _FakeContinuationClient:
         )
 
 
+class _FakeChainedNotificationClient:
+    """Two background tasks. Task-2's terminal notification arrives DURING
+    task-1's continuation turn; task-1's ResultMessage must re-open the
+    grace window (not zero it) so task-2's continuation isn't reaped
+    mid-start."""
+
+    def __init__(self) -> None:
+        self.second_result_yielded_at: float | None = None
+
+    async def receive_messages(self):
+        await asyncio.sleep(0.03)
+        yield _notification("task-1")
+        await asyncio.sleep(0.04)
+        yield runner.AssistantMessage(content=[], model="m")   # continuation A
+        await asyncio.sleep(0.04)
+        yield _notification("task-2")                          # during turn A
+        await asyncio.sleep(0.04)
+        yield runner.ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="sid-1", result="A done",
+        )
+        await asyncio.sleep(0.1)                               # B's TTFT
+        yield runner.AssistantMessage(content=[], model="m")   # continuation B
+        await asyncio.sleep(0.3)
+        self.second_result_yielded_at = time.monotonic()
+        yield runner.ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="sid-1", result="B done",
+        )
+
+
 class _FakeHungContinuationClient:
     """Continuation turn that never yields a ResultMessage — the linger
     hard cap must bound the wait."""
@@ -87,6 +118,56 @@ class _FakeHungContinuationClient:
         yield _notification()
         await asyncio.sleep(0.04)
         yield runner.AssistantMessage(content=[], model="m")
+        await asyncio.sleep(3600)
+
+
+class _FakeRunawayStreamingClient:
+    """Continuation that keeps streaming assistant messages forever with
+    no ResultMessage. The cap must LATCH: continued streaming must not
+    re-arm busy into unbounded successive cap windows."""
+
+    async def receive_messages(self):
+        await asyncio.sleep(0.03)
+        yield _notification()
+        while True:
+            await asyncio.sleep(0.02)
+            yield runner.AssistantMessage(content=[], model="m")
+
+
+class _DescendantsThenNoneProcessControl:
+    """Detached work alive for the first polls, then gone — models a
+    run_in_background shell exiting during the linger."""
+
+    def __init__(self, busy_polls: int = 3) -> None:
+        self._remaining = busy_polls
+
+    def has_detached_descendants(self, *_args, **_kwargs) -> bool:
+        if self._remaining > 0:
+            self._remaining -= 1
+            return True
+        return False
+
+    def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
+        return 0
+
+
+class _FakeShellExitContinuationClient:
+    """No task notifications at all — the continuation trigger is the
+    detached shell's exit (has_desc true→false must open the grace
+    window). The continuation's messages lag the shell exit."""
+
+    def __init__(self) -> None:
+        self.result_yielded_at: float | None = None
+
+    async def receive_messages(self):
+        await asyncio.sleep(0.15)
+        yield runner.AssistantMessage(content=[], model="m")
+        await asyncio.sleep(0.2)
+        self.result_yielded_at = time.monotonic()
+        yield runner.ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="sid-1", result="done",
+        )
         await asyncio.sleep(3600)
 
 
@@ -160,6 +241,27 @@ async def _run_case() -> list[tuple[str, bool, str]]:
             f"exited_at={exited_at_holder[0]}",
         ))
 
+        chained_dir = Path(_TMP_HOME) / "chained"
+        chained_dir.mkdir()
+        runner._LingerStreamState._CONTINUATION_EXPECT_S = 0.25
+        chained_client = _FakeChainedNotificationClient()
+        await runner._linger_for_background_work(
+            chained_dir,
+            _Log(),
+            client=chained_client,
+            outstanding_tasks={"task-1", "task-2"},
+            poll_interval_s=0.01,
+        )
+        chained_exit = time.monotonic()
+        results.append((
+            "chained notification during a continuation survives to the second result",
+            chained_client.second_result_yielded_at is not None
+            and chained_exit >= chained_client.second_result_yielded_at,
+            f"second_result={chained_client.second_result_yielded_at} "
+            f"exited={chained_exit}",
+        ))
+        runner._LingerStreamState._CONTINUATION_EXPECT_S = 0.05
+
         runner._LingerStreamState._CONTINUATION_CAP_S = 0.2
         hung_dir = Path(_TMP_HOME) / "hung"
         hung_dir.mkdir()
@@ -176,6 +278,46 @@ async def _run_case() -> list[tuple[str, bool, str]]:
             "hung continuation is bounded by the hard cap",
             elapsed < 2.0,
             f"elapsed={elapsed:.2f}s",
+        ))
+
+        runaway_dir = Path(_TMP_HOME) / "runaway"
+        runaway_dir.mkdir()
+        start = time.monotonic()
+        await runner._linger_for_background_work(
+            runaway_dir,
+            _Log(),
+            client=_FakeRunawayStreamingClient(),
+            outstanding_tasks={"task-1"},
+            poll_interval_s=0.01,
+        )
+        elapsed = time.monotonic() - start
+        results.append((
+            "runaway streaming continuation cannot re-arm past the cap",
+            elapsed < 2.0,
+            f"elapsed={elapsed:.2f}s",
+        ))
+        runner._LingerStreamState._CONTINUATION_CAP_S = original_cap
+
+        proc_control.process_control = (  # type: ignore[assignment]
+            lambda: _DescendantsThenNoneProcessControl()
+        )
+        runner._LingerStreamState._CONTINUATION_EXPECT_S = 0.3
+        shell_dir = Path(_TMP_HOME) / "shell-exit"
+        shell_dir.mkdir()
+        shell_client = _FakeShellExitContinuationClient()
+        await runner._linger_for_background_work(
+            shell_dir,
+            _Log(),
+            client=shell_client,
+            outstanding_tasks=set(),
+            poll_interval_s=0.01,
+        )
+        shell_exit = time.monotonic()
+        results.append((
+            "detached-shell exit opens grace; continuation survives to result",
+            shell_client.result_yielded_at is not None
+            and shell_exit >= shell_client.result_yielded_at,
+            f"result={shell_client.result_yielded_at} exited={shell_exit}",
         ))
     finally:
         proc_control.process_control = original_process_control  # type: ignore[assignment]

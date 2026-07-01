@@ -43,7 +43,11 @@ from env_compat import dual_env, get_env
 from event_bus import BusEvent, bus as event_bus
 import browser_trust
 import hook_store
-from event_shape import extract_output_text, strip_synthetic_events
+from event_shape import (
+    has_assistant_text,
+    project_content_snapshot,
+    strip_synthetic_events,
+)
 from paths import ba_home
 from i18n import t
 from provisioning.prompts import render_prompt
@@ -6352,8 +6356,17 @@ def _strip_synthetic_events_from_tree(tree: dict) -> None:
                     # `orchs.base._uid_idx_for`). Pop forces a rebuild on
                     # the next apply_event.
                     m.pop("_uid_idx", None)
-                    # Re-extract content without synthetic text
-                    new_content = extract_output_text(cleaned)
+                    # Re-extract content without synthetic text. Semantics:
+                    # a message left with NO assistant text blanks (it was
+                    # synthetic-only); a message whose remaining real events
+                    # merely end on a tool/thinking boundary keeps its
+                    # current snapshot (project_content_snapshot guard).
+                    if has_assistant_text(cleaned):
+                        new_content = project_content_snapshot(
+                            cleaned, m.get("content"),
+                        )
+                    else:
+                        new_content = ""
                     if new_content != (m.get("content") or ""):
                         session_manager.update_running_content(
                             sid, m["id"], new_content,
