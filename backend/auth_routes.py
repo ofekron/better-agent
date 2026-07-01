@@ -206,8 +206,6 @@ async def logout(request: Request) -> None:
 async def me(request: Request) -> dict:
     """Returns the logged-in user or 401. Used by the frontend at
     mount time to decide whether to render <Login /> or <AppMain />."""
-    if auth.is_test_auth_bypass_request(request):
-        return {"username": "test-auth-bypass"}
     user = request.session.get("user")
     if not user:
         raise HTTPException(status_code=401, detail="unauthenticated")
