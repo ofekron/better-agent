@@ -705,7 +705,18 @@ async def test_run_state_ledger_cache_invalidates_on_append() -> None:
         state_b,
         {"session_id": "LEDGER-APPEND-B", "jsonl_path": "/tmp/ledger-append-b.jsonl"},
     )
-    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-APPEND-B") == [state_b]
+    original_json_loads = runs_dir_mod.json.loads
+
+    def fail_jsonl_parse(raw, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if '"session_id"' in raw:
+            raise AssertionError("append should extend current in-memory cache")
+        return original_json_loads(raw, *args, **kwargs)
+
+    runs_dir_mod.json.loads = fail_jsonl_parse  # type: ignore
+    try:
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-APPEND-B") == [state_b]
+    finally:
+        runs_dir_mod.json.loads = original_json_loads  # type: ignore
     print("PASS test_run_state_ledger_cache_invalidates_on_append")
 
 
@@ -812,8 +823,86 @@ async def test_run_state_ledger_sqlite_cache_invalidates_on_append() -> None:
         state_b,
         {"session_id": "LEDGER-SQLITE-INVALIDATE-B", "jsonl_path": "/tmp/sqlite-invalidate-b.jsonl"},
     )
-    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-INVALIDATE-B") == [state_b]
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    original_json_loads = runs_dir_mod.json.loads
+
+    def fail_jsonl_parse(raw, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if '"session_id"' in raw:
+            raise AssertionError("append should extend current sqlite cache")
+        return original_json_loads(raw, *args, **kwargs)
+
+    runs_dir_mod.json.loads = fail_jsonl_parse  # type: ignore
+    try:
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-INVALIDATE-B") == [state_b]
+    finally:
+        runs_dir_mod.json.loads = original_json_loads  # type: ignore
     print("PASS test_run_state_ledger_sqlite_cache_invalidates_on_append")
+
+
+async def test_run_state_ledger_concurrent_appends_extend_cache_without_lost_rows() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    warm_dir = root / "run-ledger-concurrent-warm"
+    warm_dir.mkdir(parents=True, exist_ok=True)
+    warm_state = warm_dir / "state.json"
+    warm_state.write_text(
+        '{"session_id":"LEDGER-CONCURRENT-WARM","jsonl_path":"/tmp/concurrent-warm.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        warm_state,
+        {"session_id": "LEDGER-CONCURRENT-WARM", "jsonl_path": "/tmp/concurrent-warm.jsonl"},
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-CONCURRENT-WARM") == [warm_state]
+
+    errors: list[BaseException] = []
+
+    def append_one(index: int) -> None:
+        try:
+            sid = f"LEDGER-CONCURRENT-{index}"
+            run_dir = root / f"run-ledger-concurrent-{index}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state_path = run_dir / "state.json"
+            state_path.write_text(
+                f'{{"session_id":"{sid}","jsonl_path":"/tmp/{sid}.jsonl"}}',
+                encoding="utf-8",
+            )
+            _append_run_state_ledger(
+                state_path,
+                {"session_id": sid, "jsonl_path": f"/tmp/{sid}.jsonl"},
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=append_one, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+    assert not errors, errors
+    assert all(not thread.is_alive() for thread in threads)
+
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    original_json_loads = runs_dir_mod.json.loads
+
+    def fail_jsonl_parse(raw, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if '"session_id"' in raw:
+            raise AssertionError("concurrent appends should extend sqlite cache")
+        return original_json_loads(raw, *args, **kwargs)
+
+    runs_dir_mod.json.loads = fail_jsonl_parse  # type: ignore
+    try:
+        for index in range(8):
+            sid = f"LEDGER-CONCURRENT-{index}"
+            expected = root / f"run-ledger-concurrent-{index}" / "state.json"
+            assert runs_dir_mod.ledger_state_files_for_sid(root, sid) == [expected]
+    finally:
+        runs_dir_mod.json.loads = original_json_loads  # type: ignore
+    print("PASS test_run_state_ledger_concurrent_appends_extend_cache_without_lost_rows")
 
 
 async def test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback() -> None:
@@ -2152,6 +2241,7 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
     asyncio.run(test_run_state_ledger_sqlite_cache_skips_jsonl_parse())
     asyncio.run(test_run_state_ledger_sqlite_cache_invalidates_on_append())
+    asyncio.run(test_run_state_ledger_concurrent_appends_extend_cache_without_lost_rows())
     asyncio.run(test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback())
     asyncio.run(test_run_state_ledger_sqlite_cache_rejects_poisoned_paths())
     asyncio.run(test_run_state_ledger_sqlite_cache_dedupes_duplicate_state_paths())
