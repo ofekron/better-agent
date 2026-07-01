@@ -270,7 +270,7 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     await act(async () => {
       gate!.resolve(SESSION_DELETE, { detail: "nope" }, 500);
-      await deletion!;
+      await expect(deletion!).rejects.toThrow("nope");
     });
 
     await waitFor(() => {
