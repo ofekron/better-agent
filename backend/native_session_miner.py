@@ -1,26 +1,33 @@
-"""Native provider-transcript session miner.
+"""Provider-native transcript session miners.
 
-:class:`NativeSessionMiner` is the native-source counterpart to
-:class:`session_miner.SessionMiner`. Both subclass :class:`SessionMinerBase`
-and yield the same :class:`SessionVisit`, so every consumer
-(:class:`SessionConsumer`) works against either source unchanged. The
-difference is the message source: BA session snapshots vs the provider CLI's
-own transcript.
+Three native :class:`SessionMinerBase` implementations, one per supported
+provider, plus the shared parser. They are the native-source counterparts to
+:class:`session_miner.SessionMiner` (the Better Agent snapshot source);
+together that is four SessionMiner implementations of the one abstraction.
 
-Discovery uses the Better Agent session record ONLY as an index — it gives the
-reliable ``cwd``, the provider, and the ``agent_session_id`` that links to the
-native transcript. The prompt CONTENT is read from the native transcript, which
-is the raw ground truth (the BA render tree is a projection that can have gaps
-after crashes/recovery). This is Claude-first: a session resolves to a native
-transcript only when ``<claude projects root>/<agent_session_id>.jsonl`` exists,
-so non-Claude providers are skipped until their native readers land.
+- :class:`NativeClaudeSessionMiner` — Claude ``projects/<cwd>/<sid>.jsonl``.
+- :class:`NativeCodexSessionMiner` — Codex run-dir ``session_events.jsonl``
+  (Claude-shaped, captured by the runner from the Codex stream).
+- :class:`NativeGeminiSessionMiner` — Gemini run-dir ``session_events.jsonl``
+  (Claude-shaped, pre-normalized by ``runner_gemini``).
 
-A native user line is kept only when it is a REAL typed prompt: ``type=="user"``
-with text content, rejecting tool-result turns, sidechain/meta turns, and the
-CLI's command/stdout/system wrappers. Assistant turns are bridged into the
-render-tree event shape so the shared consumer helpers
-(``extract_output_text`` for the previous reply, ``_edited_files_from_events``
-for edited files) work without modification.
+Discovery uses the Better Agent session record only as an index — it gives the
+reliable ``cwd``, the ``provider_id`` (→ provider kind), and the
+``agent_session_id`` that links to the native transcript. Prompt CONTENT is read
+from the native transcript, the raw ground truth (the BA render tree is a
+projection that can have gaps after crashes/recovery).
+
+Codex and Gemini write Claude-shaped events, so all three miners share one
+parser (:func:`_native_messages`). A native user line is kept only when it is a
+REAL typed prompt: ``type=="user"`` with text content, rejecting tool-result
+turns, sidechain/meta turns, and the CLI's command/stdout wrappers. Assistant
+turns are bridged into the render-tree event shape so the shared consumer
+helpers (``extract_output_text`` for the previous reply,
+``_edited_files_from_events`` for edited files) work without modification.
+
+Each miner namespaces its watermark key (``claude:``/``codex:``/``gemini:``) so
+they can share one persisted state dict with the BA snapshot miner without
+collision.
 """
 from __future__ import annotations
 
@@ -28,11 +35,10 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from paths import claude_projects_root_for_session, encode_cwd
+from paths import bc_home, claude_projects_root_for_session, encode_cwd
 from session_miner import SessionMinerBase, SessionVisit, sessions_dir
 
 # Claude CLI user lines that are injected context/commands, not typed prompts.
-# Matched against the stripped content's leading tag.
 _NON_PROMPT_TAGS = (
     "<command-name>",
     "<command-message>",
@@ -56,22 +62,20 @@ _NON_PROMPT_TAGS = (
 
 _TOOL_EDIT_NAMES = {"Edit", "MultiEdit", "Write", "replace", "write_file"}
 
+_RUNS_DIR_NAME = "runs"
+
 
 def _is_real_user_prompt(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    lower = stripped.lower()
-    if lower.startswith("caveat:"):
+    if stripped.lower().startswith("caveat:"):
         return False
     return not stripped.startswith(_NON_PROMPT_TAGS)
 
 
 def _user_text(content: object) -> str | None:
-    """Extract a real typed-prompt string from a native user message, or None.
-
-    Rejects tool-result turns and turns whose only text is a CLI wrapper.
-    """
+    """Extract a real typed-prompt string from a native user message, or None."""
     if isinstance(content, str):
         return content if _is_real_user_prompt(content) else None
     if not isinstance(content, list):
@@ -104,18 +108,28 @@ def _assistant_text(content: object) -> str:
     return "\n".join(parts)
 
 
-def _native_messages(native_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
-    """Parse a native Claude transcript into (messages, events_by_msg_id).
+def _has_edit_tool(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in _TOOL_EDIT_NAMES
+        for b in content
+    )
 
-    ``messages`` holds the user/assistant turns in order (for role-based
-    iteration and timestamp derivation). ``events_by_msg_id`` holds, per
-    assistant turn, a single render-tree-shaped ``agent_message`` event carrying
-    the native content blocks — enough for ``extract_output_text`` (previous
-    reply) and ``_edited_files_from_events`` (tool edits) without bespoke logic.
+
+def _native_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Parse a Claude-shaped transcript into (messages, events_by_msg_id).
+
+    Works for both Claude's own ``projects/<cwd>/<sid>.jsonl`` and the
+    Codex/Gemini run-dir ``session_events.jsonl`` (both are Claude message
+    shaped). ``messages`` holds user/assistant turns in order; per assistant
+    turn a single render-tree-shaped ``agent_message`` event carries the native
+    content blocks — enough for ``extract_output_text`` (previous reply) and
+    ``_edited_files_from_events`` (tool edits) without bespoke logic.
     """
     messages: list[dict] = []
     events_by_msg_id: dict[str, list[dict]] = {}
-    with native_path.open(encoding="utf-8") as f:
+    with transcript_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -155,15 +169,6 @@ def _native_messages(native_path: Path) -> tuple[list[dict], dict[str, list[dict
     return messages, events_by_msg_id
 
 
-def _has_edit_tool(content: object) -> bool:
-    if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in _TOOL_EDIT_NAMES
-        for b in content
-    )
-
-
 def _mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -171,55 +176,150 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-class NativeSessionMiner(SessionMinerBase):
-    """Provider-native transcript source (Claude-first).
+def _provider_kind(data: dict) -> str:
+    """Resolve a BA session record's provider kind (claude/codex/gemini).
 
-    Discovery iterates Better Agent session records (``sessions/*.json``) for
-    the reliable ``cwd`` and ``agent_session_id``; content is read from the
-    linked native Claude transcript. The watermark key is the BA session-json
-    filename (so it shares state shape with :class:`SessionMiner`) and the
-    fingerprint is the max of the BA record and native transcript mtimes, so a
-    change to either triggers a re-mine.
+    Defaults to ``claude`` when the provider is missing or unconfigured, mirroring
+    the backend's own default (``config_store`` treats unknown/missing kind as
+    claude).
+    """
+    provider_id = data.get("provider_id")
+    if isinstance(provider_id, str) and provider_id:
+        try:
+            import config_store
+            rec = config_store.get_provider(provider_id)
+        except Exception:
+            rec = None
+        if isinstance(rec, dict):
+            kind = rec.get("kind")
+            if isinstance(kind, str) and kind:
+                return kind
+    return "claude"
+
+
+# Codex/Gemini run-dir index: {app_session_id -> run_dir}. Built on demand and
+# refreshed when the runs dir mtime changes, so a long-lived process does not
+# rescan thousands of run dirs every mining pass.
+_RUN_INDEX: dict[str, Path] | None = None
+_RUN_INDEX_MTIME: float = 0.0
+
+
+def _runs_root() -> Path:
+    return bc_home() / _RUNS_DIR_NAME
+
+
+def _run_index() -> dict[str, Path]:
+    global _RUN_INDEX, _RUN_INDEX_MTIME
+    root = _runs_root()
+    try:
+        root_mtime = root.stat().st_mtime
+    except OSError:
+        return {}
+    if _RUN_INDEX is not None and root_mtime == _RUN_INDEX_MTIME:
+        return _RUN_INDEX
+    index: dict[str, Path] = {}
+    for state_path in root.glob("*/state.json"):
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        aid = data.get("app_session_id")
+        if isinstance(aid, str) and aid:
+            index[aid] = state_path.parent
+    _RUN_INDEX = index
+    _RUN_INDEX_MTIME = root_mtime
+    return index
+
+
+def _iter_ba_session_records(root: Path) -> Iterable[tuple[str, dict]]:
+    """Yield (session_filename, data) for every non-summary BA session record."""
+    if not root.exists():
+        return
+    for session_json in sorted(root.glob("*.json")):
+        if session_json.name.endswith(".summary.json"):
+            continue
+        try:
+            data = json.loads(session_json.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            yield session_json.name, data
+
+
+class _NativeMinerBase(SessionMinerBase):
+    """Shared discovery + parsing for native miners.
+
+    Subclasses set :attr:`_kind` (the provider kind to mine) and
+    :attr:`_key_prefix` (the watermark namespace). :meth:`_resolve_transcript`
+    resolves the native transcript path for a BA session record (or None).
     """
 
-    def __init__(self, state: dict, *, root: Path | None = None) -> None:
-        super().__init__(state, root=root or sessions_dir())
+    _kind: str = ""
+    _key_prefix: str = ""
+
+    def _resolve_transcript(self, data: dict, sid: str) -> Path | None:
+        raise NotImplementedError
 
     def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
-        if not self._root.exists():
-            return
-        for session_json in sorted(self._root.glob("*.json")):
-            if session_json.name.endswith(".summary.json"):
+        for session_name, data in _iter_ba_session_records(self._root):
+            if _provider_kind(data) != self._kind:
+                continue
+            sid = Path(session_name).stem
+            transcript = self._resolve_transcript(data, sid)
+            if transcript is None or not transcript.exists():
                 continue
             try:
-                data = json.loads(session_json.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            agent_session_id = data.get("agent_session_id")
-            if not isinstance(agent_session_id, str) or not agent_session_id:
-                continue
-            cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
-            if not cwd:
-                continue
-            native_path = (
-                claude_projects_root_for_session(data)
-                / encode_cwd(cwd)
-                / f"{agent_session_id}.jsonl"
-            )
-            if not native_path.exists():
-                continue  # non-Claude provider or transcript not present yet
-            try:
-                messages, events_by_msg_id = _native_messages(native_path)
+                messages, events_by_msg_id = _native_messages(transcript)
             except OSError:
                 continue
-            sid = session_json.stem
             visit = SessionVisit(
                 sid=sid,
-                cwd=cwd,
+                cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else "",
                 data=data,
                 messages=messages,
                 events_by_msg_id=events_by_msg_id,
             )
-            yield session_json.name, visit, max(_mtime(session_json), _mtime(native_path))
+            yield f"{self._key_prefix}{session_name}", visit, max(
+                _mtime(self._root / session_name), _mtime(transcript),
+            )
+
+
+class NativeClaudeSessionMiner(_NativeMinerBase):
+    """Claude native transcript source (``projects/<cwd>/<sid>.jsonl``)."""
+
+    _kind = "claude"
+    _key_prefix = "claude:"
+
+    def _resolve_transcript(self, data: dict, sid: str) -> Path | None:
+        agent_session_id = data.get("agent_session_id")
+        cwd = data.get("cwd")
+        if not isinstance(agent_session_id, str) or not agent_session_id:
+            return None
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        return claude_projects_root_for_session(data) / encode_cwd(cwd) / f"{agent_session_id}.jsonl"
+
+
+class _RunDirNativeMiner(_NativeMinerBase):
+    """Codex/Gemini native source: run-dir ``session_events.jsonl``.
+
+    Both providers write Claude-shaped events captured by their runners into a
+    per-run dir; the run dir is resolved from the BA app session id (the session
+    record's filename stem) via the run-dir index (``state.json.app_session_id``).
+    """
+
+    def _resolve_transcript(self, data: dict, sid: str) -> Path | None:
+        run_dir = _run_index().get(sid)
+        if run_dir is None:
+            return None
+        return run_dir / "session_events.jsonl"
+
+
+class NativeCodexSessionMiner(_RunDirNativeMiner):
+    _kind = "codex"
+    _key_prefix = "codex:"
+
+
+class NativeGeminiSessionMiner(_RunDirNativeMiner):
+    _kind = "gemini"
+    _key_prefix = "gemini:"
