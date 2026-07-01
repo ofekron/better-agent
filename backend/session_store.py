@@ -4415,6 +4415,24 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     return [found[sid] for sid in ids if sid in found]
 
 
+def get_indexed_session_summaries_by_ids_if_current(
+    session_ids: Iterable[str],
+    expected_summary_index_version: int,
+) -> Optional[list[dict]]:
+    ids = [sid for sid in session_ids if sid]
+    with _summary_index_lock:
+        if _summary_index_version != expected_summary_index_version:
+            return None
+        summaries = [
+            _summary_index[sid]
+            for sid in ids
+            if sid in _summary_index
+        ]
+    if len(summaries) != len(ids):
+        return None
+    return summaries
+
+
 def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     ids = [sid for sid in session_ids if sid]
     if not ids:
