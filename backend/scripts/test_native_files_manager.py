@@ -71,6 +71,15 @@ def _live_keys(nfm):
     return {k for k, t in nfm._tailers.items() if t.alive}
 
 
+def _make_run_state_backfill_marker_stale(root):
+    from runs_dir import run_state_ledger_backfill_marker_path
+
+    run_state_ledger_backfill_marker_path(root).write_text(
+        '{"version":-1,"backfilled_at":1}',
+        encoding="utf-8",
+    )
+
+
 async def _wait_for(predicate, *, timeout=1.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -575,7 +584,7 @@ async def test_run_state_backfill_is_scheduled_at_startup() -> None:
 
 
 async def test_run_state_stale_index_does_not_hide_new_state() -> None:
-    from runs_dir import runs_root
+    from runs_dir import atomic_write_json, runs_root
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
@@ -583,25 +592,27 @@ async def test_run_state_stale_index_does_not_hide_new_state() -> None:
     root = runs_root()
     old_dir = root / "run-stale-index-old"
     old_dir.mkdir(parents=True, exist_ok=True)
-    (old_dir / "state.json").write_text(
-        '{"session_id":"STALE-OLD","jsonl_path":"/tmp/stale-old.jsonl"}',
-        encoding="utf-8",
+    atomic_write_json(
+        old_dir / "state.json",
+        {"session_id": "STALE-OLD", "jsonl_path": "/tmp/stale-old.jsonl"},
     )
     assert nfm_mod._scan_run_state_for_jsonl("STALE-OLD") is not None
     root_key = str(root)
-    ts, fingerprint, index, root_signature, pending_run_dirs = runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE[root_key]
-    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
-        ts - runs_dir_mod._RUN_STATE_RECENT_INDEX_TTL_S - 0.1,
-        fingerprint,
-        index,
-        root_signature,
-        pending_run_dirs,
-    )
+    cached = runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.get(root_key)
+    if cached is not None:
+        ts, fingerprint, index, root_signature, pending_run_dirs = cached
+        runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE[root_key] = (
+            ts - runs_dir_mod._RUN_STATE_RECENT_INDEX_TTL_S - 0.1,
+            fingerprint,
+            index,
+            root_signature,
+            pending_run_dirs,
+        )
     new_dir = root / "run-stale-index-new"
     new_dir.mkdir(parents=True, exist_ok=True)
-    (new_dir / "state.json").write_text(
-        '{"session_id":"STALE-NEW","jsonl_path":"/tmp/stale-new.jsonl"}',
-        encoding="utf-8",
+    atomic_write_json(
+        new_dir / "state.json",
+        {"session_id": "STALE-NEW", "jsonl_path": "/tmp/stale-new.jsonl"},
     )
     path = nfm_mod._scan_run_state_for_jsonl("STALE-NEW")
     assert str(path) == "/tmp/stale-new.jsonl", path
@@ -983,6 +994,7 @@ async def test_run_state_recent_lookup_resolves_only_candidates() -> None:
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     target_sid = "RECENT-VALIDATE-TARGET"
     for index in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 12):
         sid = target_sid if index == runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 11 else f"RECENT-VALIDATE-{index}"
@@ -1016,6 +1028,7 @@ async def test_run_state_recent_candidates_skip_run_dir_symlink() -> None:
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     outside_dir = root.parent / "outside-recent-run-dir-symlink"
     outside_dir.mkdir(parents=True, exist_ok=True)
     (outside_dir / "state.json").write_text(
@@ -1037,6 +1050,7 @@ async def test_run_state_recent_candidates_skip_state_symlink() -> None:
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     outside_dir = root.parent / "outside-recent-state-symlink"
     outside_dir.mkdir(parents=True, exist_ok=True)
     outside_state = outside_dir / "state.json"
@@ -1087,6 +1101,7 @@ async def test_run_state_recent_index_is_reused_across_sids() -> None:
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     for name, sid in (("run-reuse-a", "REUSE-A-SID"), ("run-reuse-b", "REUSE-B-SID")):
         run_dir = root / name
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1131,6 +1146,7 @@ async def test_run_state_lookup_coalesces_concurrent_scans() -> None:
     nfm_mod._RUN_STATE_INFLIGHT.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     run_dir = root / "run-coalesced"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "state.json").write_text(
@@ -1171,6 +1187,7 @@ async def test_run_state_recent_index_coalesces_concurrent_sid_scans() -> None:
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_INFLIGHT.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     for i in range(8):
         sid = f"ROOT-COALESCED-{i}"
         run_dir = root / f"run-root-coalesced-{i}"
@@ -1212,6 +1229,7 @@ async def test_run_state_lookup_checks_recent_dirs_first() -> None:
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     agent_sid = "RECENT-FIRST-SID"
     for i in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 10):
         run_dir = root / f"old-run-{i}"
@@ -1238,6 +1256,7 @@ async def test_run_state_recent_unledgered_state_is_found_without_backfill() -> 
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
+    _make_run_state_backfill_marker_stale(root)
     run_dir = root / "run-recent-unledgered"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "state.json").write_text(
@@ -1256,6 +1275,108 @@ async def test_run_state_recent_unledgered_state_is_found_without_backfill() -> 
         runs_dir_mod.ensure_run_state_ledger_backfilled = original_backfill  # type: ignore
     assert str(path) == "/tmp/recent-unledgered.jsonl", path
     print("PASS test_run_state_recent_unledgered_state_is_found_without_backfill")
+
+
+async def test_run_state_current_backfill_marker_skips_recent_miss_scan() -> None:
+    from runs_dir import (
+        _RUN_STATE_LEDGER_BACKFILL_VERSION,
+        run_state_ledger_backfill_marker_path,
+        run_state_ledger_path,
+        runs_root,
+    )
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    root = runs_root()
+    for i in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 10):
+        run_dir = root / f"authoritative-miss-run-{i}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            '{"session_id":"OTHER-SID","jsonl_path":"/tmp/other.jsonl"}',
+            encoding="utf-8",
+        )
+    run_state_ledger_path(root).write_text("", encoding="utf-8")
+    run_state_ledger_backfill_marker_path(root).write_text(
+        f'{{"version":{_RUN_STATE_LEDGER_BACKFILL_VERSION},"backfilled_at":1}}',
+        encoding="utf-8",
+    )
+    original_recent = runs_dir_mod._recent_state_index_for_root
+
+    def fail_recent(*_args, **_kwargs):
+        raise AssertionError("current backfilled ledger miss should not scan recent run dirs")
+
+    runs_dir_mod._recent_state_index_for_root = fail_recent  # type: ignore
+    try:
+        assert runs_dir_mod.state_files_for_sid(root, "MISSING-AUTHORITATIVE") == []
+        assert nfm_mod._scan_run_state_for_jsonl("MISSING-AUTHORITATIVE") is None
+    finally:
+        runs_dir_mod._recent_state_index_for_root = original_recent  # type: ignore
+    print("PASS test_run_state_current_backfill_marker_skips_recent_miss_scan")
+
+
+async def test_run_state_stale_backfill_marker_keeps_recent_fallback() -> None:
+    from runs_dir import run_state_ledger_backfill_marker_path, run_state_ledger_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    root = runs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    run_state_ledger_path(root).write_text("", encoding="utf-8")
+    run_state_ledger_backfill_marker_path(root).write_text(
+        '{"version":-1,"backfilled_at":1}',
+        encoding="utf-8",
+    )
+    run_dir = root / "stale-marker-recent"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"STALE-MARKER-SID","jsonl_path":"/tmp/stale-marker.jsonl"}',
+        encoding="utf-8",
+    )
+    assert runs_dir_mod.state_files_for_sid(root, "STALE-MARKER-SID") == [state_path]
+    path = nfm_mod._scan_run_state_for_jsonl("STALE-MARKER-SID")
+    assert str(path) == "/tmp/stale-marker.jsonl", path
+    print("PASS test_run_state_stale_backfill_marker_keeps_recent_fallback")
+
+
+async def test_run_state_current_backfill_marker_finds_new_ledger_write() -> None:
+    from runs_dir import (
+        _RUN_STATE_LEDGER_BACKFILL_VERSION,
+        atomic_write_json,
+        run_state_ledger_backfill_marker_path,
+        runs_root,
+    )
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    root = runs_root()
+    run_state_ledger_backfill_marker_path(root).write_text(
+        f'{{"version":{_RUN_STATE_LEDGER_BACKFILL_VERSION},"backfilled_at":1}}',
+        encoding="utf-8",
+    )
+    run_dir = root / "current-marker-new-write"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    atomic_write_json(
+        state_path,
+        {"session_id": "CURRENT-MARKER-NEW", "jsonl_path": "/tmp/current-marker-new.jsonl"},
+    )
+    original_recent = runs_dir_mod._recent_state_index_for_root
+
+    def fail_recent(*_args, **_kwargs):
+        raise AssertionError("ledger-backed new state should not need recent scan")
+
+    runs_dir_mod._recent_state_index_for_root = fail_recent  # type: ignore
+    try:
+        assert runs_dir_mod.state_files_for_sid(root, "CURRENT-MARKER-NEW") == [state_path]
+        path = nfm_mod._scan_run_state_for_jsonl("CURRENT-MARKER-NEW")
+    finally:
+        runs_dir_mod._recent_state_index_for_root = original_recent  # type: ignore
+    assert str(path) == "/tmp/current-marker-new.jsonl", path
+    print("PASS test_run_state_current_backfill_marker_finds_new_ledger_write")
 
 
 async def test_run_state_recent_index_reuses_unchanged_root_after_ttl() -> None:
@@ -1449,12 +1570,24 @@ async def test_run_state_recent_state_sid_change_rebuilds() -> None:
 
 
 async def test_run_state_lookup_miss_stays_bounded() -> None:
-    from runs_dir import runs_root
+    from runs_dir import (
+        _RUN_STATE_LEDGER_BACKFILL_VERSION,
+        run_state_ledger_backfill_marker_path,
+        run_state_ledger_path,
+        runs_root,
+    )
     from orchs import jsonl_helpers
 
     nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
     root = runs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    run_state_ledger_path(root).write_text("", encoding="utf-8")
+    run_state_ledger_backfill_marker_path(root).write_text(
+        f'{{"version":{_RUN_STATE_LEDGER_BACKFILL_VERSION},"backfilled_at":1}}',
+        encoding="utf-8",
+    )
     for i in range(runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 10):
         run_dir = root / f"bounded-miss-old-run-{i}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1494,7 +1627,7 @@ async def test_run_state_lookup_miss_stays_bounded() -> None:
         runs_dir_mod._backfill_run_state_ledger = original_recent_backfill  # type: ignore
         jsonl_helpers.compute_jsonl_read_path = original_compute
     assert str(path) == "/tmp/provider-fallback.jsonl", path
-    assert scan_calls == 1, f"expected bounded recent scan only, got {scan_calls}"
+    assert scan_calls == 0, f"expected current ledger miss to skip recent scan, got {scan_calls}"
     print("PASS test_run_state_lookup_miss_stays_bounded")
 
 
@@ -1741,6 +1874,9 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_recent_index_coalesces_concurrent_sid_scans())
     asyncio.run(test_run_state_lookup_checks_recent_dirs_first())
     asyncio.run(test_run_state_recent_unledgered_state_is_found_without_backfill())
+    asyncio.run(test_run_state_current_backfill_marker_skips_recent_miss_scan())
+    asyncio.run(test_run_state_stale_backfill_marker_keeps_recent_fallback())
+    asyncio.run(test_run_state_current_backfill_marker_finds_new_ledger_write())
     asyncio.run(test_run_state_recent_index_reuses_unchanged_root_after_ttl())
     asyncio.run(test_run_state_recent_pending_dir_detects_late_state())
     asyncio.run(test_run_state_recent_empty_pending_reuses_unchanged_root())
