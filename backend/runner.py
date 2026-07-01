@@ -34,6 +34,7 @@ calls `client.interrupt()` on sight.
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -41,8 +42,10 @@ import shutil
 import sys
 import time
 import http.client
+import threading
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -138,6 +141,43 @@ from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
 _RESPONSE_NO_PROGRESS_TIMEOUT_S = 5 * 60
+_RESPONSE_ACTIVITY_POLL_S = 1.0
+
+
+class _RunnerActivity:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_progress_at = time.monotonic()
+
+    def mark(self) -> None:
+        with self._lock:
+            self._last_progress_at = time.monotonic()
+
+    def last_progress_at(self) -> float:
+        with self._lock:
+            return self._last_progress_at
+
+
+_runner_activity_var: contextvars.ContextVar[Optional[_RunnerActivity]] = (
+    contextvars.ContextVar("runner_activity", default=None)
+)
+_active_runner_activity_lock = threading.Lock()
+_active_runner_activity: Optional[_RunnerActivity] = None
+
+
+def _set_active_runner_activity(activity: Optional[_RunnerActivity]) -> None:
+    global _active_runner_activity
+    with _active_runner_activity_lock:
+        _active_runner_activity = activity
+
+
+def _mark_runner_activity() -> None:
+    activity = _runner_activity_var.get()
+    if activity is None:
+        with _active_runner_activity_lock:
+            activity = _active_runner_activity
+    if activity is not None:
+        activity.mark()
 
 
 class ResponseNoProgressError(RuntimeError):
@@ -707,8 +747,10 @@ def _post_loopback_sync(
 
     while True:
         try:
+            _mark_runner_activity()
             return _request_once(internal_token)
         except urllib.error.HTTPError as e:
+            _mark_runner_activity()
             live_token = _load_internal_token()
             if (
                 e.code == 403
@@ -718,13 +760,16 @@ def _post_loopback_sync(
             ):
                 tried_live_token_after_forbidden = True
                 try:
+                    _mark_runner_activity()
                     return _request_once(live_token)
                 except urllib.error.HTTPError:
+                    _mark_runner_activity()
                     raise e
             if e.code != 403:
                 raise_loopback_http_error(e)
             raise
         except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
+            _mark_runner_activity()
             recovered = recover() if recover is not None else None
             if recovered is not None:
                 return recovered
@@ -1811,15 +1856,38 @@ async def _receive_response_message(
     resp_iter,
     *,
     timeout_s: float,
+    activity: Optional[_RunnerActivity] = None,
 ) -> object:
     if timeout_s <= 0:
         return await resp_iter.__anext__()
+
+    receive_task = asyncio.create_task(resp_iter.__anext__())
+    static_started_at = time.monotonic()
     try:
-        return await asyncio.wait_for(resp_iter.__anext__(), timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
-        raise ResponseNoProgressError(
-            f"Claude runner made no response progress for {timeout_s:.0f}s"
-        ) from exc
+        while True:
+            last_progress_at = (
+                activity.last_progress_at() if activity is not None else static_started_at
+            )
+            remaining = timeout_s - (time.monotonic() - last_progress_at)
+            if remaining <= 0:
+                raise ResponseNoProgressError(
+                    f"Claude runner made no response progress for {timeout_s:.0f}s"
+                )
+            done, _pending = await asyncio.wait(
+                {receive_task},
+                timeout=min(_RESPONSE_ACTIVITY_POLL_S, remaining),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in done:
+                if activity is not None:
+                    activity.mark()
+                return receive_task.result()
+    except BaseException:
+        if not receive_task.done():
+            receive_task.cancel()
+            with suppress(BaseException):
+                await receive_task
+        raise
 
 
 async def _run_one_turn(
@@ -1929,6 +1997,9 @@ async def _run_one_turn(
                 pass
 
     watcher_task: Optional[asyncio.Task] = None
+    activity = _RunnerActivity()
+    activity_token = _runner_activity_var.set(activity)
+    _set_active_runner_activity(activity)
 
     try:
         if current_turn_holder is not None:
@@ -2002,6 +2073,7 @@ async def _run_one_turn(
                 msg = await _receive_response_message(
                     resp_iter,
                     timeout_s=no_progress_timeout_s,
+                    activity=activity,
                 )
             except StopAsyncIteration:
                 break
@@ -2115,6 +2187,8 @@ async def _run_one_turn(
         logger.exception("SDK run failed")
         error = f"{type(e).__name__}: {e}"
     finally:
+        _set_active_runner_activity(None)
+        _runner_activity_var.reset(activity_token)
         if current_turn_holder is not None:
             current_turn_holder[0] = None
         cancel_seen.set()
