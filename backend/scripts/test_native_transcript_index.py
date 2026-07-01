@@ -6,7 +6,7 @@ Covers the contract the search fast path relies on:
   * lean extraction: user_prompt/assistant_text/reasoning/tool_call are indexed;
     tool_result (the 52%-of-bytes bulk) is NOT.
   * freshness by mtime+size: a changed file is re-indexed; a new needle in the
-    delta becomes searchable; a deleted file is tombstoned.
+    delta becomes searchable; forced full reconcile discovers external files.
   * match_paths returns cwd-filtered (path, tag) pairs; is_usable gates the fast
     path (covered + last walk within the freshness window).
   * broad match (> path cap) signals the caller to fall back.
@@ -182,6 +182,59 @@ def test_freshness_reindexes_changed_files() -> bool:
     return ok
 
 
+def test_covered_refresh_does_not_full_walk() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    fpath = claude / encode_cwd("/proj") / "s1.jsonl"
+    _write_claude(fpath, ["knownneedle here"])
+    idx.refresh_once()
+
+    called = {"stat_walk": 0}
+    original = idx._stat_walk
+    idx._stat_walk = lambda: called.__setitem__("stat_walk", called["stat_walk"] + 1) or original()
+    try:
+        time.sleep(1.05)
+        with fpath.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
+                                "message": {"role": "user", "content": "steadyneedle added"}}) + "\n")
+        r = idx.refresh_once()
+        rows = idx.search_rows(["steadyneedle"], limit=10)
+    finally:
+        idx._stat_walk = original
+    ok = called["stat_walk"] == 0 and r["full"] == 0 and r["touched"] >= 1 and len(rows) == 1
+    print(f"{OK if ok else FAIL} covered refresh avoids full walk "
+          f"(stat_walk={called['stat_walk']}, refresh={r}, rows={len(rows)})")
+    return ok
+
+
+def test_forced_full_reconcile_discovers_external_files() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["firstneedle here"])
+    idx.refresh_once()
+    _write_claude(claude / encode_cwd("/proj") / "b.jsonl", ["externalneedle new"])
+    steady = idx.refresh_once()
+    before = idx.search_rows(["externalneedle"], limit=10)
+    full = idx.refresh_once(full=True)
+    after = idx.search_rows(["externalneedle"], limit=10)
+    ok = steady["full"] == 0 and len(before) == 0 and full["full"] == 1 and len(after) == 1
+    print(f"{OK if ok else FAIL} forced full reconcile discovers external files "
+          f"(steady={steady}, full={full}, before={len(before)}, after={len(after)})")
+    return ok
+
+
+def test_restart_covered_worker_does_not_immediately_full_walk() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["restartneedle here"])
+    idx.refresh_once()
+    idx._last_full_reconcile_at = 0.0
+    ok = idx.is_covered() and not idx._full_reconcile_due()
+    print(f"{OK if ok else FAIL} covered restart reads full-reconcile timestamp "
+          f"(last_full={idx._last_full_reconcile_at:.1f})")
+    return ok
+
+
 def test_not_usable_until_covered() -> bool:
     _setup_roots()
     ok = not idx.is_usable() and not idx.is_covered()
@@ -207,15 +260,19 @@ def test_broad_match_signals_fallback() -> bool:
 
 def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     """Once covered, a stale query REQUESTS a refresh and waits for the delta
-    (which indexes the just-added file) rather than dropping to rg. Simulates
-    the worker with a one-shot thread that refreshes after the request."""
+    over indexed paths rather than dropping to rg. Simulates the worker with a
+    one-shot thread that refreshes after the request."""
     import threading
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["staleneedle here"])
     idx.refresh_once()  # covered + fresh
-    # A brand-new file appears after the last walk.
-    _write_claude(claude / encode_cwd("/proj") / "b.jsonl", ["deltawaitneedle new"])
+    # A known indexed file grows after the last walk.
+    fpath = claude / encode_cwd("/proj") / "a.jsonl"
+    time.sleep(1.05)
+    with fpath.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
+                            "message": {"role": "user", "content": "deltawaitneedle new"}}) + "\n")
     idx._last_refresh_at = 0.0  # force stale (covered but not usable)
     assert idx.is_covered() and not idx.is_usable()
 
@@ -259,6 +316,9 @@ def main_run() -> int:
         test_old_schema_cache_rebuilds,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
+        test_covered_refresh_does_not_full_walk,
+        test_forced_full_reconcile_discovers_external_files,
+        test_restart_covered_worker_does_not_immediately_full_walk,
         test_not_usable_until_covered,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,

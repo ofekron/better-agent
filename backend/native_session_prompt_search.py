@@ -202,10 +202,11 @@ def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCand
     """Match-first candidate resolution.
 
     Fast path: the native FTS5 index (:mod:`native_transcript_index`) once it
-    has caught up (covered). If covered but momentarily stale, REQUEST a delta
-    refresh and wait for it (one cheap stat-walk + parse-changed-only) rather
-    than dropping to rg — a covered index is only seconds stale. Correct because
-    the waited refresh's stat-walk sees every file as of that moment.
+    has caught up (covered). If covered but momentarily stale, REQUEST a steady
+    refresh and wait for it (stat indexed paths + parse changed known files)
+    rather than dropping to rg. New external transcript files are picked up by
+    the indexer's periodic full reconcile or by the rg fallback when the index
+    is not covered.
 
     Fallback: ``rg`` when the index is not covered (cold start) or the wait
     times out / fails. ``rg`` narrows to files containing a needle; we build
