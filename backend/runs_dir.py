@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import stat
 import threading
 import time
@@ -30,6 +31,8 @@ from paths import ba_home
 
 logger = logging.getLogger(__name__)
 _RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
+_RUN_STATE_LEDGER_CACHE_NAME = "run_state_index.cache.sqlite3"
+_RUN_STATE_LEDGER_CACHE_VERSION = 1
 _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME = "run_state_index.backfilled.json"
 _RUN_STATE_LEDGER_BACKFILL_VERSION = 1
 _RECONCILED_MARKER_INDEX_NAME = "reconciled_marker_index.jsonl"
@@ -41,7 +44,7 @@ _RUN_STATE_RECENT_SCAN_LIMIT = 256
 _RUN_STATE_RECENT_INDEX_TTL_S = 1.0
 _RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
-_RunStateLedgerSignature = tuple[int, int, int, int]
+_RunStateLedgerSignature = tuple[int, int, int, int, int]
 _RunStateRootSignature = tuple[int, int, int, int, int]
 _RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, str]]]]] = {}
 _RUN_STATE_RECENT_INDEX_CACHE: dict[
@@ -55,6 +58,7 @@ _RUN_STATE_RECENT_INDEX_CACHE: dict[
     ],
 ] = {}
 _RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
+_RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT: dict[str, threading.Event] = {}
 _RECONCILED_MARKER_INDEX_SEEN: set[tuple[str, str, int, int, int, int]] = set()
 _RECONCILED_MARKER_BACKFILL_LOCK = threading.Lock()
 
@@ -65,6 +69,10 @@ def runs_root() -> Path:
 
 def run_state_ledger_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RUN_STATE_LEDGER_NAME
+
+
+def run_state_ledger_cache_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RUN_STATE_LEDGER_CACHE_NAME
 
 
 def run_state_ledger_backfill_marker_path(root: Optional[Path] = None) -> Path:
@@ -213,13 +221,154 @@ def _ledger_state_paths_for_sid(
     return paths
 
 
-def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+def _run_state_ledger_signature(path: Path) -> _RunStateLedgerSignature | None:
     try:
-        ledger = run_state_ledger_path(root)
-        st = ledger.stat()
+        st = path.stat()
     except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _sqlite_connect(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=DELETE")
+    return conn
+
+
+def _run_state_cache_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE entries ("
+        "sid TEXT NOT NULL,"
+        "state_path TEXT NOT NULL,"
+        "written_at REAL NOT NULL,"
+        "PRIMARY KEY (sid, state_path)"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX entries_sid_written_at ON entries (sid, written_at)"
+    )
+
+
+def _run_state_cache_signature_current(
+    conn: sqlite3.Connection,
+    signature: _RunStateLedgerSignature,
+) -> bool:
+    try:
+        rows = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+    except sqlite3.DatabaseError:
+        return False
+    expected = {
+        "version": _RUN_STATE_LEDGER_CACHE_VERSION,
+        "dev": signature[0],
+        "ino": signature[1],
+        "size": signature[2],
+        "mtime_ns": signature[3],
+        "ctime_ns": signature[4],
+    }
+    return rows == expected
+
+
+def _load_run_state_cache_for_sid(
+    root: Path,
+    signature: _RunStateLedgerSignature,
+    agent_sid: str,
+    root_resolved: Path,
+) -> list[Path] | None:
+    try:
+        with _sqlite_connect(run_state_ledger_cache_path(root)) as conn:
+            if not _run_state_cache_signature_current(conn, signature):
+                return None
+            rows = conn.execute(
+                "SELECT written_at, state_path FROM entries "
+                "WHERE sid=? ORDER BY written_at",
+                (agent_sid,),
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    except OSError:
+        return None
+    paths: list[Path] = []
+    for _written_at, state_path in rows:
+        if not isinstance(state_path, str):
+            return None
+        if not _run_state_path_string_has_ledger_shape(state_path, root):
+            return None
+        path = Path(state_path)
+        if _run_state_path_under_root(path, root_resolved):
+            paths.append(path)
+    return paths
+
+
+def _claim_run_state_cache_rebuild(root_key: str) -> tuple[threading.Event, bool]:
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        event = _RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT.get(root_key)
+        if event is not None:
+            return event, False
+        event = threading.Event()
+        _RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT[root_key] = event
+        return event, True
+
+
+def _finish_run_state_cache_rebuild(root_key: str) -> None:
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        event = _RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT.pop(root_key, None)
+    if event is not None:
+        event.set()
+
+
+def _write_run_state_cache(
+    root: Path,
+    signature: _RunStateLedgerSignature,
+    index: dict[str, list[tuple[float, str]]],
+) -> None:
+    cache_path = run_state_ledger_cache_path(root)
+    tmp_path = cache_path.with_suffix(".sqlite3.tmp")
+    try:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        with _sqlite_connect(tmp_path) as conn:
+            _run_state_cache_schema(conn)
+            conn.executemany(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                (
+                    ("version", _RUN_STATE_LEDGER_CACHE_VERSION),
+                    ("dev", signature[0]),
+                    ("ino", signature[1]),
+                    ("size", signature[2]),
+                    ("mtime_ns", signature[3]),
+                    ("ctime_ns", signature[4]),
+                ),
+            )
+            rows = [
+                (sid, state_path, written_at)
+                for sid, paths in index.items()
+                for written_at, state_path in paths
+            ]
+            conn.executemany(
+                "INSERT OR REPLACE INTO entries (sid, state_path, written_at) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        os.replace(tmp_path, cache_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        logger.debug("runs_dir: failed to write run-state ledger cache", exc_info=True)
+
+
+def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    ledger = run_state_ledger_path(root)
+    signature = _run_state_ledger_signature(ledger)
+    if signature is None:
         return []
-    signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     root_key = str(root)
     try:
         root_resolved = root.resolve()
@@ -231,6 +380,21 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
             cached_signature, index = cached
             if cached_signature == signature:
                 return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
+    cached_paths = _load_run_state_cache_for_sid(root, signature, agent_sid, root_resolved)
+    if cached_paths is not None:
+        return cached_paths
+    event, owner = _claim_run_state_cache_rebuild(root_key)
+    if not owner:
+        event.wait()
+        cached_paths = _load_run_state_cache_for_sid(root, signature, agent_sid, root_resolved)
+        if cached_paths is not None:
+            return cached_paths
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
+            if cached is not None:
+                cached_signature, index = cached
+                if cached_signature == signature:
+                    return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
     latest_by_key: dict[tuple[str, str], tuple[float, str]] = {}
     try:
         with ledger.open(encoding="utf-8") as f:
@@ -255,13 +419,26 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 if current is None or written_at >= current[0]:
                     latest_by_key[key] = (written_at, state_path_str)
     except OSError:
+        if owner:
+            _finish_run_state_cache_rebuild(root_key)
         return []
     index: dict[str, list[tuple[float, str]]] = {}
     for (sid, _), value in latest_by_key.items():
         index.setdefault(sid, []).append(value)
-    with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
-    return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
+    final_signature = _run_state_ledger_signature(ledger)
+    try:
+        if final_signature == signature:
+            with _RUN_STATE_LOOKUP_CACHE_LOCK:
+                _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
+            _write_run_state_cache(root, signature, index)
+            return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
+        if owner:
+            _finish_run_state_cache_rebuild(root_key)
+            owner = False
+        return ledger_state_files_for_sid(root, agent_sid)
+    finally:
+        if owner:
+            _finish_run_state_cache_rebuild(root_key)
 
 
 def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
