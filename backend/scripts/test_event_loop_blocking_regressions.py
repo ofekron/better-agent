@@ -1951,6 +1951,20 @@ def test_node_snapshot_caches_static_specs() -> None:
     assert "def _node_registry_fingerprint()" in source
     registry_source = (ROOT / "node_registry_store.py").read_text(encoding="utf-8")
     assert "def version_token()" in registry_source
+    assert "_cache_lock = threading.Lock()" in registry_source
+    assert "_ensure_cache_locked()" in registry_source
+    token_start = registry_source.index("def version_token()")
+    token_end = registry_source.index("def hash_secret(", token_start)
+    token_source = registry_source[token_start:token_end]
+    assert "_sync_generation_locked()" in token_source
+    assert "_ensure_cache_locked()" not in token_source
+    assert "_dir().glob" not in token_source
+    assert ".stat()" not in token_source
+    list_start = registry_source.index("def list_all()")
+    list_end = registry_source.index("def remove(", list_start)
+    list_source = registry_source[list_start:list_end]
+    assert "_ensure_cache_locked()" in list_source
+    assert "_dir().glob" not in list_source
     assert "node_registry_store.version_token()" in source
     assert "def _snapshot_static_specs()" in source
     snapshot_start = source.index("def snapshot()")
