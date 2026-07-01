@@ -2724,16 +2724,86 @@ body {
   color: var(--danger, #d44);
   font-weight: 700;
 }
+.session-selector-picker-button {
+  min-width: 0;
+  max-width: min(320px, 52vw);
+  height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: calc(11px * var(--app-font-scale));
+  text-align: left;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+.session-selector-picker-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-tertiary);
+  transform: translateY(-1px);
+}
+.session-selector-picker-button span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-model-picker-overlay {
+  animation: modalFadeIn 180ms ease both;
+}
+.session-model-picker-modal {
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - 32px));
+  animation: modalRiseIn 200ms ease both;
+}
+.session-model-picker-body {
+  display: grid;
+  gap: 12px;
+  padding: 16px 20px;
+  overflow: auto;
+}
+.session-model-picker-field {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.session-model-picker-field select {
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+}
+.session-model-picker-error {
+  color: var(--danger, #d44);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.session-model-picker-actions {
+  padding: 12px 20px 16px;
+}
 @media (max-width: 720px) {
-  .session-selector-control span {
-    display: none;
+  .session-selector-picker-button {
+    max-width: min(220px, 62vw);
   }
-  .session-selector-control select {
-    max-width: 96px;
-    min-width: 66px;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modalRiseIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
   }
-  .session-selector-control--model select {
-    max-width: 120px;
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -6061,6 +6131,11 @@ button.run-badge-clickable:focus-visible {
 .input-overflow-panel .session-selector-control select,
 .input-overflow-panel .session-selector-control--model select {
   width: min(190px, 52vw);
+  max-width: none;
+}
+
+.input-overflow-panel .session-selector-picker-button {
+  width: 100%;
   max-width: none;
 }
 

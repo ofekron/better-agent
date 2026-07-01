@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "OK",
+  "sessionSelector.title": "Modèle de session",
+  "sessionSelector.openPicker": "Changer le modèle de session",
+  "sessionSelector.noModelsAvailable": "Aucun modèle disponible",
+  "sessionSelector.noModelForProvider": "Aucun modèle n’est disponible pour ce fournisseur.",
+  "sessionSelector.selectModel": "Sélectionner un modèle"
 }

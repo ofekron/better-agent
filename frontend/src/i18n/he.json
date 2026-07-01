@@ -923,5 +923,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "אישור",
+  "sessionSelector.title": "מודל סשן",
+  "sessionSelector.openPicker": "שינוי מודל הסשן",
+  "sessionSelector.noModelsAvailable": "אין מודלים זמינים",
+  "sessionSelector.noModelForProvider": "אין מודל זמין לספק הזה.",
+  "sessionSelector.selectModel": "בחרו מודל"
 }

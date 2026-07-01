@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "확인",
+  "sessionSelector.title": "세션 모델",
+  "sessionSelector.openPicker": "세션 모델 변경",
+  "sessionSelector.noModelsAvailable": "사용 가능한 모델 없음",
+  "sessionSelector.noModelForProvider": "이 프로바이더에 사용할 수 있는 모델이 없습니다.",
+  "sessionSelector.selectModel": "모델 선택"
 }
