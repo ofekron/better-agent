@@ -2500,7 +2500,7 @@ async def patch_user_prefs(body: dict = Body(...)):
 
 @app.get("/api/ui-selection")
 async def get_ui_selection():
-    return await asyncio.to_thread(ui_selection.get_all)
+    return await _run_hot_path("ui_selection.get_all", ui_selection.get_all)
 
 
 @app.patch("/api/ui-selection")
@@ -2537,7 +2537,7 @@ async def patch_ui_selection(body: dict = Body(...)):
         return ui_selection.get_all()
 
     try:
-        snapshot = await asyncio.to_thread(_patch_sync)
+        snapshot = await _run_hot_path("ui_selection.patch", _patch_sync)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.broadcast_global("ui_selection_changed", snapshot)
@@ -7579,7 +7579,8 @@ async def mark_session_opened(session_id: str):
     """Stamp `last_opened_at` when a client opens/selects this session.
     Server-generated timestamp; does not bump `updated_at`."""
     at = datetime.now().isoformat()
-    session = await asyncio.to_thread(
+    session = await _run_hot_path(
+        "session.opened.set_last_opened_at",
         session_manager.set_last_opened_at,
         session_id,
         at,
