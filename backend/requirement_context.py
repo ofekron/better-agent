@@ -456,7 +456,7 @@ def search_requirements(
             "all_projects": all_projects,
         }
 
-    preparation = prepare_requirements_context()
+    preparation = prepare_requirements_local_read_context()
     return _search_requirements_prepared(
         rg_args=normalized_args,
         cwd=cwd,
@@ -607,13 +607,6 @@ def prepare_requirements_context(
     *,
     allowed_unhandled_prompts: int = 1,
 ) -> dict[str, Any]:
-    """Cheap, non-blocking refresh on the get-requirements query path.
-
-    Syncs the raw user_prompts corpus (cheap) and reports current unit
-    freshness, then ensures the detached extraction runner is alive — but
-    NEVER runs unit extraction or the downstream DAG inline. The background
-    runner owns extraction+downstream to completion; the query path answers
-    best-effort from whatever units already exist plus a raw-prompt search."""
     _ensure_requirements_importable()
     sync = _refresh_user_prompts()
     freshness = _requirement_unit_freshness(allowed_unhandled_prompts=allowed_unhandled_prompts)

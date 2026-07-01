@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Locks the requirements execution-model redesign:
 
-1. get-requirements query path is cheap + non-blocking: it syncs user_prompts
-   and ensures the detached background runner is alive, but NEVER runs unit
-   extraction or the downstream DAG inline.
+1. get-requirements query path is cheap + non-blocking: public and processor
+   raw lookups use local-read preparation while the detached background runner
+   owns prompt sync, unit extraction, and downstream DAG work.
 2. The detached runner is spawned with an injected PYTHONPATH so its child
    interpreter can import the requirements package + backend modules.
 3. The batch packer falls back to a feasible greedy packing when the MILP
@@ -147,6 +147,65 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
     check("command" not in result, "public result does not expose command")
 
 
+def test_raw_search_keeps_processor_off_sync_path() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "prepare": rc.prepare_requirements_context,
+        "local_prepare": rc.prepare_requirements_local_read_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "load_units": rc._load_unit_records,
+        "run_rg": rc._run_rg,
+    }
+    order: list[str] = []
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("raw requirements lookup must not run sync preparation")
+
+    def local_prepare(**_kwargs):
+        order.append("local_prepare")
+        return {
+            "success": True,
+            "sync": {"success": True, "changed": False, "skipped": "local_read"},
+            "freshness": {"fresh": True},
+            "extraction": {"running": True},
+        }
+
+    rc.prepare_requirements_context = fail
+    rc.prepare_requirements_local_read_context = local_prepare
+    rc._ensure_requirements_importable = lambda: None
+    rc._load_unit_records = lambda: [{
+        "source_key": "s:1:unit:0",
+        "text": "Raw processor lookup stays responsive.",
+        "kind": "explicit",
+        "source": "user",
+        "cwd": "/repo",
+    }]
+    rc._run_rg = lambda path, args: {
+        "command": ["rg", *args, str(path)],
+        "returncode": 0,
+        "stdout": "1:Raw processor lookup stays responsive.\n",
+        "stderr": "",
+    }
+    try:
+        result = rc.search_requirements(
+            rg_args=["responsive"],
+            cwd="/repo",
+            include_unprocessed_prompts=False,
+            max_matches=5,
+        )
+    finally:
+        rc.prepare_requirements_context = saved["prepare"]
+        rc.prepare_requirements_local_read_context = saved["local_prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._load_unit_records = saved["load_units"]
+        rc._run_rg = saved["run_rg"]
+
+    check(order == ["local_prepare"], "raw search uses local prep only")
+    check(result["success"] is True, "raw search succeeds through local prep")
+    check(result["count"] == 1, "raw search returns matching unit")
+
+
 def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
 
@@ -264,6 +323,7 @@ def run() -> None:
     test_milp_failure_falls_back_to_greedy()
     test_query_path_has_no_inline_extraction()
     test_public_get_requirements_keeps_processor_off_sync_path()
+    test_raw_search_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()
     test_prepare_orchestration_is_cheap_and_nonblocking()
