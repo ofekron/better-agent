@@ -43,7 +43,7 @@ _RUN_STATE_RECENT_INDEX_MAX_AGE_S = 30.0
 _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RunStateLedgerSignature = tuple[int, int, int, int]
 _RunStateRootSignature = tuple[int, int, int, int, int]
-_RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, Path]]]]] = {}
+_RUN_STATE_LEDGER_CACHE: dict[str, tuple[_RunStateLedgerSignature, dict[str, list[tuple[float, str]]]]] = {}
 _RUN_STATE_RECENT_INDEX_CACHE: dict[
     str,
     tuple[
@@ -200,6 +200,19 @@ def _invalidate_recent_state_index(root: Path) -> None:
         _RUN_STATE_RECENT_INDEX_CACHE.pop(str(root), None)
 
 
+def _ledger_state_paths_for_sid(
+    index: dict[str, list[tuple[float, str]]],
+    agent_sid: str,
+    root_resolved: Path,
+) -> list[Path]:
+    paths: list[Path] = []
+    for _, state_path in index.get(agent_sid, []):
+        path = Path(state_path)
+        if _run_state_path_under_root(path, root_resolved):
+            paths.append(path)
+    return paths
+
+
 def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     try:
         ledger = run_state_ledger_path(root)
@@ -217,11 +230,8 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
         if cached is not None:
             cached_signature, index = cached
             if cached_signature == signature:
-                return [
-                    path for _, path in index.get(agent_sid, [])
-                    if _run_state_path_under_root(path, root_resolved)
-                ]
-    latest_by_key: dict[tuple[str, str], tuple[float, Path]] = {}
+                return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
+    latest_by_key: dict[tuple[str, str], tuple[float, str]] = {}
     try:
         with ledger.open(encoding="utf-8") as f:
             for raw in f:
@@ -236,26 +246,22 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 state_path_str = str(state_path)
                 if not _run_state_path_string_has_ledger_shape(state_path_str, root):
                     continue
-                path = Path(state_path_str)
                 try:
                     written_at = float(row.get("written_at"))
                 except (TypeError, ValueError):
                     written_at = 0.0
-                key = (sid, str(path))
+                key = (sid, state_path_str)
                 current = latest_by_key.get(key)
                 if current is None or written_at >= current[0]:
-                    latest_by_key[key] = (written_at, path)
+                    latest_by_key[key] = (written_at, state_path_str)
     except OSError:
         return []
-    index: dict[str, list[tuple[float, Path]]] = {}
+    index: dict[str, list[tuple[float, str]]] = {}
     for (sid, _), value in latest_by_key.items():
         index.setdefault(sid, []).append(value)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
-    return [
-        path for _, path in index.get(agent_sid, [])
-        if _run_state_path_under_root(path, root_resolved)
-    ]
+    return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
 
 
 def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
