@@ -984,6 +984,13 @@ class SessionManager:
             )
         return rid
 
+    def root_id_for(self, sid: str) -> Optional[str]:
+        """Public: resolve any node id — a BA app_session_id, or a provider's
+        native/agent session id (e.g. a claude transcript's id) — to its BA root
+        session id. Returns None when the id belongs to no BA session (a raw
+        native transcript never run through Better Agent)."""
+        return self._root_id_for(sid)
+
     def _lock_for_root(self, root_id: str) -> threading.RLock:
         with self._cache_guard:
             lock = self._root_locks.get(root_id)
