@@ -90,7 +90,9 @@ async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, An
     token = secrets.token_urlsafe(32)
     expires_at = _now() + _LOCK_TTL_SECONDS
     acquired: set[str] = set()
-    deadline = _now() + timeout_seconds
+    start = _now()
+    deadline = start + timeout_seconds
+    waited = False
 
     while True:
         async with _locks_guard:
@@ -110,6 +112,9 @@ async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, An
                     _locks[lock_key] = {"holder_token": token, "expires_at": expires_at}
                     acquired.add(lock_key)
 
+            if blocked:
+                waited = True
+
             if not blocked:
                 return {
                     "success": True,
@@ -117,6 +122,8 @@ async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, An
                     "keys": keys,
                     "holder_token": token,
                     "expires_in_seconds": _LOCK_TTL_SECONDS,
+                    "waited": waited,
+                    "waited_seconds": round(_now() - start, 3),
                 }
 
             if now >= deadline:
@@ -190,4 +197,6 @@ async def lock_ops(
             "key": key,
             "holder_token": token,
             "expires_in_seconds": _LOCK_TTL_SECONDS,
+            "waited": False,
+            "waited_seconds": 0.0,
         }
