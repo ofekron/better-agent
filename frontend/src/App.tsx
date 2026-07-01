@@ -4033,20 +4033,25 @@ function AppMain({
   ]);
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
+      const openedAt = markSessionOpened(session.id);
+      const openedSession = { ...session, last_opened_at: openedAt };
       setOpenSessionRecords((prev) => {
-        const merged = mergeOpenSessionRecord(prev[session.id], session);
+        const merged = mergeOpenSessionRecord(prev[session.id], openedSession);
         return merged === prev[session.id]
           ? prev
           : { ...prev, [session.id]: merged };
       });
-      if (session.topbar_pinned) {
-        setTopbarPinnedSessions((prev) => ({ ...prev, [session.id]: session }));
+      if (openedSession.topbar_pinned) {
+        setTopbarPinnedSessions((prev) => ({
+          ...prev,
+          [openedSession.id]: openedSession,
+        }));
       } else {
-        addOpenSessionId(session.id);
+        addOpenSessionId(openedSession.id);
       }
-      navigate(sessionPath(session.id));
+      navigate(sessionPath(openedSession.id));
     },
-    [addOpenSessionId, navigate],
+    [addOpenSessionId, markSessionOpened, navigate],
   );
 
   const handleSelectTab = useCallback(
