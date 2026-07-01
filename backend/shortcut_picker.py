@@ -24,7 +24,7 @@ _CACHE_TTL_SECS = 300.0
 _CACHE_MAX = 128
 _PICK_WAIT_TIMEOUT_SECS = 0.25
 _cache: dict[str, tuple[float, list[str]]] = {}
-_inflight: dict[str, asyncio.Task[list[str]]] = {}
+_inflight: dict[str, asyncio.Task[tuple[list[str], bool]]] = {}
 _lock = asyncio.Lock()
 
 _SYSTEM_PROMPT = render_prompt("shortcut_picker/system.md")
@@ -105,17 +105,18 @@ async def _cached_pick(key: str, factory) -> list[str]:
             owner = True
 
     try:
-        result = await task
+        result, cacheable = await task
     finally:
         if owner:
             async with _lock:
                 _inflight.pop(key, None)
 
-    async with _lock:
-        _cache[key] = (time.monotonic(), list(result))
-        while len(_cache) > _CACHE_MAX:
-            oldest = min(_cache, key=lambda k: _cache[k][0])
-            _cache.pop(oldest, None)
+    if cacheable:
+        async with _lock:
+            _cache[key] = (time.monotonic(), list(result))
+            while len(_cache) > _CACHE_MAX:
+                oldest = min(_cache, key=lambda k: _cache[k][0])
+                _cache.pop(oldest, None)
     return list(result)
 
 
@@ -153,29 +154,30 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
             assistant_text=assistant_excerpt,
         )
 
-        async def _pick_uncached() -> list[str]:
+        async def _pick_uncached() -> tuple[list[str], bool]:
             user_msg = f"SHORTCUTS:\n{shortcuts_json}\n\nLAST ASSISTANT MESSAGE:\n{assistant_excerpt}"
 
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{base_url}/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "max_tokens": 128,
-                        "system": _SYSTEM_PROMPT,
-                        "messages": [{"role": "user", "content": user_msg}],
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        f"{base_url}/v1/messages",
+                        headers={
+                            "x-api-key": api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "max_tokens": 128,
+                            "system": _SYSTEM_PROMPT,
+                            "messages": [{"role": "user", "content": user_msg}],
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
                 content = data.get("content", [])
                 if not content:
-                    return all_shortcuts
+                    return all_shortcuts, False
 
                 text = content[0].get("text", "[]").strip()
                 if text.startswith("```"):
@@ -183,14 +185,26 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
 
                 indices = json.loads(text)
                 if not isinstance(indices, list):
-                    return all_shortcuts
+                    return all_shortcuts, False
 
                 result = [
                     all_shortcuts[i]
                     for i in indices
                     if isinstance(i, int) and 0 <= i < len(all_shortcuts)
                 ]
-                return result if result else all_shortcuts
+                if not result:
+                    return all_shortcuts, False
+                return result, True
+            except (
+                httpx.HTTPError,
+                json.JSONDecodeError,
+                AttributeError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ):
+                logger.debug("Shortcut picker provider call failed; returning all shortcuts", exc_info=True)
+                return all_shortcuts, False
 
         return await asyncio.shield(_cached_pick(key, _pick_uncached))
 
