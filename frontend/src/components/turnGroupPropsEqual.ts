@@ -19,8 +19,14 @@ export function turnGroupPropsEqual<T extends object>(
     const a = (prev as Record<string, unknown>)[key];
     const b = (next as Record<string, unknown>)[key];
     if (a === b) continue;
+    // `runs` churns a fresh array every streaming token; the hoisted
+    // model-switch arrays are re-filtered every turnGroups recompute. Both
+    // keep stable element refs, so an element-wise compare avoids needless
+    // re-renders while still catching real changes (length or a ref).
     if (
-      key === "runs" &&
+      (key === "runs" ||
+        key === "precedingModelSwitches" ||
+        key === "trailingModelSwitches") &&
       Array.isArray(a) &&
       Array.isArray(b) &&
       a.length === b.length &&

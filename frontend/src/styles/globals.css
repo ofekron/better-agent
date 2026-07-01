@@ -4913,6 +4913,38 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
 }
 
+.model-switch-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: model-switch-banner-in 0.35s ease-out both;
+}
+
+.model-switch-banners--preceding {
+  margin: 0 0 8px;
+}
+
+.model-switch-banners--trailing {
+  margin: 8px 0 0;
+}
+
+@keyframes model-switch-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-switch-banners {
+    animation: none;
+  }
+}
+
 .event-model-switched {
   display: flex;
   flex-wrap: wrap;
@@ -12436,11 +12468,15 @@ pre .inline-tag-highlight {
  * AND give its inner div an explicit height — without this, Monaco's
  * automaticLayout polling never picks up the flex-stretched height
  * and the editor stays pinned at 5x5. */
-.file-viewer > section {
+.file-viewer > section,
+.file-viewer-md-edit > section,
+.eng-file-editor-md-edit > section {
   flex: 1;
   min-height: 0;
 }
-.file-viewer > section > div {
+.file-viewer > section > div,
+.file-viewer-md-edit > section > div,
+.eng-file-editor-md-edit > section > div {
   height: 100%;
 }
 .file-viewer-latest-diff {

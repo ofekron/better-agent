@@ -1,0 +1,74 @@
+import { describe, it, expect } from "vitest";
+import { renderApp } from "./harness";
+import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
+
+/**
+ * A model switch is recorded against the previous turn's assistant message
+ * (the only message that exists at switch time) but takes effect on the NEXT
+ * turn. The banner must therefore render heading the following user prompt's
+ * turn group, never trailing the finished response's group.
+ */
+describe("model-switch event grouping", () => {
+  const modelSwitchEvent = {
+    type: "model_switched" as const,
+    data: {
+      uuid: "model-switch-1",
+      previous_provider_id: "claude",
+      previous_model: "sonnet",
+      provider_id: "codex",
+      model: "gpt-5-codex",
+      changed: ["provider_id", "model"],
+    },
+  };
+
+  it("renders the switch banner preceding the next user prompt, not under the previous group", async () => {
+    const session = makeSession({
+      id: "sess-switch",
+      messages: [
+        makeUserMsg({ id: "u1", content: "first prompt" }),
+        makeAssistantMsg({ id: "a1", content: "first reply", events: [modelSwitchEvent] }),
+        makeUserMsg({ id: "u2", content: "second prompt" }),
+        makeAssistantMsg({ id: "a2", content: "second reply" }),
+      ],
+    });
+
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("sess-switch");
+
+    const group1 = h.$("#msg-u1")?.closest(".turn-group") ?? null;
+    const group2 = h.$("#msg-u2")?.closest(".turn-group") ?? null;
+    expect(group1).not.toBeNull();
+    expect(group2).not.toBeNull();
+
+    // Banner belongs to the SECOND group (heads the next prompt)…
+    expect(group2!.querySelector('[data-testid="model-switch-preceding"]')).not.toBeNull();
+    expect(group2!.querySelector(".event-model-switched")?.textContent).toContain(
+      "claude / sonnet to codex / gpt-5-codex",
+    );
+    // …and must NOT appear under the first (finished) group.
+    expect(group1!.querySelector(".event-model-switched")).toBeNull();
+
+    h.unmount();
+  });
+
+  it("renders a trailing switch banner as a preface when no next prompt exists yet", async () => {
+    const session = makeSession({
+      id: "sess-switch-tail",
+      messages: [
+        makeUserMsg({ id: "u1", content: "only prompt" }),
+        makeAssistantMsg({ id: "a1", content: "only reply", events: [modelSwitchEvent] }),
+      ],
+    });
+
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("sess-switch-tail");
+
+    const group1 = h.$("#msg-u1")?.closest(".turn-group") ?? null;
+    expect(group1).not.toBeNull();
+    // Rendered as a trailing preface, not inline within the finished response.
+    expect(group1!.querySelector('[data-testid="model-switch-trailing"]')).not.toBeNull();
+    expect(group1!.querySelector('[data-testid="model-switch-preceding"]')).toBeNull();
+
+    h.unmount();
+  });
+});
