@@ -1898,8 +1898,7 @@ function AppMain({
   );
   const currentSessionCanSteer = !!currentProvider?.supports_steering;
   const currentSessionCanFork = Boolean(
-    currentSession?.agent_session_id ||
-      currentSession?.manager_agent_session_id ||
+    currentSession?.manager_agent_session_id ||
       currentSession?.native_agent_session_id,
   ) && (currentProvider?.supports_fork ?? true);
   const [, setProviderName] = useState("");
@@ -4597,6 +4596,36 @@ function AppMain({
     // files (on confirm) or restores them (on cancel/dismiss).
     resolve: (sent: boolean) => void;
   } | null>(null);
+  const [notesSendPending, setNotesSendPending] = useState<{
+    sessionId: string;
+    prompt: string;
+    images: import("./components/InputArea").PastedImage[];
+    files: import("./components/InputArea").FileAttachment[];
+    sendMode: SendMode;
+  } | null>(null);
+  const [notesSendDraftResetBySession, setNotesSendDraftResetBySession] = useState<Record<string, number>>({});
+
+  const sendPromptWithNotesNotice = useCallback(
+    (
+      prompt: string,
+      images: import("./components/InputArea").PastedImage[],
+      files: import("./components/InputArea").FileAttachment[],
+      sendMode: SendMode,
+    ) => {
+      if (currentSession && (currentSession.notes?.length ?? 0) > 0) {
+        setNotesSendPending({
+          sessionId: currentSession.id,
+          prompt,
+          images,
+          files,
+          sendMode,
+        });
+        return false;
+      }
+      return sendPrompt(prompt, images, files, sendMode);
+    },
+    [currentSession, sendPrompt],
+  );
 
   const handleSend = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
@@ -4610,9 +4639,9 @@ function AppMain({
           setBypassPermPending({ prompt, images, files, resolve });
         });
       }
-      return sendPrompt(prompt, images, files, "queue");
+      return sendPromptWithNotesNotice(prompt, images, files, "queue");
     },
-    [sendPrompt, bypassPermAck, currentSession, currentProvider],
+    [sendPromptWithNotesNotice, bypassPermAck, currentSession, currentProvider],
   );
 
   const confirmBypassAndSend = useCallback(async () => {
@@ -4621,9 +4650,9 @@ function AppMain({
     localStorage.setItem("ba_bypass_perm_ack", "1");
     setBypassPermAck(true);
     setBypassPermPending(null);
-    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, "queue");
+    const sent = await sendPromptWithNotesNotice(pending.prompt, pending.images, pending.files, "queue");
     pending.resolve(sent === true);
-  }, [bypassPermPending, sendPrompt]);
+  }, [bypassPermPending, sendPromptWithNotesNotice]);
 
   const dismissBypassPending = useCallback(() => {
     setBypassPermPending((pending) => {
@@ -4637,16 +4666,39 @@ function AppMain({
     navigate("/settings");
   }, [dismissBypassPending, navigate]);
 
+  const confirmNotesSend = useCallback(async () => {
+    const pending = notesSendPending;
+    if (!pending) return;
+    setNotesSendPending(null);
+    if (currentSession?.id !== pending.sessionId) return;
+    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, pending.sendMode);
+    if (sent) {
+      setNotesSendDraftResetBySession((prev) => ({
+        ...prev,
+        [pending.sessionId]: (prev[pending.sessionId] ?? 0) + 1,
+      }));
+    }
+  }, [currentSession?.id, notesSendPending, sendPrompt]);
+
+  const reviewNotesBeforeSend = useCallback(() => {
+    setNotesSendPending((pending) => {
+      if (pending && currentSession?.id === pending.sessionId) {
+        openRightPanelWithTab("notes");
+      }
+      return null;
+    });
+  }, [currentSession?.id, openRightPanelWithTab]);
+
   const handleSteer = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPrompt(prompt, images, files, "steer"),
-    [sendPrompt],
+      sendPromptWithNotesNotice(prompt, images, files, "steer"),
+    [sendPromptWithNotesNotice],
   );
 
   const handleInterrupt = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPrompt(prompt, images, files, "interrupt"),
-    [sendPrompt],
+      sendPromptWithNotesNotice(prompt, images, files, "interrupt"),
+    [sendPromptWithNotesNotice],
   );
 
   const handleAlterUserMessage = useCallback(
@@ -6789,6 +6841,11 @@ function AppMain({
                 if (!currentSession) return;
                 handleDraftChange(currentSession.id, value);
               }}
+              draftResetToken={
+                currentSession
+                  ? notesSendDraftResetBySession[currentSession.id] ?? 0
+                  : 0
+              }
               draftImages={currentSession?.draft_images}
               onImagesChange={(images, text) => {
                 if (!currentSession) return;
@@ -7562,6 +7619,20 @@ function AppMain({
         onChangeInSettings={bypassGoToSettings}
         onDismiss={dismissBypassPending}
       />
+      {notesSendPending && (
+        <ConfirmModal
+          open={!!notesSendPending}
+          title={t("notes.sendWarningTitle")}
+          message={t("notes.sendWarningMessage", {
+            count: currentSession?.notes?.length ?? 0,
+          })}
+          confirmLabel={t("notes.sendWarningSendAnyway")}
+          cancelLabel={t("notes.sendWarningReview")}
+          onConfirm={confirmNotesSend}
+          onCancel={reviewNotesBeforeSend}
+          danger={false}
+        />
+      )}
       {sessionToDelete && (
         <ConfirmModal
           open={!!sessionToDelete}

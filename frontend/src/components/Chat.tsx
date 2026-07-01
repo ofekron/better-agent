@@ -399,6 +399,7 @@ interface Props {
    * `session_metadata_updated` WS event so multiple tabs converge. */
   draft: string;
   onDraftChange: (value: string) => void;
+  draftResetToken?: number;
   /** Backend-backed draft images for this session. Mirror of `draft`
    * for pasted/attached images so multiple tabs converge. */
   draftImages?: import("./InputArea").PastedImage[];
@@ -552,6 +553,7 @@ export function Chat({
   onRemoveTag,
   draft,
   onDraftChange,
+  draftResetToken,
   draftImages,
   onImagesChange,
   onEngineer,
@@ -1569,6 +1571,7 @@ export function Chat({
               onSchedule={session ? handleSchedule : undefined}
               draft={draft}
               onDraftChange={onDraftChange}
+              draftResetToken={draftResetToken}
               draftImages={draftImages}
               onImagesChange={onImagesChange}
               queuedPrompt={queuedPrompt}

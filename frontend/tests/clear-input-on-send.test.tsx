@@ -33,4 +33,53 @@ describe("prompt input clears on send", () => {
     expect(h.toJSON().input.text).toBe("");
     h.unmount();
   });
+
+  it("warns before sending when the session has notes", async () => {
+    const session = makeSession({
+      notes: [
+        {
+          id: "note-1",
+          text: "Remember this before sending.",
+          created_at: new Date().toISOString(),
+        },
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    await h.typeAndSend("hello with notes");
+
+    expect(h.outbound.findLast((f) => f.type === "send_message")).toBeUndefined();
+    expect(h.$(".modal-overlay")?.textContent).toContain("Session has notes");
+    expect(h.toJSON().input.text).toBe("hello with notes");
+
+    await h.clickByText("Send anyway");
+
+    const sent = h.outbound.findLast((f) => f.type === "send_message");
+    expect(sent?.prompt).toBe("hello with notes");
+    expect(h.toJSON().input.text).toBe("");
+    h.unmount();
+  });
+
+  it("opens notes instead of sending when reviewing the warning", async () => {
+    const session = makeSession({
+      notes: [
+        {
+          id: "note-1",
+          text: "Review me first.",
+          created_at: new Date().toISOString(),
+        },
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    await h.typeAndSend("hold send");
+    await h.clickByText("Review notes");
+
+    expect(h.outbound.findLast((f) => f.type === "send_message")).toBeUndefined();
+    expect(h.toJSON().input.text).toBe("hold send");
+    expect(h.$(".notes-panel")?.textContent).toContain("Review me first.");
+    h.unmount();
+  });
 });
