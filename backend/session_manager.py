@@ -884,7 +884,7 @@ class SessionManager:
         seq: int,
     ) -> bool:
         """Project one written journal render event into the live tree."""
-        from event_shape import extract_output_text, strip_synthetic_events
+        from event_shape import project_content_snapshot
         from orchs import ApplyEventCtx, get_strategy
 
         rid = self._root_id_for(root_id)
@@ -927,7 +927,7 @@ class SessionManager:
             )
             after_events = strategy._events_list(msg)
             if not msg.get("isStreaming"):
-                content = extract_output_text(strip_synthetic_events(after_events))
+                content = project_content_snapshot(after_events, msg.get("content"))
                 if content != (msg.get("content") or ""):
                     msg["content"] = content
             if event_uuid:
@@ -4370,14 +4370,18 @@ class SessionManager:
     ) -> Optional[dict]:
         """Project collapsed assistant content from message-owned journal rows."""
         from event_journal import event_journal_reader
-        from event_shape import extract_output_text, strip_synthetic_events
+        from event_shape import project_content_snapshot
 
         events = event_journal_reader.read_ws_events(
             root_id,
             sid_filter=sid,
             msg_id_filter=msg_id,
         )
-        content = extract_output_text(strip_synthetic_events(events))
+        current = self.get(sid) or {}
+        current_msg = _find_message(current, msg_id)
+        content = project_content_snapshot(
+            events, current_msg.get("content") if current_msg else "",
+        )
         def _do(s: dict) -> None:
             m = _find_message(s, msg_id)
             if m is None or m.get("isStreaming"):

@@ -14,14 +14,10 @@ import './i18n'
 import './styles/globals.css'
 import App from './App'
 
-// On Capacitor native, the WebView origin (http://localhost/) is
-// cross-site to the backend, so SameSite=Lax drops the bc_session
-// cookie on every fetch after login. Bearer-token auth via a request
-// header sidesteps the cookie entirely. Installs BEFORE any module
-// fires a request.
-if (Capacitor.isNativePlatform()) {
-  installBearerAuthInterceptor()
-}
+// Token-backed auth is needed by Capacitor and by browser QR login
+// flows embedded cross-origin. Cookie-only browser sessions are
+// unaffected when no token is stored.
+installBearerAuthInterceptor()
 installFrontendLogger()
 
 // Browsers restore `history.state` after a reload, so a modal sentinel

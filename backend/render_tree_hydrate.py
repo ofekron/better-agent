@@ -32,7 +32,7 @@ import time
 from typing import Callable, Optional
 
 from event_journal import FORK_BACKUP_SOURCE, event_journal_reader
-from event_shape import strip_synthetic_events, extract_output_text
+from event_shape import project_content_snapshot
 from orchs.base import (
     _event_uuid,
     _normalize_for_render,
@@ -364,10 +364,9 @@ def hydrate_msg_events_from_jsonl(
             )
             if live_m is None or live_m.get("isStreaming") is True:
                 continue
-            events_for_extract = strip_synthetic_events(
-                strategy._events_list(live_m),
+            extracted = project_content_snapshot(
+                strategy._events_list(live_m), live_m.get("content"),
             )
-            extracted = extract_output_text(events_for_extract)
             if extracted != (live_m.get("content") or ""):
                 session_manager.update_running_content(sid, msg_id, extracted)
 

@@ -130,6 +130,7 @@ from claude_agent_sdk import (
     SystemMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
+    UserMessage,
     create_sdk_mcp_server,
     tool,
 )
@@ -1689,6 +1690,66 @@ async def _heartbeat_writer(
             pass
 
 
+class _LingerStreamState:
+    """Mutable view of the CLI stream during the babysitter linger.
+
+    `tasks` mirrors in-flight background subagents. A terminal task
+    notification makes the CLI inject a `<task-notification>` user message
+    and start a continuation turn on the SAME instance — exiting the linger
+    at that moment SIGKILLs the CLI mid-inference and loses the
+    continuation's output. So the linger also tracks turn-in-flight state:
+
+    - terminal TaskNotificationMessage → expect a continuation for a grace
+      window (`_CONTINUATION_EXPECT_S`) — covers TTFT before the first
+      continuation message reaches the stream;
+    - UserMessage / AssistantMessage → continuation turn active;
+    - ResultMessage → continuation turn done.
+
+    `_CONTINUATION_CAP_S` hard-caps a single continuation so a hung CLI
+    cannot linger forever; the cap resets on each new continuation.
+    """
+
+    _CONTINUATION_EXPECT_S = 30.0
+    _CONTINUATION_CAP_S = 30 * 60.0
+
+    def __init__(self, tasks: set[str]) -> None:
+        self.tasks = tasks
+        self._expect_until = 0.0
+        self._active_since: Optional[float] = None
+
+    def apply(self, msg: object) -> None:
+        _apply_task_message(msg, self.tasks)
+        if isinstance(msg, TaskNotificationMessage):
+            self._expect_until = time.monotonic() + self._CONTINUATION_EXPECT_S
+        elif isinstance(msg, (UserMessage, AssistantMessage)):
+            if self._active_since is None:
+                self._active_since = time.monotonic()
+        elif isinstance(msg, ResultMessage):
+            self._active_since = None
+            self._expect_until = 0.0
+
+    def expect_continuation(self) -> None:
+        """Open the grace window without a stream message — used when
+        detached background work (run_in_background shells, Monitor
+        watchers) ends, which also triggers a CLI re-invocation whose
+        first stream message may lag the process exit."""
+        self._expect_until = time.monotonic() + self._CONTINUATION_EXPECT_S
+
+    def continuation_busy(self, log: logging.Logger) -> bool:
+        now = time.monotonic()
+        if self._active_since is not None:
+            if now - self._active_since > self._CONTINUATION_CAP_S:
+                log.warning(
+                    "babysitter: continuation turn exceeded %.0fs cap — "
+                    "no longer counted as busy", self._CONTINUATION_CAP_S,
+                )
+                self._active_since = None
+                self._expect_until = 0.0
+                return False
+            return True
+        return now < self._expect_until
+
+
 def _apply_task_message(msg: object, tasks: set[str]) -> None:
     """Fold one SDK message into the in-flight background-subagent set.
 
@@ -1707,16 +1768,17 @@ def _apply_task_message(msg: object, tasks: set[str]) -> None:
 
 async def _drain_background_tasks(
     client: "ClaudeSDKClient",
-    tasks: set[str],
+    stream_state: _LingerStreamState,
     log: logging.Logger,
 ) -> None:
     """Consume the CLI message stream during the linger so background-subagent
     `task_notification` events (emitted AFTER the turn's `ResultMessage`, on the
-    raw `receive_messages()` stream) keep `tasks` current. Ends when the stream
+    raw `receive_messages()` stream) keep `stream_state` current — both the
+    outstanding-task set and continuation-turn activity. Ends when the stream
     closes — i.e. the CLI is gone — which the linger treats as reap-eligible."""
     try:
         async for msg in client.receive_messages():
-            _apply_task_message(msg, tasks)
+            stream_state.apply(msg)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1755,17 +1817,21 @@ async def _linger_for_background_work(
     pc = process_control()
     cancel_path = run_dir / "cancel"
     tasks = outstanding_tasks if outstanding_tasks is not None else set()
+    stream_state = _LingerStreamState(tasks)
     lingering = False
     consecutive_failures = 0
+    prev_has_desc = False
 
-    # Keep `tasks` current from the CLI stream while lingering: a subagent's
-    # terminal `task_notification` lands on `receive_messages()` AFTER the
-    # turn's `ResultMessage`, so only a live drain can clear it. Skipped when
-    # there's no client (recovery) or nothing to track at entry.
+    # Keep `stream_state` current from the CLI stream while lingering: a
+    # subagent's terminal `task_notification` lands on `receive_messages()`
+    # AFTER the turn's `ResultMessage`, so only a live drain can clear it —
+    # and the same notification triggers a continuation turn on this CLI
+    # instance which must not be reaped mid-inference. Skipped only when
+    # there's no client (recovery).
     drain_task: Optional[asyncio.Task] = None
-    if client is not None and tasks:
+    if client is not None:
         drain_task = asyncio.create_task(
-            _drain_background_tasks(client, tasks, log)
+            _drain_background_tasks(client, stream_state, log)
         )
 
     try:
@@ -1807,8 +1873,18 @@ async def _linger_for_background_work(
             # A live in-flight subagent counts as busy only while the drain is
             # alive to clear it. If the stream closed (drain done) the CLI is
             # gone and no notification can arrive — don't linger on a stale id.
+            # A continuation turn (CLI responding to a task notification)
+            # counts as busy under the same drain-alive condition.
             drain_alive = drain_task is not None and not drain_task.done()
-            busy = has_desc or (bool(tasks) and drain_alive)
+            if prev_has_desc and not has_desc and drain_alive:
+                # Detached work just ended — the CLI re-invocation it
+                # triggers may not have hit the stream yet.
+                stream_state.expect_continuation()
+            prev_has_desc = has_desc
+            busy = has_desc or (
+                drain_alive
+                and (bool(tasks) or stream_state.continuation_busy(log))
+            )
             if not busy:
                 if lingering:
                     log.info("babysitter: background work ended — exiting")

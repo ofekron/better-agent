@@ -1280,6 +1280,17 @@ def test_queue_projection_skips_unchanged_disk_write() -> None:
     assert upsert_source.index('if _records.get(record["id"]) == record:') < upsert_source.index("_write_record_locked(record)")
 
 
+def test_queue_projection_overlay_reads_records_in_bulk() -> None:
+    queue_source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
+    assert "def get_many(" in queue_source
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    start = store_source.index("def _overlay_queue_projection(")
+    end = store_source.index("@perf.timed_fn(\"store.session.write_full\")", start)
+    overlay_source = store_source[start:end]
+    assert "session_queue_projection.get_many(sids)" in overlay_source
+    assert "session_queue_projection.get(sid)" not in overlay_source
+
+
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "startup-unread-warm" not in source
