@@ -77,6 +77,9 @@ describe("Better Agent TestApe consumer", () => {
         <div data-testid="user-message" data-message-id="u1">
           <div class="message-box-body">Hello</div>
         </div>
+        <div class="message user-message" data-message-id="u2">
+          <div class="message-content">Standalone</div>
+        </div>
         <div data-testid="assistant-message" data-message-id="a1">
           <div class="message-content">Answer</div>
         </div>
@@ -94,6 +97,7 @@ describe("Better Agent TestApe consumer", () => {
           session_id: "s1",
           messages: [
             { id: "u1", role: "user", text: "Hello" },
+            { id: "u2", role: "user", text: "Standalone" },
             { id: "a1", role: "assistant", text: "Answer" },
           ],
         },

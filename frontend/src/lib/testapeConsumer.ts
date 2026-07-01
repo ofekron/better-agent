@@ -89,12 +89,17 @@ function elementIsVisible(el: HTMLElement, viewport: DOMRect): boolean {
     return false;
   }
   if (viewport.width === 0 || viewport.height === 0) return true;
-  return rect.bottom >= viewport.top && rect.top <= viewport.bottom;
+  return (
+    rect.bottom >= viewport.top &&
+    rect.top <= viewport.bottom &&
+    rect.right >= viewport.left &&
+    rect.left <= viewport.right
+  );
 }
 
 function readMessage(el: HTMLElement): ChatPanelMessage | null {
   const role =
-    el.dataset.testid === "user-message"
+    el.dataset.testid === "user-message" || el.classList.contains("user-message")
       ? "user"
       : el.dataset.testid === "assistant-message"
         ? "assistant"
@@ -103,7 +108,7 @@ function readMessage(el: HTMLElement): ChatPanelMessage | null {
   if (!role || !id) return null;
   const textEl =
     role === "user"
-      ? el.querySelector<HTMLElement>(".message-box-body")
+      ? el.querySelector<HTMLElement>(".message-box-body, .message-content")
       : el.querySelector<HTMLElement>(".message-content");
   return { id, role, text: tidyText(textEl?.textContent ?? el.textContent) };
 }
@@ -117,7 +122,11 @@ function readRegion(
 ): ChatPanelRegion {
   const messages = Array.from(
     root.querySelectorAll<HTMLElement>(
-      '[data-testid="user-message"], [data-testid="assistant-message"]',
+      [
+        '[data-testid="user-message"]',
+        '[data-testid="assistant-message"]',
+        ".user-message[data-message-id]",
+      ].join(", "),
     ),
   )
     .filter((el) => elementIsVisible(el, viewport))
