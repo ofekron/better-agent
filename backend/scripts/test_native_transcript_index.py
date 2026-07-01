@@ -236,6 +236,23 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     return ok
 
 
+def test_refresh_reports_locked_instead_of_colliding() -> bool:
+    _setup_roots()
+    lock_path = idx._writer_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    try:
+        import portable_lock
+        portable_lock.lock_ex(handle.fileno())
+        result = idx.refresh_once()
+    finally:
+        portable_lock.unlock(handle.fileno())
+        handle.close()
+    ok = result == {"walked": 0, "touched": 0, "locked": 1}
+    print(f"{OK if ok else FAIL} refresh reports locked instead of colliding (result={result})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -245,6 +262,7 @@ def main_run() -> int:
         test_not_usable_until_covered,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
+        test_refresh_reports_locked_instead_of_colliding,
     ]
     results = []
     for fn in tests:

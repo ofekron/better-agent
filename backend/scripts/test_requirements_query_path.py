@@ -163,10 +163,14 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("never pass file paths" in prompt, "processor prompt forbids rg path args")
     check("Do not pass bare token lists" in prompt, "processor prompt rejects bare token rg args")
     check("do not require every term to match" in prompt, "processor prompt preserves partial semantic matches")
+    check("kind=native_transcript_bundle" in prompt, "processor prompt explains native transcript bundles")
+    check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for native bundles")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("never file paths" in instructions, "processor instructions forbid rg path args")
     check("do not pass bare token lists" in instructions, "processor instructions reject bare token rg args")
     check("do not require every term to match" in instructions, "processor instructions preserve partial semantic matches")
+    check("kind=native_transcript_bundle" in instructions, "processor instructions explain native transcript bundles")
+    check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for native bundles")
 
 
 def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
