@@ -1,12 +1,12 @@
-"""Raw provider-native session prompt search — the get-requirements fallback.
+"""Raw provider-native session prompt search.
 
-When the requirement processor (the LLM-backed curation path) is unavailable,
-answer from the rawest data we have: the provider-native session transcripts.
 Each provider is read by its own native miner — Claude ``projects/<cwd>/<sid>.jsonl``,
 Codex / Gemini / Better Agent run-dir ``session_events.jsonl`` — so this is the
 "every provider with its own grepping method" fan-out. It reuses the canonical
 :mod:`native_session_miner` readers (no watermark → scan every transcript) and
-greps the typed user prompts for the query tokens.
+greps the typed user prompts for the query tokens. Public requirements lookup
+does not use this as a success fallback; requirements still come from the LLM
+processor.
 
 Discovery (cheap) is separated from parsing (expensive: read + JSON-parse each
 transcript). Parsing + matching runs concurrently across a thread pool, since
@@ -42,9 +42,8 @@ _STOPWORDS = frozenset({
 def _native_miners() -> list:
     """One miner per provider, each with an empty state so nothing is skipped.
 
-    An empty watermark dict makes every native transcript a candidate — the
-    fallback wants the whole raw corpus, not the delta since the last mining
-    pass.
+    An empty watermark dict makes every native transcript a candidate — this
+    search wants the whole raw corpus, not the delta since the last mining pass.
     """
     return [
         NativeClaudeSessionMiner({}),
