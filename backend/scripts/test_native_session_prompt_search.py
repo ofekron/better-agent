@@ -44,6 +44,7 @@ _TMP_HOME = _test_home.isolate("bc-test-native-prompt-search-")
 import native_session_prompt_search as nsp  # noqa: E402
 import requirement_context  # noqa: E402
 from native_session_miner import NativeCandidate  # noqa: E402
+from paths import encode_cwd  # noqa: E402
 
 OK = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
@@ -238,6 +239,44 @@ def test_deterministic_order_for_empty_ts_ties() -> bool:
     return ok
 
 
+def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
+    """Regression: a native transcript with NO Better Agent session record
+    (direct CLI / extension-spawned) must be found by the search.
+
+    Before the filesystem-first discovery fix, `_candidates` was BA-index-gated
+    and an empty `sessions/` dir yielded zero candidates — so this prompt was
+    missed. Now `iter_all_native_candidates` walks the projects dir directly."""
+    _reset_candidates()  # ensure the REAL _candidates is in place
+    # claude_projects_root_for_session({}) honors CLAUDE_CONFIG_DIR → point it
+    # at an isolated temp dir so the walk reads only our fixture transcript.
+    tmp_cfg = _SCRATCH / "claude-config"
+    projects = tmp_cfg / "projects"
+    projects.mkdir(parents=True, exist_ok=True)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(tmp_cfg)
+    try:
+        cwd = "/Users/test/unlinked-proj"
+        session_dir = projects / encode_cwd(cwd)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sid = "deadbeef-0000-0000-0000-unlinked0001"
+        (session_dir / f"{sid}.jsonl").write_text(
+            json.dumps({
+                "type": "user",
+                "uuid": "u-unlinked-1",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "zulifrangible task widget"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        # Deliberately NO sessions/<sid>.json — the transcript is unlinked.
+        out = nsp.search_native_session_prompts(query="zulifrangible task widget")
+    finally:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    texts = {r["text"] for r in out}
+    ok = "zulifrangible task widget" in texts
+    print(f"{OK if ok else FAIL} unlinked transcript found via filesystem walk (got {texts})")
+    return ok
+
+
 def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
@@ -292,6 +331,7 @@ def main_run() -> int:
         test_dedup_across_sessions,
         test_bad_transcript_does_not_abort_search,
         test_deterministic_order_for_empty_ts_ties,
+        test_unlinked_transcript_found_via_filesystem_walk,
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]
