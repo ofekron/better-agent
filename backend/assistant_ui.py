@@ -297,30 +297,55 @@ async def resolve_ba_session(native_session_id: str) -> dict:
     return {"ba_session_id": root}
 
 
-def _adopt_by_import(native_id: str) -> dict:
+def _norm_path(p: str) -> str:
+    if not p:
+        return ""
+    try:
+        return str(Path(p).expanduser().resolve())
+    except OSError:
+        return str(Path(p).expanduser())
+
+
+def _adopt_by_import(transcript_path: str, native_id: str) -> dict:
+    """Find the exact native session and import it. Match on the transcript
+    PATH — the only provider-agnostic key: for codex the FTS ``sid`` is the
+    rollout-file stem while the enumerator's ``native_id`` is the codex DB thread
+    id, so a native_id match would miss codex; ``jsonl_path`` equals the FTS
+    ``path`` for every file-based provider (claude / codex-rollout / gemini /
+    agy). ``native_id`` is only a claude fallback when no path is given."""
     import native_import
+    want = _norm_path(transcript_path)
+    fallback = None
     for sess in native_import.enumerate_native_sessions():
-        if sess.native_id == native_id:
+        if want and _norm_path(sess.jsonl_path) == want:
             # Idempotent: a session already imported returns its existing id.
             return {"ba_session_id": native_import.import_session(sess)}
+        if not want and native_id and sess.native_id == native_id:
+            fallback = sess
+    if fallback is not None:
+        return {"ba_session_id": native_import.import_session(fallback)}
     return {"ba_session_id": None, "error": "native_session_not_found"}
 
 
-async def adopt_native_session(native_session_id: str) -> dict:
+async def adopt_native_session(native_session_id: str, transcript_path: str = "") -> dict:
     """Bring a native session that has NO Better Agent session into BA so it can
     be acted on: import its transcript into a new BA ``native`` session
     (preserving the full conversation as context) and return that BA session id.
 
-    Idempotent: a session that is already BA-managed or previously imported
+    Pass ``transcript_path`` (the ``path`` column from the search row) — it is the
+    accurate, provider-agnostic key; ``native_session_id`` alone is reliable only
+    for claude. Idempotent: an already-BA-managed or already-imported session
     returns its existing id — never a duplicate. Returns
-    ``{"ba_session_id": None, "error": ...}`` when the native id can't be found."""
+    ``{"ba_session_id": None, "error": ...}`` when the session can't be found."""
     sid = (native_session_id or "").strip()
-    if not sid:
-        return {"ba_session_id": None, "error": "empty_session_id"}
-    root = await asyncio.to_thread(session_manager.root_id_for, sid)
-    if root:
-        return {"ba_session_id": root}
-    return await asyncio.to_thread(_adopt_by_import, sid)
+    path = (transcript_path or "").strip()
+    if not sid and not path:
+        return {"ba_session_id": None, "error": "session_id_or_path_required"}
+    if sid:
+        root = await asyncio.to_thread(session_manager.root_id_for, sid)
+        if root:
+            return {"ba_session_id": root}
+    return await asyncio.to_thread(_adopt_by_import, path, sid)
 
 
 async def delegate(target_sid: str, prompt: str) -> dict:

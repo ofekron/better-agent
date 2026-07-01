@@ -6257,7 +6257,10 @@ async def internal_assistant_ui_adopt_native_session(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_assistant_internal(x_internal_token)
-    return await assistant_ui.adopt_native_session(str(body.get("session_id") or ""))
+    return await assistant_ui.adopt_native_session(
+        str(body.get("session_id") or ""),
+        transcript_path=str(body.get("transcript_path") or ""),
+    )
 
 
 @app.post("/api/internal/assistant-ui/search-native-sql")
