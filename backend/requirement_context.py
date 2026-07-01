@@ -856,6 +856,9 @@ def _native_transcript_bundle_records(
         tokens = _query_tokens(query)
         if not tokens:
             return _native_bundle_result([], searched=False, reason="no_tokens")
+        quick_state = native_transcript_index.quick_state()
+        if not quick_state.get("covered"):
+            return _native_bundle_result([], searched=False, reason="index_not_usable", index=quick_state)
         native_transcript_index.ensure_started()
         if native_transcript_index.is_covered() and not native_transcript_index.is_usable():
             native_transcript_index.request_refresh()
