@@ -1782,7 +1782,10 @@ class EventIngester:
                 loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
                 if loaded is not None:
                     summaries, resolutions = loaded
-                    self._rebuild_seq_offsets_locked(path, root_id)
+                    if summaries or resolutions:
+                        self._rebuild_seq_offsets_locked(path, root_id)
+                    elif offsets is not None and self._next_offset.get(root_id) != file_size:
+                        self._seq_offsets.pop(root_id, None)
                     self._summaries_cache[root_id] = (
                         file_size, summaries, resolutions,
                     )

@@ -709,7 +709,12 @@ def test_event_summary_sidecar_load_populates_memory_cache() -> None:
     loaded_start = state_source.index("if loaded is not None:")
     loaded_end = state_source.index("else:", loaded_start)
     loaded_source = state_source[loaded_start:loaded_end]
+    assert "if summaries or resolutions:" in loaded_source
     assert "self._rebuild_seq_offsets_locked(path, root_id)" in loaded_source
+    assert loaded_source.index("if summaries or resolutions:") < loaded_source.index(
+        "self._rebuild_seq_offsets_locked(path, root_id)"
+    )
+    assert "elif offsets is not None and self._next_offset.get(root_id) != file_size:" in loaded_source
     assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in loaded_source
 
 
