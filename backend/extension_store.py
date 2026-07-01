@@ -2413,7 +2413,12 @@ def _install_public_package_snapshot(
     }
 
 
-def _install_private_package_snapshot(extension_id: str, package_dir: Path) -> dict[str, Any]:
+def _install_private_package_snapshot(
+    extension_id: str,
+    package_dir: Path,
+    *,
+    commit_sha: str | None = None,
+) -> dict[str, Any]:
     manifest_path = package_dir / "better-agent-extension.json"
     if not manifest_path.exists():
         raise ExtensionError("better-agent-extension.json not found at required extension path")
@@ -2421,7 +2426,7 @@ def _install_private_package_snapshot(extension_id: str, package_dir: Path) -> d
     if manifest["id"] != extension_id:
         raise ExtensionError("Private extension manifest id does not match install spec")
     _validate_declared_files(manifest, package_dir)
-    commit_sha = _private_extension_commit_sha()
+    commit_sha = commit_sha or _private_extension_commit_sha()
     target = _install_root() / extension_id / "versions" / commit_sha
     _install_package_artifact(package_dir, target)
     try:
@@ -2589,6 +2594,14 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
     changed = False
     repo_root = _local_private_extension_repo_root()
     deleted = set((data.get("deleted_extensions") or {}).keys())
+    private_commit_sha: str | None = None
+
+    def current_private_commit_sha() -> str:
+        nonlocal private_commit_sha
+        if private_commit_sha is None:
+            private_commit_sha = _private_extension_commit_sha()
+        return private_commit_sha
+
     # Hardcoded map (preserves special-case entries like marketplace) augmented
     # by a generic manifest scan, so new private extensions load without a
     # public-code id entry.
@@ -2616,10 +2629,14 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
                 source.get("type") == "better_agent_local"
                 and package_dir is not None
                 and package_dir.exists()
-                and source.get("commit_sha") != _private_extension_commit_sha()
+                and source.get("commit_sha") != current_private_commit_sha()
             ):
                 try:
-                    refreshed = _install_private_package_snapshot(extension_id, package_dir)
+                    refreshed = _install_private_package_snapshot(
+                        extension_id,
+                        package_dir,
+                        commit_sha=current_private_commit_sha(),
+                    )
                 except ExtensionError:
                     continue
                 refreshed["enabled"] = record.get("enabled", True)
@@ -2726,7 +2743,7 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
                 )
                 changed = True
             continue
-        commit_sha = _private_extension_commit_sha()
+        commit_sha = current_private_commit_sha()
         source = record.get("source") if record else {}
         install_path_text = str(source.get("install_path") or "")
         if (
@@ -2741,7 +2758,11 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
             continue
         install_error = False
         try:
-            installed = _install_private_package_snapshot(extension_id, package_dir)
+            installed = _install_private_package_snapshot(
+                extension_id,
+                package_dir,
+                commit_sha=commit_sha,
+            )
         except (ExtensionError, OSError, subprocess.SubprocessError) as exc:
             # A broken discovered extension must not crash reconciliation — record
             # a placeholder so the store stays usable (mirrors the public path).

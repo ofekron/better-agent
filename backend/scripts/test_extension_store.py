@@ -563,6 +563,109 @@ def test_extension_store_rehydrate_skips_tombstoned_installed_snapshot() -> None
         raise AssertionError("rehydration restored a tombstoned installed snapshot")
 
 
+def test_private_extension_reconcile_reuses_private_commit_sha() -> None:
+    original_paths = extension_store._PRIVATE_EXTENSION_PATHS
+    original_repo_root = extension_store._local_private_extension_repo_root
+    original_discover = extension_store._discover_private_extensions
+    original_commit = extension_store._private_extension_commit_sha
+    original_install = extension_store._install_private_package_snapshot
+    repo = Path(tempfile.mkdtemp(prefix="bc-test-private-commit-cache-")).resolve()
+    try:
+        extension_paths = {
+            "ofek.same-a": "extensions/same-a",
+            "ofek.same-b": "extensions/same-b",
+            "ofek.stale": "extensions/stale",
+            "ofek.fresh": "extensions/fresh",
+        }
+        for rel_path in extension_paths.values():
+            (repo / rel_path).mkdir(parents=True)
+        data = {
+            "schema_version": extension_store.STORE_SCHEMA_VERSION,
+            "extensions": {
+                "ofek.same-a": {
+                    "enabled": True,
+                    "installed_at": "",
+                    "updated_at": "",
+                    "manifest": {"id": "ofek.same-a"},
+                    "source": {
+                        "type": "better_agent_local",
+                        "commit_sha": "head",
+                        "install_path": str(repo / "installed-a"),
+                    },
+                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
+                },
+                "ofek.same-b": {
+                    "enabled": True,
+                    "installed_at": "",
+                    "updated_at": "",
+                    "manifest": {"id": "ofek.same-b"},
+                    "source": {
+                        "type": "better_agent_local",
+                        "commit_sha": "head",
+                        "install_path": str(repo / "installed-b"),
+                    },
+                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
+                },
+                "ofek.stale": {
+                    "enabled": True,
+                    "installed_at": "old",
+                    "updated_at": "",
+                    "manifest": {"id": "ofek.stale"},
+                    "source": {
+                        "type": "better_agent_local",
+                        "commit_sha": "old",
+                        "install_path": str(repo / "installed-stale"),
+                    },
+                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
+                },
+            },
+            "deleted_extensions": {},
+        }
+        (repo / "installed-a").mkdir()
+        (repo / "installed-b").mkdir()
+        calls = {"commit": 0}
+        installs: list[tuple[str, str]] = []
+
+        def fake_commit() -> str:
+            calls["commit"] += 1
+            return "head"
+
+        def fake_install(extension_id: str, package_dir: Path, *, commit_sha: str | None = None) -> dict:
+            installs.append((extension_id, commit_sha or ""))
+            return {
+                "enabled": True,
+                "installed_at": "",
+                "updated_at": "",
+                "manifest": {"id": extension_id},
+                "source": {
+                    "type": "better_agent_local",
+                    "commit_sha": commit_sha,
+                    "install_path": str(repo / f"installed-{extension_id}"),
+                },
+                "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
+            }
+
+        extension_store._PRIVATE_EXTENSION_PATHS = extension_paths
+        extension_store._local_private_extension_repo_root = lambda: repo
+        extension_store._discover_private_extensions = lambda _repo: {}
+        extension_store._private_extension_commit_sha = fake_commit
+        extension_store._install_private_package_snapshot = fake_install
+
+        if not extension_store._ensure_private_extensions(data):
+            raise AssertionError("stale and fresh private extensions should be reconciled")
+        if calls["commit"] != 1:
+            raise AssertionError(f"private commit sha was read {calls['commit']} times")
+        if installs != [("ofek.stale", "head"), ("ofek.fresh", "head")]:
+            raise AssertionError(installs)
+    finally:
+        extension_store._PRIVATE_EXTENSION_PATHS = original_paths
+        extension_store._local_private_extension_repo_root = original_repo_root
+        extension_store._discover_private_extensions = original_discover
+        extension_store._private_extension_commit_sha = original_commit
+        extension_store._install_private_package_snapshot = original_install
+        shutil.rmtree(repo, ignore_errors=True)
+
+
 def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
     # An installed artifact snapshot (a version dir under the install root with
     # no registry record) must be rehydrated into the registry on reconcile.
@@ -4422,6 +4525,7 @@ if __name__ == "__main__":
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
+        test_private_extension_reconcile_reuses_private_commit_sha()
         test_extension_store_rehydrates_installed_artifact_snapshot()
         test_install_smoke_test_rejects_bad_python_module_import()
         test_optional_permissions_allow_forbid()
