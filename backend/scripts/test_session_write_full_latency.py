@@ -84,10 +84,11 @@ def _run() -> bool:
         "store.session.summary.build",
         "store.session.summary.index",
         "store.session.summary.sidecar_stat",
-        "store.session.summary.sidecar_write",
     ):
         if timer not in upsert_source:
             raise AssertionError(f"missing summary write timer {timer}")
+    if "_schedule_summary_sidecar_write(" not in upsert_source:
+        raise AssertionError("summary sidecar write must be scheduled from _upsert_summary")
     manager_source = open(session_manager_module.__file__, "r", encoding="utf-8").read()
     if "threading.Timer" in manager_source:
         raise AssertionError("persist debounce must not create per-write Timer threads")
@@ -235,6 +236,39 @@ def _run() -> bool:
     root.pop("draft_input", None)
     msg.pop("isStreaming", None)
     msg.pop("_uid_idx", None)
+
+    root["draft_input"] = "tail-draft"
+    msg["isStreaming"] = True
+    msg["_uid_idx"] = {"u-new": 0}
+    msg["events"] = [_native_event("tail-live", "tail-live")]
+    with patch("session_store._strip_volatile_from_tree", wraps=session_store._strip_volatile_from_tree) as strip:
+        session_manager._persist_root(sid, bump=False)
+        session_manager.flush_pending_persists()
+    tail_disk = json.loads(session_store._session_path(sid).read_text(encoding="utf-8"))
+    tail_msg = tail_disk["messages"][-1]
+    results.append(
+        (
+            "tail persist skips duplicate strip on persistable copy",
+            strip.call_count == 1
+            and "draft_input" not in tail_disk
+            and "events" not in tail_msg
+            and "isStreaming" not in tail_msg
+            and "_uid_idx" not in tail_msg
+            and root.get("draft_input") == "tail-draft"
+            and msg.get("isStreaming") is True
+            and msg.get("_uid_idx") == {"u-new": 0}
+            and msg.get("events"),
+            (
+                f"strip_calls={strip.call_count} "
+                f"disk_root_keys={sorted(tail_disk)} "
+                f"disk_msg_keys={sorted(tail_msg)}"
+            ),
+        )
+    )
+    root.pop("draft_input", None)
+    msg.pop("isStreaming", None)
+    msg.pop("_uid_idx", None)
+    msg.pop("events", None)
 
     # Concurrent contention: alternating writer + reader on the same
     # session. Writer goes through `set_pinned` which acquires

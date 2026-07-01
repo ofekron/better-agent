@@ -85,6 +85,7 @@ class SessionsStorage(Protocol):
         *,
         bump_updated_at: bool = True,
         preserve_projection_fields: bool = False,
+        already_persistable: bool = False,
     ) -> None: ...
 
     def list_sessions(self) -> list[dict]: ...

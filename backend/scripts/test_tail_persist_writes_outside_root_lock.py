@@ -29,7 +29,13 @@ def main() -> int:
         session_manager_module._persist_pending[root_id] = root
         session_manager_module._persist_deadlines[root_id] = 0.0
 
-        def assert_unlocked(_sess, *, bump_updated_at=True):
+        def assert_unlocked(
+            _sess,
+            *,
+            bump_updated_at=True,
+            preserve_projection_fields=False,
+            already_persistable=False,
+        ):
             lock = manager._lock_for_root(root_id)
             acquired = lock.acquire(blocking=False)
             assert acquired, "write_session_full ran while root lock was held"
