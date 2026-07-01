@@ -35,6 +35,7 @@ collision.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -57,10 +58,16 @@ class NativeCandidate:
     data: dict
     transcript: Path
     mtime: float
+    format: str = "claude"
 
     def parse(self) -> SessionVisit | None:
         try:
-            messages, events_by_msg_id = _native_messages(self.transcript)
+            if self.format == "codex":
+                messages, events_by_msg_id = _codex_messages(self.transcript)
+            elif self.format == "gemini":
+                messages, events_by_msg_id = _gemini_messages(self.transcript)
+            else:
+                messages, events_by_msg_id = _native_messages(self.transcript)
         except OSError:
             return None
         return SessionVisit(
@@ -233,6 +240,104 @@ def _native_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[
     return messages, events_by_msg_id
 
 
+# Codex user turns that are injected context, not typed prompts. Codex wraps the
+# cwd/env in an <environment_context> input_text block and appends instructions
+# under <user_instructions>; both look like a user turn but are CLI-injected.
+_CODEX_NON_PROMPT_TAGS = ("<environment_context>", "<user_instructions>")
+
+
+def _codex_is_real_prompt(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return not stripped.startswith(_CODEX_NON_PROMPT_TAGS)
+
+
+def _codex_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Parse a Codex rollout transcript (``~/.codex/sessions/.../rollout-*.jsonl``).
+
+    Each line is ``{"type", "timestamp", "payload"}``. User turns are
+    ``response_item`` payloads with ``role=="user"`` whose content is a list of
+    ``input_text`` blocks. CLI-injected ``<environment_context>`` /
+    ``<user_instructions>`` blocks are dropped so only typed prompts remain.
+    """
+    messages: list[dict] = []
+    events_by_msg_id: dict[str, list[dict]] = {}
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            payload = obj.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if obj.get("type") != "response_item" or payload.get("role") != "user":
+                continue
+            content = payload.get("content")
+            texts: list[str] = []
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        texts.append(block["text"])
+            text = "\n".join(t for t in texts if t).strip()
+            if not _codex_is_real_prompt(text):
+                continue
+            uid = payload.get("id") if isinstance(payload.get("id"), str) else ""
+            messages.append({"role": "user", "content": text, "timestamp": ts, "id": uid})
+    return messages, events_by_msg_id
+
+
+def _gemini_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Parse a Gemini chat-history transcript (``~/.gemini/tmp/<cwd>/chats/*.jsonl``).
+
+    The first line is session metadata; subsequent lines are turns
+    ``{"id", "timestamp", "type": "user"|"gemini", "content": [{"text"}]}``,
+    interleaved with ``{"$set": ...}`` update lines (skipped). User turns become
+    ``role=="user"`` messages; gemini turns become ``role=="assistant"``.
+    """
+    messages: list[dict] = []
+    events_by_msg_id: dict[str, list[dict]] = {}
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            turn_type = obj.get("type")
+            if turn_type not in ("user", "gemini"):
+                continue
+            content = obj.get("content")
+            texts: list[str] = []
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        texts.append(block["text"])
+            elif isinstance(content, str):
+                texts.append(content)
+            text = "\n".join(t for t in texts if t).strip()
+            if not text:
+                continue
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+            role = "user" if turn_type == "user" else "assistant"
+            messages.append({"role": role, "content": text, "timestamp": ts, "id": uid})
+    return messages, events_by_msg_id
+
+
 def _mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -310,45 +415,125 @@ def _iter_ba_session_records(root: Path) -> Iterable[tuple[str, dict]]:
             yield session_json.name, data
 
 
-def iter_all_native_candidates() -> Iterable[NativeCandidate]:
-    """Filesystem-first discovery of EVERY native transcript, ignoring the
-    Better-Agent session index.
+def _claude_projects_roots() -> list[Path]:
+    """Every claude projects root on disk across all provider configurations.
 
-    The BA-indexed miners (:class:`NativeClaudeSessionMiner` et al.) only see
-    transcripts linked from a BA session record, which misses the bulk of raw
-    native sessions — direct ``claude`` CLI usage and extension-spawned workers
-    (requirements/tasks pipelines) leave no BA record. This walker enumerates
-    the two on-disk transcript stores directly:
-
-    - Claude: ``<projects>/<encoded-cwd>/<sid>.jsonl`` (cwd decoded from the
-      dir name; exact for paths without underscores).
-    - Codex/Gemini/BA-runner run-dirs: ``<runs>/<run_id>/session_events.jsonl``
-      (cwd recovered from the BA record when one exists).
-
-    Used by the raw-grep search fallback (:mod:`native_session_prompt_search`)
-    so the search reflects the whole native corpus, not the BA-indexed 6%.
+    Claude-compatible providers may each set their own ``config_dir``
+    (e.g. ``~/.claude-zai`` for a Z.AI claude provider), and the claude CLI
+    writes ``<config_dir>/projects``. To cover them all we union: every
+    provider's ``config_dir``, the ``CLAUDE_CONFIG_DIR`` env var, and every
+    ``~/.claude*`` dir that actually has a ``projects/`` subdir.
     """
-    # Claude projects — every transcript under every encoded-cwd dir.
+    roots: set[Path] = set()
     try:
-        projects_root = claude_projects_root_for_session({})
+        import config_store
+        for prov in config_store.list_providers().get("providers", []):
+            if not isinstance(prov, dict) or prov.get("kind") != "claude":
+                continue
+            cfg_dir = (prov.get("config_dir") or "").strip()
+            if cfg_dir:
+                roots.add(Path(os.path.expanduser(os.path.expandvars(cfg_dir))) / "projects")
     except Exception:
-        projects_root = Path.home() / ".claude" / "projects"
-    if projects_root.exists():
+        pass
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    if env_dir:
+        roots.add(Path(os.path.expanduser(os.path.expandvars(env_dir))) / "projects")
+    try:
+        for entry in Path.home().iterdir():
+            if entry.is_dir() and entry.name.startswith(".claude") and (entry / "projects").is_dir():
+                roots.add(entry / "projects")
+    except OSError:
+        pass
+    return sorted(r for r in roots if r.exists())
+
+
+def _codex_sessions_root() -> Path:
+    return Path.home() / ".codex" / "sessions"
+
+
+def _gemini_chats_root() -> Path:
+    return Path.home() / ".gemini" / "tmp"
+
+
+def _codex_first_cwd(transcript: Path) -> str:
+    """cwd from a codex rollout's opening ``session_meta`` line, or ""."""
+    try:
+        with transcript.open(encoding="utf-8") as f:
+            first = f.readline()
+        obj = json.loads(first)
+        payload = obj.get("payload") if isinstance(obj, dict) else None
+        cwd = payload.get("cwd") if isinstance(payload, dict) else None
+        return cwd if isinstance(cwd, str) else ""
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def iter_all_native_candidates() -> Iterable[NativeCandidate]:
+    """Filesystem-first discovery of EVERY native transcript across ALL
+    providers, ignoring the Better-Agent session index.
+
+    The BA-indexed miners only see transcripts linked from a BA session record,
+    which misses the bulk of raw native sessions — direct CLI usage and
+    extension-spawned workers leave no BA record. This walker enumerates every
+    provider's native store directly so the raw-grep search covers the whole
+    corpus:
+
+    - Claude (every config): all ``<config_dir>/projects/<encoded-cwd>/*.jsonl``
+      — covers ``~/.claude``, ``~/.claude-zai``, and any provider ``config_dir``.
+    - Codex native: ``~/.codex/sessions/**/*.jsonl`` rollout files.
+    - Gemini native: ``~/.gemini/tmp/<cwd>/chats/session-*.jsonl``.
+    - BA run-dirs: ``<runs>/<run_id>/session_events.jsonl`` (codex/gemini/ba-runner
+      streams BA captured; Claude-shaped, so parsed as claude).
+    """
+    # Claude — every provider config root.
+    for projects_root in _claude_projects_roots():
+        if not projects_root.exists():
+            continue
         for encoded_dir in projects_root.iterdir():
             if not encoded_dir.is_dir():
                 continue
             decoded_cwd = _decode_cwd_token(encoded_dir.name)
             for transcript in encoded_dir.glob("*.jsonl"):
                 yield NativeCandidate(
-                    key=f"claude-fs:{encoded_dir.name}/{transcript.stem}",
+                    key=f"claude-fs:{projects_root.name}/{encoded_dir.name}/{transcript.stem}",
                     sid=transcript.stem,
                     cwd=decoded_cwd,
                     data={},
                     transcript=transcript,
                     mtime=_mtime(transcript),
+                    format="claude",
                 )
 
-    # Run-dirs (codex/gemini/ba-runner) — every run, regardless of BA linkage.
+    # Codex native rollout store.
+    codex_root = _codex_sessions_root()
+    if codex_root.exists():
+        for transcript in codex_root.rglob("*.jsonl"):
+            yield NativeCandidate(
+                key=f"codex-fs:{transcript.name}",
+                sid=transcript.stem,
+                cwd=_codex_first_cwd(transcript),
+                data={},
+                transcript=transcript,
+                mtime=_mtime(transcript),
+                format="codex",
+            )
+
+    # Gemini native chat store.
+    gemini_root = _gemini_chats_root()
+    if gemini_root.exists():
+        for transcript in gemini_root.rglob("chats/session-*.jsonl"):
+            cwd_dir = transcript.parent.parent
+            yield NativeCandidate(
+                key=f"gemini-fs:{cwd_dir.name}/{transcript.name}",
+                sid=transcript.stem,
+                cwd=_decode_cwd_token(cwd_dir.name),
+                data={},
+                transcript=transcript,
+                mtime=_mtime(transcript),
+                format="gemini",
+            )
+
+    # BA run-dirs (codex/gemini/ba-runner) — every run, regardless of BA linkage.
     for state_path in _runs_root().glob("*/state.json"):
         run_dir = state_path.parent
         transcript = run_dir / "session_events.jsonl"
@@ -366,6 +551,7 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
             data={},
             transcript=transcript,
             mtime=_mtime(transcript),
+            format="claude",
         )
 
 
