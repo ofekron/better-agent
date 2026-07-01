@@ -200,15 +200,7 @@ def _harvest_spawn_sid(child: Path) -> None:
     ledger so BA-spawn provenance survives the dir's removal. Reads the sid
     from whichever run-state file carries it."""
     import spawn_ledger
-    for name in ("state.json", "backend_state.json", "complete.json"):
-        try:
-            o = json.loads((child / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        sid = o.get("session_id") if isinstance(o, dict) else None
-        if isinstance(sid, str) and sid:
-            spawn_ledger.add(sid)
-            return
+    spawn_ledger.record_run_dir(child)
 
 
 def reap_run_dir(child: Path) -> bool:

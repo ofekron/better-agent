@@ -206,28 +206,13 @@ def _ba_managed_native_ids() -> set[str]:
     in BA (or did), so importing their native transcripts would duplicate
     agent/internal sessions rather than recover a real user conversation.
 
-    Detected two ways: every BA-spawned provider session has a run dir whose
-    `state.json` records its `session_id`; and current BA session trees
-    reference their provider sid as `agent_session_id`. A native session
-    matching either is BA-managed and skipped at import."""
+    Detected two ways: the durable spawn ledger records BA-spawned provider
+    session ids, and current BA session trees reference their provider sid as
+    `agent_session_id`. A native session matching either is BA-managed and
+    skipped at import."""
     ids: set[str] = set()
-    try:
-        from runs_dir import runs_root
-        root = runs_root()
-        if root.exists():
-            for d in root.iterdir():
-                st = d / "state.json" if d.is_dir() else None
-                if not st or not st.exists():
-                    continue
-                try:
-                    o = json.loads(st.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                sid = o.get("session_id") if isinstance(o, dict) else None
-                if isinstance(sid, str) and sid:
-                    ids.add(sid)
-    except Exception:
-        logger.exception("native_import: runs scan failed")
+    import spawn_ledger
+    spawn_ledger.bootstrap_from_run_dirs_once()
     try:
         import session_store
         for s in session_store.list_sessions():
@@ -245,7 +230,6 @@ def _ba_managed_native_ids() -> set[str]:
         logger.exception("native_import: session_store scan failed")
     # Durable provenance: sids harvested at run-dir reap time survive the
     # 7-day prune / session delete that erase live run dirs above.
-    import spawn_ledger
     ids |= spawn_ledger.all_sids()
     return ids
 
