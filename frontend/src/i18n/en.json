@@ -944,5 +944,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "OK",
+  "sessionSelector.title": "Session model",
+  "sessionSelector.openPicker": "Change session model",
+  "sessionSelector.noModelsAvailable": "No models available",
+  "sessionSelector.noModelForProvider": "No model is available for this provider.",
+  "sessionSelector.selectModel": "Select a model"
 }

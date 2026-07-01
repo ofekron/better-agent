@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "OK",
+  "sessionSelector.title": "Модель сессии",
+  "sessionSelector.openPicker": "Изменить модель сессии",
+  "sessionSelector.noModelsAvailable": "Нет доступных моделей",
+  "sessionSelector.noModelForProvider": "Для этого провайдера нет доступной модели.",
+  "sessionSelector.selectModel": "Выберите модель"
 }

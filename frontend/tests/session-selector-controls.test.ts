@@ -15,14 +15,17 @@ describe("existing-session provider/model selectors", () => {
     expect(app).toContain("applySessionMetadata(currentSession.id, updates)");
   });
 
-  it("persists provider/model changes through the session selectors endpoint", () => {
+  it("persists provider/model changes through the session selectors endpoint on OK", () => {
     expect(component).toContain("/api/sessions/${encodeURIComponent(session.id)}/selectors");
-    expect(component).toContain("provider_id: providerId");
-    expect(component).toContain("model: preferredModel");
-    expect(component).toContain("if (!preferredModel)");
+    expect(component).toContain("openPicker");
+    expect(component).toContain("confirmPicker");
+    expect(component).toContain("changedUpdates(session, draft)");
+    expect(component).toContain('t("newSession.cancel", "Cancel")');
+    expect(component).toContain('t("common.ok", "OK")');
+    expect(component).not.toContain("onChange={(e) => changeModel(e.target.value)}");
   });
 
   it("documents lazy continuation semantics for selector changes", () => {
-    expect(component).toContain("lazily on the next prompt");
+    expect(component).toContain("fresh provider subprocess");
   });
 });

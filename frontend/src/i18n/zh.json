@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "确定",
+  "sessionSelector.title": "会话模型",
+  "sessionSelector.openPicker": "更改会话模型",
+  "sessionSelector.noModelsAvailable": "没有可用模型",
+  "sessionSelector.noModelForProvider": "此提供商没有可用模型。",
+  "sessionSelector.selectModel": "选择模型"
 }

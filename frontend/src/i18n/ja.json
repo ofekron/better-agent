@@ -869,5 +869,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "OK",
+  "sessionSelector.title": "セッションモデル",
+  "sessionSelector.openPicker": "セッションモデルを変更",
+  "sessionSelector.noModelsAvailable": "利用可能なモデルはありません",
+  "sessionSelector.noModelForProvider": "このプロバイダーで利用できるモデルはありません。",
+  "sessionSelector.selectModel": "モデルを選択"
 }

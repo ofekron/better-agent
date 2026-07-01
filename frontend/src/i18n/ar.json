@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "موافق",
+  "sessionSelector.title": "نموذج الجلسة",
+  "sessionSelector.openPicker": "تغيير نموذج الجلسة",
+  "sessionSelector.noModelsAvailable": "لا توجد نماذج متاحة",
+  "sessionSelector.noModelForProvider": "لا يوجد نموذج متاح لهذا المزوّد.",
+  "sessionSelector.selectModel": "اختر نموذجًا"
 }

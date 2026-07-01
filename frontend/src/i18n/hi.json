@@ -873,5 +873,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "ठीक",
+  "sessionSelector.title": "सत्र मॉडल",
+  "sessionSelector.openPicker": "सत्र मॉडल बदलें",
+  "sessionSelector.noModelsAvailable": "कोई मॉडल उपलब्ध नहीं",
+  "sessionSelector.noModelForProvider": "इस प्रदाता के लिए कोई मॉडल उपलब्ध नहीं है।",
+  "sessionSelector.selectModel": "मॉडल चुनें"
 }

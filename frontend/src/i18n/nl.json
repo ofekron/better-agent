@@ -869,5 +869,11 @@
   "analytics.failed": "Failed",
   "analytics.succeeded": "Succeeded",
   "analytics.noPromptPreview": "No prompt preview",
-  "analytics.tokensShort": "tokens"
+  "analytics.tokensShort": "tokens",
+  "common.ok": "OK",
+  "sessionSelector.title": "Sessiemodel",
+  "sessionSelector.openPicker": "Sessiemodel wijzigen",
+  "sessionSelector.noModelsAvailable": "Geen modellen beschikbaar",
+  "sessionSelector.noModelForProvider": "Er is geen model beschikbaar voor deze provider.",
+  "sessionSelector.selectModel": "Selecteer een model"
 }
