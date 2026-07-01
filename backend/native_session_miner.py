@@ -35,11 +35,41 @@ collision.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from paths import bc_home, claude_projects_root_for_session, encode_cwd
 from session_miner import SessionMinerBase, SessionVisit, sessions_dir
+
+
+@dataclass
+class NativeCandidate:
+    """A discovered native transcript to parse — resolution done, parse pending.
+
+    :meth:`parse` reads the transcript and builds the :class:`SessionVisit`; it
+    is the expensive step, kept separate from discovery so callers can run it
+    concurrently."""
+
+    key: str
+    sid: str
+    cwd: str
+    data: dict
+    transcript: Path
+    mtime: float
+
+    def parse(self) -> SessionVisit | None:
+        try:
+            messages, events_by_msg_id = _native_messages(self.transcript)
+        except OSError:
+            return None
+        return SessionVisit(
+            sid=self.sid,
+            cwd=self.cwd,
+            data=self.data,
+            messages=messages,
+            events_by_msg_id=events_by_msg_id,
+        )
 
 # Claude CLI user lines that are injected context/commands, not typed prompts.
 _NON_PROMPT_TAGS = (
@@ -263,7 +293,10 @@ class _NativeMinerBase(SessionMinerBase):
     def _resolve_transcript(self, data: dict, sid: str) -> Path | None:
         raise NotImplementedError
 
-    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
+    def iter_candidates(self) -> Iterable["NativeCandidate"]:
+        """Cheap discovery: yield one :class:`NativeCandidate` per transcript
+        to parse, WITHOUT reading/parsing it. Splitting discovery from parsing
+        lets a caller fan the (expensive) parse out across a thread pool."""
         for session_name, data in _iter_ba_session_records(self._root):
             if _provider_kind(data) != self._kind:
                 continue
@@ -271,20 +304,22 @@ class _NativeMinerBase(SessionMinerBase):
             transcript = self._resolve_transcript(data, sid)
             if transcript is None or not transcript.exists():
                 continue
-            try:
-                messages, events_by_msg_id = _native_messages(transcript)
-            except OSError:
-                continue
-            visit = SessionVisit(
+            source_mtime = max(_mtime(self._root / session_name), _mtime(transcript))
+            yield NativeCandidate(
+                key=f"{self._key_prefix}{session_name}",
                 sid=sid,
                 cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else "",
                 data=data,
-                messages=messages,
-                events_by_msg_id=events_by_msg_id,
+                transcript=transcript,
+                mtime=source_mtime,
             )
-            yield f"{self._key_prefix}{session_name}", visit, max(
-                _mtime(self._root / session_name), _mtime(transcript),
-            )
+
+    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
+        for candidate in self.iter_candidates():
+            visit = candidate.parse()
+            if visit is None:
+                continue
+            yield candidate.key, visit, candidate.mtime
 
 
 class NativeClaudeSessionMiner(_NativeMinerBase):
