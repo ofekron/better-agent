@@ -459,8 +459,6 @@
   "session.aiSearchLoading": "검색 중…",
   "session.aiSearchClear": "결과 지우기",
   "session.aiSearchMatches": "{{count}}개 일치",
-  "session.searchNativeOff": "공급자 네이티브 세션 기록도 검색",
-  "session.searchNativeOn": "네이티브 기록도 검색 중 — 클릭하여 비활성화",
   "session.aiSearchViewFull": "전체 추론 보기",
   "session.aiSearchClose": "닫기",
   "session.aiSearchDetailsTitle": "AI 검색 상세",

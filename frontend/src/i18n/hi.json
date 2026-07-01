@@ -459,8 +459,6 @@
   "session.aiSearchLoading": "खोजा जा रहा है…",
   "session.aiSearchClear": "परिणाम साफ़ करें",
   "session.aiSearchMatches": "{{count}} मिलान",
-  "session.searchNativeOff": "प्रदाता-मूल सत्र ट्रांसक्रिप्ट में भी खोजें",
-  "session.searchNativeOn": "मूल ट्रांसक्रिप्ट में भी खोज रहे हैं — अक्षम करने हेतु क्लिक करें",
   "session.aiSearchViewFull": "पूरा तर्क देखें",
   "session.aiSearchClose": "बंद करें",
   "session.aiSearchDetailsTitle": "AI खोज विवरण",

@@ -455,8 +455,6 @@
   "session.aiSearchLoading": "Suchen…",
   "session.aiSearchClear": "Ergebnisse löschen",
   "session.aiSearchMatches": "{{count}} Treffer",
-  "session.searchNativeOff": "Auch in providereigenen Sitzungstranskripten suchen",
-  "session.searchNativeOn": "Suche auch in providereigenen Transkripten — zum Deaktivieren klicken",
   "session.aiSearchViewFull": "Vollständige Begründung anzeigen",
   "session.aiSearchClose": "Schließen",
   "session.aiSearchDetailsTitle": "KI-Suchdetails",

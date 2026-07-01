@@ -459,8 +459,6 @@
   "session.aiSearchLoading": "搜索中…",
   "session.aiSearchClear": "清除结果",
   "session.aiSearchMatches": "{{count}} 项匹配",
-  "session.searchNativeOff": "同时搜索提供方原生会话记录",
-  "session.searchNativeOn": "同时搜索原生记录 — 点击可关闭",
   "session.aiSearchViewFull": "查看完整推理",
   "session.aiSearchClose": "关闭",
   "session.aiSearchDetailsTitle": "AI 搜索详情",
