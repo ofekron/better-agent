@@ -26,10 +26,37 @@ from json_store import write_json
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
+_RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
 
 
 def runs_root() -> Path:
     return ba_home() / "runs"
+
+
+def run_state_ledger_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RUN_STATE_LEDGER_NAME
+
+
+def _append_run_state_ledger(path: Path, data: dict) -> None:
+    if path.name != "state.json":
+        return
+    session_id = data.get("session_id")
+    jsonl_path = data.get("jsonl_path")
+    if not session_id or not jsonl_path:
+        return
+    try:
+        row = {
+            "session_id": str(session_id),
+            "jsonl_path": str(jsonl_path),
+            "state_path": str(path),
+            "written_at": time.time(),
+        }
+        ledger = run_state_ledger_path(path.parent.parent)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    except Exception:
+        logger.exception("runs_dir: failed to append run-state ledger")
 
 
 def iter_run_dirs(run_id_filter: Optional[set[str]] = None):
@@ -220,6 +247,7 @@ def reap_run_dir(child: Path) -> bool:
 def atomic_write_json(path: Path, data: dict) -> None:
     """Crash-safe JSON write for run-dir state."""
     write_json(path, data)
+    _append_run_state_ledger(path, data)
 
 
 def pid_alive(pid: Optional[int]) -> bool:

@@ -179,6 +179,11 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+    try:
+        from runs_dir import _append_run_state_ledger
+        _append_run_state_ledger(path, data)
+    except Exception:
+        logging.getLogger(__name__).exception("failed to append run-state ledger")
 
 
 def _fail(run_dir: Path, error: str) -> None:

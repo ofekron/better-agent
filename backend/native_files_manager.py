@@ -61,6 +61,8 @@ _RUN_STATE_LOOKUP_CACHE_LOCK = threading.Lock()
 _RUN_STATE_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 _RUN_STATE_RECENT_INDEX_CACHE: dict[str, tuple[float, tuple[tuple[int, int, str], ...], dict[str, list[Path]]]] = {}
 _RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
+_RUN_STATE_LEDGER_CACHE_TTL_S = 1.0
+_RUN_STATE_LEDGER_CACHE: dict[str, tuple[float, int, dict[str, list[tuple[float, Path]]]]] = {}
 
 
 @dataclass
@@ -127,7 +129,60 @@ def _finish_run_state_lookup(root_key: str, agent_sid: str, path: Optional[Path]
         event.set()
 
 
+def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    try:
+        from runs_dir import run_state_ledger_path
+        ledger = run_state_ledger_path(root)
+        st = ledger.stat()
+    except OSError:
+        return []
+    now = time.monotonic()
+    root_key = str(root)
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        cached = _RUN_STATE_LEDGER_CACHE.get(root_key)
+        if cached is not None:
+            ts, size, index = cached
+            if size == st.st_size and now - ts < _RUN_STATE_LEDGER_CACHE_TTL_S:
+                return [path for _, path in index.get(agent_sid, [])]
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return []
+    index: dict[str, list[tuple[float, Path]]] = {}
+    try:
+        with ledger.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                sid = str(row.get("session_id") or "")
+                state_path = row.get("state_path")
+                if not sid or not state_path:
+                    continue
+                path = Path(str(state_path))
+                if path.name != "state.json":
+                    continue
+                try:
+                    path.resolve().relative_to(root_resolved)
+                except (OSError, ValueError):
+                    continue
+                try:
+                    written_at = float(row.get("written_at"))
+                except (TypeError, ValueError):
+                    written_at = 0.0
+                index.setdefault(sid, []).append((written_at, path))
+    except OSError:
+        return []
+    with _RUN_STATE_LOOKUP_CACHE_LOCK:
+        _RUN_STATE_LEDGER_CACHE[root_key] = (now, st.st_size, index)
+    return [path for _, path in index.get(agent_sid, [])]
+
+
 def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
+    ledger_paths = _ledger_state_files_for_sid(root, agent_sid)
+    if ledger_paths:
+        return ledger_paths
     return _recent_state_index_for_root(root).get(agent_sid, [])
 
 
