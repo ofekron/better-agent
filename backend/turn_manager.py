@@ -2013,6 +2013,7 @@ class TurnManager:
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
                 ).get("id")
+                await asyncio.to_thread(session_manager.flush_pending_persists)
                 await asyncio.to_thread(
                     provider.start_run,
                     run_id=run_id,

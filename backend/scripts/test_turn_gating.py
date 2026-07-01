@@ -34,6 +34,7 @@ from turn_helpers import _is_transient_error  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+import session_store  # noqa: E402
 import user_prefs  # noqa: E402
 
 failures: list[str] = []
@@ -395,6 +396,63 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
         backend_url.startswith("http://localhost:") or backend_url.startswith("http://127.0.0.1:"),
     )
     check("internal_token forwarded", captured[0].get("internal_token") == "test-token")
+
+
+def test_drive_cli_run_flushes_target_before_spawn() -> None:
+    print("T5c _drive_cli_run flushes target assistant before provider spawn")
+    c = _StubCoordinator()
+    tm = TurnManager(c)
+    sid = session_manager.create(name="durable-target", cwd="/tmp", model="sonnet")["id"]
+    from orchs import get_strategy
+    assistant = get_strategy("native").build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, assistant)
+    tm.current_assistant_msgs[sid] = assistant
+    durable_checks: list[bool] = []
+
+    class _Provider:
+        KIND = "codex"
+        _runs: dict = {}
+
+        def start_run(self, **kw):
+            target_message_id = kw.get("target_message_id")
+            root = session_store.get_root_tree(sid) or {}
+            durable_checks.append(
+                any(
+                    m.get("id") == target_message_id
+                    for m in root.get("messages") or []
+                )
+            )
+            kw["loop"].call_soon_threadsafe(
+                kw["queue"].put_nowait,
+                type("E", (), {
+                    "type": "complete",
+                    "data": {"success": True, "session_id": None, "token_usage": None},
+                })(),
+            )
+
+        def is_running(self, _run_id: str) -> bool:
+            return False
+
+    c.provider_for_session = lambda _sid: _Provider()
+    c.user_prompt_manager = _UPM()
+
+    async def _ws(_e):
+        pass
+
+    result = asyncio.run(tm._drive_cli_run(
+        prompt="p",
+        cwd="/tmp",
+        model="sonnet",
+        session_id=None,
+        ws_callback=_ws,
+        app_session_id=sid,
+        cancel_event=asyncio.Event(),
+        session_id_field="agent_session_id",
+        mode="native",
+        turn_run_id="turn-durable-target",
+    ))
+    check("result success", result.get("success") is True)
+    check("target assistant durable before start_run", durable_checks == [True])
 
 
 def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
@@ -805,6 +863,7 @@ def main() -> int:
     test_codex_initialize_timeout_is_not_transient()
     test_drive_cli_run_pre_spawn_guard()
     test_native_non_user_turn_gets_loopback_credentials()
+    test_drive_cli_run_flushes_target_before_spawn()
     test_rate_limit_wait_keeps_turn_active_and_cancellable()
     test_rate_limit_retry_spawns_once_then_emits_terminal()
     test_rate_limit_wait_uses_reset_or_one_minute_fallback()
