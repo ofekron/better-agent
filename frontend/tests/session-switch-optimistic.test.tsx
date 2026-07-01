@@ -27,6 +27,7 @@ import type { Session } from "../src/types";
 
 const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
 const SESSION_LIST = /\/api\/sessions\?/;
+const SESSION_DELETE = /\/api\/sessions\/[^/?]+$/;
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   const now = new Date().toISOString();
@@ -43,13 +44,13 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
-type Resolver = (body: unknown) => void;
+type Resolver = (body: unknown, status?: number) => void;
 interface FetchGate {
   /** Records every URL fetch was called with. */
   readonly urls: string[];
   /** Resolve the OLDEST pending fetch for paths matching `pattern`
    *  with the given JSON body. Throws if none is pending. */
-  resolve(pattern: RegExp, body: unknown): void;
+  resolve(pattern: RegExp, body: unknown, status?: number): void;
   /** True when at least one fetch is parked waiting on a manual
    *  resolve. */
   hasPending(pattern: RegExp): boolean;
@@ -86,10 +87,10 @@ function installFetchGate(opts: {
         return new Promise<Response>((res) => {
           pending.push({
             pattern: opts.hold,
-            resolver: (body) =>
+            resolver: (body, status = 200) =>
               res(
                 new Response(JSON.stringify(body), {
-                  status: 200,
+                  status,
                   headers: { "content-type": "application/json" },
                 }),
               ),
@@ -110,7 +111,7 @@ function installFetchGate(opts: {
 
   return {
     urls,
-    resolve(pattern, body) {
+    resolve(pattern, body, status = 200) {
       const idx = pending.findIndex((p) => pattern.source === p.pattern.source);
       if (idx < 0) {
         throw new Error(
@@ -118,7 +119,7 @@ function installFetchGate(opts: {
         );
       }
       const [{ resolver }] = pending.splice(idx, 1);
-      resolver(body);
+      resolver(body, status);
     },
     hasPending(pattern) {
       return pending.some((p) => pattern.source === p.pattern.source);
@@ -196,6 +197,86 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     expect(result.current.currentSession?.id).toBe("b");
     expect(result.current.currentSession?.messages).toHaveLength(1);
+  });
+
+  it("removes a deleted session before the DELETE round-trip resolves", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const b = makeSession({ id: "b", name: "Beta" });
+    gate = installFetchGate({
+      hold: SESSION_DELETE,
+      defaultBody: (url) => {
+        if (SESSION_FETCH.test(url)) return a;
+        return { sessions: [a, b] };
+      },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+    });
+    await act(async () => {
+      await result.current.selectSession("a");
+    });
+    expect(result.current.currentSession?.id).toBe("a");
+
+    let deletion: Promise<void>;
+    await act(async () => {
+      deletion = result.current.deleteSession("a");
+      await Promise.resolve();
+    });
+
+    expect(gate.hasPending(SESSION_DELETE)).toBe(true);
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+    expect(result.current.currentSession).toBeNull();
+
+    await act(async () => {
+      gate!.resolve(SESSION_DELETE, { deleted: true });
+      await deletion!;
+    });
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+  });
+
+  it("repairs optimistic deletion when the backend rejects the delete", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const b = makeSession({ id: "b", name: "Beta" });
+    gate = installFetchGate({
+      hold: SESSION_DELETE,
+      defaultBody: (url) => {
+        if (SESSION_FETCH.test(url)) return a;
+        return { sessions: [a, b] };
+      },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+    });
+    await act(async () => {
+      await result.current.selectSession("a");
+    });
+    expect(result.current.currentSession?.id).toBe("a");
+
+    let deletion: Promise<void>;
+    await act(async () => {
+      deletion = result.current.deleteSession("a");
+      await Promise.resolve();
+    });
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["b"]);
+    expect(result.current.currentSession).toBeNull();
+
+    await act(async () => {
+      gate!.resolve(SESSION_DELETE, { detail: "nope" }, 500);
+      await deletion!;
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+      expect(result.current.currentSession?.id).toBe("a");
+    });
   });
 
   it("composes same-tick functional metadata updates from the latest session state", async () => {

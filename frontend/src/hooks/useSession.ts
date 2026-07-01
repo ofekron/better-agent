@@ -1578,49 +1578,62 @@ export function useSession(authStatus?: string) {
     }
   }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
 
+  const removeSessionLocally = useCallback((id: string) => {
+    forgetSessionTree(id);
+    setSessions((prev) => {
+      if (!prev.some((s) => s.id === id)) return prev;
+      return prev.filter((s) => s.id !== id);
+    });
+    setCurrentSession((prev) => {
+      if (!prev) return prev;
+      if (prev.id === id) return null;
+      const dropFork = (node: Session): Session => {
+        const forks = node.forks;
+        if (!forks || forks.length === 0) return node;
+        let changed = false;
+        const next: Session[] = [];
+        for (const f of forks) {
+          if (f.id === id) {
+            changed = true;
+            continue;
+          }
+          const recursed = dropFork(f);
+          if (recursed !== f) changed = true;
+          next.push(recursed);
+        }
+        return changed ? { ...node, forks: next } : node;
+      };
+      const updated = dropFork(prev);
+      return updated === prev ? prev : updated;
+    });
+    setWsTargetSessionId((prev) => prev === id ? null : prev);
+  }, [forgetSessionTree]);
+
   const deleteSession = useCallback(
     async (id: string) => {
       const opId = `session:delete:${id}`;
+      const wasCurrentSession = currentSessionRef.current?.id === id;
       startOp(opId);
+      removeSessionLocally(id);
       try {
-        await fetch(`${API}/api/sessions/${id}`, {
+        const response = await fetch(`${API}/api/sessions/${id}`, {
           method: "DELETE",
           credentials: "include",
         });
+        if (!response.ok) {
+          throw new Error(await responseError(response, "Delete session failed"));
+        }
+      } catch (err: unknown) {
+        failOp(opId, err);
+        refetchLoadedSpan();
+        if (wasCurrentSession) {
+          void selectSession(id);
+        }
       } finally {
         completeOp(opId);
       }
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      forgetSessionTree(id);
-      // If we deleted a fork inside the open tree, splice it out of
-      // its parent's `forks` array. If we deleted the root the user
-      // is currently viewing, clear `currentSession` entirely. Either
-      // way, focus + multi-WS subscribe fall through naturally on
-      // next render via the tree-walking effect.
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        if (prev.id === id) return null;
-        const dropFork = (node: Session): Session => {
-          const forks = node.forks;
-          if (!forks || forks.length === 0) return node;
-          let changed = false;
-          const next: Session[] = [];
-          for (const f of forks) {
-            if (f.id === id) {
-              changed = true;
-              continue;
-            }
-            const recursed = dropFork(f);
-            if (recursed !== f) changed = true;
-            next.push(recursed);
-          }
-          return changed ? { ...node, forks: next } : node;
-        };
-        return dropFork(prev);
-      });
-      setWsTargetSessionId((prev) => prev === id ? null : prev);
     },
-    [forgetSessionTree]
+    [removeSessionLocally, refetchLoadedSpan, selectSession]
   );
 
   const bumpLastSeq = useCallback(
@@ -2405,40 +2418,9 @@ export function useSession(authStatus?: string) {
     });
   }, [refetchLoadedSpan, sortForList]);
 
-  /** Drop a session by id (from a WS `session_deleted` event). Mirrors
-   * the optimistic removal in `deleteSession`, but driven by the WS
-   * event so other tabs converge AND so the originating tab still
-   * cleans up if the REST response was lost / the request was
-   * cancelled mid-flight. Idempotent by id. */
   const dropSessionIfPresent = useCallback((id: string) => {
-    forgetSessionTree(id);
-    setSessions((prev) => {
-      if (!prev.some((s) => s.id === id)) return prev;
-      return prev.filter((s) => s.id !== id);
-    });
-    setCurrentSession((prev) => {
-      if (!prev) return prev;
-      if (prev.id === id) return null;
-      const dropFork = (node: Session): Session => {
-        const forks = node.forks;
-        if (!forks || forks.length === 0) return node;
-        let changed = false;
-        const next: Session[] = [];
-        for (const f of forks) {
-          if (f.id === id) {
-            changed = true;
-            continue;
-          }
-          const recursed = dropFork(f);
-          if (recursed !== f) changed = true;
-          next.push(recursed);
-        }
-        return changed ? { ...node, forks: next } : node;
-      };
-      const updated = dropFork(prev);
-      return updated === prev ? prev : updated;
-    });
-  }, [forgetSessionTree]);
+    removeSessionLocally(id);
+  }, [removeSessionLocally]);
 
   /** Append a freshly-born fork (from a WS `session_forked` event) into
    * the live tree. The fork is added under its `parent_session_id`'s
