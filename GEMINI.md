@@ -53,6 +53,11 @@ ask if true parity is not possible.
 Every encountered issue that involves a project we maintain in Better Agent
 must be looked at by delegating it to a task.
 
+Any delegated task sent to a subagent, sub-session, session, or worker must
+have a scope that is meaningfully smaller than the parent task. Delegate a
+bounded slice with clear inputs and expected output; do not delegate the whole
+parent request or a near-equivalent restatement of it.
+
 When committing and pushing changes that affect Provider Config Sync integration,
 update the provider-config-sync checkout in the same session before reporting the
 work as complete.
