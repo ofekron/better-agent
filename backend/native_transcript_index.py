@@ -35,7 +35,11 @@ from paths import ba_home, encode_cwd
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_FTS_COLUMNS = (
+    "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts",
+    "role", "element_id", "element_index",
+)
 _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 2.0
@@ -140,6 +144,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        """
+    )
+    _ensure_fts_schema(conn)
+
+
+def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
+    existing = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_fts'"
+    ).fetchone()
+    if existing:
+        columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
+        if columns != _FTS_COLUMNS:
+            conn.execute("DROP TABLE native_element_fts")
+            conn.execute("DELETE FROM native_file_state")
+            conn.execute("DELETE FROM native_corpus_state WHERE key IN ('covered', 'last_walk_at', 'schema_version')")
+    conn.executescript(
+        """
         CREATE VIRTUAL TABLE IF NOT EXISTS native_element_fts USING fts5(
             text,
             path UNINDEXED,
@@ -149,6 +170,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             element_kind UNINDEXED,
             tool_name UNINDEXED,
             ts UNINDEXED,
+            role UNINDEXED,
+            element_id UNINDEXED,
+            element_index UNINDEXED,
             tokenize='unicode61'
         );
         """
@@ -207,7 +231,7 @@ def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
         elements = candidate.parse_elements()
     except Exception:
         return rows
-    for el in elements:
+    for element_index, el in enumerate(elements):
         if el.kind not in _INDEXED_KINDS:
             continue
         text = el.text
@@ -218,6 +242,7 @@ def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
         rows.append((
             text, str(candidate.transcript), candidate.sid, candidate.cwd,
             candidate.format, el.kind, el.tool_name, el.timestamp,
+            el.role, el.id, element_index,
         ))
     return rows
 
@@ -229,8 +254,8 @@ def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: 
     if rows:
         conn.executemany(
             "INSERT INTO native_element_fts"
-            "(text, path, sid, cwd, tag, element_kind, tool_name, ts) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
     conn.execute(
@@ -406,7 +431,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
     conn = _readonly_connection()
     try:
         rows = conn.execute(
-            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts "
+            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index "
             "FROM native_element_fts WHERE native_element_fts MATCH ? LIMIT ?",
             (_match_expr(tokens), _MATCHED_SCAN_LIMIT),
         ).fetchall()
@@ -414,8 +439,9 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
         return []
     return [
         {"text": t, "path": p, "sid": sid, "cwd": cwd, "tag": tag,
-         "element_kind": ek, "tool_name": tn, "ts": ts}
-        for t, p, sid, cwd, tag, ek, tn, ts in rows[:limit]
+         "element_kind": ek, "tool_name": tn, "ts": ts,
+         "role": role, "element_id": element_id, "element_index": element_index}
+        for t, p, sid, cwd, tag, ek, tn, ts, role, element_id, element_index in rows[:limit]
     ]
 
 
@@ -452,7 +478,7 @@ _ALLOWED_READONLY_PRAGMAS = frozenset({"data_version"})
 
 # The table + columns the assistant's SQL sees; kept here so the tool doc agrees.
 SQL_TABLE = "native_element_fts"
-SQL_COLUMNS = ("text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts")
+SQL_COLUMNS = _FTS_COLUMNS
 SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
 
 
