@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from unittest import mock
 from pathlib import Path
 
 os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba_trace_grep_")
@@ -159,12 +160,80 @@ def test_hot_search_rebuilds_and_idempotency(failures: list[str]) -> None:
     _check(count == 2, "index_trace is idempotent per trace field", failures)
 
 
+def _write_index(rows: list[str], *, final_newline: bool = True) -> Path:
+    traces = trace_collector._traces_dir()
+    traces.mkdir(parents=True, exist_ok=True)
+    path = traces / "index.jsonl"
+    path.write_text("\n".join(rows) + ("\n" if final_newline else ""), encoding="utf-8")
+    return path
+
+
+def test_list_traces_uses_bounded_reverse_index_reads(failures: list[str]) -> None:
+    _reset()
+    rows = [
+        '{"trace_id":"tr_1","session_id":"s-a","user_prompt_preview":"old"}',
+        '{"trace_id":"tr_2","session_id":"s-b","user_prompt_preview":"mid"}',
+        '{"trace_id":"tr_3","session_id":"s-a","user_prompt_preview":"new"}',
+        '{"trace_id":"tr_4","session_id":"s-b","user_prompt_preview":"newest"}',
+    ]
+    _write_index(rows, final_newline=False)
+    original_read_text = Path.read_text
+
+    def guarded_read_text(self: Path, *args, **kwargs):
+        if self.name == "index.jsonl":
+            raise AssertionError("list_traces must not read the whole index")
+        return original_read_text(self, *args, **kwargs)
+
+    with mock.patch.object(Path, "read_text", guarded_read_text):
+        latest = trace_collector.list_traces(limit=3)
+    _check(
+        [row["trace_id"] for row in latest] == ["tr_4", "tr_3", "tr_2"],
+        "list_traces returns newest rows without final newline",
+        failures,
+    )
+    _check(
+        [row["trace_id"] for row in trace_collector.list_traces(session_id="s-a", limit=2)]
+        == ["tr_3", "tr_1"],
+        "list_traces session filter scans backward until enough matches",
+        failures,
+    )
+    _check(trace_collector.list_traces(limit=0) == [], "list_traces limit <= 0 returns empty", failures)
+
+
+def test_reverse_index_reader_edge_cases(failures: list[str]) -> None:
+    _reset()
+    _write_index([], final_newline=False)
+    _check(trace_collector.list_traces() == [], "empty trace index returns empty", failures)
+    _write_index([
+        '{"trace_id":"tr_crlf","session_id":"s"}\r',
+        '{"trace_id":"tr_utf","session_id":"s","user_prompt_preview":"🙂"}',
+        '{"trace_id":',
+    ], final_newline=False)
+    _check(
+        [row["trace_id"] for row in trace_collector.list_traces(limit=2)]
+        == ["tr_utf", "tr_crlf"],
+        "reverse reader skips corrupt tail and handles CRLF",
+        failures,
+    )
+    path = trace_collector._traces_dir() / "index.jsonl"
+    lines = list(trace_collector._iter_file_lines_reverse(path, _chunk_size=5))
+    _check(
+        any("🙂" in line for line in lines),
+        "reverse reader decodes multibyte UTF-8 after line assembly",
+        failures,
+    )
+    forward = [row["trace_id"] for row in trace_collector.iter_trace_index()]
+    _check(forward == ["tr_crlf", "tr_utf"], "iter_trace_index remains oldest-first", failures)
+
+
 def main() -> int:
     failures: list[str] = []
     try:
         test_shape_order_filters_and_context(failures)
         test_unicode_and_nul(failures)
         test_hot_search_rebuilds_and_idempotency(failures)
+        test_list_traces_uses_bounded_reverse_index_reads(failures)
+        test_reverse_index_reader_edge_cases(failures)
     finally:
         import shutil
 
