@@ -32,9 +32,11 @@ from paths import ba_home
 logger = logging.getLogger(__name__)
 _RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
 _RUN_STATE_LEDGER_CACHE_NAME = "run_state_index.cache.sqlite3"
-_RUN_STATE_LEDGER_CACHE_VERSION = 1
+_RUN_STATE_LEDGER_CACHE_VERSION = 2
 _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME = "run_state_index.backfilled.json"
 _RUN_STATE_LEDGER_BACKFILL_VERSION = 1
+_RUN_STATE_APP_INDEX_BACKFILL_MARKER_NAME = "run_state_app_index.backfilled.json"
+_RUN_STATE_APP_INDEX_BACKFILL_VERSION = 3
 _RECONCILED_MARKER_INDEX_NAME = "reconciled_marker_index.jsonl"
 _RECONCILED_MARKER_BACKFILL_MARKER_NAME = "reconciled_marker_index.backfilled.json"
 _RECONCILED_MARKER_BACKFILL_VERSION = 1
@@ -80,6 +82,10 @@ def run_state_ledger_backfill_marker_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME
 
 
+def run_state_app_index_backfill_marker_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RUN_STATE_APP_INDEX_BACKFILL_MARKER_NAME
+
+
 def reconciled_marker_index_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RECONCILED_MARKER_INDEX_NAME
 
@@ -95,6 +101,15 @@ def _run_state_ledger_backfill_current(root: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     return data.get("version") == _RUN_STATE_LEDGER_BACKFILL_VERSION
+
+
+def _run_state_app_index_backfill_current(root: Path) -> bool:
+    marker = run_state_app_index_backfill_marker_path(root)
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return data.get("version") == _RUN_STATE_APP_INDEX_BACKFILL_VERSION
 
 
 def _reconciled_marker_backfill_current(root: Path) -> bool:
@@ -124,6 +139,9 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
                 "state_path": str(path),
                 "written_at": time.time(),
             }
+            app_session_id = data.get("app_session_id")
+            if isinstance(app_session_id, str) and app_session_id:
+                row["app_session_id"] = app_session_id
             ledger = run_state_ledger_path(path.parent.parent)
             ledger.parent.mkdir(parents=True, exist_ok=True)
             if _run_state_ledger_has_key(ledger, key):
@@ -143,6 +161,67 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
             _RUN_STATE_LEDGER_SEEN.add(key)
     except Exception:
         logger.exception("runs_dir: failed to append run-state ledger")
+
+
+def _backfill_run_state_app_index(root: Path) -> None:
+    if _run_state_app_index_backfill_current(root):
+        return
+    with _RUN_STATE_LEDGER_APPEND_LOCK:
+        if _run_state_app_index_backfill_current(root):
+            return
+        ledger = run_state_ledger_path(root)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        backfill_base = time.time()
+        candidates: list[tuple[Path, dict, float]] = []
+        try:
+            for state_path in root.glob("*/state.json"):
+                try:
+                    data = json.loads(state_path.read_text(encoding="utf-8"))
+                    state_mtime = state_path.stat().st_mtime
+                except (OSError, json.JSONDecodeError):
+                    continue
+                session_id = data.get("session_id")
+                jsonl_path = data.get("jsonl_path")
+                app_session_id = data.get("app_session_id")
+                if not (
+                    isinstance(session_id, str)
+                    and session_id
+                    and isinstance(jsonl_path, str)
+                    and jsonl_path
+                    and isinstance(app_session_id, str)
+                    and app_session_id
+                ):
+                    continue
+                if not _run_state_path_string_has_ledger_shape(str(state_path), root):
+                    continue
+                candidates.append((state_path, data, state_mtime))
+            min_mtime = min((mtime for _, _, mtime in candidates), default=0.0)
+            with ledger.open("a", encoding="utf-8") as f:
+                for state_path, data, state_mtime in candidates:
+                    session_id = data["session_id"]
+                    jsonl_path = data["jsonl_path"]
+                    app_session_id = data["app_session_id"]
+                    try:
+                        written_at = backfill_base + (state_mtime - min_mtime)
+                    except TypeError:
+                        written_at = backfill_base
+                    row = {
+                        "session_id": session_id,
+                        "jsonl_path": jsonl_path,
+                        "state_path": str(state_path),
+                        "app_session_id": app_session_id,
+                        "written_at": written_at,
+                    }
+                    f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except OSError:
+            return
+        write_json(
+            run_state_app_index_backfill_marker_path(root),
+            {
+                "version": _RUN_STATE_APP_INDEX_BACKFILL_VERSION,
+                "backfilled_at": time.time(),
+            },
+        )
 
 
 def _run_state_path_under_root(path: Path, root_resolved: Path) -> bool:
@@ -255,11 +334,15 @@ def _run_state_cache_schema(conn: sqlite3.Connection) -> None:
         "sid TEXT NOT NULL,"
         "state_path TEXT NOT NULL,"
         "written_at REAL NOT NULL,"
+        "app_session_id TEXT NOT NULL DEFAULT '',"
         "PRIMARY KEY (sid, state_path)"
         ")"
     )
     conn.execute(
         "CREATE INDEX entries_sid_written_at ON entries (sid, written_at)"
+    )
+    conn.execute(
+        "CREATE INDEX entries_app_session_written_at ON entries (app_session_id, written_at)"
     )
 
 
@@ -334,6 +417,7 @@ def _write_run_state_cache(
     root: Path,
     signature: _RunStateLedgerSignature,
     index: dict[str, list[tuple[float, str]]],
+    app_session_by_state_path: dict[str, str] | None = None,
 ) -> None:
     cache_path = run_state_ledger_cache_path(root)
     tmp_path = cache_path.with_suffix(".sqlite3.tmp")
@@ -356,13 +440,18 @@ def _write_run_state_cache(
                 ),
             )
             rows = [
-                (sid, state_path, written_at)
+                (
+                    sid,
+                    state_path,
+                    written_at,
+                    (app_session_by_state_path or {}).get(state_path, ""),
+                )
                 for sid, paths in index.items()
                 for written_at, state_path in paths
             ]
             conn.executemany(
-                "INSERT OR REPLACE INTO entries (sid, state_path, written_at) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO entries (sid, state_path, written_at, app_session_id) "
+                "VALUES (?, ?, ?, ?)",
                 rows,
             )
             conn.commit()
@@ -423,14 +512,15 @@ def _extend_run_state_cache_after_append(
             if not _run_state_cache_signature_current(conn, prior_signature):
                 return
             sid = str(row.get("session_id") or "")
+            app_session_id = str(row.get("app_session_id") or "")
             try:
                 written_at = float(row.get("written_at"))
             except (TypeError, ValueError):
                 written_at = 0.0
             conn.execute(
-                "INSERT OR REPLACE INTO entries (sid, state_path, written_at) "
-                "VALUES (?, ?, ?)",
-                (sid, state_path, written_at),
+                "INSERT OR REPLACE INTO entries (sid, state_path, written_at, app_session_id) "
+                "VALUES (?, ?, ?, ?)",
+                (sid, state_path, written_at, app_session_id),
             )
             conn.executemany(
                 "UPDATE meta SET value=? WHERE key=?",
@@ -479,6 +569,7 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 if cached_signature == signature:
                     return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
     latest_by_key: dict[tuple[str, str], tuple[float, str]] = {}
+    app_session_by_state_path: dict[str, str] = {}
     try:
         with ledger.open(encoding="utf-8") as f:
             for raw in f:
@@ -501,6 +592,9 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 current = latest_by_key.get(key)
                 if current is None or written_at >= current[0]:
                     latest_by_key[key] = (written_at, state_path_str)
+                    app_session_id = row.get("app_session_id")
+                    if isinstance(app_session_id, str) and app_session_id:
+                        app_session_by_state_path[state_path_str] = app_session_id
     except OSError:
         if owner:
             _finish_run_state_cache_rebuild(root_key)
@@ -513,7 +607,7 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
         if final_signature == signature:
             with _RUN_STATE_LOOKUP_CACHE_LOCK:
                 _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
-            _write_run_state_cache(root, signature, index)
+            _write_run_state_cache(root, signature, index, app_session_by_state_path)
             return _ledger_state_paths_for_sid(index, agent_sid, root_resolved)
         if owner:
             _finish_run_state_cache_rebuild(root_key)
@@ -531,6 +625,52 @@ def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     if _run_state_ledger_backfill_current(root):
         return []
     return recent_state_files_for_sid(root, agent_sid)
+
+
+def run_dirs_by_app_session(root: Path) -> dict[str, Path]:
+    _backfill_run_state_app_index(root)
+    ledger = run_state_ledger_path(root)
+    signature = _run_state_ledger_signature(ledger)
+    if signature is None:
+        return {}
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return {}
+    if _load_run_state_app_index(root, signature, root_resolved) is None:
+        ledger_state_files_for_sid(root, "")
+    return _load_run_state_app_index(root, signature, root_resolved) or {}
+
+
+def _load_run_state_app_index(
+    root: Path,
+    signature: _RunStateLedgerSignature,
+    root_resolved: Path,
+) -> dict[str, Path] | None:
+    try:
+        with _sqlite_connect(run_state_ledger_cache_path(root)) as conn:
+            if not _run_state_cache_signature_current(conn, signature):
+                return None
+            rows = conn.execute(
+                "SELECT app_session_id, state_path FROM entries "
+                "WHERE app_session_id != '' "
+                "ORDER BY app_session_id, written_at, state_path"
+            ).fetchall()
+    except (sqlite3.DatabaseError, OSError):
+        return None
+    index: dict[str, Path] = {}
+    for app_session_id, state_path in rows:
+        if not isinstance(app_session_id, str) or not app_session_id:
+            continue
+        if not isinstance(state_path, str):
+            return None
+        if not _run_state_path_string_has_ledger_shape(state_path, root):
+            return None
+        path = Path(state_path)
+        if path.parent.is_symlink() or _run_state_candidate_stat(path, root) is None:
+            continue
+        index[app_session_id] = path.parent
+    return index
 
 
 def recent_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
