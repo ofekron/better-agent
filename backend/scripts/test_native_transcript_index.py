@@ -164,6 +164,37 @@ def test_broad_match_signals_fallback() -> bool:
     return ok
 
 
+def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
+    """Once covered, a stale query REQUESTS a refresh and waits for the delta
+    (which indexes the just-added file) rather than dropping to rg. Simulates
+    the worker with a one-shot thread that refreshes after the request."""
+    import threading
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["staleneedle here"])
+    idx.refresh_once()  # covered + fresh
+    # A brand-new file appears after the last walk.
+    _write_claude(claude / encode_cwd("/proj") / "b.jsonl", ["deltawaitneedle new"])
+    idx._last_refresh_at = 0.0  # force stale (covered but not usable)
+    assert idx.is_covered() and not idx.is_usable()
+
+    def simulate_worker_refresh():
+        time.sleep(0.1)
+        idx.refresh_once()  # delta: indexes b.jsonl, stamps _last_refresh_at, notifies
+
+    t = threading.Thread(target=simulate_worker_refresh)
+    t.start()
+    try:
+        fresh = idx.wait_fresh(5.0)
+        rows = idx.search_rows(["deltawaitneedle"], limit=5)
+    finally:
+        t.join()
+    ok = fresh and len(rows) >= 1
+    print(f"{OK if ok else FAIL} wait_fresh serves delta instead of fallback "
+          f"(fresh={fresh}, rows={len(rows)})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -171,6 +202,7 @@ def main_run() -> int:
         test_freshness_reindexes_changed_files,
         test_not_usable_until_covered,
         test_broad_match_signals_fallback,
+        test_wait_fresh_serves_delta_instead_of_falling_back,
     ]
     results = []
     for fn in tests:

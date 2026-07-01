@@ -48,6 +48,14 @@ _worker_started = False
 _worker_lock = threading.Lock()
 _stop = threading.Event()
 
+# Refresh signaling: once covered, a stale query REQUESTS a refresh and waits
+# for it (one delta pass) instead of dropping to rg. _last_refresh_at is the
+# in-memory freshness timestamp the worker sets after each refresh.
+_refresh_cond = threading.Condition()
+_last_refresh_at = 0.0
+_refresh_requested = False
+_FRESH_WAIT_TIMEOUT = 3.0  # max a query blocks for a delta refresh before rg
+
 
 def _db_path() -> Path:
     return ba_home() / "native_transcript_index.sqlite3"
@@ -254,6 +262,7 @@ def refresh_once() -> dict[str, int]:
     """One delta pass: re-index new/changed files, drop deleted ones, refresh
     the corpus watermark. Returns counts. Idempotent + safe to run anytime."""
     _, _, candidate_from_match = _roots_and_resolver()
+    global _last_refresh_at
     with _lock:
         conn = _writer_connection()
         try:
@@ -279,6 +288,9 @@ def refresh_once() -> dict[str, int]:
             _state_set(conn, "covered", "1")
             _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
             conn.commit()
+            with _refresh_cond:
+                _last_refresh_at = time.time()
+                _refresh_cond.notify_all()
             return {"walked": len(on_disk), "touched": new_or_changed}
         except Exception:
             conn.rollback()
@@ -309,19 +321,37 @@ def is_covered() -> bool:
 
 
 def is_usable() -> bool:
-    """covered AND the last walk is within the freshness window. Usable =>
+    """covered AND the last refresh is within the freshness window. Usable =>
     FTS reflects the current corpus closely enough to answer; caller otherwise
-    falls back to rg for strict correctness."""
-    if not is_covered():
+    requests a refresh (see wait_fresh) or falls back to rg."""
+    if not is_covered() or _last_refresh_at <= 0:
         return False
-    conn = _readonly_connection()
-    try:
-        last = _state_get(conn, "last_walk_at")
-    except sqlite3.OperationalError:
-        return False
-    if not last:
-        return False
-    return (time.time() - float(last)) <= _FRESH_WINDOW_SECONDS
+    return (time.time() - _last_refresh_at) <= _FRESH_WINDOW_SECONDS
+
+
+def request_refresh() -> None:
+    """Wake the worker for an immediate delta pass (vs waiting for the next poll)."""
+    global _refresh_requested
+    with _refresh_cond:
+        _refresh_requested = True
+        _refresh_cond.notify()
+
+
+def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
+    """Block until a refresh completes within the freshness window, or timeout.
+
+    Used by the query path once covered: rather than fall to rg for a slightly
+    stale index, wait for the one delta pass (stat-walk + parse-changed-only —
+    cheap) then serve from FTS. Returns True if fresh within the timeout; the
+    timeout itself is the safety when no refresh is forthcoming (worker down)."""
+    deadline = time.monotonic() + timeout
+    with _refresh_cond:
+        while (time.time() - _last_refresh_at) > _FRESH_WINDOW_SECONDS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _refresh_cond.wait(remaining)
+    return True
 
 
 def _match_expr(tokens: list[str]) -> str:
@@ -398,7 +428,9 @@ def ensure_started() -> None:
 
 
 def _worker_main() -> None:
-    # Cold start: keep doing full delta passes until covered, then poll.
+    # Cold start: keep doing full delta passes until covered, then poll. Each
+    # refresh (refresh_once) stamps _last_refresh_at + notifies waiting queries.
+    global _refresh_requested
     while not _stop.is_set():
         try:
             refresh_once()
@@ -406,10 +438,18 @@ def _worker_main() -> None:
             logger.debug("native transcript index refresh failed", exc_info=True)
             return  # avoid a hot failure loop; next ensure_started() restarts
         if is_covered():
-            _stop.wait(_POLL_INTERVAL_SECONDS)
+            # Sleep for the poll interval, but wake immediately if a query
+            # requested a refresh (vs waiting up to the full interval).
+            deadline = time.monotonic() + _POLL_INTERVAL_SECONDS
+            with _refresh_cond:
+                while not _refresh_requested and not _stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    _refresh_cond.wait(remaining)
+                _refresh_requested = False
         else:
-            # throttle the initial build so we don't hog a core/disk
-            _stop.wait(0.2)
+            _stop.wait(0.2)  # throttle the initial build so we don't hog disk
 
 
 def shutdown() -> None:
@@ -438,7 +478,7 @@ def _close_readonly_connection() -> None:
 
 def reset_for_test() -> None:
     """Drop the persisted index + in-memory state; for isolated tests."""
-    global _worker_started
+    global _worker_started, _last_refresh_at, _refresh_requested
     with _lock:
         global _writer_conn
         if _writer_conn is not None:
@@ -446,6 +486,9 @@ def reset_for_test() -> None:
             _writer_conn = None
         _writer_started = False
     _stop.clear()
+    with _refresh_cond:
+        _last_refresh_at = 0.0
+        _refresh_requested = False
     _close_readonly_connection()
     base = _db_path()
     for path in (base, base.with_suffix(base.suffix + "-wal"), base.with_suffix(base.suffix + "-shm")):
@@ -457,5 +500,5 @@ def reset_for_test() -> None:
 
 __all__ = [
     "ensure_started", "is_covered", "is_usable", "match_paths", "search_rows",
-    "refresh_once", "reset_for_test", "shutdown",
+    "refresh_once", "request_refresh", "wait_fresh", "reset_for_test", "shutdown",
 ]
