@@ -1046,9 +1046,12 @@ def test_recovery_dispatch_skips_reconciled_runs_before_owner_read() -> None:
     start = source.index("def recover_all_in_flight(")
     end = len(source)
     recover_source = source[start:end]
+    index_idx = recover_source.index("indexed_marker = reconciled_index.get(child.name)")
     marker_idx = recover_source.index('marker_path = child / "reconciled.marker"')
     backend_state_idx = recover_source.index('bs_path = child / "backend_state.json"')
+    assert index_idx < marker_idx
     assert marker_idx < backend_state_idx
+    assert "load_reconciled_marker_index(" in recover_source[:index_idx]
     assert "marker_data_matches_current(" in recover_source[marker_idx:backend_state_idx]
     assert "marker_matches_current(" not in recover_source[marker_idx:backend_state_idx]
 

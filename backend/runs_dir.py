@@ -30,8 +30,13 @@ logger = logging.getLogger(__name__)
 _RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
 _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME = "run_state_index.backfilled.json"
 _RUN_STATE_LEDGER_BACKFILL_VERSION = 1
+_RECONCILED_MARKER_INDEX_NAME = "reconciled_marker_index.jsonl"
+_RECONCILED_MARKER_BACKFILL_MARKER_NAME = "reconciled_marker_index.backfilled.json"
+_RECONCILED_MARKER_BACKFILL_VERSION = 1
 _RUN_STATE_LEDGER_SEEN: set[tuple[str, str, str]] = set()
 _RUN_STATE_LEDGER_BACKFILL_LOCK = threading.Lock()
+_RECONCILED_MARKER_INDEX_SEEN: set[tuple[str, str, int, int, int, int]] = set()
+_RECONCILED_MARKER_BACKFILL_LOCK = threading.Lock()
 
 
 def runs_root() -> Path:
@@ -46,6 +51,14 @@ def run_state_ledger_backfill_marker_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME
 
 
+def reconciled_marker_index_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RECONCILED_MARKER_INDEX_NAME
+
+
+def reconciled_marker_index_backfill_marker_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RECONCILED_MARKER_BACKFILL_MARKER_NAME
+
+
 def _run_state_ledger_backfill_current(root: Path) -> bool:
     marker = run_state_ledger_backfill_marker_path(root)
     try:
@@ -53,6 +66,15 @@ def _run_state_ledger_backfill_current(root: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     return data.get("version") == _RUN_STATE_LEDGER_BACKFILL_VERSION
+
+
+def _reconciled_marker_backfill_current(root: Path) -> bool:
+    marker = reconciled_marker_index_backfill_marker_path(root)
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return data.get("version") == _RECONCILED_MARKER_BACKFILL_VERSION
 
 
 def _append_run_state_ledger(path: Path, data: dict) -> None:
@@ -145,6 +167,208 @@ def ensure_run_state_ledger_backfilled(root: Optional[Path] = None) -> bool:
         except Exception:
             logger.exception("runs_dir: failed to backfill run-state ledger")
             return False
+
+
+def append_reconciled_marker_index(
+    marker_path: Path,
+    provider_kind: str | None,
+    ingestion_version: int,
+    *,
+    root: Optional[Path] = None,
+) -> None:
+    row = _reconciled_marker_index_row(
+        marker_path,
+        provider_kind,
+        ingestion_version,
+        root=root,
+    )
+    if row is None:
+        return
+    key = _reconciled_marker_index_key(row)
+    if key in _RECONCILED_MARKER_INDEX_SEEN:
+        return
+    try:
+        index = reconciled_marker_index_path(root or runs_root())
+        index.parent.mkdir(parents=True, exist_ok=True)
+        if _reconciled_marker_index_has_key(index, key):
+            _RECONCILED_MARKER_INDEX_SEEN.add(key)
+            return
+        with index.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        _RECONCILED_MARKER_INDEX_SEEN.add(key)
+    except Exception:
+        logger.exception("runs_dir: failed to append reconciled-marker index")
+
+
+def ensure_reconciled_marker_index_backfilled(root: Optional[Path] = None) -> bool:
+    root = root or runs_root()
+    if _reconciled_marker_backfill_current(root):
+        return False
+    with _RECONCILED_MARKER_BACKFILL_LOCK:
+        if _reconciled_marker_backfill_current(root):
+            return False
+        try:
+            index = reconciled_marker_index_path(root)
+            existing = _reconciled_marker_index_keys(index)
+            rows: list[dict] = []
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    marker_path = Path(entry.path) / "reconciled.marker"
+                    try:
+                        if marker_path.is_symlink():
+                            continue
+                        data = json.loads(marker_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    provider_kind = data.get("provider_kind") if isinstance(data, dict) else None
+                    ingestion_version = data.get("ingestion_version") if isinstance(data, dict) else None
+                    if not isinstance(provider_kind, str) or not isinstance(ingestion_version, int):
+                        continue
+                    row = _reconciled_marker_index_row(
+                        marker_path,
+                        provider_kind,
+                        ingestion_version,
+                        root=root,
+                    )
+                    if row is None:
+                        continue
+                    key = _reconciled_marker_index_key(row)
+                    if key in existing:
+                        continue
+                    existing.add(key)
+                    rows.append(row)
+            index.parent.mkdir(parents=True, exist_ok=True)
+            if rows:
+                with index.open("a", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row, separators=(",", ":")) + "\n")
+                        _RECONCILED_MARKER_INDEX_SEEN.add(
+                            _reconciled_marker_index_key(row)
+                        )
+            write_json(
+                reconciled_marker_index_backfill_marker_path(root),
+                {
+                    "version": _RECONCILED_MARKER_BACKFILL_VERSION,
+                    "backfilled_at": time.time(),
+                    "appended": len(rows),
+                },
+            )
+            return True
+        except Exception:
+            logger.exception("runs_dir: failed to backfill reconciled-marker index")
+            return False
+
+
+def load_reconciled_marker_index(root: Optional[Path] = None) -> dict[str, dict]:
+    root = root or runs_root()
+    latest: dict[str, dict] = {}
+    try:
+        with reconciled_marker_index_path(root).open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                run_id = row.get("run_id")
+                if isinstance(run_id, str) and run_id:
+                    latest[run_id] = row
+    except OSError:
+        pass
+    return latest
+
+
+def reconciled_marker_index_row_matches(run_dir: Path, row: dict) -> bool:
+    run_id = row.get("run_id")
+    marker_path_raw = row.get("marker_path")
+    if not isinstance(run_id, str) or run_id != run_dir.name:
+        return False
+    marker_path = run_dir / "reconciled.marker"
+    if not isinstance(marker_path_raw, str) or marker_path_raw != str(marker_path):
+        return False
+    try:
+        if run_dir.is_symlink() or marker_path.is_symlink():
+            return False
+        st = marker_path.lstat()
+    except OSError:
+        return False
+    try:
+        return (
+            int(row.get("marker_size")) == int(st.st_size)
+            and int(row.get("marker_mtime_ns")) == int(st.st_mtime_ns)
+            and int(row.get("marker_inode") or 0) == int(getattr(st, "st_ino", 0) or 0)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _reconciled_marker_index_row(
+    marker_path: Path,
+    provider_kind: str | None,
+    ingestion_version: int,
+    *,
+    root: Optional[Path] = None,
+) -> dict | None:
+    if marker_path.name != "reconciled.marker" or provider_kind is None:
+        return None
+    root = root or runs_root()
+    try:
+        root_resolved = root.resolve()
+        marker_resolved = marker_path.resolve()
+        marker_resolved.relative_to(root_resolved)
+        run_dir = marker_path.parent
+        run_dir.resolve().relative_to(root_resolved)
+        if run_dir.parent.resolve() != root_resolved:
+            return None
+        if run_dir.is_symlink() or marker_path.is_symlink():
+            return None
+        st = marker_path.lstat()
+    except (OSError, ValueError):
+        return None
+    return {
+        "run_id": run_dir.name,
+        "marker_path": str(marker_path),
+        "provider_kind": str(provider_kind),
+        "ingestion_version": int(ingestion_version),
+        "marker_size": int(st.st_size),
+        "marker_mtime_ns": int(st.st_mtime_ns),
+        "marker_inode": int(getattr(st, "st_ino", 0) or 0),
+        "written_at": time.time(),
+    }
+
+
+def _reconciled_marker_index_key(row: dict) -> tuple[str, str, int, int, int, int]:
+    return (
+        str(row.get("marker_path") or ""),
+        str(row.get("provider_kind") or ""),
+        int(row.get("ingestion_version") or 0),
+        int(row.get("marker_size") or 0),
+        int(row.get("marker_mtime_ns") or 0),
+        int(row.get("marker_inode") or 0),
+    )
+
+
+def _reconciled_marker_index_keys(index: Path) -> set[tuple[str, str, int, int, int, int]]:
+    keys: set[tuple[str, str, int, int, int, int]] = set()
+    try:
+        with index.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                keys.add(_reconciled_marker_index_key(row))
+    except OSError:
+        pass
+    return keys
+
+
+def _reconciled_marker_index_has_key(
+    index: Path,
+    key: tuple[str, str, int, int, int, int],
+) -> bool:
+    return key in _reconciled_marker_index_keys(index)
 
 
 def _run_state_ledger_keys(ledger: Path) -> set[tuple[str, str, str]]:
