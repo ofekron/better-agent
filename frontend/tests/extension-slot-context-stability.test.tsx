@@ -156,6 +156,33 @@ describe("ExtensionModuleSlot context stability", () => {
     unmount();
   });
 
+  it("does not grant assistant board events to unrelated assistant-named extensions", async () => {
+    const seen: unknown[] = [];
+    let subscribed = false;
+    const Comp = (props: {
+      context: { subscribeToEvent?: (type: string, handler: (payload: unknown) => void) => () => void };
+    }) => {
+      props.context.subscribeToEvent?.("assistant.board_updated", (payload) => {
+        seen.push(payload);
+      });
+      subscribed = true;
+      return null;
+    };
+    loadMock.mockResolvedValue({ Component: Comp });
+
+    const unrelatedModule = {
+      ...TEST_MODULE,
+      extension_id: "evil.assistant",
+      module_url: "/api/extensions/evil.assistant/frontend/ui/x.entry.js",
+    };
+    const { unmount } = render(<ExtensionModuleSlot module={unrelatedModule} />);
+    await vi.waitFor(() => expect(subscribed).toBe(true));
+
+    eventBus.publish("assistant.board_updated", { source_session_id: "s1" });
+    expect(seen).toEqual([]);
+    unmount();
+  });
+
   it("unmounts Component roots before their host slot is detached", async () => {
     const unmountConnectedStates: boolean[] = [];
     const replaceChildrenSpy = vi.spyOn(HTMLElement.prototype, "replaceChildren");

@@ -59,10 +59,12 @@ type MountedKind = "component" | "mount";
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
 const HOST_EXTENSION_EVENTS = new Set(["extensions_changed", "websocket.connected"]);
 
-function extensionEventPrefix(extensionId: string): string {
-  const parts = extensionId.split(".").filter(Boolean);
-  const localName = parts[parts.length - 1] || extensionId;
-  return `${localName}.`;
+function extensionEventPrefixes(extensionId: string): string[] {
+  const prefixes = [`${extensionId}.`];
+  if (extensionId === "ofek-dev.assistant") {
+    prefixes.push("assistant.");
+  }
+  return prefixes;
 }
 
 function normalizeModuleUrl(moduleUrl: string): string {
@@ -167,15 +169,15 @@ export function ExtensionModuleSlot({
   contextRef.current = context;
   const [error, setError] = useState("");
   const moduleUrl = useMemo(() => normalizeModuleUrl(module.module_url), [module.module_url]);
-  const eventPrefix = useMemo(() => extensionEventPrefix(module.extension_id), [module.extension_id]);
+  const eventPrefixes = useMemo(() => extensionEventPrefixes(module.extension_id), [module.extension_id]);
   const subscribeToEvent = useCallback(
     (type: string, handler: (payload: unknown) => void) => {
-      if (!HOST_EXTENSION_EVENTS.has(type) && !type.startsWith(eventPrefix)) {
+      if (!HOST_EXTENSION_EVENTS.has(type) && !eventPrefixes.some((prefix) => type.startsWith(prefix))) {
         return () => {};
       }
       return eventBus.subscribe(type, handler);
     },
-    [eventPrefix],
+    [eventPrefixes],
   );
 
   const buildMountContext = useCallback(
