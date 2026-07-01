@@ -562,7 +562,9 @@ def test_agy_run_home_overlay_carries_library_for_auth() -> None:
     run_dir = Path(tempfile.mkdtemp(prefix="agy-overlay-"))
     real_home = Path.home()
     scoped = _materialize_agy_run_home(
-        run_dir, {"mcp_servers": {"x": {"command": "echo", "args": []}}}
+        run_dir,
+        {"mcp_servers": {"x": {"command": "echo", "args": []}}},
+        cwd=str(real_home),
     )
     check(scoped is not None, "overlay is materialized when an mcp server is present")
     overlay = Path(scoped["HOME"])

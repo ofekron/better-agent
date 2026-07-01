@@ -45,6 +45,12 @@ def runtime_skill_contexts(cwd: str, *, bare_config: bool = False) -> list[dict]
     }]
 
 
+def has_runtime_skills(cwd: str, *, bare_config: bool = False) -> bool:
+    if bare_config:
+        return False
+    return bool(_discover_skills(cwd))
+
+
 def materialize_runtime_skills(root: Path, cwd: str, *, bare_config: bool = False) -> int:
     if bare_config:
         return 0

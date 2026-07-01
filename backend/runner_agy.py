@@ -19,6 +19,7 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from cli_paths import resolve_cli_binary
 from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
+from runtime_skills import has_runtime_skills, materialize_runtime_skills
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -216,10 +217,17 @@ def _load_json_object(path: Path) -> dict:
     return data
 
 
-def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optional[dict[str, str]]:
+def _materialize_agy_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    cwd: str,
+    bare_config: bool = False,
+) -> Optional[dict[str, str]]:
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
-    if not mcp_servers and not skills:
+    has_ext_skills = has_runtime_skills(cwd, bare_config=bare_config)
+    if not mcp_servers and not skills and not has_ext_skills:
         return None
 
     real_home = Path.home()
@@ -237,10 +245,17 @@ def _materialize_agy_run_home(run_dir: Path, provider_run_config: dict) -> Optio
     symlink_home_overlay(real_cli, overlay_cli, skip={"settings.json", "builtin"})
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
+    ext_count = materialize_runtime_skills(
+        overlay_cli / "builtin" / "skills", cwd, bare_config=bare_config
+    )
+    materialize_runtime_skills(
+        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config
+    )
+
     settings = _load_json_object(real_cli / "settings.json")
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
-    if skills:
+    if skills or ext_count:
         settings["skills"] = {"enabled": True}
     if settings:
         overlay_cli.mkdir(parents=True, exist_ok=True)
@@ -1087,7 +1102,12 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     run_env = os.environ.copy()
     run_env.update(native_mcp_runtime_env(inputs))
     provider_run_config = with_builtin_mcp_servers(inputs, inputs.get("provider_run_config") or {})
-    scoped_env = _materialize_agy_run_home(run_dir, provider_run_config)
+    scoped_env = _materialize_agy_run_home(
+        run_dir,
+        provider_run_config,
+        cwd=cwd,
+        bare_config=bool(inputs.get("bare_config")),
+    )
     if scoped_env:
         run_env.update(scoped_env)
     agy_home = Path(run_env.get("HOME") or str(Path.home()))
