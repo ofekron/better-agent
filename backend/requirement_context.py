@@ -75,7 +75,7 @@ RG_OPTIONS_WITH_VALUE = {
 
 class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 2
+    version = 3
     name = "worker:requirements:query-processor"
     env_prefix = "GET_REQUIREMENTS_PROCESSOR"
     task_key = "requirement_analysis"
@@ -277,7 +277,13 @@ def _is_valid_processor_payload(value: Any) -> bool:
 def _is_valid_processor_requirement(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
-    return all(_is_nonempty_string(value.get(field)) for field in PROCESSOR_REQUIREMENT_FIELDS)
+    required_fields_valid = all(
+        _is_nonempty_string(value.get(field))
+        for field in PROCESSOR_REQUIREMENT_FIELDS
+        if field != "polarity"
+    )
+    polarity = value.get("polarity")
+    return required_fields_valid and (polarity is None or isinstance(polarity, str))
 
 
 def _is_nonempty_string(value: Any) -> bool:
@@ -299,6 +305,8 @@ def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]
         }
         for key in ("kind", "polarity", "strength", "source", "cwd"):
             value = match.get(key)
+            if key == "polarity" and value is None:
+                value = ""
             if value is not None:
                 requirement[key] = value
         requirements.append(requirement)
