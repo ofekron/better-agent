@@ -109,6 +109,26 @@ def _reset_candidates() -> None:
     nsp._candidates = _ORIG_CANDIDATES
 
 
+def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | None = None,
+                          gemini: Path | None = None, runs: Path | None = None):
+    """Point every native-root helper in native_session_miner at temp dirs so
+    filesystem-walk tests neither scan the real home (~/.claude*, ~/.codex,
+    ~/.gemini — tens of thousands of files) nor read real data. Returns the
+    original callables for restoration."""
+    import native_session_miner as M
+    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root)
+    M._claude_projects_roots = lambda: list(claude or [])
+    M._codex_sessions_root = lambda: codex or _SCRATCH / "no-codex"
+    M._gemini_chats_root = lambda: gemini or _SCRATCH / "no-gemini"
+    M._runs_root = lambda: runs or _SCRATCH / "no-runs"
+    return orig
+
+
+def _restore_native_roots(orig) -> None:
+    import native_session_miner as M
+    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root) = orig
+
+
 def test_whole_word_match_not_substring() -> bool:
     _patch_candidates([
         _candidate("s1", "/proj", [("fix the ui layout", "2024-01-01")]),
@@ -240,40 +260,86 @@ def test_deterministic_order_for_empty_ts_ties() -> bool:
 
 
 def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
-    """Regression: a native transcript with NO Better Agent session record
-    (direct CLI / extension-spawned) must be found by the search.
+    """Regression: a claude native transcript with NO Better Agent session
+    record (direct CLI / extension-spawned) must be found by the search.
 
     Before the filesystem-first discovery fix, `_candidates` was BA-index-gated
     and an empty `sessions/` dir yielded zero candidates — so this prompt was
     missed. Now `iter_all_native_candidates` walks the projects dir directly."""
     _reset_candidates()  # ensure the REAL _candidates is in place
-    # claude_projects_root_for_session({}) honors CLAUDE_CONFIG_DIR → point it
-    # at an isolated temp dir so the walk reads only our fixture transcript.
-    tmp_cfg = _SCRATCH / "claude-config"
-    projects = tmp_cfg / "projects"
-    projects.mkdir(parents=True, exist_ok=True)
-    os.environ["CLAUDE_CONFIG_DIR"] = str(tmp_cfg)
+    projects = _SCRATCH / "claude-projects"
+    cwd = "/Users/test/unlinked-proj"
+    session_dir = projects / encode_cwd(cwd)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    sid = "deadbeef-0000-0000-0000-unlinked0001"
+    (session_dir / f"{sid}.jsonl").write_text(
+        json.dumps({
+            "type": "user",
+            "uuid": "u-unlinked-1",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "zulifrangible task widget"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    # Deliberately NO sessions/<sid>.json — the transcript is unlinked.
+    orig = _isolate_native_roots(claude=[projects])
     try:
-        cwd = "/Users/test/unlinked-proj"
-        session_dir = projects / encode_cwd(cwd)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        sid = "deadbeef-0000-0000-0000-unlinked0001"
-        (session_dir / f"{sid}.jsonl").write_text(
-            json.dumps({
-                "type": "user",
-                "uuid": "u-unlinked-1",
-                "timestamp": "2024-01-01T00:00:00Z",
-                "message": {"role": "user", "content": "zulifrangible task widget"},
-            }) + "\n",
-            encoding="utf-8",
-        )
-        # Deliberately NO sessions/<sid>.json — the transcript is unlinked.
         out = nsp.search_native_session_prompts(query="zulifrangible task widget")
     finally:
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        _restore_native_roots(orig)
     texts = {r["text"] for r in out}
     ok = "zulifrangible task widget" in texts
-    print(f"{OK if ok else FAIL} unlinked transcript found via filesystem walk (got {texts})")
+    print(f"{OK if ok else FAIL} unlinked claude transcript found via filesystem walk (got {texts})")
+    return ok
+
+
+def test_codex_and_gemini_native_transcripts_found() -> bool:
+    """The native stores of every provider are covered — a codex rollout and a
+    gemini chat with no BA record must both be found, and codex's injected
+    ``<environment_context>`` block must be dropped (not treated as a prompt)."""
+    _reset_candidates()
+
+    codex_root = _SCRATCH / "codex-sessions"
+    codex_root.mkdir(parents=True, exist_ok=True)
+    (codex_root / "rollout-test-zapp.jsonl").write_text(
+        json.dumps({"type": "session_meta", "timestamp": "2024-01-01T00:00:00Z",
+                    "payload": {"id": "z", "cwd": "/Users/test/zapp", "source": "cli"}}) + "\n"
+        + json.dumps({"type": "response_item", "timestamp": "2024-01-01T00:00:01Z",
+                      "payload": {"type": "message", "role": "user",
+                                  "content": [{"type": "input_text",
+                                               "text": "zulifrangible codex widget"}]}}) + "\n"
+        + json.dumps({"type": "response_item", "timestamp": "2024-01-01T00:00:02Z",
+                      "payload": {"type": "message", "role": "user",
+                                  "content": [{"type": "input_text",
+                                               "text": "<environment_context>\n  <cwd>/x</cwd>"}]}}) + "\n",
+        encoding="utf-8",
+    )
+
+    gemini_root = _SCRATCH / "gemini-tmp" / "zapp-proj" / "chats"
+    gemini_root.mkdir(parents=True, exist_ok=True)
+    (gemini_root / "session-2024-01-01-zapp.jsonl").write_text(
+        json.dumps({"sessionId": "z", "startTime": "2024-01-01T00:00:00Z", "kind": "main"}) + "\n"
+        + json.dumps({"id": "u1", "timestamp": "2024-01-01T00:00:01Z", "type": "user",
+                      "content": [{"text": "zulifrangible gemini widget"}]}) + "\n",
+        encoding="utf-8",
+    )
+
+    orig = _isolate_native_roots(
+        claude=[],
+        codex=codex_root,
+        gemini=gemini_root.parent.parent,
+    )
+    try:
+        out = nsp.search_native_session_prompts(query="zulifrangible widget")
+    finally:
+        _restore_native_roots(orig)
+    texts = {r["text"] for r in out}
+    ok = (
+        "zulifrangible codex widget" in texts
+        and "zulifrangible gemini widget" in texts
+        and not any("<environment_context>" in t for t in texts)
+    )
+    print(f"{OK if ok else FAIL} codex+gemini native transcripts found, env-context dropped (got {texts})")
     return ok
 
 
@@ -332,6 +398,7 @@ def main_run() -> int:
         test_bad_transcript_does_not_abort_search,
         test_deterministic_order_for_empty_ts_ties,
         test_unlinked_transcript_found_via_filesystem_walk,
+        test_codex_and_gemini_native_transcripts_found,
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]
