@@ -6686,6 +6686,74 @@ def _floor_events_from_seq(
     return max(0, floor)
 
 
+def _total_replay_events(msg: dict) -> int:
+    n = len(msg.get("events") or [])
+    for w in msg.get("workers") or []:
+        n += len(w.get("events") or [])
+    return n
+
+
+def _merge_in_flight_replay(
+    replay_msgs: list[dict],
+    in_flight: Optional[dict],
+    *,
+    app_session_id: str,
+) -> list[dict]:
+    if in_flight is None:
+        return replay_msgs
+    in_flight_id = in_flight.get("id")
+    in_flight_evts = _total_replay_events(in_flight)
+    new_replay = []
+    for m in replay_msgs:
+        if m.get("id") != in_flight_id:
+            new_replay.append(m)
+            continue
+        cache_evts = _total_replay_events(m)
+        if in_flight_evts >= cache_evts:
+            new_replay.append(in_flight)
+            continue
+        merged = dict(m)
+        merged["isStreaming"] = in_flight.get("isStreaming", True)
+        merged["isStale"] = in_flight.get("isStale")
+        logger.info(
+            "WS replay %s: cache over in-flight (%d>%d evts), stamping isStreaming",
+            app_session_id[:8], cache_evts, in_flight_evts,
+        )
+        new_replay.append(merged)
+    return new_replay
+
+
+def _build_messages_replay_delta(
+    app_session_id: str,
+    since_seq: int,
+    *,
+    limit: int,
+    get_messages_since=session_manager.get_messages_since,
+    get_in_flight=coordinator.turn_manager.get_in_flight_assistant_msg,
+) -> Optional[dict]:
+    initial_in_flight = get_in_flight(app_session_id)
+    used_exclusive = since_seq > 0 and initial_in_flight is None
+    effective_since_seq = since_seq + 1 if used_exclusive else since_seq
+    delta = get_messages_since(app_session_id, effective_since_seq, limit=limit)
+    if delta is None:
+        return None
+    final_in_flight = get_in_flight(app_session_id)
+    if used_exclusive and final_in_flight is not None:
+        delta = get_messages_since(app_session_id, since_seq, limit=limit)
+        if delta is None:
+            return None
+    replay_msgs = _merge_in_flight_replay(
+        delta["messages"],
+        final_in_flight,
+        app_session_id=app_session_id,
+    )
+    return {
+        "messages": replay_msgs,
+        "next_seq": delta["next_seq"],
+        "in_flight": final_in_flight,
+    }
+
+
 @app.get("/api/sessions/topbar-pinned")
 async def get_topbar_pinned_sessions():
     sessions = await asyncio.to_thread(session_manager.list)
@@ -14177,7 +14245,7 @@ async def websocket_chat(websocket: WebSocket):
                         )
                         replay_start = time.perf_counter()
                         delta = await asyncio.to_thread(
-                            session_manager.get_messages_since,
+                            _build_messages_replay_delta,
                             sub_sid,
                             since_seq,
                             limit=50,
@@ -14186,44 +14254,8 @@ async def websocket_chat(websocket: WebSocket):
                         replay_build_ms = replay_delta_ms
                         if delta is not None:
                             replay_post_start = time.perf_counter()
-                            in_flight = coordinator.turn_manager.get_in_flight_assistant_msg(sub_sid)
                             replay_msgs = delta["messages"]
-                            if in_flight is not None:
-                                in_flight_id = in_flight.get("id")
-
-                                def _total_evts(msg):
-                                    n = len(msg.get("events") or [])
-                                    for w in msg.get("workers") or []:
-                                        n += len(w.get("events") or [])
-                                    return n
-
-                                in_flight_evts = _total_evts(in_flight)
-                                # Only replace the cached message with the
-                                # in-flight version if it has >= events.
-                                # The cache may include orphan events applied
-                                # by reconcile that the in-flight copy (from
-                                # the orchestrator) doesn't have yet.
-                                # When keeping the cache (more events), stamp
-                                # the in-flight streaming flags so the
-                                # frontend still shows the turn as active.
-                                new_replay = []
-                                for m in replay_msgs:
-                                    if m.get("id") == in_flight_id:
-                                        cache_evts = _total_evts(m)
-                                        if in_flight_evts >= cache_evts:
-                                            new_replay.append(in_flight)
-                                        else:
-                                            merged = dict(m)
-                                            merged["isStreaming"] = in_flight.get("isStreaming", True)
-                                            merged["isStale"] = in_flight.get("isStale")
-                                            logger.info(
-                                                "WS replay %s: cache over in-flight (%d>%d evts), stamping isStreaming",
-                                                sub_sid[:8], cache_evts, in_flight_evts,
-                                            )
-                                            new_replay.append(merged)
-                                    else:
-                                        new_replay.append(m)
-                                replay_msgs = new_replay
+                            in_flight = delta.get("in_flight")
                             replay_post_ms = (time.perf_counter() - replay_post_start) * 1000
                             replay_build_ms = replay_delta_ms + replay_post_ms
                             perf.record("ws.replay.delta", replay_delta_ms)
