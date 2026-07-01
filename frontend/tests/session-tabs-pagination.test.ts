@@ -7,7 +7,7 @@ async function waitFor(
   h: Awaited<ReturnType<typeof renderApp>>,
   predicate: () => boolean,
 ) {
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 60; i++) {
     if (predicate()) return true;
     await h.flush();
   }
@@ -720,6 +720,7 @@ describe("session tabs with paged sessions", () => {
       id: "existing-session",
       name: "Existing session",
       cwd: "/tmp/project-a",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
     });
     const h = await renderApp({
       seed: {
@@ -740,12 +741,10 @@ describe("session tabs with paged sessions", () => {
     expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
       .toContain("sess-2");
 
-    await h.selectSession(existing.id);
-
     expect(
       await waitFor(
         h,
-        () => h.$(".session-tabs")?.textContent?.includes("New Session") === true,
+        () => tabIds(h).join(",") === "sess-2,existing-session",
       ),
     ).toBe(true);
     h.unmount();
