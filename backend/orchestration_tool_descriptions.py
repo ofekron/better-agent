@@ -43,7 +43,11 @@ ASK_DESCRIPTION = (
     "run_mode='fork' runs an ISOLATED branch that does NOT mutate the session's "
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
     "discard the fork after). Do NOT fork to create a brand-new session. Unlike "
-    "delegate_task, ask keeps the target explicit. With target_worker_pool, pass "
+    "delegate_task, ask keeps the target explicit. Unlike the session-bridge "
+    "delegate_to_session tool, ask has NO approval picker, cannot create a session, "
+    "and requires the target to be a reachable team member (session/worker/pool) — "
+    "use delegate_to_session when you need user consent, a brand-new session, or to "
+    "reach an arbitrary non-team session. With target_worker_pool, pass "
     "pool_affinity_key to continue the same thread on the same pool worker."
 )
 

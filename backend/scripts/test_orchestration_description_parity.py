@@ -33,7 +33,8 @@ SPEC = {
     "mssg": (otd.MSSG_DESCRIPTION, ["backend accepts", "final report"]),
     "ask": (
         otd.ASK_DESCRIPTION,
-        ["wait_and_grab_last_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork"],
+        ["wait_and_grab_last_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork",
+         "delegate_to_session"],
     ),
     "delegate_task": (
         otd.DELEGATE_TASK_DESCRIPTION,
