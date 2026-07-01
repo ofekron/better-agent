@@ -339,6 +339,93 @@ async def test_run_state_ledger_rejects_paths_outside_runs_root() -> None:
     print("PASS test_run_state_ledger_rejects_paths_outside_runs_root")
 
 
+async def test_run_state_recent_scan_backfills_ledger() -> None:
+    from runs_dir import runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-backfill"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        '{"session_id":"BACKFILL-SID","jsonl_path":"/tmp/backfill.jsonl"}',
+        encoding="utf-8",
+    )
+    assert str(nfm_mod._scan_run_state_for_jsonl("BACKFILL-SID")) == "/tmp/backfill.jsonl"
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    original_candidates = nfm_mod._recent_state_candidates
+
+    def fail_candidates(*_args, **_kwargs):
+        raise AssertionError("backfilled ledger should avoid recent-dir scan")
+
+    nfm_mod._recent_state_candidates = fail_candidates  # type: ignore
+    try:
+        path = nfm_mod._scan_run_state_for_jsonl("BACKFILL-SID")
+    finally:
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
+    assert str(path) == "/tmp/backfill.jsonl", path
+    print("PASS test_run_state_recent_scan_backfills_ledger")
+
+
+async def test_run_state_backfill_rejects_symlink_escape() -> None:
+    from runs_dir import runs_root, run_state_ledger_path
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    outside_dir = root.parent / "outside-run-state"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "state.json").write_text(
+        '{"session_id":"SYMLINK-ESCAPE","jsonl_path":"/tmp/symlink-escape.jsonl"}',
+        encoding="utf-8",
+    )
+    link_dir = root / "run-symlink-escape"
+    try:
+        link_dir.symlink_to(outside_dir, target_is_directory=True)
+    except FileExistsError:
+        pass
+    nfm_mod._build_recent_state_index(((1, 1, str(link_dir / "state.json")),))
+    nfm_mod._backfill_run_state_ledger(root, {"SYMLINK-ESCAPE": [link_dir / "state.json"]})
+    ledger = run_state_ledger_path(root)
+    text = ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+    assert "SYMLINK-ESCAPE" not in text, text
+    print("PASS test_run_state_backfill_rejects_symlink_escape")
+
+
+async def test_run_state_ledger_dedupes_duplicate_rows() -> None:
+    from runs_dir import runs_root, run_state_ledger_path, _RUN_STATE_LEDGER_SEEN
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    _RUN_STATE_LEDGER_SEEN.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-dedup"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"DEDUP-SID","jsonl_path":"/tmp/dedup.jsonl"}',
+        encoding="utf-8",
+    )
+    nfm_mod._backfill_run_state_ledger(root, {"DEDUP-SID": [state_path]})
+    _RUN_STATE_LEDGER_SEEN.clear()
+    nfm_mod._backfill_run_state_ledger(root, {"DEDUP-SID": [state_path]})
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    paths = nfm_mod._ledger_state_files_for_sid(root, "DEDUP-SID")
+    assert paths == [state_path], paths
+    lines = [
+        line for line in run_state_ledger_path(root).read_text(encoding="utf-8").splitlines()
+        if "DEDUP-SID" in line
+    ]
+    assert len(lines) == 1, lines
+    print("PASS test_run_state_ledger_dedupes_duplicate_rows")
+
+
 async def test_run_state_stale_index_does_not_hide_new_state() -> None:
     from runs_dir import runs_root
 
@@ -796,6 +883,9 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_lookup_is_targeted_and_cached())
     asyncio.run(test_run_state_lookup_uses_ledger_before_recent_scan())
     asyncio.run(test_run_state_ledger_rejects_paths_outside_runs_root())
+    asyncio.run(test_run_state_recent_scan_backfills_ledger())
+    asyncio.run(test_run_state_backfill_rejects_symlink_escape())
+    asyncio.run(test_run_state_ledger_dedupes_duplicate_rows())
     asyncio.run(test_run_state_stale_index_does_not_hide_new_state())
     asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())

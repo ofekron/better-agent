@@ -148,7 +148,7 @@ def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
         root_resolved = root.resolve()
     except OSError:
         return []
-    index: dict[str, list[tuple[float, Path]]] = {}
+    latest_by_key: dict[tuple[str, str], tuple[float, Path]] = {}
     try:
         with ledger.open(encoding="utf-8") as f:
             for raw in f:
@@ -171,9 +171,15 @@ def _ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                     written_at = float(row.get("written_at"))
                 except (TypeError, ValueError):
                     written_at = 0.0
-                index.setdefault(sid, []).append((written_at, path))
+                key = (sid, str(path))
+                current = latest_by_key.get(key)
+                if current is None or written_at >= current[0]:
+                    latest_by_key[key] = (written_at, path)
     except OSError:
         return []
+    index: dict[str, list[tuple[float, Path]]] = {}
+    for (sid, _), value in latest_by_key.items():
+        index.setdefault(sid, []).append(value)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         _RUN_STATE_LEDGER_CACHE[root_key] = (now, st.st_size, index)
     return [path for _, path in index.get(agent_sid, [])]
@@ -224,6 +230,7 @@ def _recent_state_index_for_root(root: Path) -> dict[str, list[Path]]:
                     )
                     return index
         index = _build_recent_state_index(candidates)
+        _backfill_run_state_ledger(root, index)
         with _RUN_STATE_LOOKUP_CACHE_LOCK:
             _RUN_STATE_RECENT_INDEX_CACHE[root_key] = (now, candidates, index)
         return index
@@ -265,6 +272,26 @@ def _build_recent_state_index(candidates: tuple[tuple[int, int, str], ...]) -> d
             continue
         index.setdefault(agent_sid, []).append(path)
     return index
+
+
+def _backfill_run_state_ledger(root: Path, index: dict[str, list[Path]]) -> None:
+    try:
+        from runs_dir import _append_run_state_ledger
+        root_resolved = root.resolve()
+    except Exception:
+        return
+    for paths in index.values():
+        for path in paths:
+            if path.name != "state.json":
+                continue
+            try:
+                path.resolve().relative_to(root_resolved)
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            _append_run_state_ledger(path, data)
 
 
 def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
