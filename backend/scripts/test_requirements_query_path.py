@@ -175,7 +175,7 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     spec = rc.GET_REQUIREMENTS_PROCESSOR_SPEC
     server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
 
-    check(spec.version >= 2, "processor spec version invalidates polluted direct bases")
+    check(spec.version >= 3, "processor spec version invalidates stale processor prompt and parser bases")
     check(spec.run_mode == "fork", "processor uses fork mode for lookup isolation")
     check(spec.ephemeral_forks is True, "processor uses ephemeral fork per lookup")
     check("_GET_REQUIREMENTS_TIMEOUT = 330.0" in server, "MCP get-requirements timeout covers three processor attempts")
