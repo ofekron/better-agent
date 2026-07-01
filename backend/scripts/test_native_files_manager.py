@@ -7,6 +7,7 @@ Run: python backend/scripts/test_native_files_manager.py
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -895,6 +896,36 @@ async def test_run_state_recent_candidates_skip_per_entry_resolve() -> None:
     print("PASS test_run_state_recent_candidates_skip_per_entry_resolve")
 
 
+async def test_run_state_recent_scan_skips_per_entry_path_helper() -> None:
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-no-helper-"))
+    for index in range(4):
+        run_dir = root / f"run-recent-no-helper-{index}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            f'{{"session_id":"RECENT-NO-HELPER-{index}","jsonl_path":"/tmp/no-helper-{index}.jsonl"}}',
+            encoding="utf-8",
+        )
+    original_candidate_stat = runs_dir_mod._run_state_candidate_stat
+
+    def fail_candidate_stat(*_args, **_kwargs):
+        raise AssertionError("recent cold scan should not call the Path-heavy candidate helper per entry")
+
+    runs_dir_mod._run_state_candidate_stat = fail_candidate_stat  # type: ignore
+    try:
+        candidates = runs_dir_mod._recent_state_candidates(root, root.resolve())
+    finally:
+        runs_dir_mod._run_state_candidate_stat = original_candidate_stat  # type: ignore
+        shutil.rmtree(root, ignore_errors=True)
+    assert {candidate[2] for candidate in candidates} == {
+        str(root / f"run-recent-no-helper-{index}" / "state.json")
+        for index in range(4)
+    }
+    print("PASS test_run_state_recent_scan_skips_per_entry_path_helper")
+
+
 async def test_run_state_recent_lookup_resolves_only_candidates() -> None:
     from runs_dir import runs_root
 
@@ -926,6 +957,27 @@ async def test_run_state_recent_lookup_resolves_only_candidates() -> None:
     assert str(path).startswith("/tmp/recent-validate-"), path
     assert len(validated_paths) <= runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT + 2, len(validated_paths)
     print("PASS test_run_state_recent_lookup_resolves_only_candidates")
+
+
+async def test_run_state_recent_candidates_skip_run_dir_symlink() -> None:
+    from runs_dir import runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    outside_dir = root.parent / "outside-recent-run-dir-symlink"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "state.json").write_text(
+        '{"session_id":"RECENT-RUN-DIR-SYMLINK","jsonl_path":"/tmp/recent-run-dir-symlink.jsonl"}',
+        encoding="utf-8",
+    )
+    run_dir = root / "run-recent-dir-symlink"
+    run_dir.symlink_to(outside_dir, target_is_directory=True)
+    candidates = runs_dir_mod._recent_state_candidates(root, root.resolve())
+    assert str(run_dir / "state.json") not in {candidate[2] for candidate in candidates}
+    assert nfm_mod._scan_run_state_for_jsonl("RECENT-RUN-DIR-SYMLINK") is None
+    print("PASS test_run_state_recent_candidates_skip_run_dir_symlink")
 
 
 async def test_run_state_recent_candidates_skip_state_symlink() -> None:
@@ -1628,7 +1680,9 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_parse_defers_resolve_to_target_sid())
     asyncio.run(test_run_state_recent_cache_revalidates_cached_paths())
     asyncio.run(test_run_state_recent_candidates_skip_per_entry_resolve())
+    asyncio.run(test_run_state_recent_scan_skips_per_entry_path_helper())
     asyncio.run(test_run_state_recent_lookup_resolves_only_candidates())
+    asyncio.run(test_run_state_recent_candidates_skip_run_dir_symlink())
     asyncio.run(test_run_state_recent_candidates_skip_state_symlink())
     asyncio.run(test_run_state_recent_build_rejects_swapped_symlink())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
