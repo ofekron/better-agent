@@ -1,15 +1,18 @@
 """Provider-native transcript session miners.
 
-Three native :class:`SessionMinerBase` implementations, one per supported
+Four native :class:`SessionMinerBase` implementations, one per supported
 provider, plus the shared parser. They are the native-source counterparts to
 :class:`session_miner.SessionMiner` (the Better Agent snapshot source);
-together that is four SessionMiner implementations of the one abstraction.
+together that is five SessionMiner implementations of the one abstraction.
 
 - :class:`NativeClaudeSessionMiner` — Claude ``projects/<cwd>/<sid>.jsonl``.
 - :class:`NativeCodexSessionMiner` — Codex run-dir ``session_events.jsonl``
   (Claude-shaped, captured by the runner from the Codex stream).
 - :class:`NativeGeminiSessionMiner` — Gemini run-dir ``session_events.jsonl``
   (Claude-shaped, pre-normalized by ``runner_gemini``).
+- :class:`NativeBetterAgentSessionMiner` — Better Agent's own runner
+  (``runner_better_agent``, ``openai`` provider kind) run-dir
+  ``session_events.jsonl`` (Claude-shaped).
 
 Discovery uses the Better Agent session record only as an index — it gives the
 reliable ``cwd``, the ``provider_id`` (→ provider kind), and the
@@ -323,3 +326,16 @@ class NativeCodexSessionMiner(_RunDirNativeMiner):
 class NativeGeminiSessionMiner(_RunDirNativeMiner):
     _kind = "gemini"
     _key_prefix = "gemini:"
+
+
+class NativeBetterAgentSessionMiner(_RunDirNativeMiner):
+    """Better Agent's own runner source (``runner_better_agent``).
+
+    The ``openai`` provider kind runs through ``runner_better_agent``, which —
+    like Codex/Gemini — writes Claude-shaped ``session_events.jsonl`` into a
+    per-run dir. Same run-dir mechanism, distinct kind/key so it is mined as its
+    own source alongside the provider-native CLIs.
+    """
+
+    _kind = "openai"
+    _key_prefix = "ba:"
