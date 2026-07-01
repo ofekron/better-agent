@@ -45,6 +45,7 @@ if _BACKEND not in sys.path:
 from session_manager import manager as session_manager  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
+from ingestion_versions import current_ingestion_version  # noqa: E402
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
@@ -83,6 +84,7 @@ def _seed_session(*, streaming: bool) -> tuple[str, str]:
     asst_msg["isStreaming"] = streaming
     session_manager.append_user_msg(sid, user_msg)
     session_manager.append_assistant_msg(sid, asst_msg)
+    session_manager.flush_pending_persists()
     return sid, asst_msg["id"]
 
 
@@ -93,6 +95,8 @@ def _seed_run(
     *,
     processed_byte: int,
     complete: bool = False,
+    target_message_id: str | None = None,
+    ingestion_version: int | None = None,
 ) -> str:
     run_id = str(uuid.uuid4())
     run_dir = _runs_root() / run_id
@@ -118,6 +122,8 @@ def _seed_run(
         "runner_pid": 0, "session_id": claude_sid,
         "jsonl_path": str(claude_jsonl),
         "processed_byte": processed_byte, "cancelled": False,
+        "target_message_id": target_message_id,
+        "ingestion_version": ingestion_version,
     }))
     (run_dir / "pid").write_text("0")
     if complete:
@@ -234,7 +240,14 @@ async def test_partial_replay_failure_blocks_marker() -> bool:
     claude_sid = str(uuid.uuid4())
     raw = [_make_assistant_text_event(t) for t in ("p1", "p2", "p3")]
     poison_uuid = raw[1]["uuid"]
-    run_id = _seed_run(app_sid, claude_sid, raw, processed_byte=0)
+    run_id = _seed_run(
+        app_sid,
+        claude_sid,
+        raw,
+        processed_byte=0,
+        target_message_id=asst_id,
+        ingestion_version=current_ingestion_version("claude"),
+    )
 
     from orchs import get_strategy
     strat = get_strategy("native")
