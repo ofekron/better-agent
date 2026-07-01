@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -27,7 +28,10 @@ from paths import ba_home
 
 logger = logging.getLogger(__name__)
 _RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
+_RUN_STATE_LEDGER_BACKFILL_MARKER_NAME = "run_state_index.backfilled.json"
+_RUN_STATE_LEDGER_BACKFILL_VERSION = 1
 _RUN_STATE_LEDGER_SEEN: set[tuple[str, str, str]] = set()
+_RUN_STATE_LEDGER_BACKFILL_LOCK = threading.Lock()
 
 
 def runs_root() -> Path:
@@ -36,6 +40,19 @@ def runs_root() -> Path:
 
 def run_state_ledger_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RUN_STATE_LEDGER_NAME
+
+
+def run_state_ledger_backfill_marker_path(root: Optional[Path] = None) -> Path:
+    return (root or runs_root()) / _RUN_STATE_LEDGER_BACKFILL_MARKER_NAME
+
+
+def _run_state_ledger_backfill_current(root: Path) -> bool:
+    marker = run_state_ledger_backfill_marker_path(root)
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return data.get("version") == _RUN_STATE_LEDGER_BACKFILL_VERSION
 
 
 def _append_run_state_ledger(path: Path, data: dict) -> None:
@@ -65,6 +82,88 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
         _RUN_STATE_LEDGER_SEEN.add(key)
     except Exception:
         logger.exception("runs_dir: failed to append run-state ledger")
+
+
+def ensure_run_state_ledger_backfilled(root: Optional[Path] = None) -> bool:
+    root = root or runs_root()
+    if _run_state_ledger_backfill_current(root):
+        return False
+    with _RUN_STATE_LEDGER_BACKFILL_LOCK:
+        if _run_state_ledger_backfill_current(root):
+            return False
+        try:
+            root_resolved = root.resolve()
+            ledger = run_state_ledger_path(root)
+            existing = _run_state_ledger_keys(ledger)
+            rows: list[dict] = []
+            now = time.time()
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    state_path = Path(entry.path) / "state.json"
+                    if state_path.name != "state.json":
+                        continue
+                    try:
+                        state_path.resolve().relative_to(root_resolved)
+                        data = json.loads(state_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    session_id = data.get("session_id") if isinstance(data, dict) else None
+                    jsonl_path = data.get("jsonl_path") if isinstance(data, dict) else None
+                    if not session_id or not jsonl_path:
+                        continue
+                    key = (str(state_path), str(session_id), str(jsonl_path))
+                    if key in existing:
+                        continue
+                    existing.add(key)
+                    rows.append({
+                        "session_id": str(session_id),
+                        "jsonl_path": str(jsonl_path),
+                        "state_path": str(state_path),
+                        "written_at": now,
+                    })
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            if rows:
+                with ledger.open("a", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row, separators=(",", ":")) + "\n")
+                        _RUN_STATE_LEDGER_SEEN.add((
+                            row["state_path"],
+                            row["session_id"],
+                            row["jsonl_path"],
+                        ))
+            write_json(
+                run_state_ledger_backfill_marker_path(root),
+                {
+                    "version": _RUN_STATE_LEDGER_BACKFILL_VERSION,
+                    "backfilled_at": now,
+                    "appended": len(rows),
+                },
+            )
+            return True
+        except Exception:
+            logger.exception("runs_dir: failed to backfill run-state ledger")
+            return False
+
+
+def _run_state_ledger_keys(ledger: Path) -> set[tuple[str, str, str]]:
+    keys: set[tuple[str, str, str]] = set()
+    try:
+        with ledger.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                state_path = row.get("state_path")
+                session_id = row.get("session_id")
+                jsonl_path = row.get("jsonl_path")
+                if state_path and session_id and jsonl_path:
+                    keys.add((str(state_path), str(session_id), str(jsonl_path)))
+    except OSError:
+        pass
+    return keys
 
 
 def _run_state_ledger_has_key(ledger: Path, key: tuple[str, str, str]) -> bool:

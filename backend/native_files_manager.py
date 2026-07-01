@@ -189,6 +189,17 @@ def _state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     ledger_paths = _ledger_state_files_for_sid(root, agent_sid)
     if ledger_paths:
         return ledger_paths
+    try:
+        from runs_dir import ensure_run_state_ledger_backfilled
+        did_backfill = ensure_run_state_ledger_backfilled(root)
+    except Exception:
+        did_backfill = False
+    if did_backfill:
+        with _RUN_STATE_LOOKUP_CACHE_LOCK:
+            _RUN_STATE_LEDGER_CACHE.pop(str(root), None)
+        ledger_paths = _ledger_state_files_for_sid(root, agent_sid)
+        if ledger_paths:
+            return ledger_paths
     return _recent_state_index_for_root(root).get(agent_sid, [])
 
 

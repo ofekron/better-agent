@@ -9,6 +9,7 @@ Run: python backend/scripts/test_native_files_manager.py
 import os
 import sys
 import tempfile
+import threading
 import time
 
 import _test_home
@@ -424,6 +425,138 @@ async def test_run_state_ledger_dedupes_duplicate_rows() -> None:
     ]
     assert len(lines) == 1, lines
     print("PASS test_run_state_ledger_dedupes_duplicate_rows")
+
+
+async def test_run_state_full_backfill_finds_old_state_outside_recent_window() -> None:
+    from runs_dir import runs_root, atomic_write_json
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    nfm_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    nfm_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    old_dir = root / "run-full-backfill-old"
+    old_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        old_dir / "state.json",
+        {"session_id": "FULL-BACKFILL-OLD", "jsonl_path": "/tmp/full-backfill-old.jsonl"},
+    )
+    old_time = time.time() - 3600
+    os.utime(old_dir / "state.json", (old_time, old_time))
+    for index in range(nfm_mod._RUN_STATE_RECENT_SCAN_LIMIT + 4):
+        run_dir = root / f"run-full-backfill-new-{index}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            run_dir / "state.json",
+            {"session_id": f"FULL-BACKFILL-NEW-{index}", "jsonl_path": f"/tmp/new-{index}.jsonl"},
+        )
+    original_candidates = nfm_mod._recent_state_candidates
+
+    def fail_candidates(*_args, **_kwargs):
+        raise AssertionError("full ledger backfill should avoid recent-dir fallback")
+
+    nfm_mod._recent_state_candidates = fail_candidates  # type: ignore
+    try:
+        path = nfm_mod._scan_run_state_for_jsonl("FULL-BACKFILL-OLD")
+    finally:
+        nfm_mod._recent_state_candidates = original_candidates  # type: ignore
+    assert str(path) == "/tmp/full-backfill-old.jsonl", path
+    print("PASS test_run_state_full_backfill_finds_old_state_outside_recent_window")
+
+
+async def test_run_state_full_backfill_marker_dedupes_rows() -> None:
+    from runs_dir import (
+        ensure_run_state_ledger_backfilled,
+        run_state_ledger_backfill_marker_path,
+        run_state_ledger_path,
+        atomic_write_json,
+    )
+
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-dedup-"))
+    run_dir = root / "run-full-backfill-dedup"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        run_dir / "state.json",
+        {"session_id": "FULL-DEDUP", "jsonl_path": "/tmp/full-dedup.jsonl"},
+    )
+    assert ensure_run_state_ledger_backfilled(root) is True
+    assert ensure_run_state_ledger_backfilled(root) is False
+    assert run_state_ledger_backfill_marker_path(root).exists()
+    lines = [
+        line for line in run_state_ledger_path(root).read_text(encoding="utf-8").splitlines()
+        if "FULL-DEDUP" in line
+    ]
+    assert len(lines) == 1, lines
+    print("PASS test_run_state_full_backfill_marker_dedupes_rows")
+
+
+async def test_run_state_full_backfill_skips_symlink_escape() -> None:
+    from runs_dir import (
+        ensure_run_state_ledger_backfilled,
+        run_state_ledger_path,
+    )
+
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-symlink-"))
+    root.mkdir(parents=True, exist_ok=True)
+    outside_dir = root.parent / "outside-full-backfill"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "state.json").write_text(
+        '{"session_id":"FULL-SYMLINK-ESCAPE","jsonl_path":"/tmp/full-symlink.jsonl"}',
+        encoding="utf-8",
+    )
+    link_dir = root / "run-full-symlink-escape"
+    try:
+        link_dir.symlink_to(outside_dir, target_is_directory=True)
+    except FileExistsError:
+        pass
+    assert ensure_run_state_ledger_backfilled(root) is True
+    ledger = run_state_ledger_path(root)
+    text = ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+    assert "FULL-SYMLINK-ESCAPE" not in text, text
+    print("PASS test_run_state_full_backfill_skips_symlink_escape")
+
+
+async def test_run_state_full_backfill_coalesces_concurrent_marker_writes() -> None:
+    from runs_dir import ensure_run_state_ledger_backfilled, atomic_write_json
+    import runs_dir as runs_dir_mod
+
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-concurrent-"))
+    run_dir = root / "run-full-backfill-concurrent"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        run_dir / "state.json",
+        {"session_id": "FULL-CONCURRENT", "jsonl_path": "/tmp/full-concurrent.jsonl"},
+    )
+    original_scandir = runs_dir_mod.os.scandir
+    scan_count = 0
+    scan_lock = threading.Lock()
+
+    def counted_scandir(path):
+        nonlocal scan_count
+        if str(path) == str(root):
+            with scan_lock:
+                scan_count += 1
+            time.sleep(0.05)
+        return original_scandir(path)
+
+    results: list[bool] = []
+    runs_dir_mod.os.scandir = counted_scandir  # type: ignore
+    try:
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(ensure_run_state_ledger_backfilled(root))
+            )
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        runs_dir_mod.os.scandir = original_scandir  # type: ignore
+    assert scan_count == 1, scan_count
+    assert results.count(True) == 1, results
+    assert results.count(False) == 1, results
+    print("PASS test_run_state_full_backfill_coalesces_concurrent_marker_writes")
 
 
 async def test_run_state_stale_index_does_not_hide_new_state() -> None:
@@ -886,6 +1019,10 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_recent_scan_backfills_ledger())
     asyncio.run(test_run_state_backfill_rejects_symlink_escape())
     asyncio.run(test_run_state_ledger_dedupes_duplicate_rows())
+    asyncio.run(test_run_state_full_backfill_finds_old_state_outside_recent_window())
+    asyncio.run(test_run_state_full_backfill_marker_dedupes_rows())
+    asyncio.run(test_run_state_full_backfill_skips_symlink_escape())
+    asyncio.run(test_run_state_full_backfill_coalesces_concurrent_marker_writes())
     asyncio.run(test_run_state_stale_index_does_not_hide_new_state())
     asyncio.run(test_run_state_positive_cache_outlives_negative_cache())
     asyncio.run(test_run_state_recent_index_is_reused_across_sids())
