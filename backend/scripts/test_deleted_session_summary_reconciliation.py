@@ -116,6 +116,27 @@ def test_manual_root_delete_reconciles_hot_summary_index() -> bool:
     return ok
 
 
+def test_manual_root_delete_reconciles_warming_summary_index() -> bool:
+    _reset_home()
+    sid = "manual-delete-warming-root"
+    _write_root(sid)
+    session_store._upsert_summary(_record(sid))
+    original_warm = session_store._start_summary_index_warm
+    session_store._start_summary_index_warm = lambda: None
+    try:
+        before = sid in _listed_ids()
+        snapshot_complete = session_store.summary_index_snapshot_complete()
+        (_sessions_dir() / f"{sid}.json").unlink()
+
+        listed = sid in _listed_ids()
+        summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
+    finally:
+        session_store._start_summary_index_warm = original_warm
+    ok = before and not snapshot_complete and not listed and not summary_exists
+    print(f"{PASS if ok else FAIL} manual root delete purges warming summary row")
+    return ok
+
+
 def test_orphan_sidecars_are_removed_on_summary_build() -> bool:
     _reset_home()
     sid = "orphan-sidecar-root"
@@ -158,6 +179,7 @@ def test_queued_summary_write_does_not_resurrect_deleted_root() -> bool:
 if __name__ == "__main__":
     results = [
         test_manual_root_delete_reconciles_hot_summary_index(),
+        test_manual_root_delete_reconciles_warming_summary_index(),
         test_orphan_sidecars_are_removed_on_summary_build(),
         test_queued_summary_write_does_not_resurrect_deleted_root(),
     ]
