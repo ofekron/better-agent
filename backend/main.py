@@ -6242,15 +6242,18 @@ async def internal_assistant_ui_search(
     )
 
 
-@app.post("/api/internal/assistant-ui/grep-transcript")
-async def internal_assistant_ui_grep_transcript(
+@app.post("/api/internal/assistant-ui/search-native-sql")
+async def internal_assistant_ui_search_native_sql(
     body: dict = Body(default={}),
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_assistant_internal(x_internal_token)
-    return await assistant_ui.grep_transcript(
-        str(body.get("query") or ""),
-        max_results=int(body.get("max_results") or 20),
+    sql = str(body.get("sql") or "")
+    if not sql.strip():
+        raise HTTPException(status_code=400, detail="sql is required")
+    return await assistant_ui.search_in_native_sessions(
+        sql,
+        row_limit=int(body.get("row_limit") or 200),
     )
 
 

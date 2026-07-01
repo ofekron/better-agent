@@ -269,17 +269,18 @@ async def search(query: str, *, max_results: int = 10) -> dict:
     return {"results": matches}
 
 
-async def grep_transcript(query: str, *, max_results: int = 20) -> dict:
-    """Dig into the raw provider-native transcripts for a query over the **whole
-    conversation** (user prompts + assistant replies), not just typed prompts.
-    Peer to :func:`search`; used once a session is chosen to pull the relevant
-    lines. Returns token-overlap-ranked matches."""
-    matches = await asyncio.to_thread(
-        native_session_prompt_search.search_native_session_transcripts,
-        query=query,
-        max_matches=max_results,
+async def search_in_native_sessions(sql: str, *, row_limit: int = 200) -> dict:
+    """Run a read-only SQL query over the provider-native transcript FTS index —
+    the assistant's autonomous search instrument. It drives the query itself
+    (bm25 ranking, GROUP BY sid, NEAR/prefix, recency), so recall and ranking are
+    the model's to shape. Delegates to the hardened
+    :func:`native_transcript_index.run_readonly_sql` sandbox (read-only, authorizer
+    denies anything but SELECT, timeout + row cap). Returns
+    ``{columns, rows, truncated, covered, usable}`` or ``{error}``."""
+    import native_transcript_index
+    return await asyncio.to_thread(
+        native_transcript_index.run_readonly_sql, sql, row_limit=row_limit
     )
-    return {"results": matches}
 
 
 async def delegate(target_sid: str, prompt: str) -> dict:
