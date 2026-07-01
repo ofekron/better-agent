@@ -91,6 +91,63 @@ def test_journal_event_projected_emits_messages_delta() -> None:
     }]
 
 
+def test_journal_event_projected_compacts_render_events() -> None:
+    captured: list[dict] = []
+    broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
+    msg = {
+        "id": "msg-1",
+        "content": "updated",
+        "events": [{"type": "agent_message", "data": {"uuid": "ev-1"}}],
+        "workers": [
+            {
+                "delegation_id": "d1",
+                "worker_session_id": "w1",
+                "events": [{"type": "agent_message", "data": {"uuid": "worker-ev-1"}}],
+                "success": True,
+            },
+        ],
+    }
+
+    broadcaster.on_change("sid-1", {
+        "kind": "journal_event_projected",
+        "msg_id": "msg-1",
+        "msg": msg,
+    })
+
+    payload = captured[0]["data"]["messages"][0]
+    assert captured[0]["type"] == "messages_delta"
+    assert payload["id"] == "msg-1"
+    assert payload["content"] == "updated"
+    assert payload["event_payload_omitted"] is True
+    assert "events" not in payload
+    assert "events" not in payload["workers"][0]
+    assert payload["workers"][0]["success"] is True
+    assert msg["events"][0]["data"]["uuid"] == "ev-1"
+    assert msg["workers"][0]["events"][0]["data"]["uuid"] == "worker-ev-1"
+
+
+def test_message_ownership_resolved_keeps_render_events() -> None:
+    captured: list[dict] = []
+    broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
+    msg = {
+        "id": "msg-1",
+        "events": [{"type": "agent_message", "data": {"uuid": "ev-1"}}],
+    }
+
+    broadcaster.on_change("sid-1", {
+        "kind": "message_ownership_resolved",
+        "msg": msg,
+    })
+
+    assert captured == [{
+        "type": "messages_delta",
+        "data": {
+            "app_session_id": "sid-1",
+            "messages": [msg],
+        },
+    }]
+
+
 def test_internal_worker_changes_do_not_warn_or_dispatch() -> None:
     captured: list[dict] = []
     seen: list[object] = []
@@ -112,5 +169,7 @@ if __name__ == "__main__":
     test_active_capability_changes_emit_metadata_patch()
     test_last_opened_emits_metadata_patch()
     test_journal_event_projected_emits_messages_delta()
+    test_journal_event_projected_compacts_render_events()
+    test_message_ownership_resolved_keeps_render_events()
     test_internal_worker_changes_do_not_warn_or_dispatch()
     print("ok")

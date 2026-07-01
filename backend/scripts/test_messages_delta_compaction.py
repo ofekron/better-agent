@@ -13,6 +13,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from messages_delta_compaction import compact_message_delta_payload  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 
 
@@ -21,7 +22,6 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def test_compacts_render_events_without_mutating_source() -> bool:
-    coordinator = Coordinator.__new__(Coordinator)
     msg = {
         "id": "msg-1",
         "role": "assistant",
@@ -38,10 +38,7 @@ def test_compacts_render_events_without_mutating_source() -> bool:
         ],
     }
 
-    payload = coordinator._messages_delta_payload(
-        msg,
-        omit_render_events=True,
-    )
+    payload = compact_message_delta_payload(msg)
 
     ok = (
         "events" not in payload
@@ -57,6 +54,18 @@ def test_compacts_render_events_without_mutating_source() -> bool:
         f"{PASS if ok else FAIL} compact messages_delta omits render events "
         "while preserving final fields",
     )
+    return ok
+
+
+def test_orchestrator_uses_shared_compaction_helper() -> bool:
+    coordinator = Coordinator.__new__(Coordinator)
+    msg = {"id": "msg-1", "events": [1]}
+    payload = coordinator._messages_delta_payload(
+        msg,
+        omit_render_events=True,
+    )
+    ok = payload == compact_message_delta_payload(msg)
+    print(f"{PASS if ok else FAIL} orchestrator uses shared compaction helper")
     return ok
 
 
@@ -76,6 +85,7 @@ def main() -> int:
     try:
         tests = [
             test_compacts_render_events_without_mutating_source,
+            test_orchestrator_uses_shared_compaction_helper,
             test_passthrough_when_not_compacting,
         ]
         return 0 if all(test() for test in tests) else 1
