@@ -276,6 +276,29 @@ def ba_home() -> Path:
 bc_home = ba_home
 
 
+def engage_test_home(home: str) -> str:
+    """Single source of truth for the test-home engagement contract.
+
+    Sets PRIMARY (`BETTER_AGENT_HOME`) and LEGACY (`BETTER_CLAUDE_HOME`) to the
+    same tempdir, plus `BETTER_AGENT_TEST_MODE`. PRIMARY must be set because
+    `_resolve_home_uncached` checks it FIRST — a dev shell that permanently
+    exports a real `BETTER_AGENT_HOME` otherwise shadows the legacy var and
+    routes test writes into production state. TEST_MODE arms
+    `assert_state_root_safe` so any later resolve that still lands on a
+    production home fails closed instead of silently clobbering it.
+
+    `_test_home.engage` and the requirements extension tests both route through
+    here so the env shape cannot drift between callers. Must be called BEFORE
+    importing any backend module that may resolve `ba_home()` at import time.
+    Importing `paths` itself is safe — it does not resolve home at module load.
+    """
+    resolved = str(Path(home).expanduser().resolve())
+    os.environ[_PRIMARY_HOME_ENV] = resolved
+    os.environ[_LEGACY_HOME_ENV] = resolved
+    os.environ[_TEST_MODE_ENV] = "1"
+    return resolved
+
+
 
 def encode_cwd(cwd: str) -> str:
     """Normalize a cwd into a filesystem-safe token.
