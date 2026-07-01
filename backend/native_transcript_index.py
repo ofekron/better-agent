@@ -376,6 +376,12 @@ def match_paths(tokens: list[str], allowed: set[str], *, limit: int = _PATH_CAP)
         ).fetchall()
     except sqlite3.OperationalError:
         return None
+    # If the FTS scan hit the row cap, element rows were truncated — the deduped
+    # path list may be SILENTLY incomplete (a path whose only matching element
+    # landed past the cap is missing). Treat as "too broad / uncertain" so the
+    # caller falls back to rg instead of returning a partial answer.
+    if len(rows) >= _MATCHED_SCAN_LIMIT:
+        return None
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for path, tag, cwd in rows:
@@ -410,6 +416,111 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
          "element_kind": ek, "tool_name": tn, "ts": ts}
         for t, p, sid, cwd, tag, ek, tn, ts in rows[:limit]
     ]
+
+
+# ─── read-only SQL sandbox ─────────────────────────────────────────────────
+# Lets a TRUSTED caller (the assistant, over the loopback) run arbitrary SELECT
+# queries against the FTS corpus for full-power search: bm25 ranking, GROUP BY
+# sid, NEAR/prefix, recency ordering — expressiveness a fixed tool can't offer.
+#
+# Security (this is arbitrary SQL, so it is fail-closed on every axis):
+# - a FRESH mode=ro connection per call (never the shared readonly conn, so the
+#   authorizer/timeout never leak onto match_paths/search_rows);
+# - a fail-closed AUTHORIZER: only SELECT / READ / FUNCTION / RECURSIVE are
+#   allowed; ATTACH (would read arbitrary files), writes, PRAGMA, and everything
+#   else are DENIED — the default is DENY;
+# - a wall-clock TIMEOUT via the progress handler aborts a runaway scan;
+# - a ROW CAP and per-cell text cap bound the payload;
+# - only a single SELECT/WITH statement is accepted.
+
+_SQL_MAX_ROWS = 200
+_SQL_MAX_CELL_CHARS = 2_000
+_SQL_TIMEOUT_SECONDS = 5.0
+_SQL_PROGRESS_OPS = 10_000
+
+_ALLOWED_SQL_ACTIONS = frozenset({
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE,
+})
+# FTS5 internally issues `PRAGMA data_version` (a read-only change-counter query)
+# while running a MATCH. Allow ONLY that pragma, and only as a query (arg2 is
+# None) — never a pragma that SETS a value. Every other pragma stays denied.
+_ALLOWED_READONLY_PRAGMAS = frozenset({"data_version"})
+
+# The table + columns the assistant's SQL sees; kept here so the tool doc agrees.
+SQL_TABLE = "native_element_fts"
+SQL_COLUMNS = ("text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts")
+SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
+
+
+def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
+    if action in _ALLOWED_SQL_ACTIONS:
+        return sqlite3.SQLITE_OK
+    if (
+        action == sqlite3.SQLITE_PRAGMA
+        and arg2 is None
+        and (arg1 or "").lower() in _ALLOWED_READONLY_PRAGMAS
+    ):
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def _cap_cell(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > _SQL_MAX_CELL_CHARS:
+        return value[:_SQL_MAX_CELL_CHARS] + "…"
+    return value
+
+
+def run_readonly_sql(
+    sql: str,
+    params: tuple = (),
+    *,
+    row_limit: int = _SQL_MAX_ROWS,
+    timeout_s: float = _SQL_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Run one read-only SELECT against the native-transcript FTS index.
+
+    Returns ``{columns, rows, truncated, covered, usable}`` or ``{error, ...}``.
+    Hardened per the section header: authorizer denies anything but read/select,
+    fresh mode=ro connection, timeout, row+cell caps, single statement only."""
+    sql = (sql or "").strip().rstrip(";").strip()
+    if not sql:
+        return {"error": "empty_sql", "columns": [], "rows": []}
+    head = sql.lstrip("( \t\r\n").lower()
+    if not (head.startswith("select") or head.startswith("with")):
+        return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
+    path = _db_path()
+    if not path.exists():
+        return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
+    row_limit = max(1, min(int(row_limit or _SQL_MAX_ROWS), _SQL_MAX_ROWS))
+    conn = _connect(path, readonly=True)
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_PROGRESS_OPS)
+    conn.set_authorizer(_sql_authorizer)
+    try:
+        cur = conn.execute(sql, params)
+        columns = [d[0] for d in (cur.description or [])]
+        fetched = cur.fetchmany(row_limit + 1)
+        truncated = len(fetched) > row_limit
+        rows = [[_cap_cell(v) for v in row] for row in fetched[:row_limit]]
+        return {
+            "columns": columns,
+            "rows": rows,
+            "truncated": truncated,
+            "covered": is_covered(),
+            "usable": is_usable(),
+        }
+    except sqlite3.Error as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
+    finally:
+        try:
+            conn.set_authorizer(None)
+            conn.set_progress_handler(None, 0)
+        except sqlite3.Error:
+            pass
+        conn.close()
 
 
 # ─── background worker ─────────────────────────────────────────────────────
@@ -500,5 +611,6 @@ def reset_for_test() -> None:
 
 __all__ = [
     "ensure_started", "is_covered", "is_usable", "match_paths", "search_rows",
+    "run_readonly_sql", "SQL_TABLE", "SQL_COLUMNS", "SQL_ELEMENT_KINDS",
     "refresh_once", "request_refresh", "wait_fresh", "reset_for_test", "shutdown",
 ]
