@@ -266,12 +266,13 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
     }
     sidecar_path.write_text(
         json.dumps({
-            "summary_version": 2,
+            "summary_version": 3,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
             "summaries": {"msg-1": expected_summary},
             "resolutions": {"9": "msg-1"},
+            "seq_offsets": [0],
         }),
         encoding="utf-8",
     )
@@ -302,14 +303,23 @@ def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
                 "data": {"event": {"type": "agent_message", "data": {"seq": seq}}},
             }) + "\n")
     stat = events_path.stat()
+    seq_offsets = []
+    with events_path.open("rb") as f:
+        while True:
+            line_start = f.tell()
+            raw = f.readline()
+            if not raw:
+                break
+            seq_offsets.append(line_start)
     (events_dir / "event_summaries.json").write_text(
         json.dumps({
-            "summary_version": 2,
+            "summary_version": 3,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
             "summaries": {},
             "resolutions": {},
+            "seq_offsets": seq_offsets,
         }),
         encoding="utf-8",
     )
@@ -325,15 +335,15 @@ def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
         summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
     finally:
         fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
-    ok = summaries == {} and fresh._seq_offsets.get(root) is None
+    ok = summaries == {} and fresh._seq_offsets.get(root) == seq_offsets
     print(
-        f"  {PASS if ok else FAIL} empty message summary sidecar skips seq-offset rebuild"
+        f"  {PASS if ok else FAIL} empty message summary sidecar loads seq offsets"
         f"{'' if ok else f' — summaries={summaries} offsets={fresh._seq_offsets.get(root)}'}"
     )
     return ok
 
 
-def _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() -> bool:
+def _run_message_summaries_non_empty_sidecar_loads_seq_offsets() -> bool:
     root = "root-message-summary-non-empty-sidecar-test"
     sid = "sid-message-summary-non-empty-sidecar-test"
     ing = EventIngester()
@@ -356,12 +366,13 @@ def _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() -> bool:
     }
     sidecar_path.write_text(
         json.dumps({
-            "summary_version": 2,
+            "summary_version": 3,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
             "summaries": {"msg-1": expected_summary},
             "resolutions": {},
+            "seq_offsets": [0],
         }),
         encoding="utf-8",
     )
@@ -380,10 +391,10 @@ def _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() -> bool:
         summaries = fresh.message_event_summaries(root, tail=25)
     finally:
         fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
-    ok = summaries == {"msg-1": expected_summary} and calls == 1
+    ok = summaries == {"msg-1": expected_summary} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
-        f"  {PASS if ok else FAIL} non-empty message summary sidecar rebuilds seq offsets"
-        f"{'' if ok else f' — summaries={summaries} rebuilds={calls}'}"
+        f"  {PASS if ok else FAIL} non-empty message summary sidecar loads seq offsets"
+        f"{'' if ok else f' — summaries={summaries} rebuilds={calls} offsets={fresh._seq_offsets.get(root)}'}"
     )
     return ok
 
@@ -414,12 +425,13 @@ def _write_summary_sidecar(
     }
     (ba_home() / "sessions" / root / "event_summaries.json").write_text(
         json.dumps({
-            "summary_version": 2,
+            "summary_version": 3,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
             "summaries": {msg_id: summary},
             "resolutions": resolutions or {},
+            "seq_offsets": [0],
         }),
         encoding="utf-8",
     )
@@ -452,7 +464,7 @@ def _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() -> bool:
     return ok
 
 
-def _run_message_summaries_filtered_match_rebuilds_seq_offsets() -> bool:
+def _run_message_summaries_filtered_match_loads_seq_offsets() -> bool:
     root = "root-message-summary-filter-match-sidecar-test"
     sid = "sid-message-summary-filter-match-sidecar-test"
     expected_summary = _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
@@ -471,10 +483,80 @@ def _run_message_summaries_filtered_match_rebuilds_seq_offsets() -> bool:
         summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
     finally:
         fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
-    ok = summaries == {"msg-1": expected_summary} and calls == 1
+    ok = summaries == {"msg-1": expected_summary} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
-        f"  {PASS if ok else FAIL} filtered message summary match rebuilds seq offsets"
-        f"{'' if ok else f' — summaries={summaries} rebuilds={calls}'}"
+        f"  {PASS if ok else FAIL} filtered message summary match loads seq offsets"
+        f"{'' if ok else f' — summaries={summaries} rebuilds={calls} offsets={fresh._seq_offsets.get(root)}'}"
+    )
+    return ok
+
+
+def _run_message_summaries_invalid_seq_offsets_falls_back_to_scan() -> bool:
+    root = "root-message-summary-invalid-offsets-test"
+    sid = "sid-message-summary-invalid-offsets-test"
+    _write_summary_sidecar(root, sid)
+    sidecar_path = ba_home() / "sessions" / root / "event_summaries.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["seq_offsets"] = [10**9]
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    fresh = EventIngester()
+    calls = 0
+    original_scan = fresh._scan_summaries
+
+    def counted_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_scan(*args, **kwargs)
+
+    fresh._scan_summaries = counted_scan  # type: ignore
+    try:
+        summaries = fresh.message_event_summaries(root, tail=25)
+    finally:
+        fresh._scan_summaries = original_scan  # type: ignore
+    rewritten = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    ok = (
+        calls == 1
+        and "msg-1" in summaries
+        and rewritten.get("summary_version") == 3
+        and rewritten.get("seq_offsets") == [0]
+    )
+    print(
+        f"  {PASS if ok else FAIL} invalid summary sidecar seq offsets fall back to scan"
+        f"{'' if ok else f' — summaries={summaries} scans={calls} sidecar={rewritten}'}"
+    )
+    return ok
+
+
+def _run_message_summaries_append_after_v3_warm_grows_seq_offsets() -> bool:
+    root = "root-message-summary-v3-append-test"
+    sid = "sid-message-summary-v3-append-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-v3-append-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    first = ing.message_event_summaries(root, tail=25)
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-v3-append-2"},
+        source="prior-run", msg_id="msg-1",
+    )
+    second = ing.message_event_summaries(root, tail=25)
+    sidecar = json.loads(
+        (ba_home() / "sessions" / root / "event_summaries.json").read_text(encoding="utf-8")
+    )
+    summary = second.get("msg-1") or {}
+    ok = (
+        (first.get("msg-1") or {}).get("event_count") == 1
+        and summary.get("event_count") == 2
+        and sidecar.get("summary_version") == 3
+        and len(sidecar.get("seq_offsets") or []) == 2
+    )
+    print(
+        f"  {PASS if ok else FAIL} append after v3 warm grows summary sidecar seq offsets"
+        f"{'' if ok else f' — first={first} second={second} sidecar={sidecar}'}"
     )
     return ok
 
@@ -508,10 +590,10 @@ def _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() -> bool:
         resolutions = fresh.ownership_resolutions_range(root, seq_start=1, seq_end=1)
     finally:
         fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
-    ok = resolutions == {1: "msg-1"} and calls == 1
+    ok = resolutions == {1: "msg-1"} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
-        f"  {PASS if ok else FAIL} ownership resolution read rebuilds after filtered miss"
-        f"{'' if ok else f' — resolutions={resolutions} rebuilds={calls}'}"
+        f"  {PASS if ok else FAIL} ownership resolution read uses sidecar offsets after filtered miss"
+        f"{'' if ok else f' — resolutions={resolutions} rebuilds={calls} offsets={fresh._seq_offsets.get(root)}'}"
     )
     return ok
 
@@ -564,9 +646,11 @@ def main() -> int:
         ok = _run_session_event_meta_ignores_stale_sidecar() and ok
         ok = _run_message_summaries_uses_valid_sidecar() and ok
         ok = _run_message_summaries_empty_sidecar_skips_seq_rebuild() and ok
-        ok = _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() and ok
+        ok = _run_message_summaries_non_empty_sidecar_loads_seq_offsets() and ok
         ok = _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() and ok
-        ok = _run_message_summaries_filtered_match_rebuilds_seq_offsets() and ok
+        ok = _run_message_summaries_filtered_match_loads_seq_offsets() and ok
+        ok = _run_message_summaries_invalid_seq_offsets_falls_back_to_scan() and ok
+        ok = _run_message_summaries_append_after_v3_warm_grows_seq_offsets() and ok
         ok = _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() and ok
         ok = _run_message_summaries_ignores_stale_sidecar() and ok
         return 0 if ok else 1

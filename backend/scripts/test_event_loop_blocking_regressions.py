@@ -703,20 +703,19 @@ def test_message_summary_reader_filters_requested_message_ids() -> None:
 
 def test_event_summary_sidecar_load_populates_memory_cache() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert "_EVENT_SUMMARIES_VERSION = 3" in source
+    assert "def _valid_seq_offsets(" in source
+    assert "isinstance(item, bool)" in source
     start = source.index("def _summaries_state(")
     end = source.index("def _seq_byte_range(", start)
     state_source = source[start:end]
     assert "sid_filter: Optional[str] = None" in state_source
     assert "msg_ids: Optional[set[str]] = None" in state_source
-    assert "filter_has_no_summary_match = (" in state_source
-    assert "self._summary_matches_filter(" in state_source
     assert "if loaded is not None:" in state_source
-    assert "if (summaries or resolutions) and not filter_has_no_summary_match:" in state_source
-    assert "self._rebuild_seq_offsets_locked(path, root_id)" in state_source
-    assert state_source.index("if (summaries or resolutions) and not filter_has_no_summary_match:") < state_source.index(
-        "self._rebuild_seq_offsets_locked(path, root_id)"
-    )
-    assert "elif offsets is not None and self._next_offset.get(root_id) != file_size:" in state_source
+    loaded_start = state_source.index("if loaded is not None:")
+    loaded_end = state_source.index("else:", loaded_start)
+    loaded_source = state_source[loaded_start:loaded_end]
+    assert "_rebuild_seq_offsets_locked" not in loaded_source
     assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in state_source
 
 
