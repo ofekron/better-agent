@@ -63,11 +63,17 @@ logger = logging.getLogger(__name__)
 # the cache list is unioned with these so legacy/special variants
 # survive even when the API drops them.
 _SUBSCRIPTION_ALIASES = [
-    "claude-fable-5[1m]",
+    "best",
+    "fable",
+    "opus",
+    "opus[1m]",
+    "sonnet",
+    "sonnet[1m]",
+    "haiku",
     "claude-fable-5",
     "claude-opus-4-8[1m]",
-    "claude-opus-4-7[1m]",
-    "claude-sonnet-4-6",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
     "claude-haiku-4-5-20251001",
 ]
 

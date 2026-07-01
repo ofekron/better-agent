@@ -322,7 +322,7 @@ def _detect_provider_name(mode: str, base_url: str) -> str:
 
 def _default_model_for(mode: str, base_url: str) -> str:
     if mode == "subscription":
-        return "claude-opus-4-7[1m]"
+        return "opus"
     if "z.ai" in (base_url or "").lower():
         return "glm-4.6"
     if is_ollama_base_url(base_url):
@@ -410,7 +410,7 @@ def _seed_default_state() -> dict:
                 "base_url": "",
                 "config_dir": "",
                 "custom_models": [],
-                "default_model": "claude-opus-4-7[1m]",
+                "default_model": "opus",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
                 "runner": _clean_runner("claude", ""),
                 "default_permission": default_permission_for_kind("claude"),
