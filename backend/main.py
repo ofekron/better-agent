@@ -6190,6 +6190,8 @@ async def internal_ask_ui_search_sessions(
         val = body.get(key)
         if isinstance(val, str) and val.strip():
             kwargs[key] = val.strip()
+    if bool(body.get("search_native")):
+        kwargs["search_native"] = True
     return await session_search.run_search_sessions_session(query, **kwargs)
 
 

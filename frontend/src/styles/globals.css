@@ -1978,6 +1978,34 @@ body {
 .session-search .ai-search-toggle:disabled:hover .ai-search-toggle-label {
   display: none;
 }
+/* Native-source toggle: same pill geometry as the AI toggle. OFF is a muted
+   icon-only pill; ON fills with accent so grepping the raw provider
+   transcripts is unmistakable. */
+.session-search .ai-search-native-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--session-toolbar-control-size);
+  height: var(--session-toolbar-control-size);
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: background-color 0.2s ease, color 0.2s ease,
+    border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.session-search .ai-search-native-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--accent, #7b68ee);
+}
+.session-search .ai-search-native-toggle.active {
+  background: var(--accent, #7b68ee);
+  border-color: var(--accent, #7b68ee);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.18);
+}
 .ai-search-toggle-spinner {
   display: inline-block;
   min-width: 16px;

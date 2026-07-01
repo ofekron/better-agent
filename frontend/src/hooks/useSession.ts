@@ -2545,6 +2545,7 @@ export function useSession(authStatus?: string) {
     async (
       query: string,
       signal?: AbortSignal,
+      searchNative?: boolean,
     ): Promise<{
       session_ids: string[];
       reasoning: string;
@@ -2555,7 +2556,7 @@ export function useSession(authStatus?: string) {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ query, search_native: !!searchNative }),
           signal,
         });
         if (!res.ok) {

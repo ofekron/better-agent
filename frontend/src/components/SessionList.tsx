@@ -70,6 +70,7 @@ interface Props {
   onAiSearch?: (
     query: string,
     signal?: AbortSignal,
+    searchNative?: boolean,
   ) => Promise<{
     session_ids: string[];
     reasoning: string;
@@ -1574,6 +1575,10 @@ export function SessionList({
     reasoning: string;
   } | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
+  // When on, AI search also greps the raw provider-native session
+  // transcripts (Claude/Codex/Gemini/Better Agent) for candidates the
+  // metadata/content index misses. Transient UI preference.
+  const [searchNative, setSearchNative] = useState(false);
   // Modal toggle for the "View full reasoning" affordance. Pure UI
   // toggle — closes on backdrop click / ESC / × button. Transient.
   const [aiDetailsOpen, setAiDetailsOpen] = useState(false);
@@ -1957,7 +1962,7 @@ export function SessionList({
     aiAbortRef.current = ctrl;
     setAiLoading(true);
     setAiError(null);
-    const result = await onAiSearch(q, ctrl.signal);
+    const result = await onAiSearch(q, ctrl.signal, searchNative);
     if (ctrl.signal.aborted || result === null) return;
     setAiLoading(false);
     if (result.error) {
@@ -2400,6 +2405,17 @@ export function SessionList({
                 </button>
               )}
             </div>
+            {onAiSearch && searchExpanded && (
+              <button
+                className={`btn-small ai-search-native-toggle ${searchNative ? "active" : ""}`}
+                title={searchNative ? t("session.searchNativeOn") : t("session.searchNativeOff")}
+                aria-label={searchNative ? t("session.searchNativeOn") : t("session.searchNativeOff")}
+                aria-pressed={searchNative}
+                onClick={() => setSearchNative((v) => !v)}
+              >
+                <Icon name="server" size={13} />
+              </button>
+            )}
             {onAiSearch && searchExpanded && (
               <button
                 className={`btn-small ai-search-toggle ${aiResult ? "active" : ""}`}
