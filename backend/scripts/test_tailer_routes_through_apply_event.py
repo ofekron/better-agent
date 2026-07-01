@@ -113,12 +113,29 @@ def _events_jsonl_for(root_id: str, sid: str) -> list[dict]:
 
 
 def _reset_native_files() -> None:
+    for task in native_files._primary_resolution_tasks.values():
+        task.cancel()
+    native_files._primary_resolution_tasks.clear()
     native_files._targets.clear()
     native_files._demand.clear()
     native_files._tailers.clear()
     native_files._seeded.clear()
     native_files._seed_locks.clear()
     native_files._native_path_locks.clear()
+
+
+async def _drain_primary_resolution_tasks(
+    *expected: tuple[str, str],
+) -> None:
+    for owning, agent_sid in expected:
+        key = (owning, agent_sid)
+        if key not in native_files._primary_resolution_tasks:
+            if agent_sid not in native_files._targets.get(owning, {}):
+                raise AssertionError(f"missing primary resolution task for {key!r}")
+    while native_files._primary_resolution_tasks:
+        tasks = list(native_files._primary_resolution_tasks.values())
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(0)
 
 
 # ─── subtests ─────────────────────────────────────────────────────
@@ -327,6 +344,7 @@ async def test_d_native_paths_appends_discovered_targets() -> bool:
         persist=False,
         seq=7002,
     ))
+    await _drain_primary_resolution_tasks((sid, agent_sid))
 
     path = ba_home() / "sessions" / root_id / "native_paths"
     rows = [
@@ -391,6 +409,7 @@ async def test_e_agent_sid_resolution_does_not_block_loop() -> bool:
             seq=8001,
         ))
         await tick_task
+        await _drain_primary_resolution_tasks((sid, agent_sid))
     finally:
         nfm._resolve_primary_jsonl = original  # type: ignore[assignment]
 
@@ -443,6 +462,7 @@ async def test_f_demand_seed_resolution_does_not_block_loop() -> bool:
             seq=8002,
         ))
         await tick_task
+        await _drain_primary_resolution_tasks((sid, agent_sid))
     finally:
         nfm._resolve_primary_jsonl = original  # type: ignore[assignment]
 
@@ -487,6 +507,7 @@ async def test_g_concurrent_agent_sid_appends_one_native_path_row() -> bool:
             ))
             for i in range(20)
         ])
+        await _drain_primary_resolution_tasks((sid, agent_sid))
     finally:
         nfm._resolve_primary_jsonl = original  # type: ignore[assignment]
 
@@ -542,6 +563,7 @@ async def test_h_concurrent_demand_seed_appends_one_native_path_row() -> bool:
             ))
             for i in range(20)
         ])
+        await _drain_primary_resolution_tasks((sid, agent_sid))
     finally:
         nfm._resolve_primary_jsonl = original  # type: ignore[assignment]
 
