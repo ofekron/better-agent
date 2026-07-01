@@ -46,6 +46,7 @@ _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
 _worker_lock = threading.Lock()
+_worker_thread: threading.Thread | None = None
 _stop = threading.Event()
 
 # Refresh signaling: once covered, a stale query REQUESTS a refresh and waits
@@ -527,7 +528,7 @@ def run_readonly_sql(
 
 def ensure_started() -> None:
     """Start the background daemon that keeps the index covered + fresh."""
-    global _worker_started
+    global _worker_started, _worker_thread
     if _worker_started:
         return
     with _worker_lock:
@@ -535,6 +536,7 @@ def ensure_started() -> None:
             return
         thread = threading.Thread(target=_worker_main, name="native-transcript-index", daemon=True)
         thread.start()
+        _worker_thread = thread
         _worker_started = True
 
 
@@ -563,8 +565,33 @@ def _worker_main() -> None:
             _stop.wait(0.2)  # throttle the initial build so we don't hog disk
 
 
-def shutdown() -> None:
+def _stop_worker() -> None:
+    """Signal the worker to stop, wake it from its cond wait, and join it.
+
+    Self-contained: the ``_lock`` barrier after the join guarantees the worker
+    has exited before we return — a worker mid-``refresh_once`` (holding
+    ``_lock``) that the ``join(timeout)`` can't reach is caught here, so callers
+    don't need their own ``_lock`` barrier before clearing ``_stop`` (which would
+    otherwise resume a ghost worker that keeps polling mid-test)."""
+    global _worker_started, _worker_thread
     _stop.set()
+    with _refresh_cond:
+        _refresh_cond.notify_all()
+    thread = _worker_thread
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=2.0)
+        with _lock:
+            # Block until any in-flight refresh_once (which holds _lock) is done;
+            # on return the worker has seen _stop and exited its loop.
+            pass
+        if thread.is_alive():
+            logger.warning("native transcript index worker did not stop within 2s")
+    _worker_started = False
+    _worker_thread = None
+
+
+def shutdown() -> None:
+    _stop_worker()
     with _lock:
         global _writer_conn
         if _writer_conn is not None:
@@ -588,14 +615,17 @@ def _close_readonly_connection() -> None:
 
 
 def reset_for_test() -> None:
-    """Drop the persisted index + in-memory state; for isolated tests."""
-    global _worker_started, _last_refresh_at, _refresh_requested
+    """Drop the persisted index + in-memory state; for isolated tests.
+
+    Stops any running worker first so clearing ``_stop`` below can't race a
+    ghost worker that would otherwise resume polling mid-test."""
+    global _last_refresh_at, _refresh_requested
+    _stop_worker()
     with _lock:
         global _writer_conn
         if _writer_conn is not None:
             _writer_conn.close()
             _writer_conn = None
-        _writer_started = False
     _stop.clear()
     with _refresh_cond:
         _last_refresh_at = 0.0
