@@ -66,6 +66,31 @@ def test_target_bypass_dispatches_directly_no_create():
     assert submit_calls[0]["params"]["app_session_id"] == target["id"]
 
 
+def test_target_bypass_rejects_sender_session():
+    coord, sender, join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+
+    for run_mode in ("direct", "fork"):
+        try:
+            asyncio.run(coord.run_delegate_task(
+                sender_session_id=sender["id"],
+                task="self target",
+                target_session_id=sender["id"],
+                model="m",
+                cwd="/repo",
+                run_mode=run_mode,
+            ))
+        except ValueError as exc:
+            assert "must not be the sender_session_id" in str(exc)
+        else:
+            raise AssertionError(
+                f"delegate_task must fail closed on explicit self-target in {run_mode}"
+            )
+
+    assert join_calls == []
+    assert submit_calls == []
+
+
 def test_target_bypass_uses_delegation_task_model_preference():
     provider_id = config_store.get_default_provider()["id"]
     coord, sender, _join_calls, submit_calls = _make_coord(
