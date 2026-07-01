@@ -1041,6 +1041,7 @@ export function useSession(authStatus?: string) {
       if (!replace) setSessionsLoadingMore(true);
       if (replace && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
+      let incompleteSnapshot = false;
       try {
         const params = new URLSearchParams({
           offset: String(offset),
@@ -1075,6 +1076,13 @@ export function useSession(authStatus?: string) {
         }
         const data = await res.json();
         if (replace && requestSeq !== sessionListRequestSeqRef.current) return;
+        if (replace && offset === 0 && data?.snapshot_complete === false) {
+          incompleteSnapshot = true;
+          window.setTimeout(() => {
+            void fetchSessionPage(0, true, filterSnapshot, limitOverride);
+          }, 150);
+          return;
+        }
         const rawPage = data.sessions || [];
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
@@ -1095,7 +1103,7 @@ export function useSession(authStatus?: string) {
       } finally {
         if (!replace) setSessionsLoadingMore(false);
         if (requestSeq === sessionListRequestSeqRef.current) {
-          if (replace) setSessionsLoaded(true);
+          if (replace && !incompleteSnapshot) setSessionsLoaded(true);
           if (replace) setSessionsSearching(false);
           sessionsLoadingPageRef.current = false;
         }

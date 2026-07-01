@@ -392,6 +392,16 @@ class SessionRegistry {
     const rows = (json && typeof json === "object" && "sessions" in json
       ? (json as { sessions: unknown }).sessions
       : []) as SessionRegistryRow[];
+    if (
+      json
+      && typeof json === "object"
+      && (json as { snapshot_complete?: unknown }).snapshot_complete === false
+    ) {
+      window.setTimeout(() => {
+        void this.bootstrap();
+      }, 150);
+      return;
+    }
 
     this.replaceFromRows(rows);
   }

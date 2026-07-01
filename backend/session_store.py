@@ -313,6 +313,18 @@ def wait_for_summary_index(
     return _summary_index_loaded
 
 
+def summary_index_snapshot_complete() -> bool:
+    return _summary_index_loaded
+
+
+def summary_index_has_roots_on_disk() -> bool:
+    try:
+        next(_session_json_files())
+        return True
+    except StopIteration:
+        return False
+
+
 def _replace_summary_projection_field(
     session_id: str,
     field: str,
