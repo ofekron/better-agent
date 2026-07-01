@@ -1,24 +1,23 @@
-"""Generic shared session-mining base.
+"""Two-layer session-mining abstraction.
 
-One pass over ``bc_home()/sessions/`` fans a normalized session stream out to N
-extension consumers (requirements, assistant, ...) so each extension stops
-reimplementing session iteration, ``events.jsonl`` parsing, and delta
-watermarks. Scanning the sessions tree once and routing each session to every
-registered consumer keeps mining cost flat in the number of extensions instead
-of growing with it.
+``SessionMinerBase`` owns the parts every source shares: the per-source mtime
+watermark (so unchanged sources are skipped without parsing), the delta-filter
+``__iter__``, and the ``mine(consumers)`` driver that fans a single pass out to
+N registered consumers. A source is a concrete subclass implementing
+``_iter_sources`` — yielding ``(key, visit, mtime)`` for every candidate file
+(changed or not); the base applies the delta filter and records watermarks.
 
-Extensibility model:
-- A consumer subclasses ``SessionConsumer`` and implements ``begin`` (load its
-  own state/dedup sets), ``visit`` (accumulate from one ``SessionVisit``), and
-  ``commit`` (persist, return how many new records it wrote).
-- Consumers register via ``register_consumer`` (usually at module import).
-- ``SessionMiner.mine(consumers)`` drives the full lifecycle over a single pass.
-- ``mine_registered(state)`` runs every registered consumer in one pass and
-  returns ``{consumer.name: new_count}``.
+Implementations:
+- :class:`SessionMiner` — Better Agent session snapshots (``sessions/*.json`` +
+  their ``events.jsonl``). The historical source.
+- :class:`NativeSessionMiner` (in ``native_session_miner``) — provider-native
+  transcripts (e.g. Claude ``projects/<cwd>/<sid>.jsonl``), used when the raw
+  native prompt stream is more reliable than the BA render-tree projection.
 
-The miner owns the per-file mtime watermark inside a ``state`` dict the caller
-persists between runs; unchanged sessions are skipped without parsing. Each
-consumer owns its own derived state separately.
+A consumer subclasses :class:`SessionConsumer` and implements ``begin`` /
+``visit`` / ``commit``; it is source-agnostic — it only consumes a
+:class:`SessionVisit`. ``mine_registered(state)`` runs every registered
+consumer against BA-session sources in one pass.
 """
 from __future__ import annotations
 
@@ -99,13 +98,18 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-class SessionMiner:
-    """Yield one ``SessionVisit`` per session changed since the stored watermark.
+class SessionMinerBase(ABC):
+    """Source-agnostic miner driver.
 
-    ``state`` maps ``<session.json name> -> {"mtime": float}``; the miner writes
-    the new watermark into it after each visit is consumed, so persisting
-    ``state`` between runs makes every pass delta-only. ``scanned_count`` is the
-    total session files examined (changed or not).
+    Subclasses implement :meth:`_iter_sources`, yielding one ``(key, visit,
+    mtime)`` triple per candidate source (the base applies the delta filter, so
+    yield every candidate — changed or not). ``key`` is the stable watermark
+    identifier (e.g. the session-json filename); ``mtime`` is the freshness
+    fingerprint (the base stores it and uses it to skip unchanged sources).
+
+    ``state`` maps ``key -> {"mtime": float}``; persisting ``state`` between
+    runs makes every pass delta-only. ``scanned_count`` is the total source
+    files examined (changed or not).
     """
 
     def __init__(self, state: dict, *, root: Path | None = None) -> None:
@@ -114,41 +118,22 @@ class SessionMiner:
         self._pending_watermarks: dict[str, float] = {}
         self.scanned_count = 0
 
+    @abstractmethod
+    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
+        """Yield ``(key, visit, mtime)`` for every candidate source."""
+
     def __iter__(self) -> Iterable[SessionVisit]:
-        if not self._root.exists():
-            return
-        for session_json in self._root.glob("*.json"):
-            if session_json.name.endswith(".summary.json"):
-                continue
+        for key, visit, current_mtime in self._iter_sources():
             self.scanned_count += 1
-            key = session_json.name
-            current_mtime = max(
-                _mtime(session_json),
-                _mtime(_events_path(self._root, session_json.stem)),
-            )
             if current_mtime <= self._state.get(key, {}).get("mtime", 0.0):
                 continue
-            try:
-                data = json.loads(session_json.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            sid = session_json.stem
-            visit = SessionVisit(
-                sid=sid,
-                cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else "",
-                data=data,
-                messages=data.get("messages", []) if isinstance(data.get("messages"), list) else [],
-                events_by_msg_id=event_rows_by_msg_id_with_orphans(data, sid),
-            )
             self._pending_watermarks[key] = current_mtime
             yield visit
 
     def mine(self, consumers: list[SessionConsumer]) -> dict[str, int]:
-        """One pass: begin all consumers, visit each changed session, commit all.
+        """One pass: begin all consumers, visit each changed source, commit all.
 
-        Returns ``{consumer.name: new_count}``. Each session is parsed once
+        Returns ``{consumer.name: new_count}``. Each source is parsed once
         regardless of how many consumers run.
         """
         for consumer in consumers:
@@ -157,13 +142,59 @@ class SessionMiner:
             for consumer in consumers:
                 consumer.visit(visit)
         counts = {consumer.name: consumer.commit() for consumer in consumers}
+        self.apply_watermarks()
+        return counts
+
+    def apply_watermarks(self) -> None:
+        """Write the per-source mtimes recorded during the last iteration.
+
+        Called automatically by :meth:`mine`; callers that drive ``visit``
+        across multiple sources manually (e.g. a dual native + BA pass) call
+        this once per source after iterating, then persist ``state``.
+        """
         for key, mtime in self._pending_watermarks.items():
             self._state[key] = {"mtime": mtime}
-        return counts
+
+
+class SessionMiner(SessionMinerBase):
+    """Better Agent session-snapshot source.
+
+    Iterates ``sessions/*.json`` (skipping ``.summary.json``) and yields one
+    :class:`SessionVisit` per session changed since the stored watermark, with
+    messages from the session snapshot and events from the sibling
+    ``events.jsonl``. ``state`` maps ``<session.json name> -> {"mtime": float}``.
+    """
+
+    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
+        if not self._root.exists():
+            return
+        for session_json in self._root.glob("*.json"):
+            if session_json.name.endswith(".summary.json"):
+                continue
+            sid = session_json.stem
+            key = session_json.name
+            current_mtime = max(
+                _mtime(session_json),
+                _mtime(_events_path(self._root, sid)),
+            )
+            try:
+                data = json.loads(session_json.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            visit = SessionVisit(
+                sid=sid,
+                cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else "",
+                data=data,
+                messages=data.get("messages", []) if isinstance(data.get("messages"), list) else [],
+                events_by_msg_id=event_rows_by_msg_id_with_orphans(data, sid),
+            )
+            yield key, visit, current_mtime
 
 
 def mine_registered(state: dict) -> dict[str, int]:
-    """Run every registered consumer against changed sessions in one pass."""
+    """Run every registered consumer against changed BA sessions in one pass."""
     classes = registered_consumers()
     if not classes:
         return {}
