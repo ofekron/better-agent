@@ -119,6 +119,7 @@ interface Props {
   teamEnabled?: boolean;
   machineNodesEnabled?: boolean;
   browserHarnessEnabled?: boolean;
+  allowOfflineCreate?: boolean;
   extensionOptions?: NewSessionExtensionOption[];
 }
 
@@ -476,6 +477,7 @@ export function NewSessionModal({
   teamEnabled = true,
   machineNodesEnabled = true,
   browserHarnessEnabled: browserHarnessExtensionEnabled = true,
+  allowOfflineCreate = false,
   extensionOptions = EMPTY_EXTENSION_OPTIONS,
 }: Props) {
   const { t } = useTranslation();
@@ -742,6 +744,8 @@ export function NewSessionModal({
   const selectedFolderLabel = folderId
     ? (folderPathMap.get(folderId) ?? t("session.unfiled"))
     : t("session.unfiled");
+  const missingProviderConfig =
+    !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
   const handleCreate = () => {
     const effectiveCwd = cwd || defaultCwd;
@@ -1071,7 +1075,7 @@ export function NewSessionModal({
             className="btn-primary"
             opId="session:create"
             onClick={handleCreate}
-            extraDisabled={!(cwd || defaultCwd) || !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId)}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
