@@ -16,10 +16,11 @@ Two differences from session_search_index, both deliberate:
 
 Freshness (see chat thread): a file is *fresh* iff its current ``mtime`` and
 ``size`` match what was indexed (stat-checked, no content read). A background
-daemon stat-walks the roots on a short poll interval, re-indexing the delta
-(new/changed files) and tombstoning deleted ones. ``covered`` is set once a full
-walk has indexed every file; while not covered (cold start), the search falls
-back to ``rg`` so correctness never depends on an incomplete index.
+daemon full-walks the roots until coverage exists, then uses steady refreshes
+over indexed paths. Periodic/forced full reconciles discover new external files
+and tombstone deleted ones. ``covered`` is set once a full walk has indexed
+every file; while not covered (cold start), the search falls back to ``rg`` so
+correctness never depends on an incomplete index.
 """
 from __future__ import annotations
 
@@ -45,9 +46,11 @@ _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 2.0
 _FRESH_WINDOW_SECONDS = 3.0  # covered + last walk within this window => trusted
+_FULL_RECONCILE_INTERVAL_SECONDS = 30 * 60
 _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
+_QUICK_STATE_BUSY_TIMEOUT_MS = 50
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -60,6 +63,7 @@ _stop = threading.Event()
 # in-memory freshness timestamp the worker sets after each refresh.
 _refresh_cond = threading.Condition()
 _last_refresh_at = 0.0
+_last_full_reconcile_at = 0.0
 _refresh_requested = False
 _FRESH_WAIT_TIMEOUT = 3.0  # max a query blocks for a delta refresh before rg
 
@@ -201,6 +205,16 @@ def _state_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def _state_float(conn: sqlite3.Connection, key: str) -> float:
+    value = _state_get(conn, key)
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
 # ─── roots + path resolution (reused from the search module) ───────────────
 # Imported lazily so this module can be imported in tests without pulling the
 # full search module's rg/subprocess machinery at import time.
@@ -291,11 +305,38 @@ def _compute_changes() -> tuple[list[tuple[Path, str, float, int]], set[str]]:
     return on_disk, indexed
 
 
-def refresh_once() -> dict[str, int]:
+def _indexed_file_states(conn: sqlite3.Connection) -> list[tuple[str, str, float, int]]:
+    return [
+        (str(path), str(tag), float(mtime), int(size))
+        for path, tag, mtime, size in conn.execute(
+            "SELECT path, tag, mtime, size FROM native_file_state"
+        )
+    ]
+
+
+def _steady_known_paths(
+    conn: sqlite3.Connection,
+) -> tuple[list[tuple[Path, str, float, int]], set[str]]:
+    indexed = _indexed_file_states(conn)
+    on_disk: list[tuple[Path, str, float, int]] = []
+    missing: set[str] = set()
+    for path_str, tag, _mtime_value, _size in indexed:
+        path = Path(path_str)
+        try:
+            st = path.stat()
+        except OSError:
+            missing.add(path_str)
+            continue
+        on_disk.append((path, tag, st.st_mtime, st.st_size))
+    indexed_paths = {path for path, _tag, _mtime_value, _size in indexed}
+    return on_disk, indexed_paths | missing
+
+
+def refresh_once(*, full: bool | None = None) -> dict[str, int]:
     """One delta pass: re-index new/changed files, drop deleted ones, refresh
     the corpus watermark. Returns counts. Idempotent + safe to run anytime."""
     _, _, candidate_from_match = _roots_and_resolver()
-    global _last_refresh_at
+    global _last_refresh_at, _last_full_reconcile_at
     lock_path = _writer_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+b")
@@ -306,7 +347,12 @@ def refresh_once() -> dict[str, int]:
         with _lock:
             conn = _writer_connection()
             try:
-                on_disk, indexed = _compute_changes()
+                covered = _state_get(conn, "covered") == "1"
+                do_full = not covered if full is None else full
+                if do_full:
+                    on_disk, indexed = _compute_changes()
+                else:
+                    on_disk, indexed = _steady_known_paths(conn)
                 now = time.time()
                 on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
                 # Freshness fingerprint per indexed file: (mtime, size).
@@ -325,13 +371,21 @@ def refresh_once() -> dict[str, int]:
                     _delete_path(conn, path_str)
                     new_or_changed += 1
                 _state_set(conn, "last_walk_at", str(now))
-                _state_set(conn, "covered", "1")
+                if do_full:
+                    _state_set(conn, "covered", "1")
+                    _state_set(conn, "last_full_reconcile_at", str(now))
+                    _last_full_reconcile_at = now
                 _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
                 conn.commit()
                 with _refresh_cond:
                     _last_refresh_at = time.time()
                     _refresh_cond.notify_all()
-                return {"walked": len(on_disk), "touched": new_or_changed, "locked": 0}
+                return {
+                    "walked": len(on_disk),
+                    "touched": new_or_changed,
+                    "locked": 0,
+                    "full": 1 if do_full else 0,
+                }
             except Exception:
                 conn.rollback()
                 raise
@@ -374,12 +428,54 @@ def is_usable() -> bool:
     return (time.time() - _last_refresh_at) <= _FRESH_WINDOW_SECONDS
 
 
+def quick_state() -> dict[str, Any]:
+    path = _db_path()
+    if not path.exists():
+        return {"schema_ok": False, "covered": False, "usable": False}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        conn.execute(f"PRAGMA busy_timeout={_QUICK_STATE_BUSY_TIMEOUT_MS}")
+        try:
+            version_row = conn.execute(
+                "SELECT value FROM native_corpus_state WHERE key = 'schema_version'"
+            ).fetchone()
+            covered_row = conn.execute(
+                "SELECT value FROM native_corpus_state WHERE key = 'covered'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "schema_ok": False,
+            "covered": False,
+            "usable": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    schema_is_ok = bool(version_row and version_row[0] == str(_SCHEMA_VERSION))
+    covered = bool(schema_is_ok and covered_row and covered_row[0] == "1")
+    return {"schema_ok": schema_is_ok, "covered": covered, "usable": covered and is_usable()}
+
+
 def request_refresh() -> None:
     """Wake the worker for an immediate delta pass (vs waiting for the next poll)."""
     global _refresh_requested
     with _refresh_cond:
         _refresh_requested = True
         _refresh_cond.notify()
+
+
+def _full_reconcile_due() -> bool:
+    global _last_full_reconcile_at
+    if _last_full_reconcile_at <= 0:
+        conn = _readonly_connection()
+        try:
+            _last_full_reconcile_at = (
+                _state_float(conn, "last_full_reconcile_at")
+                or _state_float(conn, "last_walk_at")
+            )
+        except sqlite3.OperationalError:
+            _last_full_reconcile_at = 0.0
+    return (time.time() - _last_full_reconcile_at) >= _FULL_RECONCILE_INTERVAL_SECONDS
 
 
 def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
@@ -591,7 +687,10 @@ def _worker_main() -> None:
     global _refresh_requested
     while not _stop.is_set():
         try:
-            refresh_once()
+            full = None
+            if is_covered() and _full_reconcile_due():
+                full = True
+            refresh_once(full=full)
         except Exception:
             logger.debug("native transcript index refresh failed", exc_info=True)
             return  # avoid a hot failure loop; next ensure_started() restarts
@@ -664,7 +763,7 @@ def reset_for_test() -> None:
 
     Stops any running worker first so clearing ``_stop`` below can't race a
     ghost worker that would otherwise resume polling mid-test."""
-    global _last_refresh_at, _refresh_requested
+    global _last_refresh_at, _last_full_reconcile_at, _refresh_requested
     _stop_worker()
     with _lock:
         global _writer_conn
@@ -674,6 +773,7 @@ def reset_for_test() -> None:
     _stop.clear()
     with _refresh_cond:
         _last_refresh_at = 0.0
+        _last_full_reconcile_at = 0.0
         _refresh_requested = False
     _close_readonly_connection()
     base = _db_path()

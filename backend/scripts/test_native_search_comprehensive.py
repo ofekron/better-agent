@@ -1763,13 +1763,16 @@ def test_idx_search_rows_empty_tokens() -> bool:
 
 def test_idx_wait_fresh_serves_delta() -> bool:
     """Drive the REAL worker (ensure_started + request_refresh) and assert a file
-    added after the last walk becomes searchable once the delta refresh fires."""
+    changed after the last refresh becomes searchable once steady refresh fires."""
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
-        _w(claude / encode_cwd("/p") / "a.jsonl", [_claude_user("waitneedle here", "u1")])
+        fpath = claude / encode_cwd("/p") / "a.jsonl"
+        _w(fpath, [_claude_user("waitneedle here", "u1")])
         idx.refresh_once()
-        _w(claude / encode_cwd("/p") / "b.jsonl", [_claude_user("deltawaitneedle new", "u1")])
+        time.sleep(1.05)
+        with fpath.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(_claude_user("deltawaitneedle new", "u2")) + "\n")
         idx._last_refresh_at = 0.0  # force stale
         assert idx.is_covered() and not idx.is_usable()
         idx.ensure_started()
