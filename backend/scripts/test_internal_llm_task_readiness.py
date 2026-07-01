@@ -44,6 +44,16 @@ def _requirements_record() -> dict:
     }
 
 
+def _set_provider_fields(provider_id: str, **fields) -> None:
+    state = config_store._load_state()  # type: ignore[attr-defined]
+    for provider in state.get("providers", []):
+        if provider.get("id") == provider_id:
+            provider.update(fields)
+            config_store._save_state(state)  # type: ignore[attr-defined]
+            return
+    raise AssertionError(f"provider {provider_id} not found")
+
+
 def run() -> None:
     # Fresh home seeds a default Claude provider; requirement_analysis is unset.
     check(
@@ -54,13 +64,30 @@ def run() -> None:
         config_store.get_default_provider() is not None,
         "a default provider exists (Inherit is resolvable)",
     )
+    default_provider_id = config_store.list_providers()["default_provider_id"]
+    _set_provider_fields(default_provider_id, mode="api_key")
+    orig_read_api_key = config_store._read_api_key  # type: ignore[attr-defined]
+
+    def fail_read_api_key(_provider_id: str) -> str:
+        raise AssertionError("resolve_internal_llm must not read provider api keys")
+
+    config_store._read_api_key = fail_read_api_key  # type: ignore[attr-defined]
 
     # The exact unit the bug lived in: Inherit must resolve to the default
     # provider and count as ready. Pre-fix this returned False.
-    check(
-        es._internal_llm_task_ready("requirement_analysis") is True,
-        "Inherit task is ready via default-provider fallback",
-    )
+    try:
+        resolved_default = config_store.resolve_internal_llm("requirement_analysis")
+        check(
+            resolved_default.get("provider_id") == default_provider_id
+            and bool(resolved_default.get("model")),
+            "Inherit task resolves through api-key default without reading key",
+        )
+        check(
+            es._internal_llm_task_ready("requirement_analysis") is True,
+            "Inherit task is ready via default-provider fallback",
+        )
+    finally:
+        config_store._read_api_key = orig_read_api_key  # type: ignore[attr-defined]
 
     # The assistant extension's board analyzer resolves from a dedicated
     # `assistant` internal-LLM task (its own settings row), registered as a
@@ -99,6 +126,70 @@ def run() -> None:
         es._internal_llm_task_ready("assistant") is True,
         "assistant task is ready via default-provider fallback",
     )
+    api_provider = config_store.add_provider({
+        "name": "api-key-assigned",
+        "kind": "codex",
+        "mode": "subscription",
+        "default_model": "gpt-test",
+    })
+    api_provider_id = api_provider["id"]
+    _set_provider_fields(api_provider_id, mode="api_key")
+    config_store.set_internal_llm_assignments({
+        "requirement_analysis": {
+            "provider_id": api_provider_id,
+            "model": "",
+            "reasoning_effort": "",
+        }
+    })
+    orig_read_api_key = config_store._read_api_key  # type: ignore[attr-defined]
+    config_store._read_api_key = fail_read_api_key  # type: ignore[attr-defined]
+    try:
+        assigned = config_store.resolve_internal_llm("requirement_analysis")
+        check(
+            assigned.get("provider_id") == api_provider_id and assigned.get("model") == "gpt-test",
+            "assigned api-key provider resolves without reading key",
+        )
+    finally:
+        config_store._read_api_key = orig_read_api_key  # type: ignore[attr-defined]
+    _set_provider_fields(api_provider_id, suspended=True)
+    suspended_fallback = config_store.resolve_internal_llm("requirement_analysis")
+    check(
+        suspended_fallback.get("provider_id") == default_provider_id,
+        "suspended assigned provider falls back to default provider",
+    )
+    config_store.set_internal_llm_assignments({
+        "requirement_analysis": {
+            "provider_id": "missing-provider",
+            "model": "",
+            "reasoning_effort": "",
+        }
+    })
+    missing_fallback = config_store.resolve_internal_llm("requirement_analysis")
+    check(
+        missing_fallback.get("provider_id") == default_provider_id,
+        "missing assigned provider falls back to default provider",
+    )
+    state = config_store._load_state()  # type: ignore[attr-defined]
+    default_raw = next(
+        provider for provider in state.get("providers", [])
+        if provider.get("id") == default_provider_id
+    )
+    options = config_store.reasoning_effort_options_for_provider(default_raw)
+    chosen_effort = options[0] if options else "xhigh"
+    config_store.set_internal_llm_assignments({
+        "assistant": {
+            "provider_id": default_provider_id,
+            "model": "",
+            "reasoning_effort": chosen_effort,
+        }
+    })
+    reasoning = config_store.resolve_internal_llm("assistant")
+    expected_effort = chosen_effort if chosen_effort in options else ""
+    check(
+        reasoning.get("reasoning_effort") == expected_effort,
+        "resolver preserves reasoning_effort helper semantics",
+    )
+    config_store.set_internal_llm_assignments({})
 
     record = _requirements_record()
     orig_surface = es._record_backend_surface_ready
