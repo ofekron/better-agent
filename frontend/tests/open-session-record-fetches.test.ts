@@ -17,4 +17,19 @@ describe("open session record restore fetches", () => {
     );
     expect(effectSource).toContain(".finally(() => {");
   });
+
+  it("uses the current tree as an open-tab record source", () => {
+    expect(source).toContain("function findSessionNode(");
+    expect(source).toContain("findSessionNode(currentTree, id)");
+    const lookupStart = source.indexOf("const findOpenSessionRecord = useCallback(");
+    const lookupEnd = source.indexOf("const stampOpenSessionLastOpened", lookupStart);
+    const lookupSource = source.slice(lookupStart, lookupEnd);
+
+    expect(lookupSource.indexOf("openSessionRecords[id]")).toBeLessThan(
+      lookupSource.indexOf("findSessionNode(currentTree, id)"),
+    );
+    expect(lookupSource.indexOf("findSessionNode(currentTree, id)")).toBeLessThan(
+      lookupSource.indexOf("sessions.find((s) => s.id === id)"),
+    );
+  });
 });

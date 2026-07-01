@@ -485,6 +485,51 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("renders a routed session tab from the current tree before summary restore resolves", async () => {
+    const hidden = makeSession({
+      id: "hidden-routed-session",
+      name: "Hidden routed session",
+      cwd: "/tmp/project-b",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", "/s/hidden-routed-session");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([hidden.id]),
+    );
+    localStorage.setItem("better-agent-selected-project", "/tmp/project-a");
+    localStorage.setItem("better-agent-selected-project-node", "primary");
+    const h = await renderApp({
+      seed: {
+        sessions: [hidden],
+        projects: [
+          {
+            path: "/tmp/project-a",
+            name: "project-a",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_used: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            path: "/tmp/project-b",
+            name: "project-b",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_used: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        summaryMissingIds: [hidden.id],
+      },
+    });
+
+    expect(await waitFor(h, () => tabIds(h)[0] === hidden.id)).toBe(true);
+    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Hidden routed session");
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "POST" && c.path === `/api/sessions/${hidden.id}/opened`,
+      ),
+    ).toBe(true);
+    h.unmount();
+  }, 10000);
+
   it("moves a sidebar-selected open session to the left under last-opened tab sort", async () => {
     const older = makeSession({
       id: "older-session",
