@@ -1728,9 +1728,14 @@ def _replay_and_apply(
                     "(uuid=%s) — continuing with remaining signals",
                     run_id, (sig.get("data") or {}).get("uuid"),
                 )
-    session_manager.update_running_content(
-        persist_sid, msg_id, extracted,
-    )
+    # Empty extraction (stream ended on tool/thinking events AND no
+    # sdk_output fallback) must not clobber the content the guarded
+    # apply_event replay just restored — same rule as
+    # event_shape.project_content_snapshot.
+    if extracted:
+        session_manager.update_running_content(
+            persist_sid, msg_id, extracted,
+        )
     if context_window:
         session_manager.set_context_window(persist_sid, context_window)
     # Repair `updated_at` to the session's real last-activity time

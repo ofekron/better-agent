@@ -35,7 +35,7 @@ if _BACKEND not in sys.path:
 import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-content-guard-")
 
-from event_shape import project_content_snapshot  # noqa: E402
+from event_shape import has_assistant_text, project_content_snapshot  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -109,6 +109,37 @@ def test_helper_semantics() -> None:
     )
 
 
+def test_strip_synthetic_semantics() -> None:
+    synthetic = _text_event("synthetic")
+    synthetic["data"]["message"]["model"] = "<synthetic>"
+    _check(
+        "strip semantics: synthetic-only events report no assistant text",
+        not has_assistant_text([synthetic, _tool_event()]),
+    )
+    _check(
+        "strip semantics: real text among tools reports assistant text",
+        has_assistant_text([_text_event("real"), _tool_event()]),
+    )
+
+
+def test_recovery_and_strip_tree_guards_wired() -> None:
+    """Source-pattern locks for the two call sites outside the shared
+    helper: run_recovery must not write an empty extraction, and the
+    strip-synthetic tree pass must use has_assistant_text +
+    project_content_snapshot (synthetic-only blanks; trailing-tools keep)."""
+    recovery_src = open(os.path.join(_BACKEND, "run_recovery.py")).read()
+    _check(
+        "run_recovery guards empty extraction before update_running_content",
+        "if extracted:\n        session_manager.update_running_content(" in recovery_src,
+    )
+    main_src = open(os.path.join(_BACKEND, "main.py")).read()
+    _check(
+        "main strip-tree pass routes through has_assistant_text guard",
+        "if has_assistant_text(cleaned):" in main_src
+        and "project_content_snapshot(" in main_src,
+    )
+
+
 def test_apply_event_trailing_tools_keep_content() -> None:
     sess = session_manager.create(
         name="t", model="sonnet", cwd="/tmp",
@@ -179,6 +210,8 @@ def test_journal_refresh_keeps_content() -> None:
 
 def main() -> int:
     test_helper_semantics()
+    test_strip_synthetic_semantics()
+    test_recovery_and_strip_tree_guards_wired()
     test_apply_event_trailing_tools_keep_content()
     test_journal_refresh_keeps_content()
     failed = [r for r in _results if not r[1]]

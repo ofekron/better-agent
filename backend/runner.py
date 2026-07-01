@@ -1716,17 +1716,37 @@ class _LingerStreamState:
         self.tasks = tasks
         self._expect_until = 0.0
         self._active_since: Optional[float] = None
+        # A terminal notification whose continuation has not started yet.
+        # Consumed when a continuation begins; if still pending when a
+        # ResultMessage lands (a notification arrived DURING another
+        # continuation turn), the grace window re-opens instead of
+        # zeroing — otherwise chained background tasks get reaped
+        # mid-start, reintroducing the mid-inference SIGKILL.
+        self._notification_pending = False
+        # Latched when a continuation overruns _CONTINUATION_CAP_S. While
+        # latched, further stream activity cannot re-arm busy — otherwise a
+        # runaway CLI that keeps streaming earns unbounded successive caps.
+        # Only a ResultMessage (the turn actually ended) clears it.
+        self._capped = False
 
     def apply(self, msg: object) -> None:
         _apply_task_message(msg, self.tasks)
         if isinstance(msg, TaskNotificationMessage):
             self._expect_until = time.monotonic() + self._CONTINUATION_EXPECT_S
+            self._notification_pending = True
         elif isinstance(msg, (UserMessage, AssistantMessage)):
-            if self._active_since is None:
+            if self._active_since is None and not self._capped:
                 self._active_since = time.monotonic()
+                self._notification_pending = False
         elif isinstance(msg, ResultMessage):
             self._active_since = None
-            self._expect_until = 0.0
+            self._capped = False
+            if self._notification_pending:
+                self._expect_until = (
+                    time.monotonic() + self._CONTINUATION_EXPECT_S
+                )
+            else:
+                self._expect_until = 0.0
 
     def expect_continuation(self) -> None:
         """Open the grace window without a stream message — used when
@@ -1745,8 +1765,11 @@ class _LingerStreamState:
                 )
                 self._active_since = None
                 self._expect_until = 0.0
+                self._capped = True
                 return False
             return True
+        if self._capped:
+            return False
         return now < self._expect_until
 
 
@@ -1801,9 +1824,22 @@ async def _linger_for_background_work(
     over from the backend's perspective and new prompts spawn fresh
     --resume instances. The SDK client is still connected, so the CLI
     (and therefore its background shells, which die with it) survives.
-    With the timer tools disallowed and stdin silent, nothing can start
-    a turn on this instance, so the fresh instance is the only writer
-    to the session jsonl (lifecycle tests T16/T17).
+
+    Stdin stays silent, but background-work completion (task
+    notifications, shell/Monitor exits) re-invokes the model on THIS
+    instance — a continuation turn (`_LingerStreamState`). That breaks
+    the old "fresh --resume instance is the only jsonl writer"
+    invariant (lifecycle tests T16/T17): a prompt arriving
+    mid-continuation spawns a fresh instance on the SAME session jsonl,
+    so the two instances may interleave line-atomic appends. Downstream
+    ingestion tolerates this — events.jsonl dedupes by uuid and each
+    event seq-brackets onto its own message; the continuation's final
+    text replaces the content snapshot of the message that spawned the
+    background work (the "report when done" landing where it was
+    promised), never the newer turn's message. Known limit: the fresh
+    instance resumes from a jsonl snapshot that may predate the
+    continuation's tail, so the new turn's context can exclude that
+    report.
 
     On the FIRST busy poll it touches the `run_dir/lingering` sentinel —
     the backend publishes `run.lingering` off that file, so a normal

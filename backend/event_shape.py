@@ -280,6 +280,16 @@ def extract_output_text(events: list[dict]) -> str:
     return " ".join(out).strip()
 
 
+def has_assistant_text(events: list[dict]) -> bool:
+    """True when any event carries primary-agent text (regardless of
+    whether it survives the trailing-run projection)."""
+    return any(
+        kind == "text"
+        for e in events or []
+        for kind, _uid, _parts in _assistant_text_units(e)
+    )
+
+
 def project_content_snapshot(events: list[dict], current: str | None) -> str:
     """Final-answer content snapshot for an assistant message.
 
