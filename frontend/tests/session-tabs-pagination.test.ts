@@ -40,6 +40,9 @@ describe("session tabs with paged sessions", () => {
         id: `sess-${i + 1}`,
         name: `Session ${i + 1}`,
         cwd: i === 59 ? "/tmp/project-b" : "/tmp/project-a",
+        last_opened_at: i === 0 || i === 59
+          ? `2026-01-${i === 59 ? "02" : "01"}T00:00:00.000Z`
+          : undefined,
       }),
     );
     window.history.pushState(null, "", "/s/sess-1");
@@ -86,6 +89,9 @@ describe("session tabs with paged sessions", () => {
         id: `sess-${i + 1}`,
         name: `Session ${i + 1}`,
         cwd: i === 59 ? "/tmp/project-b" : "/tmp/project-a",
+        last_opened_at: i === 0 || i === 59
+          ? `2026-01-${i === 59 ? "02" : "01"}T00:00:00.000Z`
+          : undefined,
       }),
     );
     window.history.pushState(null, "", "/s/sess-1");
@@ -190,6 +196,41 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
+  it("drops restored tab ids that resolve without opened metadata", async () => {
+    const session = makeSession({
+      id: "never-opened-session",
+      name: "Never Opened",
+      cwd: "/tmp/project-a",
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([session.id]),
+    );
+    window.history.pushState(null, "", "/empty-project");
+    const h = await renderApp({
+      seed: {
+        sessions: [session],
+        projects: [{
+          path: "/tmp/project-a",
+          name: "project-a",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+
+    expect(
+      await waitFor(
+        h,
+        () => !JSON.parse(
+          localStorage.getItem("better-agent-open-session-ids") || "[]",
+        ).includes(session.id),
+      ),
+    ).toBe(true);
+    expect(h.$(".session-tabs")).toBeNull();
+    h.unmount();
+  }, 10000);
+
   it("keeps session tabs visible for active and Assistant sessions", async () => {
     const assistant = makeSession({
       id: "assistant-session",
@@ -286,12 +327,14 @@ describe("session tabs with paged sessions", () => {
       name: "Old Running",
       cwd: "/tmp/project-a",
       updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
     });
     const newIdle = makeSession({
       id: "new-idle",
       name: "New Idle",
       cwd: "/tmp/project-a",
       updated_at: "2026-01-02T00:00:00.000Z",
+      last_opened_at: "2026-01-02T00:00:00.000Z",
     });
     localStorage.setItem(
       "better-agent-open-session-ids",
@@ -339,6 +382,7 @@ describe("session tabs with paged sessions", () => {
         id: `sess-${i + 1}`,
         name,
         cwd: "/tmp/project-a",
+        last_opened_at: `2026-01-0${i + 1}T00:00:00.000Z`,
       }),
     );
     window.history.pushState(null, "", "/empty-project");
@@ -378,6 +422,7 @@ describe("session tabs with paged sessions", () => {
         id: `sess-${i + 1}`,
         name: `Session ${i + 1}`,
         cwd: "/tmp/project-a",
+        last_opened_at: `2026-01-${String(Math.min(i + 1, 28)).padStart(2, "0")}T00:00:00.000Z`,
       }),
     );
     window.history.pushState(null, "", "/s/sess-1");
@@ -671,6 +716,7 @@ describe("session tabs with paged sessions", () => {
         id: `sess-${i + 1}`,
         name,
         cwd: "/tmp/project-a",
+        last_opened_at: `2026-01-0${i + 1}T00:00:00.000Z`,
       }),
     );
     window.history.pushState(null, "", "/s/sess-1");
@@ -704,6 +750,7 @@ describe("session tabs with paged sessions", () => {
       id: "sess-copy-1234",
       name: "Copy Source",
       cwd: "/tmp/project-a",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
     });
     window.history.pushState(null, "", "/s/sess-copy-1234");
     localStorage.setItem("better-agent-open-session-ids", JSON.stringify([session.id]));

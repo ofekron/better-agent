@@ -253,6 +253,10 @@ function mergeOpenSessionRecord(current: Session | undefined, incoming: Session)
   for (const field of OPEN_SESSION_FRESHNESS_FIELDS) {
     const currentValue = current[field];
     const incomingValue = incoming[field];
+    if (currentValue && !incomingValue) {
+      merged[field] = currentValue;
+      continue;
+    }
     if (!currentValue || !incomingValue) continue;
     const currentMs = Date.parse(currentValue);
     const incomingMs = Date.parse(incomingValue);
@@ -3516,6 +3520,11 @@ function AppMain({
   const openSessionRecordRetryTimerRef = useRef<number | null>(null);
   const [openSessionRecordRetryNonce, setOpenSessionRecordRetryNonce] = useState(0);
   const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
+  const isOpenSessionTabEligible = useCallback((session: Session) => {
+    if (session.topbar_pinned) return true;
+    const openedMs = session.last_opened_at ? Date.parse(session.last_opened_at) : NaN;
+    return Number.isFinite(openedMs);
+  }, []);
   const markSessionKnown = useCallback((id: string) => {
     if (!id) return;
     setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
@@ -3836,8 +3845,18 @@ function AppMain({
   useEffect(() => {
     if (!sessionsLoaded) return;
     const loadedIds = new Set(sessions.map((session) => session.id));
+    const invalidResolvedIds = new Set(
+      openSessionIds.filter((id) => {
+        const session = openSessionRecords[id] || sessions.find((s) => s.id === id);
+        return Boolean(session && !isOpenSessionTabEligible(session));
+      }),
+    );
+    if (invalidResolvedIds.size > 0) {
+      setOpenSessionIds((prev) => prev.filter((id) => !invalidResolvedIds.has(id)));
+    }
     const idsToFetch = openSessionIds.filter(
       (id) =>
+        !invalidResolvedIds.has(id) &&
         !loadedIds.has(id) &&
         !openSessionRecords[id] &&
         !openSessionRecordFetchesRef.current.has(id),
@@ -3856,10 +3875,15 @@ function AppMain({
       .then((data: { sessions?: Session[] } | undefined) => {
         if (cancelled || !data) return;
         const foundIds = new Set<string>();
+        const invalidIds = new Set<string>();
         for (const session of data?.sessions ?? []) {
           if (!session?.id) continue;
           foundIds.add(session.id);
           openSessionRecordMissesRef.current.delete(session.id);
+          if (!isOpenSessionTabEligible(session)) {
+            invalidIds.add(session.id);
+            continue;
+          }
           setOpenSessionRecords((prev) => {
             const merged = mergeOpenSessionRecord(prev[session.id], session);
             return merged === prev[session.id]
@@ -3869,6 +3893,7 @@ function AppMain({
         }
         const retryIds: string[] = [];
         const staleIds = idsToFetch.filter((id) => {
+          if (invalidIds.has(id)) return true;
           if (foundIds.has(id)) return false;
           const misses = (openSessionRecordMissesRef.current.get(id) ?? 0) + 1;
           openSessionRecordMissesRef.current.set(id, misses);
@@ -3908,6 +3933,7 @@ function AppMain({
     openSessionRecordRetryNonce,
     sessions,
     sessionsLoaded,
+    isOpenSessionTabEligible,
   ]);
 
   const addOpenSessionId = useCallback((id: string) => {
@@ -4028,7 +4054,7 @@ function AppMain({
       .reverse();
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
-      .filter((s): s is Session => !!s);
+      .filter((s): s is Session => Boolean(s && isOpenSessionTabEligible(s)));
     const tsOf = (s: Session) => {
       const v = (s as unknown as Record<string, unknown>)[sessionTabsSort];
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
@@ -4045,6 +4071,7 @@ function AppMain({
   }, [
     openSessionIds,
     findOpenSessionRecord,
+    isOpenSessionTabEligible,
     sessionTabsSort,
     topbarPinnedSessions,
   ]);
@@ -4997,6 +5024,7 @@ function AppMain({
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
+        last_opened_at: now,
         messages: [],
         // Mirror the backend default: new sessions start UNPINNED. While
         // empty (0 messages) the sidebar sort already floats them to the
