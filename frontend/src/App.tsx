@@ -3674,6 +3674,12 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
+    // Extension singleton sessions (e.g. the Assistant) are global — their cwd
+    // is not a project the user is browsing, so the project-mismatch redirect
+    // must not bounce them (same exemption ASK_SINGLETON_ID gets above). Without
+    // this, opening the Assistant from the quick button navigates to /s/{id} and
+    // is immediately redirected away when its cwd != the selected project.
+    if (routed.source === "extension") return;
     if (
       routed.cwd === selectedProjectPath &&
       (routed.node_id || "primary") === selectedProjectNodeId &&
