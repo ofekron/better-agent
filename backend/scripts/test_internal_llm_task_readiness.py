@@ -93,7 +93,7 @@ def run() -> None:
     # `assistant` internal-LLM task (its own settings row), registered as a
     # known task and ready on Inherit via the same default-provider fallback.
     check(
-        "assistant" in config_store.INTERNAL_LLM_TASKS,
+        "assistant" in config_store.internal_llm_tasks(),
         "assistant is a registered internal-LLM task",
     )
     for task in (
@@ -104,7 +104,7 @@ def run() -> None:
         "extension_context_audit",
     ):
         check(
-            task in config_store.INTERNAL_LLM_TASKS,
+            task in config_store.internal_llm_tasks(),
             f"{task} is a registered internal-LLM task",
         )
     harness_record = {"manifest": {"id": es.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID}}
