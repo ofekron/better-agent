@@ -356,6 +356,16 @@ function BetterAgentBrandMark({ className = "" }: { className?: string }) {
   );
 }
 
+function findSessionNode(tree: Session | null | undefined, id: string): Session | undefined {
+  if (!tree) return undefined;
+  if (tree.id === id) return tree;
+  for (const fork of tree.forks ?? []) {
+    const match = findSessionNode(fork, id);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 function capabilityContextFromPickerSource(
   source: ProviderConfigSyncCapabilityPickerSource,
   output?: ProviderConfigSyncCapabilityPickerOutput,
@@ -3949,8 +3959,11 @@ function AppMain({
   );
 
   const findOpenSessionRecord = useCallback(
-    (id: string) => openSessionRecords[id] || sessions.find((s) => s.id === id),
-    [openSessionRecords, sessions],
+    (id: string) =>
+      openSessionRecords[id] ||
+      findSessionNode(currentTree, id) ||
+      sessions.find((s) => s.id === id),
+    [currentTree, openSessionRecords, sessions],
   );
 
   const stampOpenSessionLastOpened = useCallback((id: string, at: string) => {
