@@ -3496,7 +3496,17 @@ class Coordinator:
                 data,
                 source,
             )
-        except Exception:
+        except Exception as exc:
+            from event_journal import EventJournalWriteError
+            if (
+                isinstance(exc, EventJournalWriteError)
+                and "writer is closed" in str(exc)
+            ):
+                logger.debug(
+                    "broadcast_session skipped after journal close sid=%s type=%s",
+                    app_session_id, event_type,
+                )
+                return
             logger.exception(
                 "broadcast_session ingest failed sid=%s type=%s",
                 app_session_id, event_type,

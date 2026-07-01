@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -531,6 +532,78 @@ async def test_broadcast_session_persists_event() -> bool:
     return True
 
 
+async def test_broadcast_session_ignores_closed_journal_error() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    original = event_journal.publish_event_sync
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    def closed_writer(**_kwargs: object) -> int:
+        raise event_journal.EventJournalWriteError("event journal writer is closed")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.publish_event_sync = closed_writer
+    try:
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": []},
+            source="test.closed_journal",
+        )
+    finally:
+        event_journal.publish_event_sync = original
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if errors:
+        print(f"  closed writer logged error: {errors[-1].getMessage()}")
+        return False
+    return True
+
+
+async def test_broadcast_session_logs_other_journal_errors() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    original = event_journal.publish_event_sync
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    def broken_writer(**_kwargs: object) -> int:
+        raise event_journal.EventJournalWriteError("simulated journal failure")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.publish_event_sync = broken_writer
+    try:
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": []},
+            source="test.journal_failure",
+        )
+    finally:
+        event_journal.publish_event_sync = original
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if not errors:
+        print("  non-closed journal failure did not log an error")
+        return False
+    return True
+
+
 TESTS = [
     ("(a) REST command_received persists into events.jsonl",
      test_command_received_appears_in_events_jsonl),
@@ -548,6 +621,10 @@ TESTS = [
      test_broadcast_global_does_not_wait_for_slow_client),
     ("(g) broadcast_session persists supervisor/run_state/rewind events",
      test_broadcast_session_persists_event),
+    ("(g2) broadcast_session ignores closed journal during shutdown",
+     test_broadcast_session_ignores_closed_journal_error),
+    ("(g3) broadcast_session still logs non-shutdown journal failures",
+     test_broadcast_session_logs_other_journal_errors),
 ]
 
 
