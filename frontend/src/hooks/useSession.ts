@@ -1621,19 +1621,20 @@ export function useSession(authStatus?: string) {
           credentials: "include",
         });
         if (!response.ok) {
-          throw new Error(await responseError(response, "Delete session failed"));
+          throw await responseError(response);
         }
       } catch (err: unknown) {
-        failOp(opId, err);
-        refetchLoadedSpan();
+        failOp(opId, err instanceof Error ? err.message : String(err));
+        await fetchSessions();
         if (wasCurrentSession) {
-          void selectSession(id);
+          await selectSession(id);
         }
+        throw err;
       } finally {
         completeOp(opId);
       }
     },
-    [removeSessionLocally, refetchLoadedSpan, selectSession]
+    [fetchSessions, removeSessionLocally, selectSession]
   );
 
   const bumpLastSeq = useCallback(
