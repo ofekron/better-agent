@@ -116,6 +116,9 @@ def test_delegate_uses_known_worker_registry_cwd(monkeypatch):
         def in_flight_event_count(self, app_session_id: str):
             return 0
 
+        def in_flight_event_count_after_current_event(self, app_session_id: str):
+            return 0
+
         async def emit_run_state(self, app_session_id: str):
             pass
 
@@ -203,6 +206,9 @@ def test_delegate_uses_session_cwd_without_worker_record(monkeypatch):
         def in_flight_event_count(self, app_session_id: str):
             return 0
 
+        def in_flight_event_count_after_current_event(self, app_session_id: str):
+            return 0
+
         async def emit_run_state(self, app_session_id: str):
             pass
 
@@ -288,6 +294,9 @@ def test_direct_delegations_to_same_worker_serialize_across_callers(monkeypatch)
             pass
 
         def in_flight_event_count(self, app_session_id: str):
+            return 0
+
+        def in_flight_event_count_after_current_event(self, app_session_id: str):
             return 0
 
         async def emit_run_state(self, app_session_id: str):
@@ -420,6 +429,9 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         def provider_for_session(self, worker_agent_session_id):
             return self.provider
 
+        def provider_for_run(self, *_args):
+            return self.provider
+
         async def broadcast_workers_changed(self, cwd):
             pass
 
@@ -446,7 +458,7 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         instructions="do work",
         instructions_preview="do work",
         worker_agent_session_id="worker-session",
-        worker_session=session_manager.get("worker-session") or {},
+        worker_session=_delegation.session_manager.get("worker-session") or {},
         worker_description="worker",
         worker_orchestration_mode="native",
         worker_parent_claude_sid="worker-agent",
@@ -469,3 +481,126 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
     assert status["status"] == "complete"
     assert status["result"]["success"] is True
     assert status["result"]["worker_session_id"] == "worker-session"
+
+
+def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
+    class Popen:
+        pid = 12345
+
+    class Provider:
+        KIND = "claude"
+        record = {"name": "Claude"}
+
+        def __init__(self):
+            self._runs = {}
+
+        def start_run(self, *, run_id, queue, **kwargs):
+            self._runs[run_id] = SimpleNamespace(
+                popen=Popen(),
+                run_dir=Path(_TMP_HOME) / "runs" / run_id,
+            )
+            queue.put_nowait(_delegation.StreamEvent(
+                type="session_discovered",
+                data={"session_id": "ephemeral-agent"},
+            ))
+            queue.put_nowait(_delegation.StreamEvent(
+                type="complete",
+                data={"success": True, "session_id": "ephemeral-agent"},
+            ))
+
+        def cancel_turn(self, run_id):
+            raise AssertionError("cancel_turn should not be called")
+
+    class TurnManager:
+        def __init__(self):
+            self.active_run_ids = {}
+            self.emits = []
+
+        def run_state_set_pid(self, *_args):
+            pass
+
+        async def emit_run_state(self, app_session_id):
+            self.emits.append(app_session_id)
+
+        async def _publish_terminal_lifecycle(self, *_args, **_kwargs):
+            pass
+
+    class Coordinator:
+        def __init__(self):
+            self.turn_manager = TurnManager()
+            self.internal_token = "token"
+            self.provider = Provider()
+
+        def provider_for_run(self, *_args):
+            return self.provider
+
+        async def broadcast_workers_changed(self, _cwd):
+            pass
+
+    monkeypatch.setattr(_delegation, "_compute_jsonl_read_path_off_loop", _fake_jsonl_path)
+    monkeypatch.setattr(_delegation, "count_jsonl_lines", lambda _path: 1)
+    monkeypatch.setattr(_delegation, "jsonl_byte_size", lambda _path: 0)
+
+    manager = _delegation.session_manager.create(
+        name="manager",
+        cwd=_TMP_HOME,
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    worker = _delegation.session_manager.create(
+        name="worker",
+        cwd=_TMP_HOME,
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    _delegation.session_manager.set_agent_sid(
+        worker["id"],
+        "native",
+        "worker-parent-agent",
+        bump_updated_at=False,
+    )
+
+    events = []
+
+    async def ws_callback(event):
+        events.append(event)
+
+    panel = {}
+    result = asyncio.run(_delegation.run_delegation_locked(
+        Coordinator(),
+        app_session_id=manager["id"],
+        ws_callback=ws_callback,
+        cancel_event=asyncio.Event(),
+        delegation_id="del_ephemeral",
+        worker_run_id="worker-del_ephemeral",
+        instructions="do work",
+        instructions_preview="do work",
+        worker_agent_session_id=worker["id"],
+        worker_session=_delegation.session_manager.get(worker["id"]) or {},
+        worker_description="worker",
+        worker_orchestration_mode="native",
+        worker_parent_claude_sid="worker-parent-agent",
+        session_is_registered_worker=False,
+        target_message_id="assistant-msg",
+        run_mode="fork",
+        model="model",
+        cwd=_TMP_HOME,
+        panel=panel,
+        ephemeral=True,
+    ))
+
+    fork_session_id = panel["fork_agent_session_id"]
+    assert result["success"] is True
+    assert result["fork_agent_sid"] == "ephemeral-agent"
+    assert result["jsonl_path"] == str(Path(_TMP_HOME) / "ephemeral-agent.jsonl")
+    assert _delegation.session_manager.get(fork_session_id) is None
+    manager_after = _delegation.session_manager.get(manager["id"]) or {}
+    assert (
+        manager_after.get("processed_line_by_sid") or {}
+    ).get("ephemeral-agent") == 1
+
+
+async def _fake_jsonl_path(*_args, **_kwargs):
+    return Path(_TMP_HOME) / "ephemeral-agent.jsonl"
