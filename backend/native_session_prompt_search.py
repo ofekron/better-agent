@@ -199,9 +199,25 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
 
 
 def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCandidate]:
-    """Match-first candidate resolution: ``rg`` narrows to files containing a
-    needle, we build candidates from those paths only, then cwd-filter. Falls
-    back to :func:`_candidates` (full discovery) when ``rg`` is unavailable."""
+    """Match-first candidate resolution.
+
+    Fast path: the native FTS5 index (:mod:`native_transcript_index`) when it
+    is covered + fresh — returns matched paths in ms. Correct because a covered
+    + fresh index reflects the current corpus (every file's mtime+size matches
+    what was indexed).
+
+    Fallback: ``rg`` narrows to files containing a needle, we build candidates
+    from those paths only, then cwd-filter. Falls back further to
+    :func:`_candidates` (full discovery) when ``rg`` is unavailable."""
+    if tokens:
+        try:
+            import native_transcript_index as _idx
+            if _idx.is_usable():
+                hits = _idx.match_paths(tokens, allowed)
+                if hits is not None:
+                    return [_candidate_from_match(p, tag) for p, tag in hits]
+        except Exception:
+            pass
     hits = _rg_filter(tokens)
     if hits is None:
         return _candidates(allowed)

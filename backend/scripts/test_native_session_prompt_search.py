@@ -434,6 +434,37 @@ def test_rg_filter_narrows_to_files_containing_needle() -> bool:
     return ok
 
 
+def test_index_fast_path_serves_query_with_rg_disabled() -> bool:
+    """With the native index built + fresh, a query is served from FTS even when
+    rg is disabled — proving the fast path (not the rg fallback) answers."""
+    import native_transcript_index as idx
+    projects = _SCRATCH / "idx-projects"
+    cwd = "/Users/test/idx-proj"
+    session_dir = projects / encode_cwd(cwd)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "s1.jsonl").write_text(
+        json.dumps({"type": "user", "uuid": "u", "timestamp": "2024-01-01T00:00:00Z",
+                    "message": {"role": "user", "content": "zulifrangible fastpath needle"}}) + "\n",
+        encoding="utf-8",
+    )
+    _reset_candidates()
+    _disable_rg()
+    orig = _isolate_native_roots(claude=[projects])
+    idx.reset_for_test()
+    try:
+        idx.refresh_once()  # build + mark covered
+        assert idx.is_usable()
+        out = nsp.search_in_native_session_transcript(query="zulifrangible fastpath")
+    finally:
+        _restore_native_roots(orig)
+        _restore_rg()
+        idx.reset_for_test()
+    texts = {r["text"] for r in out}
+    ok = "zulifrangible fastpath needle" in texts
+    print(f"{OK if ok else FAIL} index fast path serves query with rg disabled (got {texts})")
+    return ok
+
+
 def test_generalized_search_greps_tool_calls_and_results() -> bool:
     """search_in_native_session_transcript greps EVERYTHING — tool calls and
     tool results, not just prompts/replies — and labels each match with its
@@ -532,6 +563,7 @@ def main_run() -> int:
         test_categorizer_maps_elements_to_categories,
         test_generalized_search_greps_tool_calls_and_results,
         test_rg_filter_narrows_to_files_containing_needle,
+        test_index_fast_path_serves_query_with_rg_disabled,
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]

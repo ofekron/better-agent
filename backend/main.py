@@ -9597,6 +9597,16 @@ async def on_startup():
     acquire_backend_instance_lock()
     logger.info("backend version=%s", _GIT_SHA)
 
+    # Native-transcript FTS index: spawn the background daemon that builds +
+    # refreshes it (throttled, non-blocking). Skipped in test mode so test
+    # backends don't scan the real ~/.claude/~/.codex corpus.
+    if not os.environ.get("BETTER_AGENT_TEST_MODE"):
+        try:
+            import native_transcript_index
+            native_transcript_index.ensure_started()
+        except Exception:
+            logger.debug("native transcript index worker failed to start", exc_info=True)
+
     # Install SIGINT flag so on_shutdown can distinguish Ctrl+C from
     # uvicorn reload (which sends SIGTERM, not SIGINT). The
     # `signal.signal` call only works on the main thread of the main
