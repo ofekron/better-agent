@@ -459,6 +459,8 @@
   "session.aiSearchLoading": "Поиск…",
   "session.aiSearchClear": "Очистить результаты",
   "session.aiSearchMatches": "{{count}} совпадений",
+  "session.searchNativeOff": "Также искать в нативных транскриптах сессий провайдера",
+  "session.searchNativeOn": "Также поиск в нативных транскриптах — нажмите, чтобы отключить",
   "session.aiSearchViewFull": "Показать полное рассуждение",
   "session.aiSearchClose": "Закрыть",
   "session.aiSearchDetailsTitle": "Подробности AI-поиска",

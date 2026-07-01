@@ -473,6 +473,8 @@
   "session.aiSearchLoading": "Searching…",
   "session.aiSearchClear": "Clear results",
   "session.aiSearchMatches": "{{count}} matches",
+  "session.searchNativeOff": "Also search provider-native session transcripts",
+  "session.searchNativeOn": "Also searching provider-native transcripts — click to disable",
   "session.aiSearchViewFull": "View full reasoning",
   "session.aiSearchClose": "Close",
   "session.aiSearchDetailsTitle": "AI search details",

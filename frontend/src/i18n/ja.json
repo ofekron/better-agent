@@ -455,6 +455,8 @@
   "session.aiSearchLoading": "検索中…",
   "session.aiSearchClear": "結果をクリア",
   "session.aiSearchMatches": "{{count}} 件が一致",
+  "session.searchNativeOff": "プロバイダーネイティブのセッション記録も検索",
+  "session.searchNativeOn": "ネイティブ記録も検索中 — クリックで無効化",
   "session.aiSearchViewFull": "推論全体を表示",
   "session.aiSearchClose": "閉じる",
   "session.aiSearchDetailsTitle": "AI 検索の詳細",

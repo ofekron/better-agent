@@ -460,6 +460,8 @@
   "session.aiSearchLoading": "מחפש…",
   "session.aiSearchClear": "נקה תוצאות",
   "session.aiSearchMatches": "{{count}} תוצאות",
+  "session.searchNativeOff": "חפש גם בתמלילי הסשן המקוריים של הספק",
+  "session.searchNativeOn": "מחפש גם בתמלילי הספק המקוריים — לחץ לביטול",
   "session.aiSearchViewFull": "הצג נימוק מלא",
   "session.aiSearchClose": "סגור",
   "session.aiSearchDetailsTitle": "פרטי חיפוש AI",

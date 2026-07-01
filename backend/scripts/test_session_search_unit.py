@@ -384,6 +384,46 @@ def test_search_candidates_include_later_message_snippets() -> bool:
     return True
 
 
+def test_search_candidates_native_option_gated() -> bool:
+    """`search_native` gates the raw provider-native transcript grep: a
+    session whose only match lives in its native transcript (no metadata,
+    no content-index hit) is surfaced ONLY when `search_native=True`, and
+    only if it exists in the listable index (ghost sids dropped). The grep
+    snippet rides along as `matching_snippet`."""
+    _reset_home()
+    _write_session(
+        sid="native-1",
+        name="unrelated title",
+        messages=[{"role": "user", "content": "plain prompt"}],
+    )
+    import native_session_prompt_search
+
+    orig_index = session_search_index.search
+    orig_native = native_session_prompt_search.search_native_session_prompts
+    session_search_index.search = lambda *a, **kw: []  # type: ignore[assignment]
+    native_session_prompt_search.search_native_session_prompts = lambda **kw: [  # type: ignore[assignment]
+        {"sid": "native-1", "text": "needle only in native transcript", "cwd": "", "ts": ""},
+        {"sid": "ghost", "text": "needle in a non-listable session", "cwd": "", "ts": ""},
+    ]
+    try:
+        off = session_search._search_candidates("needle")
+        if [candidate.get("id") for candidate in off] != []:
+            print(f"{FAIL} native gated OFF: got {off!r}")
+            return False
+        on = session_search._search_candidates("needle", search_native=True)
+        if [candidate.get("id") for candidate in on] != ["native-1"]:
+            print(f"{FAIL} native gated ON: got {on!r}")
+            return False
+        if on[0].get("matching_snippet") != "needle only in native transcript":
+            print(f"{FAIL} native snippet payload: {on[0]!r}")
+            return False
+    finally:
+        session_search_index.search = orig_index  # type: ignore[assignment]
+        native_session_prompt_search.search_native_session_prompts = orig_native  # type: ignore[assignment]
+    print(f"{PASS} search_native gates native transcript grep; drops ghost sids; carries snippet")
+    return True
+
+
 def test_search_candidates_avoid_full_session_scan_for_content_matches() -> bool:
     _reset_home()
     for idx in range(50):
@@ -988,6 +1028,7 @@ def main_run() -> int:
         test_run_search_sessions_uses_provisioned_worker,
         test_search_worker_instructions_wrap_bounded_candidates,
         test_search_candidates_include_later_message_snippets,
+        test_search_candidates_native_option_gated,
         test_search_candidates_avoid_full_session_scan_for_content_matches,
         test_search_candidates_bound_content_index_wait,
         test_run_search_sessions_worker_parse_failed,
