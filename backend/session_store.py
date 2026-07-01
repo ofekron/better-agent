@@ -258,6 +258,12 @@ _summary_sidecar_write_queue: queue.Queue[
 ] = queue.Queue(maxsize=256)
 _summary_sidecar_write_started = False
 _summary_sidecar_write_lock = threading.Lock()
+_opened_cache_lock = threading.Lock()
+_opened_cache: dict[
+    str,
+    tuple[tuple[int, int, int, int] | None, dict[str, str]],
+] = {}
+_OPENED_CACHE_MAX = 256
 _summary_roots_fingerprint: tuple[str, ...] = ()
 
 
@@ -941,6 +947,38 @@ def _opened_path(root_id: str) -> Path:
     return _sessions_dir() / f"{root_id}.opened.json"
 
 
+def _opened_file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _opened_cache_get(root_id: str, signature: tuple[int, int, int, int] | None) -> dict[str, str] | None:
+    with _opened_cache_lock:
+        cached = _opened_cache.get(root_id)
+        if cached is None or cached[0] != signature:
+            return None
+        return dict(cached[1])
+
+
+def _opened_cache_put(
+    root_id: str,
+    signature: tuple[int, int, int, int] | None,
+    opened: dict[str, str],
+) -> None:
+    with _opened_cache_lock:
+        _opened_cache[root_id] = (signature, dict(opened))
+        while len(_opened_cache) > _OPENED_CACHE_MAX:
+            _opened_cache.pop(next(iter(_opened_cache)))
+
+
+def _opened_cache_invalidate(root_id: str) -> None:
+    with _opened_cache_lock:
+        _opened_cache.pop(root_id, None)
+
+
 def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
     """Atomically persist the per-node draft sidecar. `drafts` maps a
     node sid -> {draft_input, draft_input_seq, draft_images}; nodes with
@@ -1057,20 +1095,29 @@ def read_seen_cursors(root_id: str) -> dict[str, Optional[str]]:
 
 def read_last_opened(root_id: str) -> dict[str, str]:
     path = _opened_path(root_id)
-    if not path.exists():
+    signature = _opened_file_signature(path)
+    cached = _opened_cache_get(root_id, signature)
+    if cached is not None:
+        return cached
+    if signature is None:
+        _opened_cache_put(root_id, None, {})
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        _opened_cache_put(root_id, signature, {})
         return {}
     raw = data.get("opened") if isinstance(data, dict) else None
     if not isinstance(raw, dict):
+        _opened_cache_put(root_id, signature, {})
         return {}
-    return {
+    opened = {
         sid: at
         for sid, at in raw.items()
         if isinstance(sid, str) and sid and isinstance(at, str) and at
     }
+    _opened_cache_put(root_id, signature, opened)
+    return dict(opened)
 
 
 def write_last_opened(root_id: str, sid: str, at: str) -> None:
@@ -1088,6 +1135,11 @@ def write_last_opened(root_id: str, sid: str, at: str) -> None:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "opened": opened}, f)
         os.replace(tmp_path, path)
+        signature = _opened_file_signature(path)
+        if signature is None:
+            _opened_cache_invalidate(root_id)
+        else:
+            _opened_cache_put(root_id, signature, opened)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -1354,6 +1406,8 @@ def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
             continue
         try:
             path.unlink(missing_ok=True)
+            if suffix == ".opened.json":
+                _opened_cache_invalidate(sid)
         except OSError:
             pass
 
@@ -1375,6 +1429,7 @@ def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
             pass
         try:
             (_sessions_dir() / f"{sid}.opened.json").unlink(missing_ok=True)
+            _opened_cache_invalidate(sid)
         except OSError:
             pass
     _summary_index_version += 1
@@ -4839,6 +4894,7 @@ def delete_session(root_id: str) -> bool:
         pass
     try:
         _opened_path(root_id).unlink(missing_ok=True)
+        _opened_cache_invalidate(root_id)
     except OSError:
         pass
     return True
