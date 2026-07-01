@@ -405,9 +405,13 @@ def _recent_state_scan(
             for entry in entries:
                 if not entry.is_dir(follow_symlinks=False):
                     continue
-                state_path = Path(entry.path) / "state.json"
-                st = _run_state_candidate_stat(state_path, root)
-                if st is None:
+                state_path = os.path.join(entry.path, "state.json")
+                try:
+                    st = os.stat(state_path, follow_symlinks=False)
+                except OSError:
+                    pending_run_dirs.append(entry.name)
+                    continue
+                if not stat.S_ISREG(st.st_mode):
                     pending_run_dirs.append(entry.name)
                     continue
                 candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
