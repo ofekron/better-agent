@@ -4788,29 +4788,15 @@ class SessionManager:
         """Cheap (stale-tolerant) read of whether this session currently
         has an unseen turn-error dot. For sidebar snapshot enrichment.
 
-        Two signals, OR'd conservatively (show the dot if either fires):
-          1. The `unseen_error` flag — the fast live projection, set by
-             `_finalize_turn_messages` on every failure path.
-          2. The last assistant message's `error` field — the durable
-             source of truth, so sessions that errored via a path the
-             flag missed (run-recovery, or errors from before the flag
-             existed) still show the dot.
-
-        Both clear in sync at turn-start: the flag is cleared explicitly
-        AND the newly-appended non-error assistant message becomes the
-        last, so the derivation returns False too."""
+        The latest assistant message is the durable source of truth. The
+        `unseen_error` flag is only used before any assistant turn exists."""
         rid = self._root_id_for(sid)
         if rid is None:
             return False
         sess = self._cached(sid)
         if not sess:
             return False
-        if sess.get("unseen_error"):
-            return True
-        for m in reversed(sess.get("messages") or []):
-            if m.get("role") == "assistant":
-                return bool(m.get("error"))
-        return False
+        return bool(session_store.current_turn_error(sess))
 
     def _clear_view_markers(self, sid: str) -> None:
         """On a view-ack, clear any marker on `sid` owned by an extension
@@ -5886,6 +5872,14 @@ class SessionManager:
         if custom_prompt is not None:
             change["supervisor_custom_prompt"] = custom_prompt
         return self._run(sid, _do, change)
+
+    def set_agent_rename_allowed(self, sid: str, value: bool) -> Optional[dict]:
+        return self._run(
+            sid,
+            lambda s: s.__setitem__("agent_rename_allowed", bool(value)),
+            {"kind": "agent_rename_allowed_set", "value": bool(value)},
+            bump_updated_at=False,
+        )
 
     def set_pinned(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:

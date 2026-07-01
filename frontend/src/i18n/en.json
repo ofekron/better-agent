@@ -447,6 +447,8 @@
   "session.unpinTopbarTitle": "Unpin from top bar",
   "session.workerEligibleOn": "Mark as worker-eligible",
   "session.workerEligibleOff": "Remove worker eligibility",
+  "session.agentRenameAllowedOn": "Allow agent to rename session",
+  "session.agentRenameAllowedOff": "Prevent agent from renaming session",
   "session.copyTitleNot": "Copy id {{id}}",
   "session.copyTitle": "Copied!",
   "session.deleteTitle": "Delete session",

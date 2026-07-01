@@ -71,6 +71,7 @@ function renderList(
       onUnpinOthers={() => {}}
       onArchive={() => {}}
       onWorkerEligible={() => {}}
+      onAgentRenameAllowed={() => {}}
       onDetails={() => {}}
       {...props}
     />,
@@ -233,6 +234,7 @@ describe("SessionList advanced filters", () => {
         onUnpinOthers={() => {}}
         onArchive={() => {}}
         onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
         onDetails={() => {}}
       />,
     );
@@ -378,6 +380,78 @@ describe("SessionList advanced filters", () => {
     );
   });
 
+  it("persists search text and advanced filters per project and restores them on project switch", async () => {
+    localStorage.clear();
+    const onBackendFiltersChange = vi.fn();
+    const { rerender } = renderList(
+      [makeSession({ id: "a1", name: "A1", cwd: "/tmp/project-a" })],
+      { backendProjectPath: "/tmp/project-a", onBackendFiltersChange },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    fireEvent.click(screen.getByRole("button", { name: "session.fileEditMode.yes" }));
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "yes" }),
+      ),
+    );
+
+    const stored = JSON.parse(
+      localStorage.getItem("better-agent-session-filters-by-project") || "{}",
+    );
+    expect(stored["/tmp/project-a"]).toEqual(
+      expect.objectContaining({ fileEditModeFilter: "yes" }),
+    );
+
+    rerender(
+      <SessionList
+        sessions={[makeSession({ id: "b1", name: "B1", cwd: "/tmp/project-b" })]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
+        onDetails={() => {}}
+        backendProjectPath="/tmp/project-b"
+        onBackendFiltersChange={onBackendFiltersChange}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "any", projectPath: "/tmp/project-b" }),
+      ),
+    );
+
+    rerender(
+      <SessionList
+        sessions={[makeSession({ id: "a1", name: "A1", cwd: "/tmp/project-a" })]}
+        providers={providers}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onPin={() => {}}
+        onUnpinOthers={() => {}}
+        onArchive={() => {}}
+        onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
+        onDetails={() => {}}
+        backendProjectPath="/tmp/project-a"
+        onBackendFiltersChange={onBackendFiltersChange}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileEditMode: "yes", projectPath: "/tmp/project-a" }),
+      ),
+    );
+  });
+
   it("requests another page when scrolled near the bottom", () => {
     const onLoadMore = vi.fn();
     const { container } = renderList(
@@ -509,6 +583,7 @@ describe("SessionList advanced filters", () => {
         onUnpinOthers={() => {}}
         onArchive={() => {}}
         onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
         onDetails={() => {}}
       />,
     );
@@ -620,6 +695,7 @@ describe("SessionList advanced filters", () => {
         onUnpinOthers={() => {}}
         onArchive={() => {}}
         onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
         onDetails={() => {}}
       />,
     );
@@ -835,6 +911,7 @@ describe("SessionList advanced filters", () => {
         onUnpinOthers={() => {}}
         onArchive={() => {}}
         onWorkerEligible={() => {}}
+        onAgentRenameAllowed={() => {}}
         onDetails={() => {}}
       />,
     );

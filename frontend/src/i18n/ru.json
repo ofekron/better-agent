@@ -433,6 +433,8 @@
   "session.closeOtherTabsTitle": "Закрыть другие вкладки",
   "session.workerEligibleOn": "Отметить как доступную для воркеров",
   "session.workerEligibleOff": "Убрать доступность для воркеров",
+  "session.agentRenameAllowedOn": "Разрешить агенту переименовывать сессию",
+  "session.agentRenameAllowedOff": "Запретить агенту переименовывать сессию",
   "session.copyTitleNot": "Копировать id {{id}}",
   "session.copyTitle": "Скопировано!",
   "session.deleteTitle": "Удалить сессию",

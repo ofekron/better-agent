@@ -434,6 +434,8 @@
   "session.closeOtherTabsTitle": "סגור לשוניות אחרות",
   "session.workerEligibleOn": "סמן כזכאי להיות עובד",
   "session.workerEligibleOff": "הסר זכאות עובד",
+  "session.agentRenameAllowedOn": "אפשר לסוכן לשנות שם הפעלה",
+  "session.agentRenameAllowedOff": "מנע מהסוכן לשנות שם הפעלה",
   "session.copyTitleNot": "העתק id {{id}}",
   "session.copyTitle": "הועתק!",
   "session.deleteTitle": "מחק סשן",
