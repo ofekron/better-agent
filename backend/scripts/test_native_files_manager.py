@@ -744,6 +744,297 @@ async def test_run_state_ledger_cache_rejects_cached_symlink_escape() -> None:
     print("PASS test_run_state_ledger_cache_rejects_cached_symlink_escape")
 
 
+async def test_run_state_ledger_sqlite_cache_skips_jsonl_parse() -> None:
+    from runs_dir import _append_run_state_ledger, run_state_ledger_cache_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-sqlite-cache"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"LEDGER-SQLITE-CACHE","jsonl_path":"/tmp/ledger-sqlite-cache.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_path,
+        {"session_id": "LEDGER-SQLITE-CACHE", "jsonl_path": "/tmp/ledger-sqlite-cache.jsonl"},
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-CACHE") == [state_path]
+    assert run_state_ledger_cache_path(root).exists()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    original_json_loads = runs_dir_mod.json.loads
+
+    def fail_jsonl_parse(raw, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if '"session_id"' in raw:
+            raise AssertionError("sqlite cache hit should not parse ledger jsonl")
+        return original_json_loads(raw, *args, **kwargs)
+
+    runs_dir_mod.json.loads = fail_jsonl_parse  # type: ignore
+    try:
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-CACHE") == [state_path]
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-MISSING") == []
+    finally:
+        runs_dir_mod.json.loads = original_json_loads  # type: ignore
+    print("PASS test_run_state_ledger_sqlite_cache_skips_jsonl_parse")
+
+
+async def test_run_state_ledger_sqlite_cache_invalidates_on_append() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_a = root / "run-ledger-sqlite-invalidate-a"
+    run_a.mkdir(parents=True, exist_ok=True)
+    state_a = run_a / "state.json"
+    state_a.write_text(
+        '{"session_id":"LEDGER-SQLITE-INVALIDATE-A","jsonl_path":"/tmp/sqlite-invalidate-a.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_a,
+        {"session_id": "LEDGER-SQLITE-INVALIDATE-A", "jsonl_path": "/tmp/sqlite-invalidate-a.jsonl"},
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-INVALIDATE-A") == [state_a]
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    run_b = root / "run-ledger-sqlite-invalidate-b"
+    run_b.mkdir(parents=True, exist_ok=True)
+    state_b = run_b / "state.json"
+    state_b.write_text(
+        '{"session_id":"LEDGER-SQLITE-INVALIDATE-B","jsonl_path":"/tmp/sqlite-invalidate-b.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_b,
+        {"session_id": "LEDGER-SQLITE-INVALIDATE-B", "jsonl_path": "/tmp/sqlite-invalidate-b.jsonl"},
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-INVALIDATE-B") == [state_b]
+    print("PASS test_run_state_ledger_sqlite_cache_invalidates_on_append")
+
+
+async def test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback() -> None:
+    from runs_dir import _append_run_state_ledger, run_state_ledger_cache_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-sqlite-corrupt"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"LEDGER-SQLITE-CORRUPT","jsonl_path":"/tmp/ledger-sqlite-corrupt.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_path,
+        {"session_id": "LEDGER-SQLITE-CORRUPT", "jsonl_path": "/tmp/ledger-sqlite-corrupt.jsonl"},
+    )
+    cache_path = run_state_ledger_cache_path(root)
+    cache_path.write_text("not sqlite", encoding="utf-8")
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-CORRUPT") == [state_path]
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    with runs_dir_mod._sqlite_connect(cache_path) as conn:
+        conn.execute("UPDATE meta SET value=-1 WHERE key='version'")
+        conn.commit()
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-CORRUPT") == [state_path]
+    print("PASS test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback")
+
+
+async def test_run_state_ledger_sqlite_cache_rejects_poisoned_paths() -> None:
+    from runs_dir import _append_run_state_ledger, run_state_ledger_cache_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-sqlite-poison"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"LEDGER-SQLITE-POISON","jsonl_path":"/tmp/ledger-sqlite-poison.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_path,
+        {"session_id": "LEDGER-SQLITE-POISON", "jsonl_path": "/tmp/ledger-sqlite-poison.jsonl"},
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-POISON") == [state_path]
+    poisoned_paths = [
+        str(root / "run-ledger-sqlite-poison" / "nested" / "state.json"),
+        str(root.parent / "outside-ledger-sqlite-poison" / "state.json"),
+    ]
+    for poisoned_path in poisoned_paths:
+        runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+        with runs_dir_mod._sqlite_connect(run_state_ledger_cache_path(root)) as conn:
+            conn.execute("DELETE FROM entries")
+            conn.execute(
+                "INSERT INTO entries (sid, state_path, written_at) VALUES (?, ?, ?)",
+                ("LEDGER-SQLITE-POISON", poisoned_path, 1.0),
+            )
+            conn.commit()
+        assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-POISON") == [state_path]
+    print("PASS test_run_state_ledger_sqlite_cache_rejects_poisoned_paths")
+
+
+async def test_run_state_ledger_sqlite_cache_dedupes_duplicate_state_paths() -> None:
+    from runs_dir import run_state_ledger_path, runs_root
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    root = runs_root()
+    state_path = root / "run-ledger-sqlite-dedupe" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        '{"session_id":"LEDGER-SQLITE-DEDUPE","jsonl_path":"/tmp/ledger-sqlite-dedupe-new.jsonl"}',
+        encoding="utf-8",
+    )
+    ledger = run_state_ledger_path(root)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        "\n".join([
+            runs_dir_mod.json.dumps({
+                "session_id": "LEDGER-SQLITE-DEDUPE",
+                "jsonl_path": "/tmp/ledger-sqlite-dedupe-old.jsonl",
+                "state_path": str(state_path),
+                "written_at": 1.0,
+            }),
+            runs_dir_mod.json.dumps({
+                "session_id": "LEDGER-SQLITE-DEDUPE",
+                "jsonl_path": "/tmp/ledger-sqlite-dedupe-new.jsonl",
+                "state_path": str(state_path),
+                "written_at": 2.0,
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-DEDUPE") == [state_path]
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    with runs_dir_mod._sqlite_connect(runs_dir_mod.run_state_ledger_cache_path(root)) as conn:
+        rows = conn.execute(
+            "SELECT written_at FROM entries WHERE sid=? AND state_path=?",
+            ("LEDGER-SQLITE-DEDUPE", str(state_path)),
+        ).fetchall()
+    assert rows == [(2.0,)], rows
+    assert runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-DEDUPE") == [state_path]
+    print("PASS test_run_state_ledger_sqlite_cache_dedupes_duplicate_state_paths")
+
+
+async def test_run_state_ledger_sqlite_cache_rebuild_singleflight_waits() -> None:
+    from runs_dir import _append_run_state_ledger, run_state_ledger_cache_path, runs_root
+    import threading
+    import time
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT.clear()
+    root = runs_root()
+    for index in range(6):
+        sid = f"LEDGER-SQLITE-SINGLEFLIGHT-{index}"
+        run_dir = root / f"run-ledger-sqlite-singleflight-{index}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state_path = run_dir / "state.json"
+        state_path.write_text(
+            f'{{"session_id":"{sid}","jsonl_path":"/tmp/{sid}.jsonl"}}',
+            encoding="utf-8",
+        )
+        _append_run_state_ledger(
+            state_path,
+            {"session_id": sid, "jsonl_path": f"/tmp/{sid}.jsonl"},
+        )
+    try:
+        run_state_ledger_cache_path(root).unlink()
+    except OSError:
+        pass
+    original_open = runs_dir_mod.Path.open
+    parse_count = 0
+    parse_lock = threading.Lock()
+
+    def slow_ledger_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal parse_count
+        if path == runs_dir_mod.run_state_ledger_path(root):
+            with parse_lock:
+                parse_count += 1
+            time.sleep(1.2)
+        return original_open(path, *args, **kwargs)
+
+    runs_dir_mod.Path.open = slow_ledger_open  # type: ignore
+    try:
+        results = await asyncio.gather(*[
+            asyncio.to_thread(
+                runs_dir_mod.ledger_state_files_for_sid,
+                root,
+                f"LEDGER-SQLITE-SINGLEFLIGHT-{index}",
+            )
+            for index in range(6)
+        ])
+    finally:
+        runs_dir_mod.Path.open = original_open  # type: ignore
+    assert parse_count == 1, f"expected one JSONL rebuild, got {parse_count}"
+    assert all(len(result) == 1 for result in results), results
+    print("PASS test_run_state_ledger_sqlite_cache_rebuild_singleflight_waits")
+
+
+async def test_run_state_ledger_sqlite_cache_rebuild_signature_change_does_not_deadlock() -> None:
+    from runs_dir import _append_run_state_ledger, runs_root
+    import threading
+
+    nfm_mod._RUN_STATE_LOOKUP_CACHE.clear()
+    runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
+    runs_dir_mod._RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT.clear()
+    root = runs_root()
+    run_dir = root / "run-ledger-sqlite-signature-change"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        '{"session_id":"LEDGER-SQLITE-SIGNATURE","jsonl_path":"/tmp/ledger-sqlite-signature.jsonl"}',
+        encoding="utf-8",
+    )
+    _append_run_state_ledger(
+        state_path,
+        {"session_id": "LEDGER-SQLITE-SIGNATURE", "jsonl_path": "/tmp/ledger-sqlite-signature.jsonl"},
+    )
+    signature = runs_dir_mod._run_state_ledger_signature(runs_dir_mod.run_state_ledger_path(root))
+    assert signature is not None
+    calls = 0
+    original_signature = runs_dir_mod._run_state_ledger_signature
+
+    def changing_signature(path):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return (signature[0], signature[1], signature[2] + 1, signature[3], signature[4])
+        return original_signature(path)
+
+    result: list[list[nfm_mod.Path]] = []
+    error: list[BaseException] = []
+
+    def lookup() -> None:
+        try:
+            result.append(runs_dir_mod.ledger_state_files_for_sid(root, "LEDGER-SQLITE-SIGNATURE"))
+        except BaseException as exc:
+            error.append(exc)
+
+    runs_dir_mod._run_state_ledger_signature = changing_signature  # type: ignore
+    try:
+        thread = threading.Thread(target=lookup)
+        thread.start()
+        thread.join(timeout=2.0)
+    finally:
+        runs_dir_mod._run_state_ledger_signature = original_signature  # type: ignore
+    assert not thread.is_alive(), "signature-change retry deadlocked on its own rebuild event"
+    assert not error, error
+    assert result == [[state_path]], result
+    print("PASS test_run_state_ledger_sqlite_cache_rebuild_signature_change_does_not_deadlock")
+
+
 async def test_run_state_ledger_string_shape_is_strict() -> None:
     from runs_dir import runs_root
 
@@ -1859,6 +2150,13 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_cache_reuses_unchanged_index())
     asyncio.run(test_run_state_ledger_cache_invalidates_on_append())
     asyncio.run(test_run_state_ledger_cache_rejects_cached_symlink_escape())
+    asyncio.run(test_run_state_ledger_sqlite_cache_skips_jsonl_parse())
+    asyncio.run(test_run_state_ledger_sqlite_cache_invalidates_on_append())
+    asyncio.run(test_run_state_ledger_sqlite_cache_corrupt_and_wrong_version_fallback())
+    asyncio.run(test_run_state_ledger_sqlite_cache_rejects_poisoned_paths())
+    asyncio.run(test_run_state_ledger_sqlite_cache_dedupes_duplicate_state_paths())
+    asyncio.run(test_run_state_ledger_sqlite_cache_rebuild_singleflight_waits())
+    asyncio.run(test_run_state_ledger_sqlite_cache_rebuild_signature_change_does_not_deadlock())
     asyncio.run(test_run_state_ledger_string_shape_is_strict())
     asyncio.run(test_run_state_ledger_parse_defers_resolve_to_target_sid())
     asyncio.run(test_run_state_ledger_parse_defers_path_construction_to_target_sid())
