@@ -125,6 +125,13 @@ def _run_state_path_under_root(path: Path, root_resolved: Path) -> bool:
         return False
 
 
+def _run_state_path_has_ledger_shape(path: Path, root: Path) -> bool:
+    if path.name != "state.json" or not path.is_absolute():
+        return False
+    root_absolute = root.absolute()
+    return path.parent != root_absolute and path.parent.parent == root_absolute
+
+
 def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     try:
         ledger = run_state_ledger_path(root)
@@ -159,7 +166,7 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 if not sid or not state_path:
                     continue
                 path = Path(str(state_path))
-                if not _run_state_path_under_root(path, root_resolved):
+                if not _run_state_path_has_ledger_shape(path, root):
                     continue
                 try:
                     written_at = float(row.get("written_at"))
@@ -176,7 +183,10 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
         index.setdefault(sid, []).append(value)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
         _RUN_STATE_LEDGER_CACHE[root_key] = (signature, index)
-    return [path for _, path in index.get(agent_sid, [])]
+    return [
+        path for _, path in index.get(agent_sid, [])
+        if _run_state_path_under_root(path, root_resolved)
+    ]
 
 
 def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
