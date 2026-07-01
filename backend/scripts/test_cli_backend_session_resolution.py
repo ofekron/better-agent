@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import asyncio
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -110,6 +111,27 @@ async def assert_client_backend_sends_loopback_backend_url() -> None:
     assert ws.sent["backend_url"] == "http://127.0.0.1:8123"
 
 
+async def assert_client_backend_allows_large_ws_frames() -> None:
+    calls: list[dict] = []
+
+    async def fake_connect(url: str, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return FakeWebSocket()
+
+    original = sys.modules.get("websockets")
+    sys.modules["websockets"] = types.SimpleNamespace(connect=fake_connect)
+    try:
+        backend = cli.ClientBackend(8124)
+        await backend.start()
+    finally:
+        if original is None:
+            sys.modules.pop("websockets", None)
+        else:
+            sys.modules["websockets"] = original
+
+    assert calls == [{"url": cli._ws_chat_url(8124), "max_size": None}]
+
+
 def main() -> int:
     port = free_port()
     server = run_server(port)
@@ -139,6 +161,7 @@ def main() -> int:
             "bare_config": True,
         }
         asyncio.run(assert_client_backend_sends_loopback_backend_url())
+        asyncio.run(assert_client_backend_allows_large_ws_frames())
     finally:
         server.shutdown()
     print("cli backend session resolution test passed")
