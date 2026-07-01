@@ -36,6 +36,7 @@ interface ExtensionMountContext {
   extensionName: string;
   slot: string;
   moduleId: string;
+  subscribeToEvent: (type: string, handler: (payload: unknown) => void) => () => void;
   [key: string]: unknown;
 }
 
@@ -56,6 +57,13 @@ type ExtensionModule = {
 type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
+const HOST_EXTENSION_EVENTS = new Set(["extensions_changed", "websocket.connected"]);
+
+function extensionEventPrefix(extensionId: string): string {
+  const parts = extensionId.split(".").filter(Boolean);
+  const localName = parts[parts.length - 1] || extensionId;
+  return `${localName}.`;
+}
 
 function normalizeModuleUrl(moduleUrl: string): string {
   if (/^https?:\/\//.test(moduleUrl) || moduleUrl.startsWith("//")) {
@@ -159,6 +167,16 @@ export function ExtensionModuleSlot({
   contextRef.current = context;
   const [error, setError] = useState("");
   const moduleUrl = useMemo(() => normalizeModuleUrl(module.module_url), [module.module_url]);
+  const eventPrefix = useMemo(() => extensionEventPrefix(module.extension_id), [module.extension_id]);
+  const subscribeToEvent = useCallback(
+    (type: string, handler: (payload: unknown) => void) => {
+      if (!HOST_EXTENSION_EVENTS.has(type) && !type.startsWith(eventPrefix)) {
+        return () => {};
+      }
+      return eventBus.subscribe(type, handler);
+    },
+    [eventPrefix],
+  );
 
   const buildMountContext = useCallback(
     (): ExtensionMountContext => ({
@@ -168,8 +186,9 @@ export function ExtensionModuleSlot({
       slot: module.slot,
       moduleId: module.id,
       ...contextRef.current,
+      subscribeToEvent,
     }),
-    [module.extension_id, module.extension_name, module.slot, module.id],
+    [module.extension_id, module.extension_name, module.slot, module.id, subscribeToEvent],
   );
 
   useLayoutEffect(() => {

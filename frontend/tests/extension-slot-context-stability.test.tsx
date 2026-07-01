@@ -14,6 +14,7 @@ import { createRoot } from "react-dom/client";
 import { ExtensionModuleSlot } from "../src/components/ExtensionSlots";
 import type { ExtensionFrontendModule } from "../src/components/ExtensionSlots";
 import { loadExtensionModule } from "../src/components/extensionModuleLoader";
+import { eventBus } from "../src/lib/eventBus";
 
 const createRootMock = vi.mocked(createRoot);
 const loadMock = vi.mocked(loadExtensionModule);
@@ -118,6 +119,41 @@ describe("ExtensionModuleSlot context stability", () => {
     await act(async () => {
       unmount();
     });
+  });
+
+  it("passes a narrow realtime event subscription into Component modules", async () => {
+    const seen: unknown[] = [];
+    let subscribed = false;
+    const Comp = (props: {
+      context: { subscribeToEvent?: (type: string, handler: (payload: unknown) => void) => () => void };
+    }) => {
+      props.context.subscribeToEvent?.("assistant.board_updated", (payload) => {
+        seen.push(payload);
+      });
+      props.context.subscribeToEvent?.("session.created", (payload) => {
+        seen.push(payload);
+      });
+      props.context.subscribeToEvent?.("websocket.connected", (payload) => {
+        seen.push(payload);
+      });
+      subscribed = true;
+      return null;
+    };
+    loadMock.mockResolvedValue({ Component: Comp });
+
+    const assistantModule = {
+      ...TEST_MODULE,
+      extension_id: "ofek-dev.assistant",
+      module_url: "/api/extensions/ofek-dev.assistant/frontend/ui/assistant-view.entry.js",
+    };
+    const { unmount } = render(<ExtensionModuleSlot module={assistantModule} />);
+    await vi.waitFor(() => expect(subscribed).toBe(true));
+
+    eventBus.publish("session.created", { session_id: "ignored" });
+    eventBus.publish("assistant.board_updated", { source_session_id: "s1" });
+    eventBus.publish("websocket.connected", {});
+    expect(seen).toEqual([{ source_session_id: "s1" }, {}]);
+    unmount();
   });
 
   it("unmounts Component roots before their host slot is detached", async () => {
