@@ -4295,7 +4295,7 @@ class SessionManager:
         """
         # Resolve the inner uuid OUTSIDE _do so the dedup decision and
         # the mutation are atomic under the per-root lock.
-        from orchs.base import _event_uuid
+        from orchs.base import _event_uuid, _uid_idx_for
         ev_uuid = _event_uuid(inner_event)
         def _do(s: dict) -> None:
             m = _find_message(s, msg_id)
@@ -4310,20 +4310,13 @@ class SessionManager:
             if panel is None:
                 return
             evs = panel.setdefault("events", [])
-            # O(1) dedup via cached uid_idx on the panel dict. Trust
-            # the cache; any external mutation MUST `panel.pop(
-            # "_uid_idx", None)` to invalidate (no known callsites
-            # today).
-            uid_idx = panel.get("_uid_idx")
-            if uid_idx is None:
-                uid_idx = {}
-                for i, e in enumerate(evs):
-                    eu = _event_uuid(e)
-                    if eu:
-                        uid_idx[eu] = i
-                panel["_uid_idx"] = uid_idx
+            uid_idx = _uid_idx_for(panel, evs)
             if ev_uuid:
                 existing_idx = uid_idx.get(ev_uuid)
+                if existing_idx is not None and existing_idx >= len(evs):
+                    panel.pop("_uid_idx", None)
+                    uid_idx = _uid_idx_for(panel, evs)
+                    existing_idx = uid_idx.get(ev_uuid)
                 if existing_idx is not None:
                     if evs[existing_idx] == inner_event:
                         return

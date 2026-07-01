@@ -89,10 +89,10 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
     lives on `owner["_uid_idx"]` and is stripped from
     disk snapshots by `session_store._strip_volatile_from_tree`.
 
-    Cheap validity check: a lazy compare of `len(idx)` against the
-    number of uuid-bearing events in `evs`. Catches structural drift
-    (someone replaced the whole list) without walking every event. Does
-    NOT catch the pathological "same length, different uuids" case —
+    Cheap validity check: reject caches whose size is impossible for
+    the current list. Callers still guard the specific cached index
+    before dereferencing. Does NOT catch the pathological
+    "same length, different uuids" case -
     that requires the mutating caller to `owner.pop('_uid_idx', None)`
     explicitly. Today the only callers that bypass `apply_event` and
     its mutator family are `session_manager.set_native_events` and
@@ -101,7 +101,8 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
     """
     idx = owner.get("_uid_idx")
     if idx is not None:
-        return idx
+        if len(idx) <= len(evs):
+            return idx
     idx = {}
     for i, e in enumerate(evs):
         eu = _event_uuid(e)
@@ -1095,6 +1096,10 @@ class OrchestrationStrategy(ABC):
             owner = self._events_owner(msg)
             uid_idx = _uid_idx_for(owner, evs)
             existing_idx = uid_idx.get(ev_uuid)
+            if existing_idx is not None and existing_idx >= len(evs):
+                owner.pop("_uid_idx", None)
+                uid_idx = _uid_idx_for(owner, evs)
+                existing_idx = uid_idx.get(ev_uuid)
             if existing_idx is not None:
                 existing = evs[existing_idx]
                 if existing == normalized:

@@ -503,6 +503,56 @@ def test_i2_worker_event_skips_cold_event_hydration() -> bool:
     return ok
 
 
+def test_i3_stale_panel_uid_idx_rebuilds() -> bool:
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_I3")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _worker_event("del_I3", "uuid-I3", "old"),
+        source_is_provider_stream=True,
+    )
+
+    def _clear_events_only(s: dict) -> None:
+        m = next((mm for mm in s.get("messages") or []
+                  if mm.get("id") == msg_id), None)
+        if not m:
+            return
+        panel = next((p for p in m.get("workers") or []
+                      if p.get("delegation_id") == "del_I3"), None)
+        if panel is not None:
+            panel["events"] = []
+
+    session_manager._run(
+        sid,
+        _clear_events_only,
+        {"kind": "test_clear_panel_events_without_uid_idx_invalidation"},
+    )
+
+    crashed = False
+    try:
+        _apply(
+            sid,
+            msg_id,
+            root_id,
+            _worker_event("del_I3", "uuid-I3", "new"),
+            source_is_provider_stream=False,
+        )
+    except IndexError:
+        crashed = True
+
+    panel_evs = _panel_events(sid, msg_id, "del_I3")
+    last_content = (
+        ((panel_evs[-1].get("data") or {}).get("message") or {}).get("content")
+        if panel_evs else None
+    )
+    ok = not crashed and len(panel_evs) == 1 and last_content == "new"
+    print(f"{PASS if ok else FAIL} I3: stale panel uid_idx rebuilds — "
+          f"crashed={crashed} panel.events={len(panel_evs)} "
+          f"last_content={last_content!r}")
+    return ok
+
+
 def test_j_malformed_inner_no_crash_no_pollute() -> bool:
     """Corner cases on the worker_event payload shape:
        J1: data.event = None → inner becomes {} (falsy) → branch's
@@ -755,6 +805,7 @@ def main() -> int:
             test_h_multi_panel_routes_correctly(),
             test_i_worker_event_does_not_need_snapshot_workers(),
             test_i2_worker_event_skips_cold_event_hydration(),
+            test_i3_stale_panel_uid_idx_rebuilds(),
             test_j_malformed_inner_no_crash_no_pollute(),
             test_k_worker_start_creates_panel_before_worker_event(),
             test_l_post_trigger_insert_at_counts_after_current_event(),
