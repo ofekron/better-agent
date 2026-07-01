@@ -125,6 +125,8 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
     create_sdk_mcp_server,
     tool,
 )
@@ -1619,14 +1621,51 @@ async def _heartbeat_writer(
             pass
 
 
+def _apply_task_message(msg: object, tasks: set[str]) -> None:
+    """Fold one SDK message into the in-flight background-subagent set.
+
+    `TaskStartedMessage` adds the task; a terminal `TaskNotificationMessage`
+    (completed/failed/stopped) removes it. Anything else is ignored. Shared by
+    the turn loop (seed) and the babysitter drain (keep current)."""
+    if isinstance(msg, TaskStartedMessage):
+        tid = getattr(msg, "task_id", None)
+        if tid:
+            tasks.add(tid)
+    elif isinstance(msg, TaskNotificationMessage):
+        tid = getattr(msg, "task_id", None)
+        if tid:
+            tasks.discard(tid)
+
+
+async def _drain_background_tasks(
+    client: "ClaudeSDKClient",
+    tasks: set[str],
+    log: logging.Logger,
+) -> None:
+    """Consume the CLI message stream during the linger so background-subagent
+    `task_notification` events (emitted AFTER the turn's `ResultMessage`, on the
+    raw `receive_messages()` stream) keep `tasks` current. Ends when the stream
+    closes — i.e. the CLI is gone — which the linger treats as reap-eligible."""
+    try:
+        async for msg in client.receive_messages():
+            _apply_task_message(msg, tasks)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("babysitter: background-task drain ended")
+
+
 async def _linger_for_background_work(
     run_dir: Path,
     log: logging.Logger,
     *,
+    client: Optional["ClaudeSDKClient"] = None,
+    outstanding_tasks: Optional[set[str]] = None,
     poll_interval_s: float = 2.0,
 ) -> None:
     """Babysitter: stay alive while detached background work
-    (run_in_background shells, Monitor watchers) is still running.
+    (run_in_background shells, Monitor watchers) OR an in-flight background
+    subagent (Task tool `run_in_background`) is still running.
 
     Called AFTER the run-level complete.json is on disk — the turn is
     over from the backend's perspective and new prompts spawn fresh
@@ -1647,55 +1686,83 @@ async def _linger_for_background_work(
     from proc_control import process_control
     pc = process_control()
     cancel_path = run_dir / "cancel"
+    tasks = outstanding_tasks if outstanding_tasks is not None else set()
     lingering = False
     consecutive_failures = 0
-    while True:
-        if cancel_path.exists():
-            # Idempotent: a turn cancelled mid-flight already swept in
-            # _run_one_turn; a cancel that raced turn end (or arrived
-            # during the linger) sweeps here.
-            try:
-                swept = pc.kill_detached_descendant_groups(
-                    os.getpid(),
-                )
-                log.info(
-                    "babysitter: cancel sentinel — swept %d detached "
-                    "group(s), exiting", swept,
-                )
-            except Exception:
-                logger.exception("babysitter cancel sweep failed")
-            return
-        try:
-            busy = await asyncio.to_thread(
-                pc.has_detached_descendants,
-                os.getpid(), frozenset(),
-            )
-            consecutive_failures = 0
-        except Exception:
-            # Fail toward staying alive: exiting kills the CLI and every
-            # background shell with it. Only give up after sustained
-            # failure of the signal itself.
-            consecutive_failures += 1
-            logger.exception(
-                "babysitter signal check failed (%d/5)", consecutive_failures,
-            )
-            if consecutive_failures >= 5:
-                log.warning("babysitter: signal check broken — exiting")
+
+    # Keep `tasks` current from the CLI stream while lingering: a subagent's
+    # terminal `task_notification` lands on `receive_messages()` AFTER the
+    # turn's `ResultMessage`, so only a live drain can clear it. Skipped when
+    # there's no client (recovery) or nothing to track at entry.
+    drain_task: Optional[asyncio.Task] = None
+    if client is not None and tasks:
+        drain_task = asyncio.create_task(
+            _drain_background_tasks(client, tasks, log)
+        )
+
+    try:
+        while True:
+            if cancel_path.exists():
+                # Idempotent: a turn cancelled mid-flight already swept in
+                # _run_one_turn; a cancel that raced turn end (or arrived
+                # during the linger) sweeps here.
+                try:
+                    swept = pc.kill_detached_descendant_groups(
+                        os.getpid(),
+                    )
+                    log.info(
+                        "babysitter: cancel sentinel — swept %d detached "
+                        "group(s), exiting", swept,
+                    )
+                except Exception:
+                    logger.exception("babysitter cancel sweep failed")
                 return
-            await asyncio.sleep(poll_interval_s)
-            continue
-        if not busy:
-            if lingering:
-                log.info("babysitter: background work ended — exiting")
-            return
-        if not lingering:
-            lingering = True
             try:
-                (run_dir / "lingering").touch()
-            except OSError:
-                logger.exception("babysitter: lingering sentinel write failed")
-            log.info("babysitter: detached background work alive — lingering")
-        await asyncio.sleep(poll_interval_s)
+                has_desc = await asyncio.to_thread(
+                    pc.has_detached_descendants,
+                    os.getpid(), frozenset(),
+                )
+                consecutive_failures = 0
+            except Exception:
+                # Fail toward staying alive: exiting kills the CLI and every
+                # background shell with it. Only give up after sustained
+                # failure of the signal itself.
+                consecutive_failures += 1
+                logger.exception(
+                    "babysitter signal check failed (%d/5)", consecutive_failures,
+                )
+                if consecutive_failures >= 5:
+                    log.warning("babysitter: signal check broken — exiting")
+                    return
+                await asyncio.sleep(poll_interval_s)
+                continue
+            # A live in-flight subagent counts as busy only while the drain is
+            # alive to clear it. If the stream closed (drain done) the CLI is
+            # gone and no notification can arrive — don't linger on a stale id.
+            drain_alive = drain_task is not None and not drain_task.done()
+            busy = has_desc or (bool(tasks) and drain_alive)
+            if not busy:
+                if lingering:
+                    log.info("babysitter: background work ended — exiting")
+                return
+            if not lingering:
+                lingering = True
+                try:
+                    (run_dir / "lingering").touch()
+                except OSError:
+                    logger.exception("babysitter: lingering sentinel write failed")
+                log.info(
+                    "babysitter: background work alive — lingering "
+                    "(detached=%s, subagents=%d)", has_desc, len(tasks),
+                )
+            await asyncio.sleep(poll_interval_s)
+    finally:
+        if drain_task is not None and not drain_task.done():
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 # ============================================================================
@@ -1825,6 +1892,12 @@ async def _run_one_turn(
     # for the UI/telemetry. (Reap is decided by live background processes,
     # not tool names.)
     used_tools: set[str] = set()
+    # Background subagents (Task tool `run_in_background`) still in flight at
+    # turn end. They run IN-PROCESS inside the CLI — no detached OS group — so
+    # the babysitter's descendant probe can't see them; without this the CLI
+    # is reaped and the running subagent SIGKILLed. Seeded here, updated on
+    # `TaskStarted`/`TaskNotification`, and carried into the linger.
+    outstanding_tasks: set[str] = set()
 
     # Cancel sentinel watcher: polls for `cancel_path` every ~150ms
     # and calls client.interrupt() on sight. Default = run-level
@@ -1942,6 +2015,10 @@ async def _run_one_turn(
                 break
 
             if isinstance(msg, SystemMessage):
+                # Track background subagents so the babysitter won't reap the
+                # CLI (and SIGKILL them) while they're still running. No-ops
+                # for non-Task system messages.
+                _apply_task_message(msg, outstanding_tasks)
                 data = msg.data or {}
                 if data.get("subtype") == "init":
                     sid = data.get("session_id")
@@ -2114,6 +2191,7 @@ async def _run_one_turn(
         "sdk_output_parts": sdk_output_parts,
         "final_success": final_success,
         "used_tools": used_tools,
+        "outstanding_tasks": outstanding_tasks,
     }
 
 
@@ -2674,6 +2752,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     sdk_output_parts = turn_result["sdk_output_parts"]
     final_success = turn_result["final_success"]
     context_window = turn_result.get("context_window")
+    outstanding_tasks = turn_result.get("outstanding_tasks") or set()
 
     # Write complete.json (run-level — the backend's _watch_complete
     # finalizes the turn off this file while the babysitter lingers).
@@ -2708,10 +2787,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Babysitter linger: complete.json is durable (the backend finalized
     # the turn off it; new prompts spawn fresh --resume instances), but
     # the CLI stays connected and alive while detached background work
-    # (run_in_background shells, Monitor watchers) is still running.
-    # The heartbeat keeps refreshing runner_alive throughout so the
-    # backend can tell a live babysitter from a dead orphan.
-    await _linger_for_background_work(run_dir, log)
+    # (run_in_background shells, Monitor watchers) OR an in-flight background
+    # subagent (Task tool `run_in_background`) is still running. The heartbeat
+    # keeps refreshing runner_alive throughout so the backend can tell a live
+    # babysitter from a dead orphan.
+    await _linger_for_background_work(
+        run_dir, log, client=client, outstanding_tasks=outstanding_tasks,
+    )
 
     try:
         await client.disconnect()

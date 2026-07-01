@@ -91,6 +91,7 @@ async def _fake_run_one_turn(**kwargs):
         "sdk_output_parts": ["the real answer"],
         "final_success": True,
         "used_tools": [],
+        "outstanding_tasks": set(),
     }
 
 
