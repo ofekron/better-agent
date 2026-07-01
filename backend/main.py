@@ -13433,9 +13433,10 @@ async def internal_list_pending_credentials(
     from credential_broker import consent_store as _cs
 
     app_session_id = (body or {}).get("app_session_id")
+    pending = await asyncio.to_thread(_cs.list_pending, app_session_id=app_session_id)
     out = [
         _cs.public_view(rec)
-        for rec in _cs.list_pending(app_session_id=app_session_id)
+        for rec in pending
     ]
     return {"consents": out}
 

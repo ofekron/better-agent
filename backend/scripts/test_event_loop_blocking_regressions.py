@@ -2005,6 +2005,25 @@ def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
     assert "pending_approvals.list_pending(cwd=cwd)" not in route_source
 
 
+def test_credential_consent_listing_uses_cached_projection_off_loop() -> None:
+    source = (ROOT / "credential_broker" / "consent_store.py").read_text(encoding="utf-8")
+    assert "_pending_cache_lock = threading.Lock()" in source
+    assert "def _pending_snapshot()" in source
+    list_start = source.index("def list_pending(")
+    list_end = source.index("def _expired(", list_start)
+    list_source = source[list_start:list_end]
+    assert "records = _pending_snapshot()" in list_source
+    assert "_dir().glob" not in list_source
+    assert "path.read_text" not in list_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    route_start = main_source.index("async def internal_list_pending_credentials(")
+    route_end = main_source.index("@app.post(\"/api/internal/credential-ui/approve\")", route_start)
+    route_source = main_source[route_start:route_end]
+    assert "await asyncio.to_thread(_cs.list_pending, app_session_id=app_session_id)" in route_source
+    assert "_cs.list_pending(app_session_id=app_session_id)" not in route_source
+
+
 def test_project_update_counts_batch_uses_single_store_call() -> None:
     store_source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
     assert "def unseen_counts(project_ids: list[str])" in store_source
