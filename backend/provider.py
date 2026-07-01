@@ -998,15 +998,33 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
     """
     import json
     from ingestion_versions import marker_data_matches_current
-    from runs_dir import runs_root as _runs_root
+    from runs_dir import (
+        append_reconciled_marker_index,
+        ensure_reconciled_marker_index_backfilled,
+        load_reconciled_marker_index,
+        reconciled_marker_index_row_matches,
+        runs_root as _runs_root,
+    )
     runs_root = _runs_root()
     if not runs_root.exists():
         return []
+    ensure_reconciled_marker_index_backfilled(runs_root)
+    reconciled_index = load_reconciled_marker_index(runs_root)
 
     # Group run_ids by owning provider_id.
     by_provider: dict[Optional[str], list[str]] = {}
     for child in runs_root.iterdir():
-        if not child.is_dir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        indexed_marker = reconciled_index.get(child.name)
+        if (
+            indexed_marker is not None
+            and reconciled_marker_index_row_matches(child, indexed_marker)
+            and marker_data_matches_current(
+                indexed_marker,
+                str(indexed_marker.get("provider_kind") or ""),
+            )
+        ):
             continue
         marker_path = child / "reconciled.marker"
         if marker_path.exists():
@@ -1016,6 +1034,12 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
                     marker,
                     str(marker.get("provider_kind") or ""),
                 ):
+                    append_reconciled_marker_index(
+                        marker_path,
+                        str(marker.get("provider_kind") or ""),
+                        int(marker.get("ingestion_version")),
+                        root=runs_root,
+                    )
                     continue
             except Exception:
                 pass

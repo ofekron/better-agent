@@ -75,8 +75,14 @@ def marker_data_matches_current(data: dict, provider_kind: str | None) -> bool:
 
 
 def write_marker(path: Path, provider_kind: str | None) -> None:
+    version = current_ingestion_version(provider_kind)
     data = {
         "provider_kind": provider_kind,
-        "ingestion_version": current_ingestion_version(provider_kind),
+        "ingestion_version": version,
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        from runs_dir import append_reconciled_marker_index
+        append_reconciled_marker_index(path, provider_kind, version)
+    except Exception:
+        pass
