@@ -286,6 +286,108 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
     return ok
 
 
+def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
+    root = "root-message-summary-empty-sidecar-test"
+    sid = "sid-message-summary-empty-sidecar-test"
+    events_dir = ba_home() / "sessions" / root
+    events_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+    with events_path.open("w", encoding="utf-8") as f:
+        for seq in range(1, 200):
+            f.write(json.dumps({
+                "seq": seq,
+                "sid": sid,
+                "type": "worker_event",
+                "msg_id": None,
+                "data": {"event": {"type": "agent_message", "data": {"seq": seq}}},
+            }) + "\n")
+    stat = events_path.stat()
+    (events_dir / "event_summaries.json").write_text(
+        json.dumps({
+            "summary_version": 2,
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "tail": 25,
+            "summaries": {},
+            "resolutions": {},
+        }),
+        encoding="utf-8",
+    )
+
+    fresh = EventIngester()
+    original_rebuild = fresh._rebuild_seq_offsets_locked
+
+    def fail_rebuild(*_args, **_kwargs):
+        raise AssertionError("empty current summary sidecar should not rebuild seq offsets")
+
+    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    try:
+        summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    ok = summaries == {} and fresh._seq_offsets.get(root) is None
+    print(
+        f"  {PASS if ok else FAIL} empty message summary sidecar skips seq-offset rebuild"
+        f"{'' if ok else f' — summaries={summaries} offsets={fresh._seq_offsets.get(root)}'}"
+    )
+    return ok
+
+
+def _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() -> bool:
+    root = "root-message-summary-non-empty-sidecar-test"
+    sid = "sid-message-summary-non-empty-sidecar-test"
+    ing = EventIngester()
+    ing.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-message-summary-non-empty-sidecar"},
+        source="prior-run", msg_id="msg-1",
+    )
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    stat = events_path.stat()
+    sidecar_path = ba_home() / "sessions" / root / "event_summaries.json"
+    expected_summary = {
+        "sid": sid,
+        "event_count": 1,
+        "last_events": [{"seq": 1, "type": "agent_message", "data": {"ok": True}}],
+        "seq_start": 1,
+        "seq_end": 1,
+        "byte_start": 0,
+        "byte_end": stat.st_size,
+    }
+    sidecar_path.write_text(
+        json.dumps({
+            "summary_version": 2,
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "tail": 25,
+            "summaries": {"msg-1": expected_summary},
+            "resolutions": {},
+        }),
+        encoding="utf-8",
+    )
+
+    fresh = EventIngester()
+    calls = 0
+    original_rebuild = fresh._rebuild_seq_offsets_locked
+
+    def counted_rebuild(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_rebuild(*args, **kwargs)
+
+    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    try:
+        summaries = fresh.message_event_summaries(root, tail=25)
+    finally:
+        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+    ok = summaries == {"msg-1": expected_summary} and calls == 1
+    print(
+        f"  {PASS if ok else FAIL} non-empty message summary sidecar rebuilds seq offsets"
+        f"{'' if ok else f' — summaries={summaries} rebuilds={calls}'}"
+    )
+    return ok
+
+
 def _run_message_summaries_ignores_stale_sidecar() -> bool:
     root = "root-message-summary-stale-sidecar-test"
     sid = "sid-message-summary-stale-sidecar-test"
@@ -333,6 +435,8 @@ def main() -> int:
         ok = _run_session_event_meta_uses_valid_sidecar() and ok
         ok = _run_session_event_meta_ignores_stale_sidecar() and ok
         ok = _run_message_summaries_uses_valid_sidecar() and ok
+        ok = _run_message_summaries_empty_sidecar_skips_seq_rebuild() and ok
+        ok = _run_message_summaries_non_empty_sidecar_rebuilds_seq_offsets() and ok
         ok = _run_message_summaries_ignores_stale_sidecar() and ok
         return 0 if ok else 1
     finally:
