@@ -32,7 +32,7 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_EVENT_SUMMARIES_VERSION = 2
+_EVENT_SUMMARIES_VERSION = 3
 _MAX_OPEN_APPEND_HANDLES = 64
 _SESSIONS_DIR = bc_home() / "sessions"
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
@@ -262,7 +262,12 @@ class EventIngester:
             return None
         summaries = sidecar.get("summaries")
         resolutions = sidecar.get("resolutions")
-        if not isinstance(summaries, dict) or not isinstance(resolutions, dict):
+        seq_offsets = sidecar.get("seq_offsets")
+        if (
+            not isinstance(summaries, dict)
+            or not isinstance(resolutions, dict)
+            or not self._valid_seq_offsets(seq_offsets, signature[1])
+        ):
             return None
         clean_resolutions: dict[int, str] = {}
         for seq, msg_id in resolutions.items():
@@ -272,8 +277,27 @@ class EventIngester:
                 continue
             if isinstance(msg_id, str):
                 clean_resolutions[seq_int] = msg_id
+        clean_offsets = list(seq_offsets)
+        self._seq_offsets[root_id] = clean_offsets
+        self._seq[root_id] = len(clean_offsets)
+        self._next_offset[root_id] = signature[1]
         self._summaries_cache[root_id] = (signature[1], summaries, clean_resolutions)
         return summaries, clean_resolutions
+
+    @staticmethod
+    def _valid_seq_offsets(value: Any, file_size: int) -> bool:
+        if not isinstance(value, list):
+            return False
+        previous = -1
+        for item in value:
+            if not isinstance(item, int) or isinstance(item, bool):
+                return False
+            if item <= previous:
+                return False
+            if item < 0 or item >= file_size:
+                return False
+            previous = item
+        return bool(value) or file_size == 0
 
     def _write_event_summaries_sidecar_locked(
         self,
@@ -287,6 +311,14 @@ class EventIngester:
         signature = self._event_file_signature(path)
         if signature is None:
             return
+        seq_offsets = self._seq_offsets.get(root_id)
+        if (
+            seq_offsets is None
+            or self._next_offset.get(root_id) != signature[1]
+            or self._seq.get(root_id) != len(seq_offsets)
+            or not self._valid_seq_offsets(seq_offsets, signature[1])
+        ):
+            return
         sidecar_path = self._event_summaries_path(root_id)
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         payload = {
@@ -296,6 +328,7 @@ class EventIngester:
             "tail": tail,
             "summaries": summaries,
             "resolutions": {str(k): v for k, v in resolutions.items()},
+            "seq_offsets": seq_offsets,
         }
         try:
             tmp_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1807,22 +1840,6 @@ class EventIngester:
                 loaded = self._load_event_summaries_sidecar_locked(root_id, path, tail)
                 if loaded is not None:
                     summaries, resolutions = loaded
-                    filter_has_no_summary_match = (
-                        (sid_filter or msg_ids is not None)
-                        and not any(
-                            self._summary_matches_filter(
-                                msg_id,
-                                summary,
-                                sid_filter=sid_filter,
-                                msg_ids=msg_ids,
-                            )
-                            for msg_id, summary in summaries.items()
-                        )
-                    )
-                    if (summaries or resolutions) and not filter_has_no_summary_match:
-                        self._rebuild_seq_offsets_locked(path, root_id)
-                    elif offsets is not None and self._next_offset.get(root_id) != file_size:
-                        self._seq_offsets.pop(root_id, None)
                     self._summaries_cache[root_id] = (
                         file_size, summaries, resolutions,
                     )
@@ -2080,6 +2097,7 @@ class EventIngester:
         # pre-truncation index, so a length guard would wrongly keep
         # garbage offsets that `_seq_byte_range` would fold past EOF.
         self._seq_offsets[root_id] = seq_offsets
+        self._seq[root_id] = len(seq_offsets)
         self._next_offset[root_id] = path.stat().st_size
         return out, resolutions
 
