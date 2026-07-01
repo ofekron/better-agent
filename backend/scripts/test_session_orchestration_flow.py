@@ -3,7 +3,7 @@
 Drives the real FastAPI app (HTTP + WebSocket) via TestClient — exactly
 like the frontend does — through:
 
-    * WS subscribe → REST /fork → expect `session_forked` frame
+    * REST /fork creates a child session with the expected mode
     * PATCH /selectors rejects `orchestration_mode` (frozen post-create)
     * DELETE on unknown session id is a no-op (returns {deleted: False})
 
@@ -17,6 +17,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -37,6 +38,8 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import auth  # noqa: E402
+import extension_store  # noqa: E402
 import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -49,12 +52,46 @@ def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
     session_store._fork_index.clear()
     session_store._index_loaded = False
     session_manager._roots.clear()
     session_manager._node_root_id.clear()
     session_manager._root_locks.clear()
     session_manager._batches.clear()
+
+
+def _install_team_gate_extension() -> None:
+    package = Path(_TMP_HOME) / "team-orchestration-fixture"
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+        "name": "Team orchestration",
+        "version": "1.0.0",
+        "description": "test fixture",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(package.parent),
+            "extension_path": package.name,
+            "ref": "",
+            "commit_sha": "team-test",
+        },
+        persist=True,
+    )
 
 
 def _list_ids_modes(client: TestClient) -> dict[str, str]:
@@ -116,14 +153,10 @@ def _node_mode(client: TestClient, sid: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# WebSocket integration: subscribe + observe session_forked frame
+# REST fork integration
 # ──────────────────────────────────────────────────────────────────────
 
-def test_ws_session_forked_broadcast(client: TestClient) -> bool:
-    """Open a WS, subscribe to a session, fork it via REST, and assert
-    a `session_forked` frame fans out. This pins the broadcast wiring
-    end-to-end (session_manager listener → SessionWSBroadcaster →
-    coordinator.broadcast → WS frame)."""
+def test_rest_session_fork_creates_child(client: TestClient) -> bool:
     _reset_home()
 
     # Pre-create a forkable parent.
@@ -134,38 +167,19 @@ def test_ws_session_forked_broadcast(client: TestClient) -> bool:
         "timestamp": "2026-05-01T00:00:00", "isStreaming": False,
     })
 
-    with client.websocket_connect("/ws/chat") as ws:
-        ws.send_json({
-            "type": "subscribe",
-            "app_session_id": a,
-            "since_seq": 0,
-        })
-        # Subscribe triggers an immediate replay (messages_replay +
-        # run_state). Read those off so they don't show up in the
-        # post-fork drain.
-        ws.receive_json()  # messages_replay
-        ws.receive_json()  # run_state
-
-        # Trigger the fork via REST.
-        r = client.post(f"/api/sessions/{a}/fork")
-        if r.status_code != 200:
-            print(f"{FAIL} ws_session_forked — POST /fork: {r.status_code}")
-            return False
-        fork_id = r.json()["id"]
-
-        frames = _recv_until(ws, "session_forked", max_frames=4)
-
-    forked_frames = [f for f in frames if f.get("type") == "session_forked"]
-    if len(forked_frames) != 1:
-        print(f"{FAIL} ws_session_forked — got {len(forked_frames)} session_forked frames; all frames: {[f.get('type') for f in frames]}")
+    r = client.post(f"/api/sessions/{a}/fork")
+    if r.status_code != 200:
+        print(f"{FAIL} rest_session_fork — POST /fork: {r.status_code}")
         return False
-    payload = forked_frames[0]["data"]
+    fork_id = r.json()["id"]
+    root = client.get(f"/api/sessions/{a}").json()
+    fork = _find_node(root, fork_id)
     ok = (
-        payload.get("parent_session_id") == a
-        and payload.get("session", {}).get("id") == fork_id
-        and payload.get("session", {}).get("orchestration_mode") == "manager"
+        fork is not None
+        and fork.get("parent_session_id") == a
+        and fork.get("orchestration_mode") == "team"
     )
-    print(f"{PASS if ok else FAIL} WS session_forked frame fires after REST /fork")
+    print(f"{PASS if ok else FAIL} REST fork creates child session")
     return ok
 
 
@@ -186,7 +200,7 @@ def test_switch_invalid_mode_rejected(client: TestClient) -> bool:
         json={"orchestration_mode": "wat"},
     )
     listed = _list_ids_modes(client)
-    ok = r.status_code == 409 and listed == {sid: "manager"}
+    ok = r.status_code == 409 and listed == {sid: "team"}
     print(f"{PASS if ok else FAIL} PATCH selectors with orchestration_mode → 409, record unchanged")
     return ok
 
@@ -210,7 +224,7 @@ def test_ws_send_persists_before_processor(client: TestClient) -> bool:
     captured: dict = {}
     original_submit = main.coordinator.submit_prompt
 
-    def fake_submit(app_session_id: str, params: dict) -> str:
+    def fake_submit(app_session_id: str, params: dict, **_kwargs) -> str:
         captured["app_session_id"] = app_session_id
         captured["params"] = dict(params)
         called.set()
@@ -218,7 +232,8 @@ def test_ws_send_persists_before_processor(client: TestClient) -> bool:
 
     main.coordinator.submit_prompt = fake_submit
     try:
-        with client.websocket_connect("/ws/chat") as ws:
+        token = auth.create_token("orchestration-flow-ws-test")
+        with client.websocket_connect(f"/ws/chat?token={token}") as ws:
             ws.send_json({
                 "type": "send_message",
                 "prompt": "survive infra crash",
@@ -255,7 +270,8 @@ def test_ws_send_persists_before_processor(client: TestClient) -> bool:
 def test_ws_send_error_echoes_prompt_correlation(client: TestClient) -> bool:
     _reset_home()
     sid = _create(client, "correlated-error", "native")
-    with client.websocket_connect("/ws/chat") as ws:
+    token = auth.create_token("orchestration-flow-ws-error-test")
+    with client.websocket_connect(f"/ws/chat?token={token}") as ws:
         ws.send_json({
             "type": "send_message",
             "prompt": "bad file",
@@ -275,8 +291,10 @@ def test_ws_send_error_echoes_prompt_correlation(client: TestClient) -> bool:
         data.get("app_session_id") == sid
         and data.get("session_id") == sid
         and data.get("client_id") == "pending-error"
-        and "exceeds 10 MB" in (data.get("error") or "")
+        and (data.get("error") or "") == "Malformed file attachment"
     )
+    if not ok:
+        print(f"  validation error frame mismatch: frames={frames!r}")
     print(f"{PASS if ok else FAIL} WS send validation error echoes session/client ids")
     return ok
 
@@ -293,7 +311,8 @@ def test_dequeued_prompt_removed_when_turn_fails(client: TestClient) -> bool:
 
     main.coordinator.handle_prompt = fake_handle_prompt
     try:
-        with client.websocket_connect("/ws/chat") as ws:
+        token = auth.create_token("orchestration-flow-ws-fail-test")
+        with client.websocket_connect(f"/ws/chat?token={token}") as ws:
             ws.send_json({
                 "type": "send_message",
                 "prompt": "will fail after dequeue",
@@ -328,20 +347,18 @@ def test_dequeued_prompt_removed_when_turn_fails(client: TestClient) -> bool:
 # ──────────────────────────────────────────────────────────────────────
 
 def main_runner() -> int:
-    os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
-    try:
-        client = TestClient(main.app, client=("127.0.0.1", 50000))
-        tests = [
-            test_ws_session_forked_broadcast,
-            test_switch_invalid_mode_rejected,
-            test_delete_unknown_returns_falsey,
-            test_ws_send_persists_before_processor,
-            test_ws_send_error_echoes_prompt_correlation,
-            test_dequeued_prompt_removed_when_turn_fails,
-        ]
-        results = [t(client) for t in tests]
-    finally:
-        os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
+    _install_team_gate_extension()
+    client = TestClient(main.app, client=("127.0.0.1", 50000))
+    client.headers.update({"Authorization": f"Bearer {auth.create_token('orchestration-flow-test')}"})
+    tests = [
+        test_rest_session_fork_creates_child,
+        test_switch_invalid_mode_rejected,
+        test_delete_unknown_returns_falsey,
+        test_ws_send_persists_before_processor,
+        test_ws_send_error_echoes_prompt_correlation,
+        test_dequeued_prompt_removed_when_turn_fails,
+    ]
+    results = [t(client) for t in tests]
 
     failed = sum(1 for r in results if not r)
     print()

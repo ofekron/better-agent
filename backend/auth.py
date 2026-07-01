@@ -11,8 +11,6 @@ shared store (sqlite / redis).
 """
 
 import asyncio
-import ipaddress
-import os
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -78,19 +76,6 @@ def reload_credentials() -> None:
 
 def get_session_secret() -> str:
     return SESSION_SECRET if _BOOTSTRAPPED else _EPHEMERAL_SECRET
-
-
-def is_test_auth_bypass_request(request) -> bool:
-    if os.environ.get("BETTER_CLAUDE_TEST_AUTH_BYPASS") != "1":
-        return False
-    client = request.client
-    host = client.host if client else None
-    if not host:
-        return False
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return host == "localhost"
 
 
 # ---------------------------------------------------------------------

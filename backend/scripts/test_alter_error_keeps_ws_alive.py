@@ -13,7 +13,6 @@ import tempfile
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-alter-ws-")
-os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -25,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import main  # noqa: E402
+import auth  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -53,9 +53,10 @@ def main_test() -> bool:
     sid = session["id"]
     original = main._rewind_latest_user_for_alter
     main._rewind_latest_user_for_alter = _raise_alter_error
+    token = auth.create_token("alter-ws-test")
     try:
         with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
-            with client.websocket_connect("/ws/chat") as ws:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                 ws.send_json({
                     "type": "send_message",
                     "prompt": "alter this",
