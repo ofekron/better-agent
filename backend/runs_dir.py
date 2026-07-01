@@ -268,6 +268,8 @@ def state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
     ledger_paths = ledger_state_files_for_sid(root, agent_sid)
     if ledger_paths:
         return ledger_paths
+    if _run_state_ledger_backfill_current(root):
+        return []
     return recent_state_files_for_sid(root, agent_sid)
 
 
