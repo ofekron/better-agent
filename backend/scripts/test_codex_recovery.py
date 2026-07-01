@@ -18,6 +18,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import shutil
@@ -768,6 +769,41 @@ def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
         print(f"  expected spawn then disk token, got {seen_tokens!r}")
         return False
     return True
+
+
+def test_loopback_post_surfaces_http_error_detail() -> bool:
+    import runner_codex
+
+    original_urlopen = runner_codex.urllib.request.urlopen
+
+    def fake_urlopen(req, *_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b'{"detail":"no idle worker in target_worker_pool"}'),
+        )
+
+    try:
+        runner_codex.urllib.request.urlopen = fake_urlopen
+        try:
+            _post_loopback_sync(
+                {"x": 1},
+                backend_url="http://127.0.0.1:8000",
+                internal_token="token",
+                url_path="/api/internal/ask",
+                timeout_s=10,
+            )
+        except RuntimeError as exc:
+            if str(exc) != "HTTP 409: no idle worker in target_worker_pool":
+                print(f"  unexpected error: {exc!r}")
+                return False
+            return True
+        print("  expected HTTP error detail to be surfaced")
+        return False
+    finally:
+        runner_codex.urllib.request.urlopen = original_urlopen
 
 
 def test_schedule_loop_task_from_worker_thread() -> bool:
@@ -1622,6 +1658,7 @@ TESTS = [
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
     ("codex loopback POST retries disk token after forbidden", test_loopback_post_retries_disk_token_after_forbidden),
+    ("codex loopback POST surfaces HTTP error detail", test_loopback_post_surfaces_http_error_detail),
     ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
     ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),
     ("codex MCP string error normalizes", test_codex_mcp_string_error_normalizes),

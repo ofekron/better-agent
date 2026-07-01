@@ -67,6 +67,7 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
+from loopback_http import raise_loopback_http_error
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_better_agent")
@@ -1487,6 +1488,8 @@ def _post_loopback_sync(
                     return _request_once(live_token)
                 except urllib.error.HTTPError:
                     raise e
+            if e.code != 403:
+                raise_loopback_http_error(e)
             raise
         except (
             urllib.error.URLError,

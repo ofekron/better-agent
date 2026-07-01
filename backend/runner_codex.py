@@ -42,6 +42,7 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from codex_usage import token_usage_from_codex_usage
+from loopback_http import raise_loopback_http_error
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
@@ -430,6 +431,8 @@ def _post_loopback_sync(
                     return _request_once(live_token)
                 except urllib.error.HTTPError:
                     raise e
+            if e.code != 403:
+                raise_loopback_http_error(e)
             raise
         except (
             urllib.error.URLError,

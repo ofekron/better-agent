@@ -3,6 +3,7 @@ import sys
 import tempfile
 import urllib.error
 import json
+import io
 from pathlib import Path
 
 import _test_home
@@ -100,6 +101,35 @@ def test_loopback_post_retries_disk_token_after_forbidden(monkeypatch):
 
     assert recovered == {"success": True}
     assert seen_tokens == ["spawn-token", "disk-token"]
+
+
+def test_loopback_post_surfaces_http_error_detail(monkeypatch):
+    def fake_urlopen(req, *args, **kwargs):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b'{"detail":"no idle worker in target_worker_pool"}'),
+        )
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        runner._post_loopback_sync(
+            {},
+            backend_url="http://127.0.0.1:9999",
+            internal_token="token",
+            url_path="/api/internal/ask",
+            timeout=24 * 60 * 60,
+            non_json_t_key="runner.delegate_non_json",
+            log_prefix="ask POST",
+            backoff_cap=60.0,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "HTTP 409: no idle worker in target_worker_pool"
+    else:
+        raise AssertionError("expected HTTP error detail to be surfaced")
 
 
 def test_loopback_post_recovers_completed_delegate_result(monkeypatch):
