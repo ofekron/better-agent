@@ -415,11 +415,31 @@ _SUMMARY_PROJECTION_FIELDS = (
 
 
 def current_turn_error(session: dict) -> Optional[str]:
+    """Durable "does the latest turn have an unseen error" derivation.
+
+    The latest message (any role) is authoritative:
+    - assistant: its `errorText`/`error` fields (set by
+      `set_assistant_error` / `set_msg_retrying_until`).
+    - user: its `errorText` when `status == "error"` — this is the
+      shape left behind when `_finalize_turn_messages` hits its
+      exception path and calls `remove_assistant_msg`, so the failed
+      turn has no assistant message at all and the user message is
+      the only durable record of the failure.
+
+    Only falls back to the `unseen_error` flag when there is no
+    message history yet to derive from."""
     for msg in reversed(session.get("messages") or []):
-        if msg.get("role") != "assistant":
-            continue
-        error = msg.get("error")
-        return str(error) if error else None
+        role = msg.get("role")
+        if role == "assistant":
+            if not msg.get("error"):
+                return None
+            text = msg.get("errorText")
+            return str(text) if text else "error"
+        if role == "user":
+            if msg.get("status") != "error":
+                return None
+            text = msg.get("errorText")
+            return str(text) if text else "error"
     error = session.get("unseen_error")
     return str(error) if error else None
 
