@@ -835,7 +835,11 @@ class OrchestrationStrategy(ABC):
 
 
     def _refresh_message_content_from_event_projection(self, msg: dict, event: dict) -> None:
-        from event_shape import extract_output_text, strip_synthetic_events
+        from event_shape import (
+            extract_output_text,
+            project_content_snapshot,
+            strip_synthetic_events,
+        )
 
         content = extract_output_text(strip_synthetic_events([event]))
         if content:
@@ -844,7 +848,7 @@ class OrchestrationStrategy(ABC):
             return
         events = self._events_list(msg)
         if events:
-            projected = extract_output_text(strip_synthetic_events(events))
+            projected = project_content_snapshot(events, msg.get("content"))
             if projected != (msg.get("content") or ""):
                 msg["content"] = projected
             msg["_content_dirty"] = False

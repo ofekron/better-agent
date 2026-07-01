@@ -280,6 +280,22 @@ def extract_output_text(events: list[dict]) -> str:
     return " ".join(out).strip()
 
 
+def project_content_snapshot(events: list[dict], current: str | None) -> str:
+    """Final-answer content snapshot for an assistant message.
+
+    Single source of truth for every content (re-)projection site.
+    `extract_output_text` is empty when the event list ends on a
+    tool/thinking boundary — e.g. events late-flushed during the runner's
+    babysitter linger, or a continuation turn cut off mid-tools. An empty
+    projection must never clobber an already-set non-empty snapshot, so
+    the caller's current content wins in that case.
+    """
+    projected = extract_output_text(strip_synthetic_events(events or []))
+    if projected:
+        return projected
+    return current or ""
+
+
 def extract_subagent_types(events: list[dict]) -> list[str]:
     """Collect unique subagent_type values from Agent/Task tool_use blocks."""
     seen: set[str] = set()

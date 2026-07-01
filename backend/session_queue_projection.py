@@ -156,6 +156,19 @@ def get(session_id: str) -> Optional[dict[str, Any]]:
         return copy.deepcopy(record) if record is not None else None
 
 
+def get_many(session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    ids = [sid for sid in session_ids if sid]
+    if not ids:
+        return {}
+    with _lock:
+        _load_locked()
+        return {
+            sid: copy.deepcopy(record)
+            for sid in ids
+            if (record := _records.get(sid)) is not None
+        }
+
+
 def queued_prompts(session_id: str) -> list[dict[str, Any]]:
     record = get(session_id)
     if not record:

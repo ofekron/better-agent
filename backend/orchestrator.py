@@ -186,6 +186,7 @@ from event_shape import (
     extract_output_text as _extract_output_text,
     extract_subagent_types as _extract_subagent_types,
     is_synthetic_event as _is_synthetic_event,
+    project_content_snapshot as _project_content_snapshot,
     strip_synthetic_events as _strip_synthetic_events,
 )
 from event_bus import BusEvent, bus
@@ -2101,7 +2102,7 @@ class Coordinator:
         events = assistant_msg.get("events") or []
         if not events:
             return ""
-        projected = _extract_output_text(_strip_synthetic_events(events))
+        projected = _project_content_snapshot(events, content)
         if projected:
             msg_id = assistant_msg.get("id")
             if msg_id:

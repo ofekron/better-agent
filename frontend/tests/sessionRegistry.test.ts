@@ -533,6 +533,54 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
     expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
   });
 
+  it("non-empty run_state does not clobber a richer monitoring_state (#unreliable-running)", async () => {
+    // Regression: session_monitoring_changed and run_state are two
+    // independent, uncoordinated backend broadcasts (no ordering
+    // guarantee between them). run_state used to be naively collapsed to
+    // monitoring_state via `runs.length > 0 ? "active" : "stopped"` — a
+    // stray run_state with a non-empty runs list arriving AFTER the
+    // correct "blocked_on_user"/"waiting_on_background"/"idle" broadcast
+    // would blindly downgrade it to a blunt "active", producing a
+    // flickering/incorrect running badge. A non-empty run_state may only
+    // fast-path stopped -> active; it must never override an
+    // already-richer non-stopped state.
+    await resetRegistry();
+    const sid = "sess-monitoring-race";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "blocked_on_user",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("blocked_on_user");
+    eventBus.publish("run_state", {
+      app_session_id: sid,
+      runs: [{ run_id: "r1", kind: "native" }],
+    });
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("blocked_on_user");
+    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+  });
+
+  it("empty run_state still collapses monitoring_state to stopped", async () => {
+    // Per backend invariant (turn_manager.monitoring_state), a non-stopped
+    // state is only possible with a non-empty run list — so an empty
+    // run_state unambiguously means stopped, and applying it directly is
+    // safe (unlike the non-empty direction above).
+    await resetRegistry();
+    const sid = "sess-monitoring-empty";
+    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "waiting_on_background",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("waiting_on_background");
+    eventBus.publish("run_state", { app_session_id: sid, runs: [] });
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("stopped");
+  });
+
   it("statusRankForRow prefers the live registry over the row snapshot", async () => {
     await resetRegistry();
     const sid = "rank-live";

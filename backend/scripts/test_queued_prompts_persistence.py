@@ -152,6 +152,56 @@ def _run() -> bool:
         f"projected={projected.get('queued_prompts')}",
     ))
 
+    fork_prompt = {
+        **prompt,
+        "id": "fork-queue",
+        "client_id": "fork-client",
+        "lifecycle_msg_id": "fork-life",
+    }
+    root = session_store.copy_persistable_tree(session_manager.get(sid))
+    fork = {
+        **root,
+        "id": "fork-child",
+        "parent_session_id": sid,
+        "forks": [],
+        "messages": [],
+        "queued_prompts": [{"id": "stale-fork-queue"}],
+    }
+    root["forks"] = [fork]
+    session_queue_projection.upsert_record({
+        "id": "fork-child",
+        "model": root.get("model"),
+        "cwd": root.get("cwd"),
+        "queued_prompts": [fork_prompt],
+        "user_messages": [],
+        "user_client_ids": [],
+        "user_lifecycle_msg_ids": [],
+    })
+    original_get = session_queue_projection.get
+    per_node_get_calls = 0
+
+    def tracking_get(session_id: str):
+        nonlocal per_node_get_calls
+        per_node_get_calls += 1
+        return original_get(session_id)
+
+    session_queue_projection.get = tracking_get
+    try:
+        session_store.write_session_full(
+            root,
+            bump_updated_at=False,
+            preserve_projection_fields=True,
+        )
+    finally:
+        session_queue_projection.get = original_get
+    raw = _read_raw(sid)
+    fork_queued = ((raw.get("forks") or [{}])[0].get("queued_prompts") or [])
+    results.append((
+        "queue projection overlays fork records in bulk",
+        per_node_get_calls == 0 and fork_queued == [fork_prompt],
+        f"calls={per_node_get_calls} queued={fork_queued}",
+    ))
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL
