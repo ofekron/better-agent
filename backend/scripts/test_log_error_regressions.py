@@ -502,12 +502,12 @@ def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
 
     claude_home = Path(tempfile.mkdtemp(prefix="bc-test-claude-home-run-cache-"))
     old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    original_candidates = runs_dir_mod._recent_state_candidates
-    calls = {"candidates": 0}
+    original_scan = runs_dir_mod._recent_state_scan
+    calls = {"scan": 0}
 
-    def counted_candidates(*args, **kwargs):
-        calls["candidates"] += 1
-        return original_candidates(*args, **kwargs)
+    def counted_scan(*args, **kwargs):
+        calls["scan"] += 1
+        return original_scan(*args, **kwargs)
 
     try:
         os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
@@ -527,14 +527,14 @@ def test_jsonl_path_reuses_recent_run_state_index(failures: list[str]) -> None:
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
         runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.clear()
-        runs_dir_mod._recent_state_candidates = counted_candidates  # type: ignore[assignment]
+        runs_dir_mod._recent_state_scan = counted_scan  # type: ignore[assignment]
 
         first = helpers.compute_jsonl_path("/tmp", "agent-a")
         second = helpers.compute_jsonl_path("/tmp", "agent-b")
         check(first is not None and second is not None, "jsonl helper resolves cached run-state sids", failures)
-        check(calls["candidates"] == 1, "jsonl helper reuses recent run-state index", failures)
+        check(calls["scan"] == 1, "jsonl helper reuses recent run-state index", failures)
     finally:
-        runs_dir_mod._recent_state_candidates = original_candidates  # type: ignore[assignment]
+        runs_dir_mod._recent_state_scan = original_scan  # type: ignore[assignment]
         helpers._JSONL_PATH_CACHE.clear()
         helpers._CLAUDE_PATH_INDEX = None
         helpers._RUN_STATE_PATH_CACHE.clear()
@@ -571,7 +571,10 @@ def test_jsonl_path_run_state_miss_stays_bounded(failures: list[str]) -> None:
 
         found = helpers.compute_jsonl_path("/tmp", "missing-agent-sid")
         check(found is None, "jsonl helper returns missing run-state sid", failures)
-        _, candidates, _ = next(iter(runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.values()), (0.0, (), {}))
+        _, candidates, _index, _root_signature, _pending = next(
+            iter(runs_dir_mod._RUN_STATE_RECENT_INDEX_CACHE.values()),
+            (0.0, (), {}, (0, 0, 0, 0, 0), ()),
+        )
         check(
             len(candidates) == runs_dir_mod._RUN_STATE_RECENT_SCAN_LIMIT,
             "jsonl helper bounds run-state miss to recent index",
