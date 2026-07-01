@@ -122,10 +122,13 @@ class SessionMinerBase(ABC):
     def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
         """Yield ``(key, visit, mtime)`` for every candidate source."""
 
+    def source_changed(self, key: str, current_mtime: float) -> bool:
+        return current_mtime > self._state.get(key, {}).get("mtime", 0.0)
+
     def __iter__(self) -> Iterable[SessionVisit]:
         for key, visit, current_mtime in self._iter_sources():
             self.scanned_count += 1
-            if current_mtime <= self._state.get(key, {}).get("mtime", 0.0):
+            if not self.source_changed(key, current_mtime):
                 continue
             self._pending_watermarks[key] = current_mtime
             yield visit
@@ -177,6 +180,9 @@ class SessionMiner(SessionMinerBase):
                 _mtime(session_json),
                 _mtime(_events_path(self._root, sid)),
             )
+            if not self.source_changed(key, current_mtime):
+                self.scanned_count += 1
+                continue
             try:
                 data = json.loads(session_json.read_text(encoding="utf-8"))
             except Exception:
