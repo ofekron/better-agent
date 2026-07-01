@@ -1472,6 +1472,10 @@ class Coordinator:
         if run_mode == "fork" and not target_session_id:
             raise ValueError("run_mode=fork requires target_session_id")
         target: Optional[str] = target_session_id or None
+        if target == caller:
+            raise ValueError(
+                "delegate_task target_session_id must not be the sender_session_id"
+            )
         created = False
         forked_from: Optional[str] = None
 
