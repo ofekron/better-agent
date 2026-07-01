@@ -73,17 +73,17 @@ def _candidate(sid: str, cwd: str, turns: list[tuple[str, str, str]]) -> NativeC
     )
 
 
-_ORIG_CANDIDATES = nsp._candidates
+_ORIG_MATCHED = nsp._matched_candidates
 
 
 def _patch_candidates(cands: list[object]) -> None:
-    def fake(allowed: set[str]):
+    def fake(tokens: list[str], allowed: set[str]):
         return [c for c in cands if not allowed or getattr(c, "cwd", "") in allowed]
-    nsp._candidates = fake
+    nsp._matched_candidates = fake
 
 
 def _reset_candidates() -> None:
-    nsp._candidates = _ORIG_CANDIDATES
+    nsp._matched_candidates = _ORIG_MATCHED
 
 
 def test_term_only_in_assistant_reply() -> bool:

@@ -95,19 +95,34 @@ class _RaisingCandidate:
 
 
 def _patch_candidates(monkeypatch_list: list[object]) -> None:
-    def fake(allowed: set[str]):
+    """Inject scripted candidates at the match-resolution seam so unit tests
+    never touch rg or the filesystem."""
+    def fake(tokens: list[str], allowed: set[str]):
         return [
             c for c in monkeypatch_list
             if not allowed or getattr(c, "cwd", "") in allowed
         ]
-    nsp._candidates = fake
+    nsp._matched_candidates = fake
 
 
-_ORIG_CANDIDATES = nsp._candidates
+_ORIG_MATCHED = nsp._matched_candidates
 
 
 def _reset_candidates() -> None:
-    nsp._candidates = _ORIG_CANDIDATES
+    nsp._matched_candidates = _ORIG_MATCHED
+
+
+# Integration-style tests exercise the real Python discovery path; disable rg so
+# they stay deterministic and isolated (rg would search the real home too).
+_ORIG_RG = nsp._rg_filter
+
+
+def _disable_rg() -> None:
+    nsp._rg_filter = lambda tokens: None
+
+
+def _restore_rg() -> None:
+    nsp._rg_filter = _ORIG_RG
 
 
 def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | None = None,
@@ -283,11 +298,13 @@ def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
         encoding="utf-8",
     )
     # Deliberately NO sessions/<sid>.json — the transcript is unlinked.
+    _disable_rg()
     orig = _isolate_native_roots(claude=[projects])
     try:
         out = nsp.search_native_session_prompts(query="zulifrangible task widget")
     finally:
         _restore_native_roots(orig)
+        _restore_rg()
     texts = {r["text"] for r in out}
     ok = "zulifrangible task widget" in texts
     print(f"{OK if ok else FAIL} unlinked claude transcript found via filesystem walk (got {texts})")
@@ -325,6 +342,7 @@ def test_codex_and_gemini_native_transcripts_found() -> bool:
         encoding="utf-8",
     )
 
+    _disable_rg()
     orig = _isolate_native_roots(
         claude=[],
         codex=codex_root,
@@ -334,6 +352,7 @@ def test_codex_and_gemini_native_transcripts_found() -> bool:
         out = nsp.search_native_session_prompts(query="zulifrangible widget")
     finally:
         _restore_native_roots(orig)
+        _restore_rg()
     texts = {r["text"] for r in out}
     ok = (
         "zulifrangible codex widget" in texts
@@ -378,6 +397,41 @@ def _write_raw_transcript(records: list[dict]) -> Path:
     path = _SCRATCH / f"raw_{_seq}.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
     return path
+
+
+def test_rg_filter_narrows_to_files_containing_needle() -> bool:
+    """The rg match-first path finds only files containing the needle and builds
+    candidates from those paths. Skipped when rg isn't installed."""
+    _reset_candidates()
+    if not nsp._rg_filter(["zulifrangible"]):
+        # rg unavailable — the None fallback is covered by the other tests.
+        print(f"{OK} rg-filter test skipped (rg not installed)")
+        return True
+    import native_session_miner as M
+    projects = _SCRATCH / "rg-projects"
+    cwd = "/Users/test/rg-proj"
+    session_dir = projects / encode_cwd(cwd)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "rg-hit.jsonl").write_text(
+        json.dumps({"type": "user", "uuid": "u", "timestamp": "2024-01-01T00:00:00Z",
+                    "message": {"role": "user", "content": "zulifrangible rg needle hunt"}}) + "\n",
+        encoding="utf-8",
+    )
+    (session_dir / "rg-miss.jsonl").write_text(
+        json.dumps({"type": "user", "uuid": "u", "timestamp": "2024-01-01T00:00:00Z",
+                    "message": {"role": "user", "content": "nothing relevant here"}}) + "\n",
+        encoding="utf-8",
+    )
+    orig = _isolate_native_roots(claude=[projects], codex=_SCRATCH / "no-codex",
+                                 gemini=_SCRATCH / "no-gemini", runs=_SCRATCH / "no-runs")
+    try:
+        cands = nsp._matched_candidates(["zulifrangible"], set())
+    finally:
+        _restore_native_roots(orig)
+    sids = {c.sid for c in cands}
+    ok = sids == {"rg-hit"}
+    print(f"{OK if ok else FAIL} rg filter narrows to needle files (got sids={sids})")
+    return ok
 
 
 def test_generalized_search_greps_tool_calls_and_results() -> bool:
@@ -477,6 +531,7 @@ def main_run() -> int:
         test_codex_and_gemini_native_transcripts_found,
         test_categorizer_maps_elements_to_categories,
         test_generalized_search_greps_tool_calls_and_results,
+        test_rg_filter_narrows_to_files_containing_needle,
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]

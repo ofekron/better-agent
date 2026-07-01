@@ -25,19 +25,28 @@ the LLM processor.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable
 
 from native_session_miner import (
     NativeCandidate,
+    _ba_session_cwd,
+    _codex_first_cwd,
+    _decode_cwd_token,
+    _mtime,
     iter_all_native_candidates,
 )
 from paths import encode_cwd
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _MAX_WORKERS = min(32, (os.cpu_count() or 4) * 4)
+_RG_TIMEOUT_SECONDS = 120
 
 # Common English function words carry no query signal — a prompt matching only
 # one of these would score 1 on pure noise, so they are dropped from the tokens.
@@ -49,15 +58,11 @@ _STOPWORDS = frozenset({
 
 
 def _candidates(allowed: set[str]) -> list[NativeCandidate]:
-    """Cheap filesystem-first discovery across all providers, cwd-filtered
-    before any parse.
-
-    Walks every native transcript on disk (claude projects + run-dirs) so the
-    search covers direct-CLI and extension-spawned sessions that have no Better
-    Agent session record — the BA-indexed miners miss ~99% of the corpus. The
-    cwd filter compares encoded forms because claude projects encode ``/`` and
-    ``_`` both to ``-``, making the decoded cwd ambiguous for underscore paths.
-    """
+    """Filesystem-first discovery across all providers, cwd-filtered. The
+    pure-Python fallback used when ``rg`` is unavailable; otherwise
+    :func:`_matched_candidates` short-circuits this with an ``rg`` pass that
+    returns only files containing a needle, so the 55k-file full walk never
+    runs for a real query."""
     allowed_encoded = {encode_cwd(c) for c in allowed}
     out: list[NativeCandidate] = []
     for candidate in iter_all_native_candidates():
@@ -67,6 +72,142 @@ def _candidates(allowed: set[str]) -> list[NativeCandidate]:
         if candidate.cwd in allowed or encode_cwd(candidate.cwd) in allowed_encoded:
             out.append(candidate)
     return out
+
+
+def _cwd_ok(cwd: str, allowed: set[str], allowed_encoded: set[str]) -> bool:
+    if not allowed:
+        return True
+    return cwd in allowed or encode_cwd(cwd) in allowed_encoded
+
+
+# ─── rg match-first filter ─────────────────────────────────────────────────
+# rg greps the raw transcripts natively (SIMD, parallel) and returns only the
+# files containing a needle token. We then build NativeCandidates — resolving
+# sid/cwd/format from the matched PATH — and run the expensive parse only on
+# those few files. This inverts the old "discover 55k → parse all" flow: match
+# first, resolve metadata only for matches. Discovery (the ~69s codex-cwd walk)
+# never runs on the rg path.
+
+def _native_roots() -> list[tuple[Path, str]]:
+    """(root, format-tag) for every native transcript store. ``runs`` is tagged
+    distinctly because its cwd/sid come from ``state.json`` even though the
+    transcript itself is Claude-shaped. Root helpers are resolved through the
+    module so tests can monkeypatch them."""
+    import native_session_miner as nm
+    roots: list[tuple[Path, str]] = []
+    for projects in nm._claude_projects_roots():
+        roots.append((projects, "claude"))
+    codex = nm._codex_sessions_root()
+    if codex.exists():
+        roots.append((codex, "codex"))
+    gemini = nm._gemini_chats_root()
+    if gemini.exists():
+        roots.append((gemini, "gemini"))
+    runs = nm._runs_root()
+    if runs.exists():
+        roots.append((runs, "runs"))
+    return roots
+
+
+def _classify_root(path: Path, roots: list[tuple[Path, str]]) -> str:
+    for root, tag in roots:
+        try:
+            path.relative_to(root)
+            return tag
+        except ValueError:
+            continue
+    return "claude"
+
+
+def _rg_filter(tokens: list[str]) -> list[tuple[Path, str]] | None:
+    """Run ripgrep over every native root for the query tokens; return the
+    matched ``(path, format-tag)`` pairs, or ``None`` to signal the caller must
+    fall back to pure-Python discovery (rg missing / errored).
+
+    The pattern is a whole-word alternation of ``re.escape``'d tokens; it is a
+    safe SUPerset of the authoritative Python ``\\b`` match that
+    :func:`_match_elements` applies later, so a loose rg word-boundary edge case
+    can only over-include, never drop a real hit."""
+    if not tokens:
+        return None
+    rg = shutil.which("rg")
+    if not rg:
+        return None
+    roots = _native_roots()
+    if not roots:
+        return None
+    pattern = "|".join(re.escape(t) for t in tokens)
+    # --max-count 1: one match per file is enough — we only need the PATH (we
+    # re-parse the file ourselves); without it a common token emits a JSON
+    # record per occurrence across tens of thousands of files, dwarfing the grep.
+    argv = [rg, "--json", "-i", "-w", "--max-count", "1", "--no-messages",
+            "-g", "*.jsonl", "-e", pattern, *[str(r) for r, _ in roots]]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=_RG_TIMEOUT_SECONDS)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode not in (0, 1):
+        return None
+    matched: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for line in proc.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "match":
+            continue
+        path = (obj.get("data") or {}).get("path", {}).get("text")
+        if not isinstance(path, str) or path in seen:
+            continue
+        seen.add(path)
+        matched.append((Path(path), _classify_root(Path(path), roots)))
+    return matched
+
+
+def _runs_app_session_id(run_dir: Path) -> str:
+    try:
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    aid = state.get("app_session_id")
+    return aid if isinstance(aid, str) else ""
+
+
+def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
+    """Resolve a NativeCandidate from a matched PATH — cheap, no full parse.
+    codex cwd needs the first ``session_meta`` line, but only for the handful of
+    matched codex files, not all 30k."""
+    if tag == "codex":
+        return NativeCandidate(key=f"codex-rg:{path.name}", sid=path.stem,
+                               cwd=_codex_first_cwd(path), data={}, transcript=path,
+                               mtime=_mtime(path), format="codex")
+    if tag == "gemini":
+        cwd = _decode_cwd_token(path.parent.parent.name)  # tmp/<enc>/chats/<file>
+        return NativeCandidate(key=f"gemini-rg:{path.name}", sid=path.stem, cwd=cwd,
+                               data={}, transcript=path, mtime=_mtime(path), format="gemini")
+    if tag == "runs":
+        run_dir = path.parent
+        sid = _runs_app_session_id(run_dir) or run_dir.name
+        return NativeCandidate(key=f"run-rg:{run_dir.name}", sid=sid,
+                               cwd=_ba_session_cwd(sid), data={}, transcript=path,
+                               mtime=_mtime(path), format="claude")
+    cwd = _decode_cwd_token(path.parent.name)  # projects/<enc>/<file>
+    return NativeCandidate(key=f"claude-rg:{path.name}", sid=path.stem, cwd=cwd,
+                           data={}, transcript=path, mtime=_mtime(path), format="claude")
+
+
+def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCandidate]:
+    """Match-first candidate resolution: ``rg`` narrows to files containing a
+    needle, we build candidates from those paths only, then cwd-filter. Falls
+    back to :func:`_candidates` (full discovery) when ``rg`` is unavailable."""
+    hits = _rg_filter(tokens)
+    if hits is None:
+        return _candidates(allowed)
+    allowed_encoded = {encode_cwd(c) for c in allowed}
+    return [c for c in (_candidate_from_match(p, tag) for p, tag in hits)
+            if _cwd_ok(c.cwd, allowed, allowed_encoded)]
 
 
 def _query_tokens(query: str) -> list[str]:
@@ -235,7 +376,7 @@ def _search_elements(
         return []
     patterns = _token_patterns(tokens)
     allowed = {c for c in cwds if isinstance(c, str) and c.strip()}
-    candidates = _candidates(allowed)
+    candidates = _matched_candidates(tokens, allowed)
     if not candidates:
         return []
 
