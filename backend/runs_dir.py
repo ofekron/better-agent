@@ -27,6 +27,7 @@ from paths import ba_home
 
 logger = logging.getLogger(__name__)
 _RUN_STATE_LEDGER_NAME = "run_state_index.jsonl"
+_RUN_STATE_LEDGER_SEEN: set[tuple[str, str, str]] = set()
 
 
 def runs_root() -> Path:
@@ -45,6 +46,9 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
     if not session_id or not jsonl_path:
         return
     try:
+        key = (str(path), str(session_id), str(jsonl_path))
+        if key in _RUN_STATE_LEDGER_SEEN:
+            return
         row = {
             "session_id": str(session_id),
             "jsonl_path": str(jsonl_path),
@@ -53,10 +57,34 @@ def _append_run_state_ledger(path: Path, data: dict) -> None:
         }
         ledger = run_state_ledger_path(path.parent.parent)
         ledger.parent.mkdir(parents=True, exist_ok=True)
+        if _run_state_ledger_has_key(ledger, key):
+            _RUN_STATE_LEDGER_SEEN.add(key)
+            return
         with ledger.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        _RUN_STATE_LEDGER_SEEN.add(key)
     except Exception:
         logger.exception("runs_dir: failed to append run-state ledger")
+
+
+def _run_state_ledger_has_key(ledger: Path, key: tuple[str, str, str]) -> bool:
+    try:
+        with ledger.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                existing = (
+                    str(row.get("state_path") or ""),
+                    str(row.get("session_id") or ""),
+                    str(row.get("jsonl_path") or ""),
+                )
+                if existing == key:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def iter_run_dirs(run_id_filter: Optional[set[str]] = None):
