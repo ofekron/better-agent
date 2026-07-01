@@ -16,7 +16,7 @@ from provisioning import DirtyPolicy, ProvisionedSessionSpec
 from provisioning.prompts import render_prompt
 
 RG_TIMEOUT_SECONDS = 30
-DEFAULT_MATCH_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
+DEFAULT_MATCH_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd", "ts")
 MATCH_FIELD_ORDER = (
     "source_key",
     "source_prompt_key",
@@ -74,7 +74,7 @@ RG_OPTIONS_WITH_VALUE = {
 
 class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 3
+    version = 4
     name = "worker:requirements:query-processor"
     env_prefix = "GET_REQUIREMENTS_PROCESSOR"
     task_key = "requirement_analysis"
@@ -116,7 +116,11 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
             "Use broad key phrases from request.query. Extra query words may be noisy, so do not require "
             "every term to match. Treat raw matches as candidate requirements and return any match that is "
             "semantically related to the request or to a concrete failure/tool/provider named in it. "
-            "Use cwd/cwds/all_projects/max_matches from the request. "
+            "Use cwd/cwds/all_projects/max_matches from the request.\n"
+            "Each match carries its full timestamp in the `ts` field, and matches are ordered oldest-first "
+            "by `ts`. Read them in that chronological order: it shows how the requirement evolved over time, "
+            "so a later prompt refines or overrides an earlier one on the same topic — weight the latest "
+            "statement accordingly.\n"
             "Return only the required JSON object.\n"
             f"<request>\n{json.dumps(request, ensure_ascii=False)}\n</request>"
         )
@@ -171,7 +175,7 @@ def get_processed_requirements(
     if not isinstance(requirements, list):
         requirements = []
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
-    if error:
+    if error and not requirements:
         fallback = _native_session_fallback(
             query=normalized_query,
             cwd=cwd,
@@ -371,7 +375,7 @@ def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]
         requirement = {
             "text": text,
         }
-        for key in ("kind", "polarity", "strength", "source", "cwd"):
+        for key in ("kind", "polarity", "strength", "source", "cwd", "ts"):
             value = match.get(key)
             if key == "polarity" and value is None:
                 value = ""
@@ -379,6 +383,13 @@ def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]
                 requirement[key] = value
         requirements.append(requirement)
     return requirements
+
+
+def _sort_matches_by_ts_asc(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order matches oldest-first by timestamp so the requirement-building LLM
+    reads a requirement's evolution over time; matches without a timestamp sort
+    last."""
+    return sorted(matches, key=lambda m: (not m.get("ts"), m.get("ts") or ""))
 
 
 def search_requirements(
@@ -554,6 +565,7 @@ def _search_requirements_prepared(
         remaining=_remaining_matches(normalized_max_matches, len(matches)),
     )
     matches.extend(fallback_result.pop("matches"))
+    matches = _sort_matches_by_ts_asc(matches)
     stdout = _records_stdout(matches)
     authoritative = bool(freshness.get("fresh"))
     return {
