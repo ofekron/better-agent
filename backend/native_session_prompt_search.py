@@ -201,21 +201,27 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
 def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCandidate]:
     """Match-first candidate resolution.
 
-    Fast path: the native FTS5 index (:mod:`native_transcript_index`) when it
-    is covered + fresh — returns matched paths in ms. Correct because a covered
-    + fresh index reflects the current corpus (every file's mtime+size matches
-    what was indexed).
+    Fast path: the native FTS5 index (:mod:`native_transcript_index`) once it
+    has caught up (covered). If covered but momentarily stale, REQUEST a delta
+    refresh and wait for it (one cheap stat-walk + parse-changed-only) rather
+    than dropping to rg — a covered index is only seconds stale. Correct because
+    the waited refresh's stat-walk sees every file as of that moment.
 
-    Fallback: ``rg`` narrows to files containing a needle, we build candidates
-    from those paths only, then cwd-filter. Falls back further to
+    Fallback: ``rg`` when the index is not covered (cold start) or the wait
+    times out / fails. ``rg`` narrows to files containing a needle; we build
+    candidates from those paths only, then cwd-filter. Falls back further to
     :func:`_candidates` (full discovery) when ``rg`` is unavailable."""
     if tokens:
         try:
             import native_transcript_index as _idx
-            if _idx.is_usable():
-                hits = _idx.match_paths(tokens, allowed)
-                if hits is not None:
-                    return [_candidate_from_match(p, tag) for p, tag in hits]
+            if _idx.is_covered():
+                if not _idx.is_usable():
+                    _idx.request_refresh()
+                    _idx.wait_fresh()
+                if _idx.is_usable():
+                    hits = _idx.match_paths(tokens, allowed)
+                    if hits is not None:
+                        return [_candidate_from_match(p, tag) for p, tag in hits]
         except Exception:
             pass
     hits = _rg_filter(tokens)
