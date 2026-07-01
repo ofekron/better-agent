@@ -634,6 +634,7 @@ export function useWebSocket(
 
     ws.onopen = () => {
       setConnected(true);
+      eventBus.publish("websocket.connected", {});
     };
 
     ws.onclose = (ev) => {
