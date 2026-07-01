@@ -65,7 +65,8 @@ from orchestration_tool_schemas import (
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
 )
 from paths import ba_home
-from provider_run_config import toml_literal, write_skill_tree
+from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
+from runtime_skills import materialize_runtime_skills
 from proc_control import process_control as _process_control
 
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
@@ -145,17 +146,46 @@ def _codex_thread_capability_params(
     return params
 
 
-def _codex_config_overrides(run_dir: Path, provider_run_config: dict) -> list[str]:
+def _codex_config_overrides(
+    run_dir: Path,
+    provider_run_config: dict,
+) -> list[str]:
     overrides: list[str] = []
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     if mcp_servers:
         overrides.append(f"mcp_servers={toml_literal(mcp_servers)}")
 
+    return overrides
+
+
+def _materialize_codex_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    cwd: str,
+    bare_config: bool = False,
+) -> dict[str, str]:
+    real_home = Path.home()
+    overlay_home = run_dir / "codex-home"
+    symlink_home_overlay(real_home, overlay_home, skip={".codex", ".agents"})
+    symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
+
+    real_codex_home = Path(os.environ.get("CODEX_HOME") or real_home / ".codex").expanduser()
+    overlay_codex_home = overlay_home / ".codex"
+    if real_codex_home.exists() and not overlay_codex_home.exists() and not overlay_codex_home.is_symlink():
+        os.symlink(real_codex_home, overlay_codex_home, target_is_directory=real_codex_home.is_dir())
+
+    skills_root = overlay_home / ".agents" / "skills"
+    materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
+
     skills = provider_run_config.get("skills") or {}
     if skills:
-        write_skill_tree(run_dir / "codex-skills" / ".agents" / "skills", skills)
+        write_skill_tree(skills_root, skills)
 
-    return overrides
+    env = {"HOME": str(overlay_home)}
+    if overlay_codex_home.exists() or overlay_codex_home.is_symlink():
+        env["CODEX_HOME"] = str(overlay_codex_home)
+    return env
 
 
 def _context_strategy_config_overrides(inputs: dict) -> list[str]:
@@ -2639,6 +2669,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
     prompt = inputs.get("prompt") or ""
     images = inputs.get("images") or []
+    bare_config = bool(inputs.get("bare_config"))
     cwd = inputs.get("cwd")
     if not cwd:
         _fail(run_dir, "missing required field: cwd")
@@ -2661,6 +2692,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     run_env = os.environ.copy()
     run_env.update(native_mcp_runtime_env(runner_inputs))
+    run_env.update(_materialize_codex_run_home(
+        run_dir,
+        provider_run_config,
+        cwd=cwd,
+        bare_config=bare_config,
+    ))
     backend_url = inputs.get("backend_url") or get_env(
         "BETTER_CLAUDE_BACKEND_URL",
         "http://localhost:8000",
