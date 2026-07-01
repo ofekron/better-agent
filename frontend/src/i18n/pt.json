@@ -459,8 +459,6 @@
   "session.aiSearchLoading": "Pesquisando…",
   "session.aiSearchClear": "Limpar resultados",
   "session.aiSearchMatches": "{{count}} correspondências",
-  "session.searchNativeOff": "Pesquisar também nas transcrições nativas do provedor",
-  "session.searchNativeOn": "Pesquisando também transcrições nativas — clique para desativar",
   "session.aiSearchViewFull": "Ver raciocínio completo",
   "session.aiSearchClose": "Fechar",
   "session.aiSearchDetailsTitle": "Detalhes da busca por IA",

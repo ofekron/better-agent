@@ -459,8 +459,6 @@
   "session.aiSearchLoading": "جارٍ البحث…",
   "session.aiSearchClear": "مسح النتائج",
   "session.aiSearchMatches": "{{count}} مطابقات",
-  "session.searchNativeOff": "ابحث أيضًا في نصوص جلسات المزود الأصلية",
-  "session.searchNativeOn": "يجري البحث أيضًا في النصوص الأصلية — انقر للتعطيل",
   "session.aiSearchViewFull": "عرض الاستدلال الكامل",
   "session.aiSearchClose": "إغلاق",
   "session.aiSearchDetailsTitle": "تفاصيل بحث AI",

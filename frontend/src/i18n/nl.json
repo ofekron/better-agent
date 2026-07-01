@@ -455,8 +455,6 @@
   "session.aiSearchLoading": "Zoeken…",
   "session.aiSearchClear": "Resultaten wissen",
   "session.aiSearchMatches": "{{count}} treffers",
-  "session.searchNativeOff": "Zoek ook in provider-native sessietranscripties",
-  "session.searchNativeOn": "Zoekt ook in provider-native transcripties — klik om uit te schakelen",
   "session.aiSearchViewFull": "Volledige redenering bekijken",
   "session.aiSearchClose": "Sluiten",
   "session.aiSearchDetailsTitle": "Details van AI-zoekopdracht",

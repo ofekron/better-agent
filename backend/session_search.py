@@ -267,34 +267,11 @@ def _candidate_payload(
     return payload
 
 
-def _native_snippets(query: str, limit: int) -> dict[str, str]:
-    """`{sid: matching_prompt}` grepped from the raw provider-native session
-    transcripts (Claude/Codex/Gemini/Better Agent). Reuses the same fan-out as
-    the get-requirements native fallback so the raw corpus has one grep path.
-    Returns the highest-overlap prompt per session; `{}` on any failure."""
-    try:
-        import native_session_prompt_search
-        matches = native_session_prompt_search.search_native_session_prompts(
-            query=query, max_matches=limit,
-        )
-    except Exception:
-        logger.debug("_search_candidates: native session grep failed", exc_info=True)
-        return {}
-    snippets: dict[str, str] = {}
-    for record in matches:
-        sid = str(record.get("sid") or "")
-        text = record.get("text")
-        if sid and isinstance(text, str) and sid not in snippets:
-            snippets[sid] = text
-    return snippets
-
-
 def _search_candidates(
     query: str,
     *,
     filters: Optional[dict] = None,
     limit: int = _SEARCH_CANDIDATE_LIMIT,
-    search_native: bool = False,
 ) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
     if not tokens:
@@ -331,17 +308,6 @@ def _search_candidates(
             sid = str(row.get("id") or "")
             if sid not in metadata_ids and content_scores.get(sid, 0) > 0:
                 scored.append((2, row, ""))
-    if search_native and len(scored) < limit:
-        rows_by_id = {str(row.get("id") or ""): row for row in rows}
-        chosen = {str(row.get("id") or "") for _, row, _ in scored}
-        for sid, snippet in _native_snippets(query, max(len(rows), limit)).items():
-            if sid in chosen:
-                continue
-            row = rows_by_id.get(sid)
-            if row is None:
-                continue
-            scored.append((2, row, snippet))
-            chosen.add(sid)
     scored.sort(
         key=lambda item: (
             item[0],
@@ -658,7 +624,6 @@ async def run_search_sessions_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     node_id: Optional[str] = None,
-    search_native: bool = False,
 ) -> dict:
     """Run one provisioned search-worker fork and return the ranked ids.
 
@@ -688,9 +653,7 @@ async def run_search_sessions_session(
         node_id=node_id,
     )
     with perf.timed("ask.search_candidates"):
-        candidates = await asyncio.to_thread(
-            _search_candidates, query, filters=filters, search_native=search_native,
-        )
+        candidates = await asyncio.to_thread(_search_candidates, query, filters=filters)
     if not candidates:
         return {"session_ids": [], "reasoning": "", "error": None}
 
