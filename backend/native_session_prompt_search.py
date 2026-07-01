@@ -7,21 +7,28 @@ Codex / Gemini / Better Agent run-dir ``session_events.jsonl`` — so this is th
 "every provider with its own grepping method" fan-out. It reuses the canonical
 :mod:`native_session_miner` readers (no watermark → scan every transcript) and
 greps the typed user prompts for the query tokens.
+
+Discovery (cheap) is separated from parsing (expensive: read + JSON-parse each
+transcript). Parsing + matching runs concurrently across a thread pool, since
+the workload is I/O bound over many small transcript files.
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import Any, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 from native_session_miner import (
     NativeBetterAgentSessionMiner,
+    NativeCandidate,
     NativeClaudeSessionMiner,
     NativeCodexSessionMiner,
     NativeGeminiSessionMiner,
 )
-from session_miner import SessionVisit
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_MAX_WORKERS = min(32, (os.cpu_count() or 4) * 4)
 
 
 def _native_miners() -> list:
@@ -43,15 +50,53 @@ def _query_tokens(query: str) -> list[str]:
     return [tok for tok in _TOKEN_RE.findall(query.lower()) if len(tok) >= 2]
 
 
-def _iter_visits() -> Iterable[SessionVisit]:
+def _candidates(allowed: set[str]) -> list[NativeCandidate]:
+    """Cheap discovery across all providers, cwd-filtered before any parse."""
+    out: list[NativeCandidate] = []
     for miner in _native_miners():
         try:
-            for _key, visit, _mtime in miner._iter_sources():
-                yield visit
+            for candidate in miner.iter_candidates():
+                if allowed and candidate.cwd not in allowed:
+                    continue
+                out.append(candidate)
         except Exception:
-            # One provider's transcripts being unreadable must not sink the
-            # whole fallback — the other providers still answer.
+            # One provider's discovery failing must not sink the others.
             continue
+    return out
+
+
+def _match_candidate(
+    candidate: NativeCandidate,
+    tokens: list[str],
+    is_noise: Callable[[str], bool] | None,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Parse one transcript and score its user prompts against the tokens."""
+    visit = candidate.parse()
+    if visit is None:
+        return []
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for msg in visit.messages:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text or (is_noise is not None and is_noise(text)):
+            continue
+        lowered = text.lower()
+        score = sum(1 for tok in tokens if tok in lowered)
+        if score == 0:
+            continue
+        scored.append((score, {
+            "text": text,
+            "kind": "native_session_prompt",
+            "source": "native_session_fallback",
+            "cwd": visit.cwd,
+            "sid": visit.sid,
+            "ts": msg.get("timestamp") if isinstance(msg.get("timestamp"), str) else "",
+        }))
+    return scored
 
 
 def search_native_session_prompts(
@@ -74,31 +119,19 @@ def search_native_session_prompts(
     if not tokens:
         return []
     allowed = {c for c in cwds if isinstance(c, str) and c.strip()}
+    candidates = _candidates(allowed)
+    if not candidates:
+        return []
+
     scored: list[tuple[int, dict[str, Any]]] = []
-    for visit in _iter_visits():
-        if allowed and visit.cwd not in allowed:
-            continue
-        for msg in visit.messages:
-            if not isinstance(msg, dict) or msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, str):
-                continue
-            text = content.strip()
-            if not text or (is_noise is not None and is_noise(text)):
-                continue
-            lowered = text.lower()
-            score = sum(1 for tok in tokens if tok in lowered)
-            if score == 0:
-                continue
-            scored.append((score, {
-                "text": text,
-                "kind": "native_session_prompt",
-                "source": "native_session_fallback",
-                "cwd": visit.cwd,
-                "sid": visit.sid,
-                "ts": msg.get("timestamp") if isinstance(msg.get("timestamp"), str) else "",
-            }))
+    workers = max(1, min(_MAX_WORKERS, len(candidates)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for chunk in pool.map(
+            lambda candidate: _match_candidate(candidate, tokens, is_noise),
+            candidates,
+        ):
+            scored.extend(chunk)
+
     scored.sort(key=lambda item: (item[0], item[1].get("ts") or ""), reverse=True)
     matches: list[dict[str, Any]] = []
     seen_text: set[str] = set()
