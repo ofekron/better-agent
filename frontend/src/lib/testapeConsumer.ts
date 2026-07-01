@@ -117,9 +117,11 @@ function readRegion(
   root: HTMLElement,
   kind: ChatPanelRegion["kind"],
   sessionId: string | null,
-  viewport: DOMRect,
+  outerViewport: DOMRect,
   focused?: boolean,
 ): ChatPanelRegion {
+  const viewport = effectiveRegionViewport(root, outerViewport);
+  if (!viewport) return { kind, session_id: sessionId, focused, messages: [] };
   const messages = Array.from(
     root.querySelectorAll<HTMLElement>(
       [
@@ -133,6 +135,55 @@ function readRegion(
     .map(readMessage)
     .filter((m): m is ChatPanelMessage => m !== null);
   return { kind, session_id: sessionId, focused, messages };
+}
+
+function effectiveRegionViewport(root: HTMLElement, outerViewport: DOMRect): DOMRect | null {
+  const regionRect = regionViewport(root);
+  let viewport = regionRect;
+  if (hasArea(outerViewport) && hasArea(regionRect)) {
+    viewport = intersectRects(outerViewport, regionRect);
+    if (!hasArea(viewport)) return null;
+  }
+  const forkGrid = root.closest<HTMLElement>('[data-testid="fork-grid"]');
+  if (forkGrid) {
+    const gridRect = forkGrid.getBoundingClientRect();
+    if (hasArea(gridRect) && hasArea(viewport)) {
+      viewport = intersectRects(viewport, gridRect);
+      if (!hasArea(viewport)) return null;
+    }
+  }
+  return viewport;
+}
+
+function hasArea(rect: DOMRect): boolean {
+  return rect.width > 0 && rect.height > 0;
+}
+
+function regionViewport(root: HTMLElement): DOMRect {
+  return (
+    root.querySelector<HTMLElement>(".fork-pane-messages")?.getBoundingClientRect() ??
+    root.getBoundingClientRect()
+  );
+}
+
+function intersectRects(a: DOMRect, b: DOMRect): DOMRect {
+  const left = Math.max(a.left, b.left);
+  const right = Math.min(a.right, b.right);
+  const top = Math.max(a.top, b.top);
+  const bottom = Math.min(a.bottom, b.bottom);
+  const width = Math.max(0, right - left);
+  const height = Math.max(0, bottom - top);
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width,
+    height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
 }
 
 export function extractVisibleChatPanelTree(): ChatPanelTree {
