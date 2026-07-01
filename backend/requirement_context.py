@@ -32,13 +32,19 @@ MATCH_FIELD_ORDER = (
     "edited_files",
     "git_commits",
     "sid",
+    "path",
     "ts",
     "user_seq",
+    "native_hit_index",
 )
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
+NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
 PROCESSOR_PARSE_ATTEMPTS = 3
 PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
+NATIVE_BUNDLE_HIT_LIMIT = 6
+NATIVE_BUNDLE_WINDOW_BEFORE = 5
+NATIVE_BUNDLE_WINDOW_AFTER = 8
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
@@ -74,7 +80,7 @@ RG_OPTIONS_WITH_VALUE = {
 
 class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
     key = GET_REQUIREMENTS_PROCESSOR_KEY
-    version = 4
+    version = 5
     name = "worker:requirements:query-processor"
     env_prefix = "GET_REQUIREMENTS_PROCESSOR"
     task_key = "requirement_analysis"
@@ -116,6 +122,9 @@ class GetRequirementsProcessorSpec(ProvisionedSessionSpec):
             "Use broad key phrases from request.query. Extra query words may be noisy, so do not require "
             "every term to match. Treat raw matches as candidate requirements and return any match that is "
             "semantically related to the request or to a concrete failure/tool/provider named in it. "
+            "Matches with kind=native_transcript_bundle are raw transcript evidence: read the assistant "
+            "proposal and following user turns in the bundle, then return the requirement only when the "
+            "user confirms, adopts, or refines it; return the refined user-approved requirement text. "
             "Use cwd/cwds/all_projects/max_matches from the request.\n"
             "Each match carries its full timestamp in the `ts` field, and matches are ordered oldest-first "
             "by `ts`. Read them in that chronological order: it shows how the requirement evolved over time, "
@@ -520,6 +529,14 @@ def _search_requirements_prepared(
         remaining=_remaining_matches(normalized_max_matches, len(matches)),
     )
     matches.extend(fallback_result.pop("matches"))
+    native_result = _search_native_transcript_bundles(
+        rg_args=normalized_args,
+        cwds=normalized_cwds,
+        fields=normalized_fields,
+        enabled=include_unprocessed_prompts and fields is None and not include_all_fields,
+        remaining=_remaining_matches(normalized_max_matches, len(matches)),
+    )
+    matches.extend(native_result.pop("matches"))
     matches = _sort_matches_by_ts_asc(matches)
     stdout = _records_stdout(matches)
     authoritative = bool(freshness.get("fresh"))
@@ -535,6 +552,7 @@ def _search_requirements_prepared(
         "matches": matches,
         "count": len(matches),
         "unprocessed_prompt_fallback": fallback_result,
+        "native_transcript_bundles": native_result,
         "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
         "cwd_filters": list(normalized_cwds),
         "all_projects": all_projects,
@@ -772,6 +790,226 @@ def _prompt_fallback_record(prompt: dict[str, Any], key: str) -> dict[str, Any]:
         "edited_files": prompt.get("edited_files") if isinstance(prompt.get("edited_files"), list) else [],
         "git_commits": prompt.get("git_commits") if isinstance(prompt.get("git_commits"), list) else [],
     }
+
+
+def _search_native_transcript_bundles(
+    *,
+    rg_args: list[str],
+    cwds: tuple[str, ...],
+    fields: tuple[str, ...] | None,
+    enabled: bool,
+    remaining: int | None,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "searched": False, "matches": [], "count": 0}
+    if remaining is not None and remaining <= 0:
+        return {"enabled": True, "searched": False, "matches": [], "count": 0, "reason": "match_limit_reached"}
+    query = _query_text_from_rg_args(rg_args)
+    if not query:
+        return {"enabled": True, "searched": False, "matches": [], "count": 0, "reason": "no_query_terms"}
+    native_limit = min(remaining, NATIVE_BUNDLE_HIT_LIMIT) if remaining is not None else NATIVE_BUNDLE_HIT_LIMIT
+    raw = _native_transcript_bundle_records(query=query, cwds=cwds, limit=native_limit)
+    matches = _project_records(raw["matches"], fields)
+    return {
+        "enabled": True,
+        "searched": raw["searched"],
+        "matches": matches,
+        "count": len(matches),
+        "query": query,
+        "index": raw["index"],
+        **({"error": raw["error"]} if raw.get("error") else {}),
+        **({"reason": raw["reason"]} if raw.get("reason") else {}),
+    }
+
+
+def _query_text_from_rg_args(rg_args: list[str]) -> str:
+    patterns: list[str] = []
+    skip_next = False
+    for index, arg in enumerate(rg_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("-e", "--regexp"):
+            if index + 1 < len(rg_args):
+                patterns.append(rg_args[index + 1])
+                skip_next = True
+            continue
+        if arg in RG_OPTIONS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        patterns.append(arg)
+    return " ".join(pattern.strip() for pattern in patterns if pattern.strip())
+
+
+def _native_transcript_bundle_records(
+    *,
+    query: str,
+    cwds: tuple[str, ...],
+    limit: int,
+) -> dict[str, Any]:
+    try:
+        from native_session_prompt_search import _query_tokens
+        import native_transcript_index
+
+        tokens = _query_tokens(query)
+        if not tokens:
+            return _native_bundle_result([], searched=False, reason="no_tokens")
+        native_transcript_index.ensure_started()
+        if native_transcript_index.is_covered() and not native_transcript_index.is_usable():
+            native_transcript_index.request_refresh()
+            native_transcript_index.wait_fresh()
+        index_state = {
+            "covered": native_transcript_index.is_covered(),
+            "usable": native_transcript_index.is_usable(),
+        }
+        if not index_state["usable"]:
+            return _native_bundle_result([], searched=False, reason="index_not_usable", index=index_state)
+        rows = _native_transcript_sql_window_rows(
+            native_transcript_index,
+            tokens=tokens,
+            cwds=cwds,
+            limit=limit,
+        )
+        return _native_bundle_result(_native_bundle_records_from_rows(rows), searched=True, index=index_state)
+    except Exception as exc:
+        return _native_bundle_result([], searched=False, error=str(exc))
+
+
+def _native_bundle_result(
+    matches: list[dict[str, Any]],
+    *,
+    searched: bool,
+    index: dict[str, Any] | None = None,
+    reason: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "matches": matches,
+        "searched": searched,
+        "index": index or {"covered": False, "usable": False},
+        **({"reason": reason} if reason else {}),
+        **({"error": error} if error else {}),
+    }
+
+
+def _native_transcript_sql_window_rows(
+    native_transcript_index: Any,
+    *,
+    tokens: list[str],
+    cwds: tuple[str, ...],
+    limit: int,
+) -> list[dict[str, Any]]:
+    match_expr = native_transcript_index._match_expr(tokens)
+    cwd_clause = ""
+    params: list[Any] = [match_expr]
+    if cwds:
+        placeholders = ",".join("?" for _ in cwds)
+        cwd_clause = f" AND cwd IN ({placeholders})"
+        params.extend(cwds)
+    params.extend([limit, NATIVE_BUNDLE_WINDOW_BEFORE, NATIVE_BUNDLE_WINDOW_AFTER])
+    sql = f"""
+        WITH hits AS (
+            SELECT
+                path,
+                CAST(element_index AS INTEGER) AS hit_index,
+                bm25(native_element_fts) AS rank
+            FROM native_element_fts
+            WHERE native_element_fts MATCH ?{cwd_clause}
+            ORDER BY rank, path, hit_index
+            LIMIT ?
+        )
+        SELECT
+            h.hit_index,
+            e.text,
+            e.path,
+            e.sid,
+            e.cwd,
+            e.tag,
+            e.element_kind,
+            e.tool_name,
+            e.ts,
+            e.role,
+            e.element_id,
+            e.element_index
+        FROM hits h
+        JOIN native_element_fts e ON e.path = h.path
+        WHERE CAST(e.element_index AS INTEGER)
+            BETWEEN h.hit_index - ? AND h.hit_index + ?
+        ORDER BY h.rank, h.path, h.hit_index, CAST(e.element_index AS INTEGER)
+    """
+    result = native_transcript_index.run_readonly_sql(
+        sql,
+        tuple(params),
+        row_limit=max(1, limit) * (NATIVE_BUNDLE_WINDOW_BEFORE + NATIVE_BUNDLE_WINDOW_AFTER + 1),
+    )
+    if result.get("error"):
+        raise RuntimeError(result["error"])
+    columns = result.get("columns") or []
+    return [dict(zip(columns, row)) for row in result.get("rows") or []]
+
+
+def _native_bundle_records_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        path = str(row.get("path") or "")
+        if not path:
+            continue
+        try:
+            hit_index = int(row.get("hit_index"))
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault((path, hit_index), []).append(row)
+
+    records: list[dict[str, Any]] = []
+    seen_text: set[str] = set()
+    for (path, hit_index), bundle_rows in grouped.items():
+        ordered = sorted(bundle_rows, key=lambda r: int(r.get("element_index") or 0))
+        text = _format_native_bundle_text(hit_index, ordered)
+        if not text or text in seen_text:
+            continue
+        seen_text.add(text)
+        first = ordered[0]
+        records.append({
+            "source_key": f"native-transcript:{path}:{hit_index}",
+            "source_prompt_key": None,
+            "unit_index": None,
+            "text": text,
+            "kind": NATIVE_TRANSCRIPT_BUNDLE_KIND,
+            "polarity": "",
+            "strength": "medium",
+            "source": "native_transcript",
+            "source_text": text,
+            "prev_reply": "",
+            "cwd": first.get("cwd") or "",
+            "edited_files": [],
+            "git_commits": [],
+            "sid": first.get("sid") or "",
+            "path": path,
+            "ts": first.get("ts") or "",
+            "user_seq": None,
+            "native_hit_index": hit_index,
+        })
+    return records
+
+
+def _format_native_bundle_text(hit_index: int, rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "Native transcript evidence bundle.",
+        "Use this only if the user confirms, adopts, or refines an assistant proposal in the surrounding turns.",
+        f"matched_element_index={hit_index}",
+    ]
+    for row in rows:
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        element_index = row.get("element_index")
+        role = row.get("role") or ""
+        kind = row.get("element_kind") or ""
+        ts = row.get("ts") or ""
+        lines.append(f"[{element_index} {role} {kind} {ts}] {text}")
+    return "\n".join(lines)
 
 
 def _filter_records_by_cwds(records: list[dict[str, Any]], cwds: tuple[str, ...]) -> list[dict[str, Any]]:

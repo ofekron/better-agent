@@ -32,6 +32,7 @@ from typing import Any, Iterator
 
 from native_session_miner import _mtime
 from paths import ba_home, encode_cwd
+import portable_lock
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 _FRESH_WINDOW_SECONDS = 3.0  # covered + last walk within this window => trusted
 _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -64,6 +66,10 @@ _FRESH_WAIT_TIMEOUT = 3.0  # max a query blocks for a delta refresh before rg
 
 def _db_path() -> Path:
     return ba_home() / "native_transcript_index.sqlite3"
+
+
+def _writer_lock_path() -> Path:
+    return _db_path().with_name(_db_path().name + ".lock")
 
 
 # ─── connection management ─────────────────────────────────────────────────
@@ -87,6 +93,7 @@ def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
 
 
 def _configure(conn: sqlite3.Connection) -> None:
+    conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-200000")
@@ -289,38 +296,50 @@ def refresh_once() -> dict[str, int]:
     the corpus watermark. Returns counts. Idempotent + safe to run anytime."""
     _, _, candidate_from_match = _roots_and_resolver()
     global _last_refresh_at
-    with _lock:
-        conn = _writer_connection()
-        try:
-            on_disk, indexed = _compute_changes()
-            now = time.time()
-            on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
-            # Freshness fingerprint per indexed file: (mtime, size).
-            fingerprints = {
-                r[0]: (r[1], r[2]) for r in conn.execute(
-                    "SELECT path, mtime, size FROM native_file_state"
-                )
-            }
-            new_or_changed = 0
-            for path, tag, mt, sz in on_disk:
-                if fingerprints.get(str(path)) != (mt, sz):
-                    candidate = candidate_from_match(path, tag)
-                    _replace_candidate(conn, candidate, mt, sz)
+    lock_path = _writer_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    if not portable_lock.try_lock_ex(handle.fileno()):
+        handle.close()
+        return {"walked": 0, "touched": 0, "locked": 1}
+    try:
+        with _lock:
+            conn = _writer_connection()
+            try:
+                on_disk, indexed = _compute_changes()
+                now = time.time()
+                on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
+                # Freshness fingerprint per indexed file: (mtime, size).
+                fingerprints = {
+                    r[0]: (r[1], r[2]) for r in conn.execute(
+                        "SELECT path, mtime, size FROM native_file_state"
+                    )
+                }
+                new_or_changed = 0
+                for path, tag, mt, sz in on_disk:
+                    if fingerprints.get(str(path)) != (mt, sz):
+                        candidate = candidate_from_match(path, tag)
+                        _replace_candidate(conn, candidate, mt, sz)
+                        new_or_changed += 1
+                for path_str in indexed - set(on_disk_by_path):
+                    _delete_path(conn, path_str)
                     new_or_changed += 1
-            for path_str in indexed - set(on_disk_by_path):
-                _delete_path(conn, path_str)
-                new_or_changed += 1
-            _state_set(conn, "last_walk_at", str(now))
-            _state_set(conn, "covered", "1")
-            _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
-            conn.commit()
-            with _refresh_cond:
-                _last_refresh_at = time.time()
-                _refresh_cond.notify_all()
-            return {"walked": len(on_disk), "touched": new_or_changed}
-        except Exception:
-            conn.rollback()
-            raise
+                _state_set(conn, "last_walk_at", str(now))
+                _state_set(conn, "covered", "1")
+                _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
+                conn.commit()
+                with _refresh_cond:
+                    _last_refresh_at = time.time()
+                    _refresh_cond.notify_all()
+                return {"walked": len(on_disk), "touched": new_or_changed, "locked": 0}
+            except Exception:
+                conn.rollback()
+                raise
+    finally:
+        try:
+            portable_lock.unlock(handle.fileno())
+        finally:
+            handle.close()
 
 
 # ─── public: freshness gates + search ──────────────────────────────────────
