@@ -141,6 +141,7 @@ class SubprocessAgent:
                 target_message_id = assistant_msg["id"]
             with perf.timed("subprocess_agent.init.start_run"):
                 import startup_recovery_gate
+                from env_compat import get_env
                 await startup_recovery_gate.wait_for_recovery_ready()
                 provider.start_run(
                     run_id=run_id,
@@ -153,6 +154,8 @@ class SubprocessAgent:
                     session_id=None,
                     mode=mode,
                     app_session_id=self.agent_session_id,
+                    backend_url=get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
+                    internal_token=getattr(coordinator, "internal_token", None),
                     extra_env=self.extra_env,
                     provider_run_config=provider_run_config,
                     capability_contexts=capability_contexts,

@@ -273,6 +273,7 @@ async def _scenario_prep_cancel_drains_queue() -> None:
     holder: dict = {}
 
     def _start_run(**kw):
+        holder["start_run"] = kw
         run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=_TMP_HOME))
         jsonl = run_dir / "session.jsonl"
         jsonl.write_text("")
@@ -293,8 +294,17 @@ async def _scenario_prep_cancel_drains_queue() -> None:
 
     prov.start_run = _start_run
     prov.cancel_turn = lambda run_id: True
+    old_agent_url = os.environ.get("BETTER_AGENT_BACKEND_URL")
+    old_claude_url = os.environ.get("BETTER_CLAUDE_BACKEND_URL")
+    os.environ["BETTER_AGENT_BACKEND_URL"] = "http://127.0.0.1:8199"
+    os.environ.pop("BETTER_CLAUDE_BACKEND_URL", None)
 
     class _Coord:
+        internal_token = "prep-token"
+
+        class turn_manager:
+            current_assistant_msgs = {}
+
         def provider_for_session(self, _sid):
             return prov
 
@@ -310,12 +320,26 @@ async def _scenario_prep_cancel_drains_queue() -> None:
     agent = SubprocessAgent(agent_session_id=sid, cwd="/tmp")
     cancel_event = asyncio.Event()
     cancel_event.set()
-    res = await agent.init(
-        _Coord(), model="sonnet", prep_prompt="x",
-        cancel_event=cancel_event,
-    )
+    try:
+        res = await agent.init(
+            _Coord(), model="sonnet", prep_prompt="x",
+            cancel_event=cancel_event,
+        )
+    finally:
+        if old_agent_url is None:
+            os.environ.pop("BETTER_AGENT_BACKEND_URL", None)
+        else:
+            os.environ["BETTER_AGENT_BACKEND_URL"] = old_agent_url
+        if old_claude_url is None:
+            os.environ.pop("BETTER_CLAUDE_BACKEND_URL", None)
+        else:
+            os.environ["BETTER_CLAUDE_BACKEND_URL"] = old_claude_url
     rs = holder["rs"]
     check(res is None, "prep init returned None on cancel")
+    check(holder["start_run"]["backend_url"] == "http://127.0.0.1:8199",
+          "prep init forwards backend_url to provider")
+    check(holder["start_run"]["internal_token"] == _Coord.internal_token,
+          "prep init forwards internal_token to provider")
     check(rs.queue.empty(), "release drained the abandoned prep queue")
     check(rs.turn_finalized, "release flipped the late-flush gate")
 

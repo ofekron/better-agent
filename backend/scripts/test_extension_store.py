@@ -409,6 +409,63 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
         raise AssertionError("runtime MCP config does not prefer the extension venv")
 
 
+def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-internal-runtime-mcp-")) / "internal-mcp"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.internal-runtime-mcp",
+        "name": "Internal Runtime MCP",
+        "version": "1.0.0",
+        "description": "Internal runtime MCP fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "internal-runtime",
+                    "python": "mcp/server.py",
+                    "user_facing": False,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {"internal_loopback": True},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "internal-mcp",
+            "ref": "",
+            "commit_sha": "internal-mcp-test",
+        },
+        persist=True,
+    )
+    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
+    venv_bin.mkdir(parents=True)
+    extension_store.set_harness_delivery_mode("ofek.internal-runtime-mcp", "runtime")
+
+    inputs = {
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "token",
+        "app_session_id": "session-1",
+    }
+    configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
+    if "internal-runtime" not in configs:
+        raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
+
+    missing_token = dict(inputs)
+    missing_token["internal_token"] = ""
+    configs = extension_store.runtime_mcp_server_configs(missing_token, user_facing=False, bare=False)
+    if "internal-runtime" in configs:
+        raise AssertionError("internal runtime MCP available without internal token")
+
+
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
 
