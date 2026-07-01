@@ -394,6 +394,7 @@ interface Props {
     prompt: string,
     images: import("./InputArea").PastedImage[]
   ) => boolean | Promise<boolean>;
+  canForkSession?: boolean;
   /** Currently queued prompt (shown in banner). */
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
@@ -521,6 +522,7 @@ export function Chat({
   onDeleteFork,
   runStateBySession,
   onForkAndSend,
+  canForkSession = false,
   queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
@@ -1464,7 +1466,7 @@ export function Chat({
               onInterrupt={onInterrupt}
               canSteer={!!canSteer}
               onFork={onForkAndSend}
-              canFork={!!onForkAndSend}
+              canFork={!!onForkAndSend && canForkSession}
               onEngineer={onEngineer}
               onSendToNewSession={onSendToNewSession}
               disabled={disabled}

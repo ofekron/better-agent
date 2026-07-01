@@ -1883,6 +1883,11 @@ function AppMain({
     [providers, defaultProviderId],
   );
   const currentSessionCanSteer = !!currentProvider?.supports_steering;
+  const currentSessionCanFork = Boolean(
+    currentSession?.agent_session_id ||
+      currentSession?.manager_agent_session_id ||
+      currentSession?.native_agent_session_id,
+  ) && (currentProvider?.supports_fork ?? true);
   const [, setProviderName] = useState("");
   const syncProvider = useCallback(async () => {
     try {
@@ -6765,6 +6770,7 @@ function AppMain({
               onDeleteFork={handleDeleteSession}
               runStateBySession={runStateBySession}
               onForkAndSend={handleForkAndSend}
+              canForkSession={currentSessionCanFork}
               queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
               onPromoteQueued={() => handlePromoteQueued("interrupt")}

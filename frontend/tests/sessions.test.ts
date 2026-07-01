@@ -669,7 +669,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   it("Fork button POSTs /fork_and_send with the typed prompt once a claude_sid exists", async () => {
     const session = makeSession({
       id: "parent",
-      manager_claude_session_id: "claude-sid-1",
+      agent_session_id: "agent-sid-1",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -683,7 +683,11 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     )!.set!.call(ta, "explore alternative");
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     await h.flush();
-    await h.clickByText(/^Fork$/);
+    await h.click(".input-overflow-trigger");
+    const fork = h.$('[data-testid="fork-btn"]') as HTMLButtonElement | null;
+    expect(fork).not.toBeNull();
+    expect(fork!.disabled).toBe(false);
+    await h.click('[data-testid="fork-btn"]');
 
     expect(
       h.restCalls.find(
@@ -694,14 +698,28 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("Fork button is disabled before any turn (no claude_sid)", async () => {
-    const session = makeSession({ manager_claude_session_id: null });
+    const session = makeSession({ agent_session_id: null });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const fork = Array.from(h.$$("button")).find((b) => b.textContent === "Fork");
-    expect(fork).toBeDefined();
-    // Disabled by canFork=false (claude_sid missing) regardless of draft.
-    expect((fork as HTMLButtonElement).disabled).toBe(true);
+    const ta = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(ta, "cannot fork yet");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.flush();
+    await h.click(".input-overflow-trigger");
+
+    const fork = h.$('[data-testid="fork-btn"]') as HTMLButtonElement | null;
+    expect(fork).not.toBeNull();
+    expect(fork!.disabled).toBe(true);
+    expect(
+      h.restCalls.find(
+        (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/fork_and_send`,
+      ),
+    ).toBeUndefined();
     h.unmount();
   });
 
