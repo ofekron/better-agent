@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import threading
 import time
 import heapq
@@ -130,6 +131,18 @@ def _run_state_path_has_ledger_shape(path: Path, root: Path) -> bool:
         return False
     root_absolute = root.absolute()
     return path.parent != root_absolute and path.parent.parent == root_absolute
+
+
+def _run_state_candidate_stat(path: Path, root: Path) -> os.stat_result | None:
+    if not _run_state_path_has_ledger_shape(path, root):
+        return None
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return st
 
 
 def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
@@ -283,11 +296,8 @@ def _recent_state_candidates(
                 if not entry.is_dir(follow_symlinks=False):
                     continue
                 state_path = Path(entry.path) / "state.json"
-                if not _run_state_path_under_root(state_path, root_resolved):
-                    continue
-                try:
-                    st = state_path.stat()
-                except OSError:
+                st = _run_state_candidate_stat(state_path, root)
+                if st is None:
                     continue
                 candidates.append((st.st_mtime_ns, st.st_size, str(state_path)))
     except OSError:
