@@ -10373,8 +10373,10 @@ async def get_internal_llm_endpoint():
     mean "inherit active provider")."""
     assignments = await asyncio.to_thread(config_store.get_internal_llm_assignments)
     extension_tasks = await asyncio.to_thread(extension_store.extension_internal_llm_task_keys)
+    tasks = await asyncio.to_thread(config_store.internal_llm_tasks)
     return {
-        "tasks": [task for task in config_store.INTERNAL_LLM_TASKS if task not in extension_tasks],
+        "tasks": [task for task in tasks if task not in extension_tasks],
+        "labels": extension_store.internal_llm_task_labels(),
         "assignments": assignments,
     }
 

@@ -101,8 +101,9 @@ def _load_private_builtin_registry() -> dict[str, Any]:
     """
     import importlib.util
 
-    empty = {"ids": {}, "paths": {}, "llm_tasks": {}, "mcp_replacements": {},
-             "runtime_required_paths": {}, "display_names": {}}
+    empty = {"ids": {}, "paths": {}, "llm_tasks": {}, "llm_task_labels": {},
+             "mcp_replacements": {}, "runtime_required_paths": {},
+             "display_names": {}}
     if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1":
         return empty
     candidates: list[Path] = []
@@ -126,6 +127,7 @@ def _load_private_builtin_registry() -> dict[str, Any]:
             "ids": getattr(module, "PRIVATE_BUILTIN_IDS", {}),
             "paths": getattr(module, "PRIVATE_EXTENSION_DIRS", {}),
             "llm_tasks": getattr(module, "INTERNAL_LLM_TASKS", {}),
+            "llm_task_labels": getattr(module, "INTERNAL_LLM_TASK_LABELS", {}),
             "mcp_replacements": getattr(module, "MCP_REPLACEMENTS", {}),
             "runtime_required_paths": getattr(module, "RUNTIME_REQUIRED_PATHS", {}),
             "display_names": getattr(module, "DISPLAY_NAMES", {}),
@@ -5062,6 +5064,29 @@ def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
     return list(_EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()))
+
+
+def all_internal_llm_task_keys() -> list[str]:
+    """Every internal-LLM task key contributed by builtin extensions (public
+    and private-registry), in stable declaration order. Absent private
+    checkout ⇒ private tasks are simply not contributed."""
+    keys: list[str] = []
+    for task_keys in _BUILTIN_INTERNAL_LLM_TASKS.values():
+        for key in task_keys:
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def internal_llm_task_labels() -> dict[str, str]:
+    """Display labels for extension-contributed tasks that have no public
+    i18n entry (private-registry tasks). Public builtin tasks are labeled
+    via frontend i18n and are absent here."""
+    return {
+        str(k): str(v)
+        for k, v in (_PRIVATE_REGISTRY.get("llm_task_labels") or {}).items()
+        if str(k) and str(v)
+    }
 
 
 def extension_internal_llm_task_keys() -> set[str]:

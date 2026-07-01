@@ -683,14 +683,12 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
 #
 # `default_session` is the model/provider/effort stamped on every newly
 # created user-facing session when the caller doesn't specify one.
-INTERNAL_LLM_TASKS = (
+# Core tasks owned by the backend itself. Extension-contributed tasks
+# (public builtins and private-registry extensions) come from
+# extension_store.all_internal_llm_task_keys() — no extension task name is
+# hard-coded here.
+_CORE_INTERNAL_LLM_TASKS = (
     "default_session",
-    "requirement_analysis",
-    "provider_config_sync_review",
-    "session_search_worker",
-    "project_structure_edit",
-    "extension_context_audit",
-    "assistant",
     "delegation_task",
     "delegation_message",
     "delegation_ask",
@@ -699,14 +697,27 @@ INTERNAL_LLM_TASKS = (
 _INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort")
 
 
+def internal_llm_tasks() -> tuple[str, ...]:
+    """All known internal-LLM task keys: core tasks plus every
+    extension-contributed task (absent extensions contribute nothing, so a
+    pure-public checkout fails closed on private task keys)."""
+    import extension_store
+    seen = list(_CORE_INTERNAL_LLM_TASKS)
+    for key in extension_store.all_internal_llm_task_keys():
+        if key not in seen:
+            seen.append(key)
+    return tuple(seen)
+
+
 def _normalize_internal_llm(raw) -> dict:
     """Coerce a raw mapping into `{task: {provider_id?, model?,
     reasoning_effort?}}` with only known tasks and non-empty string fields."""
     out: dict[str, dict[str, str]] = {}
     if not isinstance(raw, dict):
         return out
+    known = internal_llm_tasks()
     for key, val in raw.items():
-        if key not in INTERNAL_LLM_TASKS or not isinstance(val, dict):
+        if key not in known or not isinstance(val, dict):
             continue
         entry: dict[str, str] = {}
         for field in _INTERNAL_LLM_FIELDS:
@@ -736,7 +747,7 @@ def set_internal_llm_assignments(value: dict) -> dict:
 
 def get_internal_llm_task(task_key: str) -> dict:
     """Raw stored assignment for one task (empty dict if unset)."""
-    if task_key not in INTERNAL_LLM_TASKS:
+    if task_key not in internal_llm_tasks():
         return {}
     return dict(get_internal_llm_assignments().get(task_key, {}))
 
@@ -750,7 +761,7 @@ def resolve_internal_llm(task_key: str) -> dict:
     is "" when the resolved provider has no effort support."""
     state = _load_state()
     raw_assignments = _normalize_internal_llm(state.get("internal_llm"))
-    assignment = dict(raw_assignments.get(task_key, {})) if task_key in INTERNAL_LLM_TASKS else {}
+    assignment = dict(raw_assignments.get(task_key, {})) if task_key in internal_llm_tasks() else {}
     provider = None
     provider_id = assignment.get("provider_id")
     if provider_id:
