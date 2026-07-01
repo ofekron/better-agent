@@ -328,12 +328,19 @@ def extract_provider_result_token_usage(result: dict) -> Optional[dict]:
 
 def list_traces(session_id: Optional[str] = None, limit: int = 100) -> list[dict]:
     """Read index.jsonl and return trace entries, newest first."""
+    if limit <= 0:
+        return []
     index_path = _traces_dir() / "index.jsonl"
     if not index_path.exists():
         return []
 
     entries = []
-    for line in reversed(index_path.read_text(encoding="utf-8").splitlines()):
+    lines = (
+        _iter_file_lines_reverse(index_path)
+        if session_id is None
+        else reversed(index_path.read_text(encoding="utf-8").splitlines())
+    )
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -347,6 +354,32 @@ def list_traces(session_id: Optional[str] = None, limit: int = 100) -> list[dict
         except json.JSONDecodeError:
             continue
     return entries
+
+
+def _iter_file_lines_reverse(path: Path, *, _chunk_size: int = 65536) -> Iterator[str]:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        buffer = b""
+        trailing_newline = True
+        while position > 0:
+            size = min(_chunk_size, position)
+            position -= size
+            handle.seek(position)
+            chunk = handle.read(size)
+            if not chunk:
+                break
+            buffer = chunk + buffer
+            parts = buffer.split(b"\n")
+            buffer = parts[0]
+            for line in reversed(parts[1:]):
+                if trailing_newline and line == b"":
+                    trailing_newline = False
+                    continue
+                trailing_newline = False
+                yield line.rstrip(b"\r").decode("utf-8")
+        if buffer:
+            yield buffer.rstrip(b"\r").decode("utf-8")
 
 
 def iter_trace_index() -> Iterator[dict]:
