@@ -6230,7 +6230,18 @@ async def internal_assistant_ui_search(
     return await assistant_ui.search(
         str(body.get("query") or ""),
         max_results=int(body.get("max_results") or 10),
-        timeout=float(body.get("timeout") or 120.0),
+    )
+
+
+@app.post("/api/internal/assistant-ui/grep-transcript")
+async def internal_assistant_ui_grep_transcript(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    return await assistant_ui.grep_transcript(
+        str(body.get("query") or ""),
+        max_results=int(body.get("max_results") or 20),
     )
 
 
