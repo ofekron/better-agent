@@ -45,6 +45,26 @@ from session_miner import SessionMinerBase, SessionVisit, sessions_dir
 
 
 @dataclass
+class NativeElement:
+    """One greppable unit from any provider transcript.
+
+    The structural ``kind`` is assigned by the per-format extractor; it is the
+    provider-neutral vocabulary the shared search + categorizer operate on:
+    ``user_prompt`` | ``assistant_text`` | ``reasoning`` | ``tool_call`` |
+    ``tool_result`` | ``command`` | ``meta``. ``tool_name`` is set for
+    ``tool_call``/``tool_result`` so the categorizer can classify it (Bash vs
+    Edit vs Read…) without re-parsing provider shapes.
+    """
+
+    kind: str
+    role: str
+    text: str
+    tool_name: str = ""
+    timestamp: str = ""
+    id: str = ""
+
+
+@dataclass
 class NativeCandidate:
     """A discovered native transcript to parse — resolution done, parse pending.
 
@@ -77,6 +97,19 @@ class NativeCandidate:
             messages=messages,
             events_by_msg_id=events_by_msg_id,
         )
+
+    def parse_elements(self) -> list[NativeElement]:
+        """Full transcript element stream for the generalized grep — every
+        greppable unit (prompts, replies, reasoning, tool calls, tool results,
+        commands, meta), not just user/assistant text. Dispatches per format."""
+        try:
+            if self.format == "codex":
+                return _codex_elements(self.transcript)
+            if self.format == "gemini":
+                return _gemini_elements(self.transcript)
+            return _claude_elements(self.transcript)
+        except OSError:
+            return []
 
 # Claude CLI user lines that are injected context/commands, not typed prompts.
 _NON_PROMPT_TAGS = (
@@ -336,6 +369,231 @@ def _gemini_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[
             role = "user" if turn_type == "user" else "assistant"
             messages.append({"role": role, "content": text, "timestamp": ts, "id": uid})
     return messages, events_by_msg_id
+
+
+# ─── generalized element extractors ────────────────────────────────────────
+# Per-format adapters that emit the provider-neutral NativeElement stream used
+# by the generalized transcript grep + categorizer. They share the content /
+# noise helpers above with the message parsers so there is one reading of each
+# format's shapes. kinds: user_prompt | assistant_text | reasoning | tool_call
+# | tool_result | command | meta.
+
+_COMMAND_TAGS = ("<command-name>", "<bash-input>")
+
+
+def _stringify(value: object) -> str:
+    """Render a tool argument/output blob as greppable text."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _tool_result_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return ""
+
+
+def _claude_user_kind(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith(_COMMAND_TAGS):
+        return "command"
+    return "user_prompt" if _is_real_user_prompt(stripped) else "meta"
+
+
+def _claude_elements(transcript_path: Path) -> list[NativeElement]:
+    """Claude-shaped transcript → elements (covers ~/.claude/projects and the
+    BA run-dir session_events.jsonl, both Claude message-shaped)."""
+    elements: list[NativeElement] = []
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("isSidechain") or obj.get("isMeta"):
+                continue
+            line_type = obj.get("type")
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            uid = obj.get("uuid") if isinstance(obj.get("uuid"), str) else ""
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            role = message.get("role") if isinstance(message.get("role"), str) else ""
+            if line_type == "user":
+                if isinstance(content, str):
+                    if content.strip():
+                        elements.append(NativeElement(_claude_user_kind(content), role or "user", content.strip(), "", ts, uid))
+                elif isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        bt = block.get("type")
+                        if bt == "tool_result":
+                            text = _tool_result_text(block.get("content")).strip()
+                            if text:
+                                elements.append(NativeElement("tool_result", "user", text, "", ts, block.get("tool_use_id") or uid))
+                        elif bt == "text" and isinstance(block.get("text"), str):
+                            text = block["text"].strip()
+                            if text:
+                                elements.append(NativeElement(_claude_user_kind(text), role or "user", text, "", ts, uid))
+            elif line_type == "assistant":
+                if isinstance(content, str):
+                    if content.strip():
+                        elements.append(NativeElement("assistant_text", "assistant", content.strip(), "", ts, uid))
+                elif isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        bt = block.get("type")
+                        if bt == "text" and isinstance(block.get("text"), str):
+                            text = block["text"].strip()
+                            if text:
+                                elements.append(NativeElement("assistant_text", "assistant", text, "", ts, uid))
+                        elif bt == "thinking" and isinstance(block.get("thinking"), str):
+                            text = block["thinking"].strip()
+                            if text:
+                                elements.append(NativeElement("reasoning", "assistant", text, "", ts, uid))
+                        elif bt == "tool_use":
+                            name = block.get("name") if isinstance(block.get("name"), str) else ""
+                            text = f"{name} {_stringify(block.get('input'))}".strip()
+                            elements.append(NativeElement("tool_call", "assistant", text, name, ts, block.get("id") or uid))
+    return elements
+
+
+def _codex_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                txt = block.get("text") if isinstance(block.get("text"), str) else None
+                if txt is None:
+                    txt = block.get("content") if isinstance(block.get("content"), str) else None
+                if txt:
+                    parts.append(txt)
+        return "\n".join(parts)
+    return ""
+
+
+def _codex_output_text(output: object) -> str:
+    """Codex function_call_output payloads wrap the text as a JSON string
+    (``{"output": "..."}``) — unwrap when present, else return as-is."""
+    if isinstance(output, str):
+        try:
+            unwrapped = json.loads(output)
+            if isinstance(unwrapped, dict) and isinstance(unwrapped.get("output"), str):
+                return unwrapped["output"]
+        except json.JSONDecodeError:
+            pass
+        return output
+    return _stringify(output)
+
+
+def _codex_elements(transcript_path: Path) -> list[NativeElement]:
+    elements: list[NativeElement] = []
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            payload = obj.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            pt = payload.get("type")
+            uid = payload.get("id") if isinstance(payload.get("id"), str) else ""
+            if pt == "message":
+                role = payload.get("role") if isinstance(payload.get("role"), str) else ""
+                text = _codex_content_text(payload.get("content")).strip()
+                if not text:
+                    continue
+                if role == "user":
+                    kind = "user_prompt" if _codex_is_real_prompt(text) else "meta"
+                    elements.append(NativeElement(kind, "user", text, "", ts, uid))
+                elif role == "assistant":
+                    elements.append(NativeElement("assistant_text", "assistant", text, "", ts, uid))
+            elif pt in ("agent_reasoning", "reasoning"):
+                text = _codex_content_text(payload.get("content")).strip()
+                if text:
+                    elements.append(NativeElement("reasoning", "assistant", text, "", ts, uid))
+            elif pt in ("function_call", "custom_tool_call"):
+                name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+                args = payload.get("arguments")
+                if args is None:
+                    args = payload.get("input")
+                text = f"{name} {_stringify(args)}".strip()
+                elements.append(NativeElement("tool_call", "assistant", text, name, ts, uid))
+            elif pt in ("function_call_output", "custom_tool_call_output"):
+                text = _codex_output_text(payload.get("output")).strip()
+                if text:
+                    elements.append(NativeElement("tool_result", "user", text, "", ts, uid))
+    return elements
+
+
+def _gemini_elements(transcript_path: Path) -> list[NativeElement]:
+    elements: list[NativeElement] = []
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            turn_type = obj.get("type")
+            if turn_type not in ("user", "gemini"):
+                continue
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+            role = "user" if turn_type == "user" else "assistant"
+            text_kind = "user_prompt" if turn_type == "user" else "assistant_text"
+            content = obj.get("content")
+            if isinstance(content, str):
+                if content.strip():
+                    elements.append(NativeElement(text_kind, role, content.strip(), "", ts, uid))
+                continue
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if isinstance(block.get("text"), str) and block["text"].strip():
+                    elements.append(NativeElement(text_kind, role, block["text"].strip(), "", ts, uid))
+                if isinstance(block.get("functionCall"), dict):
+                    fc = block["functionCall"]
+                    name = fc.get("name") if isinstance(fc.get("name"), str) else ""
+                    elements.append(NativeElement("tool_call", role, f"{name} {_stringify(fc.get('args'))}".strip(), name, ts, uid))
+                if isinstance(block.get("functionResponse"), dict):
+                    fr = block["functionResponse"]
+                    name = fr.get("name") if isinstance(fr.get("name"), str) else ""
+                    text = _stringify(fr.get("response")).strip()
+                    if text:
+                        elements.append(NativeElement("tool_result", role, text, name, ts, uid))
+    return elements
 
 
 def _mtime(path: Path) -> float:

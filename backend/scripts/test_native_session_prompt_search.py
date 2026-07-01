@@ -43,7 +43,8 @@ _TMP_HOME = _test_home.isolate("bc-test-native-prompt-search-")
 
 import native_session_prompt_search as nsp  # noqa: E402
 import requirement_context  # noqa: E402
-from native_session_miner import NativeCandidate  # noqa: E402
+from native_session_miner import NativeCandidate, NativeElement  # noqa: E402
+from native_session_prompt_search import Categorizer, ElementCategory  # noqa: E402
 from paths import encode_cwd  # noqa: E402
 
 OK = "\033[92mPASS\033[0m"
@@ -343,6 +344,81 @@ def test_codex_and_gemini_native_transcripts_found() -> bool:
     return ok
 
 
+def test_categorizer_maps_elements_to_categories() -> bool:
+    """The shared Categorizer maps structural kind + tool name → semantic
+    category, provider-agnostic. Tool-name casing/spacing is normalized."""
+    cat = Categorizer()
+    cases = [
+        (NativeElement("user_prompt", "user", "fix it"), ElementCategory.PROMPT),
+        (NativeElement("assistant_text", "assistant", "ok"), ElementCategory.REPLY),
+        (NativeElement("reasoning", "assistant", "hmm"), ElementCategory.REASONING),
+        (NativeElement("command", "user", "/foo"), ElementCategory.COMMAND),
+        (NativeElement("meta", "user", "title"), ElementCategory.META),
+        (NativeElement("tool_call", "assistant", "x", "Bash"), ElementCategory.SHELL),
+        (NativeElement("tool_call", "assistant", "x", "exec_command"), ElementCategory.SHELL),
+        (NativeElement("tool_call", "assistant", "x", "Edit"), ElementCategory.FILE_EDIT),
+        (NativeElement("tool_call", "assistant", "x", "apply_patch"), ElementCategory.FILE_EDIT),
+        (NativeElement("tool_call", "assistant", "x", "Read"), ElementCategory.FILE_READ),
+        (NativeElement("tool_call", "assistant", "x", "WebSearch"), ElementCategory.SEARCH),
+        (NativeElement("tool_call", "assistant", "x", "Task"), ElementCategory.SUBAGENT),
+        (NativeElement("tool_call", "assistant", "x", "MysteryTool"), ElementCategory.OTHER),
+        (NativeElement("tool_result", "user", "ran fine"), ElementCategory.TOOL_OUTPUT),
+        (NativeElement("tool_result", "user", "Traceback (most recent call last)"), ElementCategory.ERROR),
+    ]
+    bad = [(el, got, want) for el, want in cases if (got := cat.categorize(el)) != want]
+    ok = not bad
+    print(f"{OK if ok else FAIL} categorizer maps kind+tool -> category (mismatches={bad})")
+    return ok
+
+
+def _write_raw_transcript(records: list[dict]) -> Path:
+    """Write arbitrary Claude-shaped jsonl lines (tool_use/tool_result/etc)."""
+    global _seq
+    _seq += 1
+    path = _SCRATCH / f"raw_{_seq}.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def test_generalized_search_greps_tool_calls_and_results() -> bool:
+    """search_in_native_session_transcript greps EVERYTHING — tool calls and
+    tool results, not just prompts/replies — and labels each match with its
+    category + tool_name. The category filter narrows the scope."""
+    transcript = _write_raw_transcript([
+        {"type": "assistant", "uuid": "a1", "timestamp": "2024-01-01T00:00:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "text", "text": "running the zulifrangible build now"},
+             {"type": "tool_use", "id": "t1", "name": "Bash",
+              "input": {"command": "make zulifrangible-widget"}},
+         ]}},
+        {"type": "user", "uuid": "u1", "timestamp": "2024-01-01T00:00:01Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "content": "zulifrangible widget built ok"},
+         ]}},
+    ])
+    cand = NativeCandidate(key="claude:s1", sid="s1", cwd="/proj", data={},
+                           transcript=transcript, mtime=0.0, format="claude")
+    _patch_candidates([cand])
+    try:
+        all_hits = nsp.search_in_native_session_transcript(query="zulifrangible widget")
+        shell_only = nsp.search_in_native_session_transcript(
+            query="zulifrangible widget", categories=("shell",))
+    finally:
+        _reset_candidates()
+    cats = {r["category"] for r in all_hits}
+    tools = {r.get("tool_name") for r in all_hits}
+    shell_cats = {r["category"] for r in shell_only}
+    ok = (
+        cats == {ElementCategory.REPLY, ElementCategory.SHELL, ElementCategory.TOOL_OUTPUT}
+        and tools == {"Bash", ""}
+        and shell_cats == {ElementCategory.SHELL}
+        and len(shell_only) == 1
+    )
+    print(f"{OK if ok else FAIL} generalized search greps tools+results, category filter works "
+          f"(cats={cats}, tools={tools}, shell_only={shell_cats})")
+    return ok
+
+
 def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
@@ -399,6 +475,8 @@ def main_run() -> int:
         test_deterministic_order_for_empty_ts_ties,
         test_unlinked_transcript_found_via_filesystem_walk,
         test_codex_and_gemini_native_transcripts_found,
+        test_categorizer_maps_elements_to_categories,
+        test_generalized_search_greps_tool_calls_and_results,
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]
