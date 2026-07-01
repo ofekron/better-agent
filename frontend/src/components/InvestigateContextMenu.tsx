@@ -18,6 +18,20 @@ function isMediaTarget(target: EventTarget | null): boolean {
   );
 }
 
+function isNativeTextSelectionTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (FORM_TAG_NAMES.has(target.tagName)) return true;
+  return Boolean(target.closest("p, pre, code, blockquote, li, h1, h2, h3, h4, h5, h6"));
+}
+
+function isMobileLongPressTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest("[data-mobile-context-owner]")) return false;
+  if (isMediaTarget(target)) return true;
+  return !isNativeTextSelectionTarget(target);
+}
+
 export interface InvestigationData {
   prompt: string;
   images: PastedImage[];
@@ -327,9 +341,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
   useEffect(() => {
     const handleTouchStart = (e: TouchEvent) => {
       if (!isMobileViewport()) return;
-      // Media-only gate: long-press on text MUST fall through to the
-      // browser's native selection so the user can actually select text.
-      if (!isMediaTarget(e.target)) return;
+      if (!isMobileLongPressTarget(e.target)) return;
 
       const touch = e.touches[0];
       touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
@@ -372,10 +384,10 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
       touchStartPosRef.current = null;
     };
 
-    // Suppress native context menu on mobile ONLY for media targets.
+    // Suppress native context menu only where the app owns long-press.
     const suppressNative = (e: Event) => {
       if (!isMobileViewport()) return;
-      if (!isMediaTarget(e.target)) return;
+      if (!isMobileLongPressTarget(e.target)) return;
       const target = e.target as HTMLElement;
       if (FORM_TAG_NAMES.has(target.tagName)) return;
       if (target.closest(".modal-overlay")) return;

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, type MouseEvent } from "react";
+import { useRef, useEffect, useState, type MouseEvent, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemToCenter } from "src/utils/tabScroll";
@@ -7,6 +7,7 @@ import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
 import Icon from "./Icon";
+import { isMobileViewport, useMobileActionSheet, type ActionItem } from "./MobileActionSheet";
 
 interface Props {
   sessions: Session[];
@@ -19,6 +20,9 @@ interface Props {
   onCloseOthers: (id: string) => void;
   onToggleTopbarPin: (id: string, pinned: boolean) => void;
 }
+
+const LONG_PRESS_MS = 500;
+const MOVE_THRESHOLD = 10;
 
 export function SessionTabs({
   sessions,
@@ -36,6 +40,10 @@ export function SessionTabs({
     sessions.map((session) => session.id),
   );
   const activeRef = useRef<HTMLDivElement>(null);
+  const { show: showSheet } = useMobileActionSheet();
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFiredRef = useRef(false);
+  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     sessionId: string;
     x: number;
@@ -59,6 +67,12 @@ export function SessionTabs({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    };
+  }, []);
 
   if (sessions.length === 0) return null;
   const contextSession = contextMenu
@@ -88,6 +102,60 @@ export function SessionTabs({
     setContextMenu(null);
   };
 
+  const buildContextItems = (session: Session): ActionItem[] => [
+    {
+      id: "copy",
+      label: t("session.copyAction"),
+      icon: <Icon name="clipboard" size={14} />,
+      onClick: () => void copySessionMarker(session),
+    },
+    ...(sessions.length > 1
+      ? [
+          {
+            id: "close-others",
+            label: t("session.closeOtherTabsTitle"),
+            icon: <Icon name="x-circle" size={14} />,
+            onClick: () => {
+              setContextMenu(null);
+              onCloseOthers(session.id);
+            },
+          },
+        ]
+      : []),
+  ];
+
+  const clearLongPressTimer = () => {
+    if (!longPressTimerRef.current) return;
+    clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  };
+
+  const handlePointerDown = (e: PointerEvent, session: Session) => {
+    if (!isMobileViewport() || e.button !== 0 || e.pointerType === "mouse") return;
+    clearLongPressTimer();
+    longPressFiredRef.current = false;
+    pointerStartRef.current = { x: e.clientX, y: e.clientY };
+    longPressTimerRef.current = setTimeout(() => {
+      longPressFiredRef.current = true;
+      showSheet(buildContextItems(session), session.name || "Untitled");
+    }, LONG_PRESS_MS);
+  };
+
+  const handlePointerMove = (e: PointerEvent) => {
+    if (!pointerStartRef.current) return;
+    const dx = e.clientX - pointerStartRef.current.x;
+    const dy = e.clientY - pointerStartRef.current.y;
+    if (Math.sqrt(dx * dx + dy * dy) > MOVE_THRESHOLD) {
+      clearLongPressTimer();
+      pointerStartRef.current = null;
+    }
+  };
+
+  const handlePointerEnd = () => {
+    clearLongPressTimer();
+    pointerStartRef.current = null;
+  };
+
   return (
     <div
       className="session-tabs"
@@ -112,12 +180,30 @@ export function SessionTabs({
             key={s.id}
             data-tab-movement-key={s.id}
             className={`session-tab-wrapper${isActive ? " active" : ""}${topbarPinned ? " topbar-pinned" : ""}`}
-            onContextMenu={(e) => openContextMenu(e, s.id)}
+            onContextMenu={(e) => {
+              if (isMobileViewport()) {
+                e.preventDefault();
+                return;
+              }
+              openContextMenu(e, s.id);
+            }}
+            data-mobile-context-owner="session-tab"
           >
             <button
               type="button"
               className="session-tab"
-              onClick={() => onSelect(s.id)}
+              onPointerDown={(e) => handlePointerDown(e, s)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerEnd}
+              onPointerCancel={handlePointerEnd}
+              onPointerLeave={handlePointerEnd}
+              onClick={() => {
+                if (longPressFiredRef.current) {
+                  longPressFiredRef.current = false;
+                  return;
+                }
+                onSelect(s.id);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -184,37 +270,26 @@ export function SessionTabs({
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >
-          <button
-            type="button"
-            role="menuitem"
-            className="session-tab-context-item"
-            data-session-marker={sessionLinkMarker(
-              contextSession.id,
-              contextSession.name || "Untitled",
-            )}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              void copySessionMarker(contextSession);
-            }}
-          >
-            <Icon name="clipboard" size={14} />
-            <span>{t("session.copyAction")}</span>
-          </button>
-          {sessions.length > 1 && (
+          {buildContextItems(contextSession).map((item) => (
             <button
+              key={item.id}
               type="button"
               role="menuitem"
               className="session-tab-context-item"
+              data-session-marker={
+                item.id === "copy"
+                  ? sessionLinkMarker(contextSession.id, contextSession.name || "Untitled")
+                  : undefined
+              }
               onMouseDown={(e) => {
                 e.preventDefault();
-                setContextMenu(null);
-                onCloseOthers(contextSession.id);
+                item.onClick();
               }}
             >
-              <Icon name="x-circle" size={14} />
-              <span>{t("session.closeOtherTabsTitle")}</span>
+              {item.icon}
+              <span>{item.label}</span>
             </button>
-          )}
+          ))}
         </div>
       )}
     </div>

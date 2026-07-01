@@ -128,4 +128,37 @@ describe("InvestigateContextMenu mobile selection", () => {
     vi.useRealTimers();
     await m.unmount();
   });
+
+  it("opens the mobile action sheet when long pressing a message surface", async () => {
+    vi.useFakeTimers();
+    const showSheet = vi.fn();
+    const mocked = await import("../src/components/MobileActionSheet");
+    vi.spyOn(mocked, "useMobileActionSheet").mockReturnValue({
+      show: showSheet,
+      dismiss: vi.fn(),
+      visible: false,
+    });
+
+    const m = await mount(
+      <InvestigateContextMenu onInvestigate={() => {}} activeSessionId="session-a">
+        <div data-testid="message" data-message-id="message-a" />
+      </InvestigateContextMenu>,
+    );
+    const ts = captured.find((c) => c.type === "touchstart");
+    expect(ts).toBeDefined();
+
+    const target = m.container.querySelector('[data-testid="message"]')!;
+    const touchEvent = {
+      target,
+      touches: [{ clientX: 10, clientY: 10 }],
+    } as unknown as TouchEvent;
+    ts!.fn(touchEvent);
+    vi.advanceTimersByTime(600);
+
+    expect(showSheet).toHaveBeenCalledTimes(1);
+    expect(showSheet.mock.calls[0][0].map((item: { id: string }) => item.id))
+      .toEqual(["copy-id", "investigate"]);
+    vi.useRealTimers();
+    await m.unmount();
+  });
 });

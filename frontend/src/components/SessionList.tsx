@@ -382,10 +382,16 @@ function SessionNode({
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || isBulkSelectBlockedTarget(e.target)) return;
+    const rowEl = e.currentTarget as HTMLElement;
     longPressSelectedRef.current = false;
     clearBulkSelectTimer();
     bulkSelectTimerRef.current = setTimeout(() => {
       longPressSelectedRef.current = true;
+      if (isMobileViewport()) {
+        menuAnchorRef.current = rowEl.getBoundingClientRect();
+        showSheet(buildSessionActions(true, true), session.name);
+        return;
+      }
       onStartBulkSelect(session.id);
     }, SESSION_BULK_SELECT_LONG_PRESS_MS);
   };
@@ -410,11 +416,19 @@ function SessionNode({
     onSetTags(session.id, Array.from(current));
   };
 
-  // `includePin` is true only for the desktop right-click context menu;
-  // mobile and the action sheet rely on the always-visible pin button.
-  const buildSessionActions = (includePin = false): ActionItem[] => {
+  const buildSessionActions = (includePin = false, includeSelect = false): ActionItem[] => {
     const copyTarget = session.file_path || session.id;
     return [
+      ...(includeSelect
+        ? [
+            {
+              id: "select",
+              label: t("session.selectSession"),
+              icon: <Icon name="check-circle" size={14} />,
+              onClick: () => onStartBulkSelect(session.id),
+            },
+          ]
+        : []),
       ...(includePin
         ? [
             {
@@ -657,6 +671,7 @@ function SessionNode({
         onPointerLeave={clearBulkSelectTimer}
         onPointerCancel={clearBulkSelectTimer}
         onClick={handleRowClick}
+        data-mobile-context-owner="session-row"
         onContextMenu={(e) => {
           // Desktop-only: mobile uses the ⋯ button + long-press. Keep
           // the native menu (don't preventDefault) and add our floating

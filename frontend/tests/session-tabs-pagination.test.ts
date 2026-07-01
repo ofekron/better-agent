@@ -745,6 +745,43 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
+  it("opens tab actions by long pressing a tab on mobile", async () => {
+    vi.stubGlobal("innerWidth", 390);
+    const sessions = ["One", "Two"].map((name, i) =>
+      makeSession({
+        id: `sess-${i + 1}`,
+        name,
+        cwd: "/tmp/project-a",
+        last_opened_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      }),
+    );
+    window.history.pushState(null, "", "/s/sess-1");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify(sessions.map((session) => session.id)),
+    );
+    const h = await renderApp({ seed: { sessions } });
+
+    expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 2)).toBe(true);
+    h.$('[data-tab-movement-key="sess-2"] .session-tab')?.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", button: 0, clientX: 100, clientY: 80 }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    h.$('[data-tab-movement-key="sess-2"] .session-tab')?.dispatchEvent(
+      new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", button: 0 }),
+    );
+    await h.flush();
+
+    expect(await waitFor(h, () => Boolean(h.$(".mobile-action-sheet")))).toBe(true);
+    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain("session.copyAction");
+    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain("session.closeOtherTabsTitle");
+    h.$('[data-tab-movement-key="sess-2"]')?.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 80 }),
+    );
+    expect(h.$(".session-tab-context-menu")).toBeNull();
+    h.unmount();
+  }, 10000);
+
   it("copies a smart session marker from the tab context menu", async () => {
     const session = makeSession({
       id: "sess-copy-1234",
