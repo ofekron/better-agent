@@ -98,6 +98,37 @@ _TOOL_EDIT_NAMES = {"Edit", "MultiEdit", "Write", "replace", "write_file"}
 _RUNS_DIR_NAME = "runs"
 
 
+def _decode_cwd_token(token: str) -> str:
+    """Best-effort reverse of :func:`paths.encode_cwd` for a projects dir name.
+
+    ``encode_cwd`` collapses ``/ \\ : _`` all to ``-``, so the reverse is
+    ambiguous for paths containing underscores — callers that need an exact
+    cwd match compare via ``encode_cwd`` rather than this string. Used only for
+    display and as a fallback cwd when no BA record enriches a transcript.
+    """
+    if not token:
+        return ""
+    body = token.lstrip("-")
+    if not body:
+        return ""
+    return "/" + body.replace("-", "/")
+
+
+def _ba_session_cwd(sid: str) -> str:
+    """Real cwd for a BA app session id, or "" when no record exists.
+
+    Filesystem-first discovery has no BA index, so cwd is recovered from the
+    session record when present (the authoritative source) and falls back to
+    the encoded dir name otherwise.
+    """
+    try:
+        rec = json.loads((sessions_dir() / f"{sid}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    cwd = rec.get("cwd")
+    return cwd if isinstance(cwd, str) else ""
+
+
 def _is_real_user_prompt(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -277,6 +308,65 @@ def _iter_ba_session_records(root: Path) -> Iterable[tuple[str, dict]]:
             continue
         if isinstance(data, dict):
             yield session_json.name, data
+
+
+def iter_all_native_candidates() -> Iterable[NativeCandidate]:
+    """Filesystem-first discovery of EVERY native transcript, ignoring the
+    Better-Agent session index.
+
+    The BA-indexed miners (:class:`NativeClaudeSessionMiner` et al.) only see
+    transcripts linked from a BA session record, which misses the bulk of raw
+    native sessions — direct ``claude`` CLI usage and extension-spawned workers
+    (requirements/tasks pipelines) leave no BA record. This walker enumerates
+    the two on-disk transcript stores directly:
+
+    - Claude: ``<projects>/<encoded-cwd>/<sid>.jsonl`` (cwd decoded from the
+      dir name; exact for paths without underscores).
+    - Codex/Gemini/BA-runner run-dirs: ``<runs>/<run_id>/session_events.jsonl``
+      (cwd recovered from the BA record when one exists).
+
+    Used by the raw-grep search fallback (:mod:`native_session_prompt_search`)
+    so the search reflects the whole native corpus, not the BA-indexed 6%.
+    """
+    # Claude projects — every transcript under every encoded-cwd dir.
+    try:
+        projects_root = claude_projects_root_for_session({})
+    except Exception:
+        projects_root = Path.home() / ".claude" / "projects"
+    if projects_root.exists():
+        for encoded_dir in projects_root.iterdir():
+            if not encoded_dir.is_dir():
+                continue
+            decoded_cwd = _decode_cwd_token(encoded_dir.name)
+            for transcript in encoded_dir.glob("*.jsonl"):
+                yield NativeCandidate(
+                    key=f"claude-fs:{encoded_dir.name}/{transcript.stem}",
+                    sid=transcript.stem,
+                    cwd=decoded_cwd,
+                    data={},
+                    transcript=transcript,
+                    mtime=_mtime(transcript),
+                )
+
+    # Run-dirs (codex/gemini/ba-runner) — every run, regardless of BA linkage.
+    for state_path in _runs_root().glob("*/state.json"):
+        run_dir = state_path.parent
+        transcript = run_dir / "session_events.jsonl"
+        if not transcript.exists():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        sid = state.get("app_session_id") if isinstance(state.get("app_session_id"), str) else run_dir.name
+        yield NativeCandidate(
+            key=f"run-fs:{run_dir.name}",
+            sid=sid,
+            cwd=_ba_session_cwd(sid),
+            data={},
+            transcript=transcript,
+            mtime=_mtime(transcript),
+        )
 
 
 class _NativeMinerBase(SessionMinerBase):

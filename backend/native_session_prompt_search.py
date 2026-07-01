@@ -1,12 +1,14 @@
 """Raw provider-native session prompt search.
 
-Each provider is read by its own native miner — Claude ``projects/<cwd>/<sid>.jsonl``,
-Codex / Gemini / Better Agent run-dir ``session_events.jsonl`` — so this is the
-"every provider with its own grepping method" fan-out. It reuses the canonical
-:mod:`native_session_miner` readers (no watermark → scan every transcript) and
-greps the typed user prompts for the query tokens. Public requirements lookup
-does not use this as a success fallback; requirements still come from the LLM
-processor.
+Each provider is read by its own native transcript store — Claude
+``projects/<cwd>/<sid>.jsonl``, Codex / Gemini / Better Agent run-dir
+``session_events.jsonl`` — so this is the "every provider with its own grepping
+method" fan-out. Discovery walks both stores directly via
+:func:`native_session_miner.iter_all_native_candidates` (NOT the BA-indexed
+miners, which miss direct-CLI and extension-spawned sessions with no BA record),
+then greps the typed user prompts for the query tokens. Public requirements
+lookup does not use this as a success fallback; requirements still come from
+the LLM processor.
 
 Discovery (cheap) is separated from parsing (expensive: read + JSON-parse each
 transcript). Parsing + matching runs concurrently across a thread pool, since
@@ -20,12 +22,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from native_session_miner import (
-    NativeBetterAgentSessionMiner,
     NativeCandidate,
-    NativeClaudeSessionMiner,
-    NativeCodexSessionMiner,
-    NativeGeminiSessionMiner,
+    iter_all_native_candidates,
 )
+from paths import encode_cwd
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _MAX_WORKERS = min(32, (os.cpu_count() or 4) * 4)
@@ -39,18 +39,25 @@ _STOPWORDS = frozenset({
 })
 
 
-def _native_miners() -> list:
-    """One miner per provider, each with an empty state so nothing is skipped.
+def _candidates(allowed: set[str]) -> list[NativeCandidate]:
+    """Cheap filesystem-first discovery across all providers, cwd-filtered
+    before any parse.
 
-    An empty watermark dict makes every native transcript a candidate — this
-    search wants the whole raw corpus, not the delta since the last mining pass.
+    Walks every native transcript on disk (claude projects + run-dirs) so the
+    search covers direct-CLI and extension-spawned sessions that have no Better
+    Agent session record — the BA-indexed miners miss ~99% of the corpus. The
+    cwd filter compares encoded forms because claude projects encode ``/`` and
+    ``_`` both to ``-``, making the decoded cwd ambiguous for underscore paths.
     """
-    return [
-        NativeClaudeSessionMiner({}),
-        NativeCodexSessionMiner({}),
-        NativeGeminiSessionMiner({}),
-        NativeBetterAgentSessionMiner({}),
-    ]
+    allowed_encoded = {encode_cwd(c) for c in allowed}
+    out: list[NativeCandidate] = []
+    for candidate in iter_all_native_candidates():
+        if not allowed:
+            out.append(candidate)
+            continue
+        if candidate.cwd in allowed or encode_cwd(candidate.cwd) in allowed_encoded:
+            out.append(candidate)
+    return out
 
 
 def _query_tokens(query: str) -> list[str]:
@@ -65,21 +72,6 @@ def _token_patterns(tokens: list[str]) -> list[re.Pattern]:
     """One whole-word matcher per token so ``in`` matches the word ``in`` and
     not the substring inside ``building``."""
     return [re.compile(r"\b" + re.escape(tok) + r"\b") for tok in tokens]
-
-
-def _candidates(allowed: set[str]) -> list[NativeCandidate]:
-    """Cheap discovery across all providers, cwd-filtered before any parse."""
-    out: list[NativeCandidate] = []
-    for miner in _native_miners():
-        try:
-            for candidate in miner.iter_candidates():
-                if allowed and candidate.cwd not in allowed:
-                    continue
-                out.append(candidate)
-        except Exception:
-            # One provider's discovery failing must not sink the others.
-            continue
-    return out
 
 
 def _match_candidate(
