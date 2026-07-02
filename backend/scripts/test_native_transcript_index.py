@@ -500,6 +500,66 @@ def test_refresh_persists_batch_and_file_timings() -> bool:
     return ok
 
 
+def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    fpath = claude / encode_cwd("/proj") / "rowid-delete.jsonl"
+    _write_claude(fpath, ["rowiddeleteneedle first"])
+    idx.refresh_once()
+
+    class GuardedConn:
+        def __init__(self, inner):
+            self.inner = inner
+            self.fts_path_deletes = 0
+            self.fts_rowid_deletes = 0
+
+        def execute(self, sql, *args, **kwargs):
+            self._count(sql)
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def executemany(self, sql, *args, **kwargs):
+            self._count(sql)
+            return self.inner.executemany(sql, *args, **kwargs)
+
+        def _count(self, sql):
+            normalized = " ".join(str(sql).split()).lower()
+            if "delete from native_element_fts where path" in normalized:
+                self.fts_path_deletes += 1
+            if "delete from native_element_fts where rowid" in normalized:
+                self.fts_rowid_deletes += 1
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    time.sleep(1.05)
+    _write_claude(fpath, ["rowiddeleteneedle second"])
+    real_conn = idx._writer_conn
+    guarded = GuardedConn(real_conn)
+    idx._writer_conn = guarded
+    try:
+        result = idx.refresh_once()
+        rows = idx.search_rows(["rowiddeleteneedle"], limit=10)
+        mapped_rows = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_element_path"
+        ).fetchone()[0]
+    finally:
+        if isinstance(idx._writer_conn, GuardedConn):
+            idx._writer_conn = idx._writer_conn.inner
+
+    ok = (
+        result["touched"] == 1
+        and guarded.fts_path_deletes == 0
+        and guarded.fts_rowid_deletes >= 1
+        and len(rows) == 1
+        and rows[0]["text"] == "rowiddeleteneedle second"
+        and mapped_rows == 1
+    )
+    print(f"{OK if ok else FAIL} reindex deletes FTS rows by rowid not path scan "
+          f"(result={result}, path_deletes={guarded.fts_path_deletes}, "
+          f"rowid_deletes={guarded.fts_rowid_deletes}, rows={len(rows)}, mapped={mapped_rows})")
+    return ok
+
+
 def test_broad_match_signals_fallback() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -628,6 +688,7 @@ def main_run() -> int:
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_refresh_persists_batch_and_file_timings,
+        test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_refresh_reports_locked_instead_of_colliding,

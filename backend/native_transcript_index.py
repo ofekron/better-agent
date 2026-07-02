@@ -42,7 +42,7 @@ import portable_lock
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts",
     "role", "element_id", "element_index",
@@ -261,10 +261,22 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if existing:
         columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
-        if columns != _FTS_COLUMNS:
+        version_row = conn.execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'schema_version'"
+        ).fetchone()
+        path_index_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_path'"
+        ).fetchone()
+        if (
+            columns != _FTS_COLUMNS
+            or version_row is None
+            or version_row[0] != str(_SCHEMA_VERSION)
+            or not path_index_exists
+        ):
             conn.execute("DROP TABLE native_element_fts")
+            conn.execute("DROP TABLE IF EXISTS native_element_path")
             conn.execute("DELETE FROM native_file_state")
-            conn.execute("DELETE FROM native_corpus_state WHERE key IN ('covered', 'last_walk_at', 'schema_version')")
+            conn.execute("DELETE FROM native_corpus_state")
             conn.execute("DELETE FROM native_full_scan_queue")
     conn.executescript(
         """
@@ -282,6 +294,12 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             element_index UNINDEXED,
             tokenize='unicode61'
         );
+        CREATE TABLE IF NOT EXISTS native_element_path (
+            rowid INTEGER PRIMARY KEY,
+            path TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS native_element_path_path_idx
+            ON native_element_path(path);
         """
     )
 
@@ -414,7 +432,7 @@ def _replace_candidate(
 ) -> tuple[int, dict[str, float]]:
     path = str(candidate.transcript)
     delete_start = time.monotonic()
-    conn.execute("DELETE FROM native_element_fts WHERE path = ?", (path,))
+    _delete_path(conn, path, file_state=False)
     delete_s = time.monotonic() - delete_start
 
     parse_start = time.monotonic()
@@ -423,11 +441,18 @@ def _replace_candidate(
 
     insert_start = time.monotonic()
     if rows:
+        path_rows = []
+        for row in rows:
+            cursor = conn.execute(
+                "INSERT INTO native_element_fts"
+                "(text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                row,
+            )
+            path_rows.append((cursor.lastrowid, path))
         conn.executemany(
-            "INSERT INTO native_element_fts"
-            "(text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
+            "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
+            path_rows,
         )
     insert_s = time.monotonic() - insert_start
 
@@ -448,9 +473,22 @@ def _replace_candidate(
     }
 
 
-def _delete_path(conn: sqlite3.Connection, path: str) -> None:
-    conn.execute("DELETE FROM native_element_fts WHERE path = ?", (path,))
-    conn.execute("DELETE FROM native_file_state WHERE path = ?", (path,))
+def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True) -> None:
+    rowids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT rowid FROM native_element_path WHERE path = ?",
+            (path,),
+        )
+    ]
+    if rowids:
+        conn.executemany(
+            "DELETE FROM native_element_fts WHERE rowid = ?",
+            [(rowid,) for rowid in rowids],
+        )
+        conn.execute("DELETE FROM native_element_path WHERE path = ?", (path,))
+    if file_state:
+        conn.execute("DELETE FROM native_file_state WHERE path = ?", (path,))
 
 
 def _compute_changes() -> tuple[list[tuple[Path, str, float, int]], set[str]]:
