@@ -524,6 +524,28 @@ interface Props {
   machines?: import("../types").NodeSnapshot[];
 }
 
+function runRenderKey(run: RunInfo): string {
+  return [
+    run.run_id,
+    run.kind,
+    run.target_message_id ?? "",
+    run.delegation_id ?? "",
+    run.started_at ?? "",
+  ].join("\t");
+}
+
+function turnGroupsRenderShapeKey(groups: TurnGroupData[]): string {
+  return groups
+    .map((group) =>
+      [
+        group.initiatorMessage.client_id ?? group.initiatorMessage.id,
+        group.responseMessage?.id ?? "",
+        group.turnRuns.map(runRenderKey).join("\v"),
+      ].join("\t"),
+    )
+    .join("\n");
+}
+
 export function Chat({
   messages,
   pendingMessages,
@@ -1148,10 +1170,22 @@ export function Chat({
     });
   }, [allMessages, visibleRuns]);
 
-  // Coalesce streaming-driven re-renders so the chat's layout animations
-  // animate in chunks instead of re-triggering on every token. Idle sessions
-  // pass through immediately so user interactions stay snappy.
-  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning ? 140 : 0);
+  const turnGroupsShapeKey = useMemo(
+    () => turnGroupsRenderShapeKey(turnGroups),
+    [turnGroups],
+  );
+  const previousTurnGroupsShapeKeyRef = useRef<string | null>(null);
+  const throttleTurnGroups =
+    sessionRunning &&
+    previousTurnGroupsShapeKeyRef.current === turnGroupsShapeKey;
+  const throttledTurnGroups = useThrottledValue(
+    turnGroups,
+    throttleTurnGroups ? 140 : 0,
+  );
+  const displayTurnGroups = throttleTurnGroups ? throttledTurnGroups : turnGroups;
+  useEffect(() => {
+    previousTurnGroupsShapeKeyRef.current = turnGroupsShapeKey;
+  }, [turnGroupsShapeKey]);
 
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
   // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
@@ -1451,7 +1485,14 @@ export function Chat({
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
                 return (
-                  <Wrapper key={g.initiatorMessage.id} {...wrapperProps}>
+                  // Key by client_id when present: the optimistic pending
+                  // message's id IS the client_id, and the persisted ack
+                  // carries it as client_id — so the group identity survives
+                  // the pending→persisted swap without remounting TurnGroup.
+                  <Wrapper
+                    key={g.initiatorMessage.client_id ?? g.initiatorMessage.id}
+                    {...wrapperProps}
+                  >
                     <TurnGroup
                       enterAnimation={enteringGroupIds.has(g.initiatorMessage.id)}
                       initiatorMessage={g.initiatorMessage}
