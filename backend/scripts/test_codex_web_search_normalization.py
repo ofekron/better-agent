@@ -7,6 +7,8 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[1]
@@ -655,6 +657,141 @@ def test_codex_rollout_tailer_emits_context_updates() -> bool:
         asyncio.run(_go())
     assert updates == [(200000, 180000)]
     assert rendered == []
+    return True
+
+
+def _rollout_agent_line(text: str) -> str:
+    return json.dumps({
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "message": text},
+    }) + "\n"
+
+
+def test_codex_rollout_tailer_keeps_partial_line_pending() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        first = _rollout_agent_line("complete")
+        partial = json.dumps({
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "partial"},
+        })
+        path.write_text(first + partial, encoding="utf-8")
+        rendered: list[dict] = []
+        cursors: list[int] = []
+
+        async def _go() -> CodexRolloutTailer:
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+                on_cursor_advance=lambda cursor: cursors.append(cursor),
+            )
+            assert await tailer.drain_available() is True
+            return tailer
+
+        tailer = asyncio.run(_go())
+        first_cursor = len(first.encode("utf-8"))
+        assert tailer.processed_byte == first_cursor
+        assert cursors == [first_cursor]
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == ["complete"]
+
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+
+        async def _again() -> None:
+            assert await tailer.drain_available() is True
+
+        asyncio.run(_again())
+        final_cursor = len((first + partial + "\n").encode("utf-8"))
+        assert tailer.processed_byte == final_cursor
+        assert cursors == [first_cursor, final_cursor]
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == [
+            "complete",
+            "partial",
+        ]
+    return True
+
+
+def test_codex_rollout_tailer_advances_cursor_after_dispatch() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        first = _rollout_agent_line("one")
+        second = _rollout_agent_line("two")
+        path.write_text(first + second, encoding="utf-8")
+        order: list[tuple[str, int]] = []
+
+        async def _go() -> None:
+            tailer: CodexRolloutTailer | None = None
+
+            def _dispatch(_event: dict) -> None:
+                assert tailer is not None
+                order.append(("dispatch", tailer.processed_byte))
+
+            def _cursor(cursor: int) -> None:
+                order.append(("cursor", cursor))
+
+            tailer = CodexRolloutTailer(
+                path=path,
+                start_byte=0,
+                namespace="thread",
+                dispatch=_dispatch,
+                on_cursor_advance=_cursor,
+            )
+            assert await tailer.drain_available() is True
+
+        asyncio.run(_go())
+        first_cursor = len(first.encode("utf-8"))
+        second_cursor = len((first + second).encode("utf-8"))
+        assert order == [
+            ("dispatch", 0),
+            ("cursor", first_cursor),
+            ("dispatch", first_cursor),
+            ("cursor", second_cursor),
+        ]
+    return True
+
+
+class _BlockingOpenPath:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.release = threading.Event()
+
+    def open(self, *args, **kwargs):
+        self.release.wait(timeout=0.35)
+        return self.path.open(*args, **kwargs)
+
+
+def test_codex_rollout_tailer_file_read_does_not_block_loop() -> bool:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "rollout.jsonl"
+        path.write_text(_rollout_agent_line("nonblocking"), encoding="utf-8")
+        blocking_path = _BlockingOpenPath(path)
+        rendered: list[dict] = []
+
+        async def _go() -> float:
+            tailer = CodexRolloutTailer(
+                path=blocking_path,  # type: ignore[arg-type]
+                start_byte=0,
+                namespace="thread",
+                dispatch=lambda event: rendered.append(event),
+            )
+            timer = threading.Timer(0.35, blocking_path.release.set)
+            timer.start()
+            task = asyncio.create_task(tailer.drain_available())
+            started = time.perf_counter()
+            try:
+                await asyncio.sleep(0.05)
+                elapsed = time.perf_counter() - started
+            finally:
+                blocking_path.release.set()
+                timer.cancel()
+            assert await asyncio.wait_for(task, timeout=2) is True
+            return elapsed
+
+        elapsed = asyncio.run(_go())
+        assert elapsed < 0.22
+        assert [ev["message"]["content"][0]["text"] for ev in rendered] == ["nonblocking"]
     return True
 
 
@@ -1428,6 +1565,18 @@ TESTS = [
     (
         "codex rollout tailer emits context updates",
         test_codex_rollout_tailer_emits_context_updates,
+    ),
+    (
+        "codex rollout tailer keeps partial line pending",
+        test_codex_rollout_tailer_keeps_partial_line_pending,
+    ),
+    (
+        "codex rollout tailer advances cursor after dispatch",
+        test_codex_rollout_tailer_advances_cursor_after_dispatch,
+    ),
+    (
+        "codex rollout tailer file read does not block loop",
+        test_codex_rollout_tailer_file_read_does_not_block_loop,
     ),
     (
         "codex rollout assistant text dedup is lossless",

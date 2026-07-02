@@ -108,6 +108,24 @@ def test_gemini_polling_tailer_reads_file_off_loop() -> None:
     assert "new_lines = self._read_new_lines()" not in gemini_source
 
 
+def test_codex_rollout_tailer_reads_file_off_loop() -> None:
+    source = (ROOT / "codex_native.py").read_text(encoding="utf-8")
+    start = source.index("class CodexRolloutTailer")
+    end = source.index("async def _dispatch(", start)
+    tailer_source = source[start:end]
+    drain_start = tailer_source.index("async def _drain_available_locked(")
+    drain_end = tailer_source.index("def _read_available_lines(", drain_start)
+    drain_source = tailer_source[drain_start:drain_end]
+    assert "lines = await asyncio.to_thread(" in drain_source
+    assert "self._read_available_lines" in drain_source
+    assert "self.path.open" not in drain_source
+    assert ".readline()" not in drain_source
+
+    read_source = tailer_source[drain_end:]
+    assert "with self.path.open(\"rb\") as f:" in read_source
+    assert "raw = f.readline()" in read_source
+
+
 def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
     assert "_SESSIONS_DIR = bc_home() / \"sessions\"" in source
@@ -3446,6 +3464,7 @@ if __name__ == "__main__":
     test_provisioning_run_lifecycle_runs_off_loop()
     test_provider_run_process_poll_runs_off_loop()
     test_gemini_polling_tailer_reads_file_off_loop()
+    test_codex_rollout_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
     test_ui_selection_routes_use_hot_path_executor()
