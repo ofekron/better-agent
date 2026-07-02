@@ -2937,7 +2937,12 @@ class SessionManager:
             return
         import session_queue_projection
 
-        session_queue_projection.upsert_record(record)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            session_queue_projection.upsert_record(record)
+            return
+        session_queue_projection.upsert_record_background(record)
 
     def _queue_projection_enricher(
         self, holder: dict[str, Optional[dict]], *, include_queued_prompts: bool,
