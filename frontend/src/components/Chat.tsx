@@ -1366,7 +1366,6 @@ export function Chat({
                       responseMessage={g.responseMessage}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
-                      isLatestTurnGroup={g.isLatest}
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
                         !!g.responseMessage &&

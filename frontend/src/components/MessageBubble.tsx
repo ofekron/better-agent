@@ -2764,7 +2764,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   /** Child turn groups nested under the supervisor/main turn. */
@@ -2802,8 +2802,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
-  /** True only for the latest visible chat group. */
-  isLatestTurnGroup?: boolean;
 }) {
   const { t } = useTranslation();
   const responseContainerRef = useRef<HTMLDivElement>(null);

@@ -290,7 +290,6 @@ function CellGroup({
       onRetryStopped={onRetryStopped}
       threadColorMap={threadColorMap}
       defaultCollapsed={!!pair.response && !pair.response.isStreaming}
-      isLatestTurnGroup={isLatestTurn}
       expandAllTrigger={expandAllTrigger}
       orchestrationMode={orchestrationMode}
       runs={turnRuns}
