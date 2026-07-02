@@ -1444,22 +1444,28 @@ class _Subscriber:
         """Read events.jsonl from `next_seq..until_seq` filtered by sid,
         send each. Caller MUST hold `_lock`."""
         from event_journal import event_journal_reader
-        events, _, _ = await asyncio.to_thread(
-            event_journal_reader.read_events,
-            self.root_id,
-            after_seq=self.next_seq - 1,
-            limit=10_000,
-            sid_filter=self.app_session_id,
-        )
-        for e in events:
-            seq = e.get("seq")
-            if not isinstance(seq, int) or seq > until_seq:
+        while self.next_seq <= until_seq:
+            events, _, has_more = await asyncio.to_thread(
+                event_journal_reader.read_events,
+                self.root_id,
+                after_seq=self.next_seq - 1,
+                limit=10_000,
+                sid_filter=self.app_session_id,
+            )
+            if not events:
                 break
-            frame = BetterAgentJsonlTailer._entry_to_ws_frame(e)
-            if frame is None:
-                continue
-            await self._send(frame)
-            self.next_seq = seq + 1
+            for e in events:
+                seq = e.get("seq")
+                if not isinstance(seq, int) or seq > until_seq:
+                    return
+                frame = BetterAgentJsonlTailer._entry_to_ws_frame(e)
+                if frame is None:
+                    self.next_seq = seq + 1
+                    continue
+                await self._send(frame)
+                self.next_seq = seq + 1
+            if not has_more:
+                break
 
     async def _send(self, frame: dict) -> None:
         try:

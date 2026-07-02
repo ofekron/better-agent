@@ -1666,20 +1666,31 @@ class EventJournalReader:
     ) -> tuple[list[dict], int, bool]:
         resolutions = self._ownership_resolutions(root_id)
         if resolutions:
-            rows, _, _ = event_ingester.read_events(
-                root_id,
-                after_seq=after_seq,
-                limit=999_999,
-                sid_filter=sid_filter,
-            )
-            rows = self._apply_ownership_resolutions(rows, resolutions)
+            page_limit = max(limit, 0)
             if msg_id_filter:
-                rows = [
-                    row for row in rows
-                    if row.get("msg_id") == msg_id_filter
-                ]
+                rows, _, _ = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=999_999,
+                    sid_filter=sid_filter,
+                )
+            else:
+                rows, _total, raw_has_more = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=page_limit + 1,
+                    sid_filter=sid_filter,
+                )
+                rows = self._apply_ownership_resolutions(rows, resolutions)
+                total = len(rows)
+                return rows[:page_limit], total, raw_has_more or total > page_limit
+            rows = self._apply_ownership_resolutions(rows, resolutions)
+            rows = [
+                row for row in rows
+                if row.get("msg_id") == msg_id_filter
+            ]
             total = len(rows)
-            return rows[:limit], total, total > limit
+            return rows[:page_limit], total, total > page_limit
         return event_ingester.read_events(
             root_id,
             after_seq=after_seq,

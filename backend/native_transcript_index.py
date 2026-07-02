@@ -24,7 +24,11 @@ correctness never depends on an incomplete index.
 """
 from __future__ import annotations
 
+import argparse
 import logging
+import os
+import subprocess
+import sys
 import sqlite3
 import threading
 import time
@@ -51,13 +55,17 @@ _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
-_FULL_REFRESH_FILE_BATCH = 512
+_FULL_REFRESH_FILE_BATCH = 128
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
+_WORKER_ARG = "--native-transcript-index-worker"
+_WORKER_POLL_INTERVAL_SECONDS = 0.5
+_WORKER_LOG_BYTES = 16 * 1024 * 1024
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
 _worker_lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
+_worker_process: subprocess.Popen | None = None
 _stop = threading.Event()
 
 # Refresh signaling: once covered, a stale query REQUESTS a refresh and waits
@@ -76,6 +84,61 @@ def _db_path() -> Path:
 
 def _writer_lock_path() -> Path:
     return _db_path().with_name(_db_path().name + ".lock")
+
+
+def _worker_pid_path() -> Path:
+    return _db_path().with_name(_db_path().name + ".worker.pid")
+
+
+def _worker_log_path() -> Path:
+    return ba_home() / "logs" / "native-transcript-index.log"
+
+
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _read_worker_pid() -> int | None:
+    try:
+        return int(_worker_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_worker_pid(pid: int) -> None:
+    path = _worker_pid_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pid), encoding="utf-8")
+
+
+def _clear_worker_pid(pid: int | None = None) -> None:
+    path = _worker_pid_path()
+    if pid is not None and _read_worker_pid() != pid:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _append_worker_log(message: str) -> None:
+    path = _worker_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > _WORKER_LOG_BYTES:
+            path.replace(path.with_suffix(path.suffix + ".1"))
+        with path.open("a", encoding="utf-8") as f:
+            f.write(message.rstrip() + "\n")
+    except OSError:
+        logger.debug("native transcript index worker log write failed", exc_info=True)
 
 
 # ─── connection management ─────────────────────────────────────────────────
@@ -341,7 +404,7 @@ def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
     return rows
 
 
-def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: int) -> None:
+def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: int) -> int:
     path = str(candidate.transcript)
     conn.execute("DELETE FROM native_element_fts WHERE path = ?", (path,))
     rows = _index_candidate_rows(candidate)
@@ -359,6 +422,7 @@ def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: 
         "sid=excluded.sid, cwd=excluded.cwd, indexed_at=excluded.indexed_at",
         (path, mtime, size, candidate.format, candidate.sid, candidate.cwd, time.time()),
     )
+    return len(rows)
 
 
 def _delete_path(conn: sqlite3.Connection, path: str) -> None:
@@ -440,6 +504,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
         with _lock:
             conn = _writer_connection()
             try:
+                refresh_start = time.monotonic()
                 covered = _state_get(conn, "covered") == "1"
                 do_full = not covered if full is None else full
                 if do_full:
@@ -487,11 +552,15 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     partial_full = True
 
                 new_or_changed = 0
+                inserted_rows = 0
+                parse_insert_s = 0.0
                 _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
                 for path, tag, mt, sz in changed:
                     if fingerprints.get(str(path)) != (mt, sz):
+                        per_file_start = time.monotonic()
                         candidate = candidate_from_match(path, tag)
-                        _replace_candidate(conn, candidate, mt, sz)
+                        inserted_rows += _replace_candidate(conn, candidate, mt, sz)
+                        parse_insert_s += time.monotonic() - per_file_start
                         new_or_changed += 1
                 for path_str in deleted:
                     _delete_path(conn, path_str)
@@ -505,11 +574,26 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                         _state_set(conn, "covered", "1")
                         _state_set(conn, "last_full_reconcile_at", str(now))
                         _last_full_reconcile_at = now
+                duration_s = time.monotonic() - refresh_start
+                _state_set(conn, "last_refresh_duration_s", f"{duration_s:.6f}")
+                _state_set(conn, "last_refresh_changed", str(len(changed)))
+                _state_set(conn, "last_refresh_deleted", str(len(deleted)))
+                _state_set(conn, "last_refresh_inserted_rows", str(inserted_rows))
+                _state_set(conn, "last_refresh_parse_insert_s", f"{parse_insert_s:.6f}")
+                _state_set(conn, "last_refresh_batch_size", str(len(batch)))
+                _state_set(conn, "last_refresh_remaining", str(remaining_after_batch))
                 conn.commit()
                 _checkpoint_if_large(conn)
                 with _refresh_cond:
                     _last_refresh_at = time.time()
                     _refresh_cond.notify_all()
+                if duration_s >= 1.0 or new_or_changed:
+                    logger.info(
+                        "native transcript index refresh full=%s partial=%s batch=%d "
+                        "changed=%d deleted=%d rows=%d remaining=%d duration=%.2fs parse_insert=%.2fs",
+                        do_full, partial_full, len(batch), len(changed), len(deleted),
+                        inserted_rows, remaining_after_batch, duration_s, parse_insert_s,
+                    )
                 return {
                     "walked": walked_count,
                     "touched": new_or_changed,
@@ -554,9 +638,14 @@ def is_usable() -> bool:
     """covered AND the last refresh is within the freshness window. Usable =>
     FTS reflects the current corpus closely enough to answer; caller otherwise
     requests a refresh (see wait_fresh) or falls back to rg."""
-    if not is_covered() or _last_refresh_at <= 0:
+    if not is_covered():
         return False
-    return (time.time() - _last_refresh_at) <= _FRESH_WINDOW_SECONDS
+    conn = _readonly_connection()
+    try:
+        last_walk_at = _state_float(conn, "last_walk_at")
+    except sqlite3.OperationalError:
+        return False
+    return last_walk_at > 0 and (time.time() - last_walk_at) <= _FRESH_WINDOW_SECONDS
 
 
 def quick_state() -> dict[str, Any]:
@@ -573,6 +662,9 @@ def quick_state() -> dict[str, Any]:
             covered_row = conn.execute(
                 "SELECT value FROM native_corpus_state WHERE key = 'covered'"
             ).fetchone()
+            last_walk_row = conn.execute(
+                "SELECT value FROM native_corpus_state WHERE key = 'last_walk_at'"
+            ).fetchone()
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -584,7 +676,13 @@ def quick_state() -> dict[str, Any]:
         }
     schema_is_ok = bool(version_row and version_row[0] == str(_SCHEMA_VERSION))
     covered = bool(schema_is_ok and covered_row and covered_row[0] == "1")
-    usable = bool(covered and _last_refresh_at > 0 and (time.time() - _last_refresh_at) <= _FRESH_WINDOW_SECONDS)
+    last_walk_at = 0.0
+    if covered and last_walk_row:
+        try:
+            last_walk_at = float(last_walk_row[0])
+        except (TypeError, ValueError):
+            last_walk_at = 0.0
+    usable = bool(covered and last_walk_at > 0 and (time.time() - last_walk_at) <= _FRESH_WINDOW_SECONDS)
     return {"schema_ok": schema_is_ok, "covered": covered, "usable": usable}
 
 
@@ -618,12 +716,11 @@ def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
     cheap) then serve from FTS. Returns True if fresh within the timeout; the
     timeout itself is the safety when no refresh is forthcoming (worker down)."""
     deadline = time.monotonic() + timeout
-    with _refresh_cond:
-        while (time.time() - _last_refresh_at) > _FRESH_WINDOW_SECONDS:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            _refresh_cond.wait(remaining)
+    while not is_usable():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
     return True
 
 
@@ -800,31 +897,54 @@ def run_readonly_sql(
 # ─── background worker ─────────────────────────────────────────────────────
 
 def ensure_started() -> None:
-    """Start the background daemon that keeps the index covered + fresh."""
-    global _worker_started, _worker_thread
+    """Start the external daemon that keeps the index covered + fresh."""
+    global _worker_process, _worker_started
     if _worker_started:
         return
     with _worker_lock:
         if _worker_started:
             return
-        thread = threading.Thread(target=_worker_main, name="native-transcript-index", daemon=True)
-        thread.start()
-        _worker_thread = thread
+        _stop.clear()
+        existing_pid = _read_worker_pid()
+        if existing_pid and _is_process_alive(existing_pid):
+            _worker_started = True
+            return
+        _clear_worker_pid(existing_pid)
+        log_path = _worker_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "a", encoding="utf-8")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), _WORKER_ARG],
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=log_fh,
+                stderr=log_fh,
+                start_new_session=False,
+            )
+        finally:
+            log_fh.close()
+        _write_worker_pid(proc.pid)
+        _worker_process = proc
         _worker_started = True
+        logger.info("native transcript index worker process started pid=%s", proc.pid)
 
 
-def _worker_main() -> None:
+def _worker_main(parent_pid: int | None = None) -> None:
     # Cold start: keep doing full delta passes until covered, then poll. Each
     # refresh (refresh_once) stamps _last_refresh_at + notifies waiting queries.
     global _refresh_requested
     while not _stop.is_set():
+        if parent_pid and not _is_process_alive(parent_pid):
+            break
         try:
             full = None
             if is_covered() and _full_reconcile_due():
                 full = True
-            refresh_once(full=full)
+            result = refresh_once(full=full)
+            if result.get("locked"):
+                _append_worker_log("native transcript index worker: writer locked")
         except Exception:
-            logger.debug("native transcript index refresh failed", exc_info=True)
+            logger.exception("native transcript index refresh failed")
             return  # avoid a hot failure loop; next ensure_started() restarts
         if is_covered():
             # Sleep for the poll interval, but wake immediately if a query
@@ -841,6 +961,23 @@ def _worker_main() -> None:
             _stop.wait(0.2)  # throttle the initial build so we don't hog disk
 
 
+def _run_worker_process() -> int:
+    parent_pid = os.getppid()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    pid = os.getpid()
+    _write_worker_pid(pid)
+    try:
+        logger.info("native transcript index worker process running pid=%s parent=%s", pid, parent_pid)
+        _worker_main(parent_pid=parent_pid)
+        return 0
+    finally:
+        _clear_worker_pid(pid)
+        shutdown()
+
+
 def _stop_worker() -> None:
     """Signal the worker to stop, wake it from its cond wait, and join it.
 
@@ -849,7 +986,7 @@ def _stop_worker() -> None:
     ``_lock``) that the ``join(timeout)`` can't reach is caught here, so callers
     don't need their own ``_lock`` barrier before clearing ``_stop`` (which would
     otherwise resume a ghost worker that keeps polling mid-test)."""
-    global _worker_started, _worker_thread
+    global _worker_started, _worker_thread, _worker_process
     _stop.set()
     with _refresh_cond:
         _refresh_cond.notify_all()
@@ -862,8 +999,26 @@ def _stop_worker() -> None:
             pass
         if thread.is_alive():
             logger.warning("native transcript index worker did not stop within 2s")
+    proc = _worker_process
+    if proc is None:
+        pid = _read_worker_pid()
+        if pid and _is_process_alive(pid):
+            try:
+                os.kill(pid, 15)
+            except OSError:
+                pass
+    else:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
+        _clear_worker_pid(proc.pid)
     _worker_started = False
     _worker_thread = None
+    _worker_process = None
 
 
 def shutdown() -> None:
@@ -916,8 +1071,21 @@ def reset_for_test() -> None:
             pass
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(_WORKER_ARG, action="store_true")
+    args = parser.parse_args(argv)
+    if args.native_transcript_index_worker:
+        return _run_worker_process()
+    return 0
+
+
 __all__ = [
     "ensure_started", "is_covered", "is_usable", "match_paths", "search_rows",
     "run_readonly_sql", "SQL_TABLE", "SQL_COLUMNS", "SQL_ELEMENT_KINDS",
     "refresh_once", "request_refresh", "wait_fresh", "reset_for_test", "shutdown",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
