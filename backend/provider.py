@@ -44,6 +44,7 @@ from typing import Any, ClassVar, Iterable, Optional
 
 import config_store
 from env_compat import dual_env_many
+from paths import ba_home
 from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,12 @@ def build_better_agent_run_env(
     user_facing: bool,
     disabled_builtin_extensions: list[str] | None,
 ) -> dict[str, str]:
-    return dual_env_many({
+    state_home = str(ba_home())
+    env = {
+        "BETTER_AGENT_HOME": state_home,
+        "BETTER_CLAUDE_HOME": state_home,
+    }
+    env.update(dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": str(backend_url or ""),
         "BETTER_CLAUDE_INTERNAL_TOKEN": str(internal_token or ""),
         "BETTER_CLAUDE_APP_SESSION_ID": str(app_session_id or ""),
@@ -166,7 +172,8 @@ def build_better_agent_run_env(
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(
             sorted(set(disabled_builtin_extensions or []))
         ),
-    })
+    }))
+    return env
 
 
 # ============================================================================
