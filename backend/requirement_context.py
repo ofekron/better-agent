@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +43,12 @@ NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
 PROCESSOR_PARSE_ATTEMPTS = 3
 PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
+DIRECT_REQUIREMENT_QUERY_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "arent", "as", "be", "but", "by", "can", "cant",
+    "do", "does", "for", "from", "has", "have", "i", "in", "is", "it", "not",
+    "of", "on", "or", "that", "the", "this", "to", "was", "were", "when",
+    "with",
+})
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
@@ -135,6 +142,48 @@ def _processor_search_hints(query: str) -> list[str]:
         "user confirms requirements",
         "non-user transcript rows",
     ]
+
+
+def _direct_requirement_search_patterns(query: str) -> list[str]:
+    normalized_query = " ".join(str(query or "").split())
+    terms = _direct_requirement_query_terms(normalized_query)
+    patterns: list[str] = []
+    if normalized_query and terms:
+        patterns.append(normalized_query)
+    patterns.extend(_processor_search_hints(normalized_query))
+    for term in terms:
+        if _direct_requirement_single_term(term):
+            patterns.append(term)
+            if term.endswith("s") and len(term) > 4:
+                patterns.append(term[:-1])
+    patterns.extend(_direct_requirement_adjacent_phrases(terms))
+    return list(dict.fromkeys(patterns))
+
+
+def _direct_requirement_query_terms(query: str) -> list[str]:
+    terms = []
+    for raw in re.findall(r"[a-zA-Z0-9_]+", query.lower()):
+        term = raw.strip("_")
+        if term and term not in DIRECT_REQUIREMENT_QUERY_STOPWORDS:
+            terms.append(term)
+    return terms
+
+
+def _direct_requirement_single_term(term: str) -> bool:
+    return "_" in term or len(term) >= 5
+
+
+def _direct_requirement_adjacent_phrases(terms: list[str]) -> list[str]:
+    phrases: list[str] = []
+    for size in (2, 3):
+        for index in range(0, max(0, len(terms) - size + 1)):
+            phrase_terms = terms[index:index + size]
+            if (
+                any(_direct_requirement_single_term(term) for term in phrase_terms)
+                or all(len(term) >= 3 for term in phrase_terms)
+            ):
+                phrases.append(" ".join(phrase_terms))
+    return phrases
 
 
 def _processor_tool_unavailable(text: str) -> bool:
@@ -333,7 +382,7 @@ def _direct_processed_requirement_matches(
     all_projects: bool = False,
     max_matches: int | None = 20,
 ) -> list[dict[str, Any]]:
-    patterns = [query, *_processor_search_hints(query)]
+    patterns = _direct_requirement_search_patterns(query)
     rg_args = ["-i"]
     for pattern in patterns:
         normalized = str(pattern or "").strip()
