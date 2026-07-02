@@ -363,6 +363,65 @@ def test_default_cold_build_batch_is_bounded() -> bool:
     return ok
 
 
+def test_partial_resume_does_not_scan_entire_queue() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        _write_claude(
+            claude / encode_cwd("/proj") / f"resume-no-scan-{i}.jsonl",
+            [f"resumenoscanneedle {i}"],
+        )
+
+    class GuardedConn:
+        def __init__(self, inner):
+            self.inner = inner
+            self.full_queue_scans = 0
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(str(sql).split()).lower()
+            if (
+                "select path, tag, mtime, size from native_full_scan_queue" in normalized
+                and "where" not in normalized
+            ):
+                self.full_queue_scans += 1
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    try:
+        first = idx.refresh_once()
+        real_conn = idx._writer_conn
+        guarded = GuardedConn(real_conn)
+        idx._writer_conn = guarded
+        second = idx.refresh_once()
+        third = idx.refresh_once()
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["resumenoscanneedle"], limit=10)
+    finally:
+        if isinstance(idx._writer_conn, GuardedConn):
+            idx._writer_conn = idx._writer_conn.inner
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+
+    ok = (
+        first["partial"] == 1
+        and second["partial"] == 1
+        and third["partial"] == 0
+        and guarded.full_queue_scans == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and len(rows) == 5
+    )
+    print(f"{OK if ok else FAIL} partial resume avoids full detailed queue scans "
+          f"(first={first}, second={second}, third={third}, "
+          f"full_queue_scans={guarded.full_queue_scans}, final={final_state})")
+    return ok
+
+
 def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -479,6 +538,7 @@ def main_run() -> int:
         test_not_usable_until_covered,
         test_cold_full_build_commits_partial_progress_and_resumes,
         test_default_cold_build_batch_is_bounded,
+        test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
