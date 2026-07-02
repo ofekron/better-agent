@@ -299,9 +299,11 @@ def _merge_processed_requirements(
 
 def _can_satisfy_with_direct_requirements(error: Any) -> bool:
     text = str(error or "")
+    if not text.startswith("processor_failed:"):
+        return False
     return (
-        text.startswith("processor_failed:")
-        and "get_requirements_internal unavailable" in text
+        "get_requirements_internal unavailable" in text
+        or "processor timed out before returning requirements" in text
     )
 
 
