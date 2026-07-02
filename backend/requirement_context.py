@@ -419,6 +419,18 @@ def build_processed_requirements_response(
     if not isinstance(text, str):
         text = ""
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
+    if not error:
+        requirements = _merge_processed_requirements(
+            requirements,
+            _direct_processed_requirement_matches(
+                query=normalized_query,
+                cwd=cwd,
+                cwds=cwds,
+                all_projects=all_projects,
+                max_matches=max_matches,
+            ),
+            max_matches=max_matches,
+        )
     response = {
         "success": not bool(error),
         "text": text,
@@ -532,6 +544,45 @@ def _dispatch_provider_session_id(dispatch_result: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _direct_processed_requirement_matches(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+) -> list[dict[str, Any]]:
+    patterns = [query, *_processor_search_hints(query)]
+    rg_args = ["-i"]
+    for pattern in patterns:
+        normalized = str(pattern or "").strip()
+        if normalized:
+            rg_args.extend(["-e", normalized])
+    result = search_requirements(
+        rg_args=rg_args,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        max_matches=max_matches,
+    )
+    if not result.get("success"):
+        return []
+    return _normalize_processed_requirements(result.get("matches") or [])
+
+
+def _merge_processed_requirements(
+    primary: list[Any],
+    supplemental: list[dict[str, Any]],
+    *,
+    max_matches: int | None,
+) -> list[dict[str, Any]]:
+    normalized = _normalize_processed_requirements([*primary, *supplemental])
+    limit, error = _normalize_max_matches(max_matches)
+    if error or limit is None:
+        return normalized
+    return normalized[:limit]
 
 
 _RATE_LIMIT_MARKERS = (
