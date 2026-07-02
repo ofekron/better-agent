@@ -2859,11 +2859,13 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
   useEffect(() => {
     if (!userToggled) setCollapsed(defaultCollapsed);
   }, [defaultCollapsed, userToggled]);
-  // Split collapse surfaces for the latest group: the user prompt body never
-  // auto-collapses — it folds only when the user manually clicks the header.
-  // The final assistant message body remains expanded so the answer stays
-  // readable. Historical groups keep the compact collapsed preview behavior.
-  const initiatorBodyCollapsed = isLatestTurnGroup ? collapsed && userToggled : false;
+  // Two independent collapse surfaces: the group chevron folds the events/
+  // response, while the user prompt text has its own chevron. The prompt
+  // never auto-collapses — only its own toggle folds it. For the latest
+  // group the final assistant body stays expanded so the answer remains
+  // readable; historical groups keep the compact collapsed preview.
+  const [promptCollapsed, setPromptCollapsed] = useState(false);
+  const initiatorBodyCollapsed = promptCollapsed;
   const responseCollapsed = isLatestTurnGroup ? false : collapsed;
   const toggleCollapsed = () => {
     setUserToggled(true);
@@ -3133,6 +3135,16 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
               {turnMessageHeader(initiatorMessage.source).label}
             </span>
           </button>
+          <button
+            type="button"
+            className="prompt-collapse-toggle"
+            onClick={() => setPromptCollapsed((v) => !v)}
+            aria-expanded={!promptCollapsed}
+            aria-label={promptCollapsed ? t("message.expandMessageAria") : t("message.collapseMessageAria")}
+            title={promptCollapsed ? t("message.expandMessageAria") : t("message.collapseMessageAria")}
+          >
+            <span className="collapse-arrow">{promptCollapsed ? "▶" : "▼"}</span>
+          </button>
           {onAlterTurnMessage && (
             <div className="message-header-actions">
               {hiddenPrompt && (
@@ -3215,6 +3227,15 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
               </div>
             </div>
           </div>
+        )}
+        {initiatorBodyCollapsed && (
+          <button
+            type="button"
+            className="message-box-collapsed-body"
+            onClick={() => setPromptCollapsed(false)}
+          >
+            {firstLineSummary(rawInitiatorContent)}
+          </button>
         )}
         {!initiatorBodyCollapsed && (() => {
           const hasArtificial = hasArtificialSections(rawInitiatorContent);
