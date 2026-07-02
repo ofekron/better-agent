@@ -52,6 +52,7 @@ _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_
 _POLL_INTERVAL_SECONDS = 10.0
 _FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
 _FULL_RECONCILE_INTERVAL_SECONDS = 30 * 60
+_STEADY_REFRESH_FILE_BATCH = 2048
 _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -522,6 +523,37 @@ def _indexed_file_states(conn: sqlite3.Connection) -> list[tuple[str, str, float
     ]
 
 
+def _indexed_file_state_batch(
+    conn: sqlite3.Connection,
+    cursor: str,
+    limit: int,
+) -> tuple[list[tuple[str, str, float, int]], str]:
+    if limit <= 0:
+        return [], cursor
+    rows = [
+        (str(path), str(tag), float(mtime), int(size))
+        for path, tag, mtime, size in conn.execute(
+            "SELECT path, tag, mtime, size FROM native_file_state "
+            "WHERE path > ? ORDER BY path LIMIT ?",
+            (cursor, limit),
+        )
+    ]
+    if len(rows) < limit and cursor:
+        seen = {path for path, _tag, _mtime_value, _size in rows}
+        rows.extend(
+            (str(path), str(tag), float(mtime), int(size))
+            for path, tag, mtime, size in conn.execute(
+                "SELECT path, tag, mtime, size FROM native_file_state "
+                "WHERE path <= ? ORDER BY path LIMIT ?",
+                (cursor, limit - len(rows)),
+            )
+            if str(path) not in seen
+        )
+    if not rows:
+        return [], ""
+    return rows, rows[-1][0]
+
+
 def _indexed_fingerprints_for_paths(
     conn: sqlite3.Connection, paths: list[str],
 ) -> dict[str, tuple[float, int]]:
@@ -544,14 +576,18 @@ def _indexed_fingerprints_for_paths(
 
 def _steady_known_paths(
     conn: sqlite3.Connection,
-) -> tuple[list[tuple[Path, str, float, int]], set[str]]:
+) -> tuple[list[tuple[Path, str, float, int]], set[str], str]:
     native_roots, classify_root, _, is_native_transcript_path = _roots_and_resolver()
-    indexed = _indexed_file_states(conn)
+    roots = native_roots()
+    cursor = _state_get(conn, "steady_refresh_cursor") or ""
+    indexed, next_cursor = _indexed_file_state_batch(
+        conn, cursor, _STEADY_REFRESH_FILE_BATCH,
+    )
     on_disk: list[tuple[Path, str, float, int]] = []
     missing: set[str] = set()
     for path_str, tag, _mtime_value, _size in indexed:
         path = Path(path_str)
-        source_tag = classify_root(path, native_roots())
+        source_tag = classify_root(path, roots)
         if not is_native_transcript_path(path, source_tag):
             missing.add(path_str)
             continue
@@ -562,7 +598,7 @@ def _steady_known_paths(
             continue
         on_disk.append((path, source_tag, st.st_mtime, st.st_size))
     indexed_paths = {path for path, _tag, _mtime_value, _size in indexed}
-    return on_disk, indexed_paths | missing
+    return on_disk, indexed_paths, next_cursor
 
 
 def refresh_once(*, full: bool | None = None) -> dict[str, int]:
@@ -608,7 +644,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                             }
                         deleted = sorted(indexed - on_disk_paths)[:_FULL_REFRESH_FILE_BATCH]
                 else:
-                    on_disk, indexed = _steady_known_paths(conn)
+                    on_disk, indexed, steady_next_cursor = _steady_known_paths(conn)
                     walked_count = len(on_disk)
                     on_disk_paths = {str(p) for p, _tag, _mt, _sz in on_disk}
                     batch = on_disk
@@ -685,6 +721,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                         _state_set(conn, "covered", "1")
                         _state_set(conn, "last_full_reconcile_at", str(now))
                         _last_full_reconcile_at = now
+                else:
+                    _state_set(conn, "steady_refresh_cursor", steady_next_cursor)
                 duration_s = time.monotonic() - refresh_start
                 _state_set(conn, "last_refresh_duration_s", f"{duration_s:.6f}")
                 _state_set(conn, "last_refresh_changed", str(len(changed)))
