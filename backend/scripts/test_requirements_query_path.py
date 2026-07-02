@@ -237,12 +237,12 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
         os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
         public_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
         check(
-            "fire_get_requirement" in public_tools,
-            "normal requirements MCP exposes async fire_get_requirement tool",
+            "fire_get_requirements" in public_tools,
+            "normal requirements MCP exposes async fire_get_requirements tool",
         )
         check(
-            "get_requirement_results" in public_tools,
-            "normal requirements MCP exposes async get_requirement_results tool",
+            "get_requirements_results" in public_tools,
+            "normal requirements MCP exposes async get_requirements_results tool",
         )
         check(
             "get_requirements" not in public_tools,
@@ -787,7 +787,7 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal exposes manual compare mode, off by default")
     check("compare=compare" in fn,
           "get_requirements_internal forwards compare")
-    check("Normal agents should use\n            fire_get_requirement and get_requirement_results" in fn,
+    check("Normal agents should use\n            fire_get_requirements and get_requirements_results" in fn,
           "get_requirements_internal points normal agents at the async public tools")
     check("Normal agents should use\n            get_requirements." not in fn,
           "get_requirements_internal does not reference the removed blocking public tool")
@@ -853,11 +853,11 @@ def test_assistant_uses_shared_native_transcript_tool_only() -> None:
 def test_public_tool_guidance_asks_for_task_description() -> None:
     skill = (PKG_ROOT / "skills" / "get-requirements" / "SKILL.md").read_text(encoding="utf-8")
     server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
-    public_fn = server.split("def fire_get_requirement(", 1)[1].split("def get_requirement_results", 1)[0]
+    public_fn = server.split("def fire_get_requirements(", 1)[1].split("def get_requirements_results", 1)[0]
 
     check("task you are about to start" in skill,
           "get-requirements skill asks callers for the task they are about to start")
-    check("fire_get_requirement" in skill and "get_requirement_results" in skill,
+    check("fire_get_requirements" in skill and "get_requirements_results" in skill,
           "get-requirements skill directs callers through the async MCP tools")
     check("1-3 minutes" in skill,
           "get-requirements skill warns the async lookup can take 1-3 minutes")
