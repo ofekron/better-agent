@@ -617,6 +617,19 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal forwards provider_native_only")
 
 
+def test_public_tool_guidance_asks_for_task_description() -> None:
+    skill = (PKG_ROOT / "skills" / "get-requirements" / "SKILL.md").read_text(encoding="utf-8")
+    server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+    public_fn = server.split("def get_requirements(", 1)[1].split("def get_requirements_internal", 1)[0]
+
+    check("task you are about to start" in skill,
+          "get-requirements skill asks callers for the task they are about to start")
+    check("not generic search keywords" in skill,
+          "get-requirements skill rejects generic keyword queries")
+    check("concrete task the caller is about to start" in public_fn,
+          "public MCP description asks for the concrete task")
+
+
 def test_native_transcript_bundle_lookup_uses_indexed_rowids() -> None:
     import json
 
@@ -751,6 +764,7 @@ def run() -> None:
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
+    test_public_tool_guidance_asks_for_task_description()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
 
 
