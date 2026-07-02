@@ -111,6 +111,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     original_client = runner.ClaudeSDKClient
     original_run_one_turn = runner._run_one_turn
     original_linger = runner._linger_for_background_work
+    original_runtime_configs = runner.extension_store.runtime_mcp_server_configs
     original_native_configs = runner.extension_store.native_mcp_server_configs
     original_launcher_configs = runner.extension_store.native_mcp_launcher_server_configs
     original_mcp_list_tools = runner._mcp_list_tools
@@ -147,24 +148,37 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     async def fake_linger(*_args, **_kwargs):
         return None
 
-    def fake_native_configs(_inputs, *, user_facing: bool, bare: bool):
-        raise AssertionError("bare Claude workers must not receive raw native MCP configs")
+    def fake_runtime_configs(_inputs, *, user_facing: bool, bare: bool):
+        assert user_facing is False
+        assert bare is True
+        return {"runtime-owned": {"type": "runtime"}}
 
-    def fake_launcher_configs(_inputs, *, user_facing: bool, bare: bool):
+    def fake_native_configs(_inputs, *, user_facing: bool, bare: bool):
         assert user_facing is False
         assert bare is True
         return {
             "testape": {
-                "command": "/fake/python",
-                "args": ["extension_mcp_launcher.py", "ofek.testape", "testape"],
+                "command": "/fake/testape-mcp",
+                "args": [],
                 "env": {"BETTER_CLAUDE_EXTENSION_ID": "ofek.testape", "BETTER_CLAUDE_BARE_CONFIG": "1"},
-            }
+            },
+            "runtime-owned": {
+                "command": "/fake/native-runtime-owned",
+                "args": [],
+                "env": {},
+            },
         }
 
+    def fake_launcher_configs(_inputs, *, user_facing: bool, bare: bool):
+        raise AssertionError("bare Claude bridge must not use launcher configs for tools/list")
+
     async def fake_mcp_list_tools(server_name: str, config: dict):
-        assert server_name == "testape"
-        assert config["args"][-2:] == ["ofek.testape", "testape"]
+        assert server_name in {"testape", "runtime-owned"}
+        if server_name == "testape":
+            assert config["command"] == "/fake/testape-mcp"
         assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in config.get("env", {})
+        if server_name != "testape":
+            return []
         return [{
             "name": "test_ui",
             "description": "Run TestApe UI test",
@@ -178,16 +192,17 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
         }]
 
     async def fake_mcp_call_tool(config: dict, tool_name: str, args: dict):
-        assert config["args"][-2:] == ["ofek.testape", "testape"]
+        assert config["command"] == "/fake/testape-mcp"
         assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in config.get("env", {})
         assert tool_name == "test_ui"
         assert args == {"task": "check", "repo_path": "/repo"}
-        return {"ok": True}
+        return {"content": [{"type": "text", "text": "ok"}]}
 
     runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
     runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
     runner._linger_for_background_work = fake_linger  # type: ignore[assignment]
+    runner.extension_store.runtime_mcp_server_configs = fake_runtime_configs  # type: ignore[method-assign]
     runner.extension_store.native_mcp_server_configs = fake_native_configs  # type: ignore[method-assign]
     runner.extension_store.native_mcp_launcher_server_configs = fake_launcher_configs  # type: ignore[method-assign]
     runner._mcp_list_tools = fake_mcp_list_tools  # type: ignore[assignment]
@@ -225,6 +240,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
         runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
         runner._linger_for_background_work = original_linger  # type: ignore[assignment]
+        runner.extension_store.runtime_mcp_server_configs = original_runtime_configs  # type: ignore[method-assign]
         runner.extension_store.native_mcp_server_configs = original_native_configs  # type: ignore[method-assign]
         runner.extension_store.native_mcp_launcher_server_configs = original_launcher_configs  # type: ignore[method-assign]
         runner._mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]
@@ -233,7 +249,27 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     assert code == 0
     assert captured_servers["testape"] == ["test_ui"]
     assert captured_options["mcp_servers"]["testape"]["type"] == "sdk"
-    assert call_result == {"ok": True}
+    assert captured_options["mcp_servers"]["runtime-owned"]["type"] == "runtime"
+    assert call_result == {"content": [{"type": "text", "text": "ok"}]}
+
+
+def test_bridged_mcp_call_normalizes_structured_result() -> None:
+    original_json_request = runner._mcp_json_request
+
+    async def fake_json_request(_config: dict, method: str, params: dict, *, timeout: float):
+        assert method == "tools/call"
+        assert params == {"name": "test_ui", "arguments": {"task": "check"}}
+        assert timeout == runner._MCP_CALL_TIMEOUT_S
+        return {"structuredContent": {"ok": True}}
+
+    runner._mcp_json_request = fake_json_request  # type: ignore[assignment]
+    try:
+        result = asyncio.run(runner._mcp_call_tool({"command": "unused"}, "test_ui", {"task": "check"}))
+    finally:
+        runner._mcp_json_request = original_json_request  # type: ignore[assignment]
+
+    assert result["content"] == [{"type": "text", "text": '{\n  "ok": true\n}'}]
+    assert result["structuredContent"] == {"ok": True}
 
 
 def test_codex_native_non_user_registers_loopback_tools() -> None:

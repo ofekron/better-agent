@@ -274,11 +274,13 @@ async def _mcp_call_tool(config: dict[str, Any], tool_name: str, args: dict[str,
         {"name": tool_name, "arguments": args},
         timeout=_MCP_CALL_TIMEOUT_S,
     )
-    if "content" not in result and "structuredContent" in result:
-        result["content"] = [{
-            "type": "text",
-            "text": json.dumps(result["structuredContent"], ensure_ascii=False, indent=2),
-        }]
+    if "content" not in result:
+        text = (
+            json.dumps(result["structuredContent"], ensure_ascii=False, indent=2)
+            if "structuredContent" in result
+            else json.dumps(result, ensure_ascii=False)
+        )
+        result["content"] = [{"type": "text", "text": text}]
     if result.get("isError"):
         result["is_error"] = True
     return result
@@ -290,7 +292,7 @@ async def _bridge_native_extension_mcp_servers(
     user_facing: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
-    configs = extension_store.native_mcp_launcher_server_configs(
+    configs = extension_store.native_mcp_server_configs(
         inputs,
         user_facing=user_facing,
         bare=bare,
@@ -2923,7 +2925,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 bare=_bare,
             )
         ).items():
-            mcp_servers[_extension_mcp_name] = _extension_mcp_config
+            mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
     if not _bare:
         for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
             inputs,
