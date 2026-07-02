@@ -200,8 +200,13 @@ def _acquired_lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfi
 
 
 def _sync_timeout_seconds(spec: ProvisionedSessionSpec) -> float:
+    """Total run_sync budget = lifecycle phase (provision_timeout) + one
+    dispatch budget per attempt + retry backoff + slack. Sizing the total as
+    provision_timeout alone starves dispatch, whose per-attempt allowance is
+    itself up to provision_timeout."""
     backoff = sum(float(delay) for delay in spec.retry_backoff[: max(0, spec.retry_attempts - 1)])
-    return max(0.0, float(spec.provision_timeout) * max(1, spec.retry_attempts) + backoff + 0.5)
+    dispatch_budget = spec.effective_dispatch_timeout * max(1, spec.retry_attempts)
+    return max(0.0, float(spec.provision_timeout) + dispatch_budget + backoff + 0.5)
 
 
 def run_sync(

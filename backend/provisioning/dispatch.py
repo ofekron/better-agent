@@ -83,7 +83,7 @@ async def _dispatch_http(
     for attempt in range(1, spec.retry_attempts + 1):
         started = time.monotonic()
         try:
-            result = await _post_ask_fork(cfg, payload, timeout=spec.provision_timeout)
+            result = await _post_ask_fork(cfg, payload, timeout=spec.effective_dispatch_timeout)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             duration = time.monotonic() - started
             last_error = type(exc).__name__
