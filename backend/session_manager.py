@@ -1716,6 +1716,30 @@ class SessionManager:
         return pool[start:]
 
     @staticmethod
+    def _include_leading_assistant_initiator(
+        all_msgs: list[dict],
+        window: list[dict],
+    ) -> list[dict]:
+        if not window or window[0].get("role") != "assistant":
+            return window
+        first_seq = window[0].get("seq")
+        if first_seq is None:
+            return window
+        initiator = None
+        for msg in reversed(all_msgs):
+            seq = msg.get("seq")
+            if seq is None or seq >= first_seq:
+                continue
+            if msg.get("role") == "user":
+                initiator = msg
+                break
+            if msg.get("role") == "assistant":
+                break
+        if initiator is None:
+            return window
+        return [initiator, *window]
+
+    @staticmethod
     def _trim_tree_messages(
         tree: dict,
         msg_limit: int,
@@ -2396,6 +2420,7 @@ class SessionManager:
             next_seq = snapshot["next_seq"]
             delta = [m for m in all_msgs if (m.get("seq") or 0) >= since_seq]
             delta = delta[-limit:]
+            delta = self._include_leading_assistant_initiator(all_msgs, delta)
             return {"messages": delta, "next_seq": next_seq}
         finally:
             lock.release()

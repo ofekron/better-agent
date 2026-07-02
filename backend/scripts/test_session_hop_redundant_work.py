@@ -632,29 +632,132 @@ async def test_loop_responsive_during_slow_reconcile() -> bool:
 
 
 def test_ws_replay_cap_at_msg_limit() -> bool:
-    """Mirror of the WS subscribe handler's replay-build logic. The
-    cap MUST hold even when since_seq=0 (cold hop) so the WS payload
-    is bounded independent of `since_seq` or session length.
+    """Mirror of the WS subscribe handler's replay-build logic. Cold
+    replay may include one extra turn initiator when the raw cap cuts
+    through a user→assistant boundary, but it must stay bounded
+    independent of `since_seq` or session length.
 
-    Pre-fix, the WS path delivered every message with `seq >= since_seq`
-    uncapped — a 1000-msg session with `since_seq=0` shipped the full
-    history on every cold hop.
+    A long session with `since_seq=0` must not ship full history on
+    every cold hop.
     """
-    sid = _fresh_session()
-    # Push 200 more user messages so the total exceeds the cap.
+    sess = session_manager.create(
+        name="replay-cap", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
     for i in range(200):
         session_manager.append_user_msg(sid, {
             "id": str(uuid.uuid4()), "role": "user", "content": f"u{i}",
             "events": [], "isStreaming": False,
         })
+        session_manager.append_assistant_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "assistant", "content": f"a{i}",
+            "events": [], "isStreaming": False,
+        })
 
-    sess = session_manager.get(sid)
-    persisted = sess.get("messages") or []
-    since_seq = 0
-    replay = [m for m in persisted if int(m.get("seq", 0)) >= since_seq]
-    replay = replay[-50:]
-    if len(replay) > 50:
-        print(f"  replay payload {len(replay)} > 50 cap")
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    delta = _build_messages_replay_delta(sid, 0, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = delta["messages"]
+    if len(replay) > 51:
+        print(f"  replay payload {len(replay)} > 51 bounded cap")
+        return False
+    return True
+
+
+def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="turn-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    for i in range(2):
+        session_manager.append_user_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "user", "content": f"u{i}",
+            "events": [], "isStreaming": False,
+        })
+        session_manager.append_assistant_msg(sid, {
+            "id": str(uuid.uuid4()), "role": "assistant", "content": f"a{i}",
+            "events": [], "isStreaming": False,
+        })
+    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["user", "assistant"]:
+        print(f"  cold replay split the turn boundary: {roles}")
+        return False
+    return True
+
+
+def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="orphan-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a1",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a2",
+        "events": [], "isStreaming": False,
+    })
+    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["assistant"]:
+        print(f"  orphan assistant got an invented header: {roles}")
+        return False
+    return True
+
+
+def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="incremental-boundary", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "prior-u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "prior-a",
+        "events": [], "isStreaming": False,
+    })
+    user = session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "a",
+        "events": [], "isStreaming": False,
+    })
+    delta = _build_messages_replay_delta(sid, int(user["seq"]), limit=1)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    roles = [m.get("role") for m in delta["messages"]]
+    if roles != ["assistant"]:
+        print(f"  incremental replay prepended seen initiator: {roles}")
         return False
     return True
 
@@ -1003,6 +1106,9 @@ async def _amain() -> int:
         ("render orphan updates warm root events", test_render_orphan_updates_warm_root_events_projection),
         ("stamped event updates warm root events", test_stamped_event_updates_warm_root_events_projection),
         ("ws replay cap at msg_limit", test_ws_replay_cap_at_msg_limit),
+        ("cold ws replay keeps turn header initiator", test_cold_ws_replay_keeps_turn_header_initiator),
+        ("cold ws replay does not invent orphan header", test_cold_ws_replay_does_not_invent_orphan_header),
+        ("incremental ws replay does not prepend seen initiator", test_incremental_ws_replay_does_not_prepend_seen_initiator),
         ("ws replay excludes completed seen message", test_ws_replay_excludes_completed_seen_message),
         ("ws replay keeps preexisting in-flight message", test_ws_replay_keeps_preexisting_in_flight_message),
         ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
