@@ -8,7 +8,9 @@ def main() -> int:
     )
     assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
     assert "_run_requirements_query" not in source
-    assert "run_requirements_query(\n        \"requirements.processed\"," in source
+    assert "run_requirements_processor_query(\n            \"requirements.processed.processor\"," in source
+    assert "run_requirements_query(\n        \"requirements.processed.finalize\"," in source
+    assert "except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)" in source
     assert "executor=REQUIREMENTS_PROCESSOR_EXECUTOR" in source
     assert "run_requirements_query(\n        \"requirements.search\"," in source
     assert "executor=REQUIREMENTS_SEARCH_EXECUTOR" in source

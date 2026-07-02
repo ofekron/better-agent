@@ -82,6 +82,140 @@ def test_search_completes_while_processor_pool_saturated() -> None:
     print("PASS search completes on its own pool while processor pool is saturated")
 
 
+def test_processor_admission_times_out_before_executor_queue_growth() -> None:
+    from requirements_query_runner import (
+        REQUIREMENTS_PROCESSOR_EXECUTOR,
+        REQUIREMENTS_SEARCH_EXECUTOR,
+        run_requirements_processor_query,
+        run_requirements_query,
+    )
+
+    async def _main() -> bool:
+        hold = asyncio.Event()
+        started = 0
+        started_event = asyncio.Event()
+
+        def _blocker() -> str:
+            nonlocal started
+            started += 1
+            if started == 2:
+                started_event.set()
+            while not hold.is_set():
+                time.sleep(0.005)
+            return "released"
+
+        blockers = [
+            asyncio.create_task(
+                run_requirements_processor_query(
+                    f"requirements.processed.processor.blocker.{idx}",
+                    _blocker,
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=0.05,
+                )
+            )
+            for idx in range(2)
+        ]
+        try:
+            await asyncio.wait_for(started_event.wait(), timeout=2)
+            started_at = time.perf_counter()
+            try:
+                await run_requirements_processor_query(
+                    "requirements.processed.processor",
+                    lambda: "late",
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=0.05,
+                )
+            except TimeoutError:
+                timed_out = True
+            else:
+                timed_out = False
+            search = await asyncio.wait_for(
+                run_requirements_query(
+                    "requirements.search",
+                    lambda: "search-ok",
+                    executor=REQUIREMENTS_SEARCH_EXECUTOR,
+                ),
+                timeout=2,
+            )
+        finally:
+            hold.set()
+            await asyncio.gather(*blockers)
+        return timed_out and search == "search-ok" and time.perf_counter() - started_at < 1
+
+    assert asyncio.run(_main()) is True
+    print("PASS saturated processor admission times out quickly without starving search")
+
+
+def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
+    from requirements_query_runner import (
+        REQUIREMENTS_PROCESSOR_EXECUTOR,
+        run_requirements_processor_query,
+    )
+
+    async def _main() -> bool:
+        hold = asyncio.Event()
+        started = 0
+        started_event = asyncio.Event()
+
+        def _blocker() -> str:
+            nonlocal started
+            started += 1
+            if started == 2:
+                started_event.set()
+            while not hold.is_set():
+                time.sleep(0.005)
+            return "released"
+
+        blockers = [
+            asyncio.create_task(
+                run_requirements_processor_query(
+                    f"requirements.processed.processor.cancel.{idx}",
+                    _blocker,
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=0.05,
+                )
+            )
+            for idx in range(2)
+        ]
+        await asyncio.wait_for(started_event.wait(), timeout=2)
+        blockers[0].cancel()
+        try:
+            await blockers[0]
+        except asyncio.CancelledError:
+            pass
+        try:
+            await run_requirements_processor_query(
+                "requirements.processed.processor.after_cancel",
+                lambda: "early",
+                executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                admission_timeout_seconds=0.05,
+            )
+        except TimeoutError:
+            held_until_done = True
+        else:
+            held_until_done = False
+        hold.set()
+        await asyncio.gather(blockers[1])
+        restored = await asyncio.gather(
+            run_requirements_processor_query(
+                "requirements.processed.processor.after_release.1",
+                lambda: "ok-1",
+                executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                admission_timeout_seconds=1.0,
+            ),
+            run_requirements_processor_query(
+                "requirements.processed.processor.after_release.2",
+                lambda: "ok-2",
+                executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                admission_timeout_seconds=1.0,
+            ),
+        )
+        return held_until_done and sorted(restored) == ["ok-1", "ok-2"]
+
+    assert asyncio.run(_main()) is True
+    print("PASS cancelled processor waiter keeps admission held until worker completion")
+
+
 def test_shared_bounded_pool_self_deadlocks_under_saturation() -> None:
     """Negative case (the bug): the SAME pattern on one shared 2-worker pool
     deadlocks — proving the split is load-bearing, not decorative. Bounded by a

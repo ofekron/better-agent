@@ -62,6 +62,7 @@ import provider_setup
 from requirements_query_runner import (
     REQUIREMENTS_PROCESSOR_EXECUTOR,
     REQUIREMENTS_SEARCH_EXECUTOR,
+    run_requirements_processor_query,
     run_requirements_query,
 )
 import user_input_store
@@ -3673,15 +3674,34 @@ async def internal_get_requirements(
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
     import requirement_context
+    await run_requirements_query(
+        "requirements.processed.prepare",
+        requirement_context.prepare_requirements_local_read_context,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+    )
+    try:
+        processed = await run_requirements_processor_query(
+            "requirements.processed.processor",
+            requirement_context._run_requirements_processor,
+            executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+            query=query,
+            cwd=cwd,
+            cwds=cwds,
+            all_projects=all_projects,
+            max_matches=max_matches,
+        )
+    except TimeoutError as exc:
+        processed = requirement_context.processor_failure_result(exc)
     return await run_requirements_query(
-        "requirements.processed",
-        requirement_context.get_processed_requirements,
-        executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+        "requirements.processed.finalize",
+        requirement_context.build_processed_requirements_response,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
         query=query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
         max_matches=max_matches,
+        processed=processed,
     )
 
 
