@@ -541,6 +541,14 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
         rc._ensure_requirements_importable = saved
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
+    check("Your purpose is to recover durable user requirements" in prompt,
+          "processor prompt explains its purpose")
+    check("searchable FTS5 projection of raw provider conversation logs" in prompt,
+          "processor prompt explains the provider-native transcript index")
+    check("when you need evidence from prior conversations" in prompt,
+          "processor prompt explains when to use the index")
+    check("not as a requirement by itself" in prompt,
+          "processor prompt distinguishes the caller query from stored requirements")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
     check("query_requirements_index" in prompt, "processor prompt uses free-form SQL on the native index")
     check("native_element_fts" in prompt, "processor prompt documents the index schema")
@@ -555,6 +563,14 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
     check("Never invent a requirement" in prompt, "processor prompt forbids invented requirements")
+    check("Your purpose is to recover durable user requirements" in instructions,
+          "processor instructions explain their purpose")
+    check("searchable FTS5 projection of raw provider conversation logs" in instructions,
+          "processor instructions explain the provider-native transcript index")
+    check("when you need evidence from prior conversations" in instructions,
+          "processor instructions explain when to use the index")
+    check("not as a requirement by itself" in instructions,
+          "processor instructions distinguish the caller query from stored requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("query_requirements_index" in instructions, "processor instructions use free-form SQL on the native index")
     check("native_element_fts" in instructions, "processor instructions document the index schema")
