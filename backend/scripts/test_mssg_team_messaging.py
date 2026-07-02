@@ -102,6 +102,63 @@ def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
     }
 
 
+def test_plain_native_target_gets_no_invented_team_context(monkeypatch):
+    sender = session_manager.create(
+        name="plain sender",
+        cwd="/repo-plain",
+        orchestration_mode="native",
+    )
+    target = session_manager.create(
+        name="plain native target",
+        cwd="/repo-plain",
+        orchestration_mode="native",
+    )
+    # Unrelated workers in the same cwd must not become an invented team.
+    monkeypatch.setattr(
+        team_messaging.worker_store,
+        "list_worker_projection",
+        lambda _cwd, limit=20: [{
+            "agent_session_id": "unrelated-worker",
+            "description": "someone else's worker",
+        }],
+    )
+
+    prompt = team_messaging.format_team_message_prompt(
+        "hello",
+        {"sender_session_id": sender["id"]},
+        target_session_id=target["id"],
+    )
+
+    assert "<team>" not in prompt
+    assert "unrelated-worker" not in prompt
+    assert 'role="manager"' not in prompt
+
+
+def test_worker_target_still_gets_real_team_context(monkeypatch):
+    target = session_manager.create(
+        name="worker target",
+        cwd="/repo-worker",
+        orchestration_mode="native",
+    )
+    monkeypatch.setattr(
+        team_messaging.worker_store,
+        "list_worker_projection",
+        lambda _cwd, limit=20: [{
+            "agent_session_id": target["id"],
+            "description": "implementation worker",
+        }],
+    )
+
+    prompt = team_messaging.format_team_message_prompt(
+        "hello",
+        {"sender_session_id": "sender"},
+        target_session_id=target["id"],
+    )
+
+    assert "<team>" in prompt
+    assert f'session_id="{target["id"]}" role="worker"' in prompt
+
+
 def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     sender = session_manager.create(
         name="implementation worker",
@@ -116,7 +173,7 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -164,7 +221,7 @@ def test_assistant_self_message_uses_update_source(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -197,7 +254,7 @@ def test_submit_team_message_take_latest_collapse_keeps_one_waiting_message(monk
     coordinator = Coordinator()
     submitted: list[dict] = []
 
-    async def fake_submit_prompt_async(sid: str, params: dict) -> str:
+    async def fake_submit_prompt_async(sid: str, params: dict, **_kwargs) -> str:
         q = coordinator._prompt_queues.setdefault(sid, asyncio.Queue())
         q.put_nowait(dict(params))
         coordinator._queued_ids.setdefault(sid, []).append(params["_queued_id"])
@@ -248,7 +305,7 @@ def test_submit_team_message_collapse_key_does_not_replace_active_turn(monkeypat
     coordinator = Coordinator()
     submitted: list[dict] = []
 
-    async def fake_submit_prompt_async(sid: str, params: dict) -> str:
+    async def fake_submit_prompt_async(sid: str, params: dict, **_kwargs) -> str:
         q = coordinator._prompt_queues.setdefault(sid, asyncio.Queue())
         q.put_nowait(dict(params))
         coordinator._queued_ids.setdefault(sid, []).append(params["_queued_id"])
@@ -423,7 +480,7 @@ def test_detached_team_message_does_not_register_turn_join(monkeypatch):
     monkeypatch.setattr(
         coordinator,
         "submit_prompt",
-        lambda _sid, params: params["_queued_id"],
+        lambda _sid, params, **_kw: params["_queued_id"],
     )
 
     result = asyncio.run(coordinator.submit_team_message(
@@ -459,7 +516,7 @@ def test_submit_team_message_uses_delegation_message_model_preference(monkeypatc
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -492,7 +549,7 @@ def test_submit_team_message_explicit_model_overrides_preference(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["params"] = params
         return params["_queued_id"]
 
@@ -524,7 +581,7 @@ def test_submit_team_message_can_expect_async_mssg_response(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -562,7 +619,7 @@ def test_submit_team_message_can_target_sub_session(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -602,7 +659,7 @@ def test_ask_team_message_can_target_sub_session(monkeypatch):
     )
     coordinator = Coordinator()
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
@@ -664,7 +721,7 @@ def test_ask_team_message_failed_target_returns_error_without_empty_response(mon
     )
     coordinator = Coordinator()
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
@@ -722,7 +779,7 @@ def test_submit_team_message_allows_cross_cwd_target(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
         return params["_queued_id"]
@@ -768,7 +825,7 @@ def test_submit_team_message_removes_persisted_queue_when_submit_fails(monkeypat
     )
     coordinator = Coordinator()
 
-    def fail_submit_prompt(_sid: str, _params: dict) -> str:
+    def fail_submit_prompt(_sid: str, _params: dict, **_kwargs) -> str:
         raise RuntimeError("submit failed")
 
     monkeypatch.setattr(coordinator, "submit_prompt", fail_submit_prompt)
@@ -852,7 +909,7 @@ def test_ask_team_message_submits_target_app_session_id(monkeypatch):
     coordinator = Coordinator()
     captured: dict = {}
 
-    def fake_submit_prompt(sid: str, params: dict) -> str:
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
         captured["sid"] = sid
         captured["params"] = params
 
@@ -945,6 +1002,8 @@ def test_ask_response_falls_back_to_event_text_when_content_empty():
         "events": [{
             "type": "agent_message",
             "data": {
+                "type": "assistant",
+                "uuid": "event-answer-uuid",
                 "message": {
                     "role": "assistant",
                     "content": [{"type": "text", "text": "event answer"}],

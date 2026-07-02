@@ -69,19 +69,34 @@ def _target_team_context(target_session_id: Optional[str]) -> str:
         return ""
     cwd = str(target.get("cwd") or "")
     workers = worker_store.list_worker_projection(cwd, limit=20) if cwd else []
-    self_role = "manager"
-    self_description = str(target.get("name") or "manager")
+    self_worker = next(
+        (w for w in workers if w.get("agent_session_id") == target_session_id),
+        None,
+    )
     runtime_team = team_store.find_for_session(target_session_id)
-    if runtime_team:
-        member = team_store.member_for_session(runtime_team, target_session_id)
-        if member:
-            self_role = str(member.get("role") or member.get("type") or self_role)
-            self_description = str(member.get("description") or self_description)
-    for worker in workers:
-        if worker.get("agent_session_id") == target_session_id:
-            self_role = "worker"
-            self_description = str(worker.get("description") or self_description)
-            break
+    member = (
+        team_store.member_for_session(runtime_team, target_session_id)
+        if runtime_team
+        else None
+    )
+    is_manager = str(target.get("orchestration_mode") or "") in ("manager", "team")
+    # Target has no real team membership: a synthesized context would invent
+    # a team the target never had, so send none.
+    if not member and not self_worker and not is_manager:
+        return ""
+    if member:
+        self_role = str(member.get("role") or member.get("type") or "manager")
+        self_description = str(
+            member.get("description") or target.get("name") or self_role
+        )
+    elif self_worker:
+        self_role = "worker"
+        self_description = str(
+            self_worker.get("description") or target.get("name") or "worker"
+        )
+    else:
+        self_role = "manager"
+        self_description = str(target.get("name") or "manager")
     from orchs.manager import bootstrap as manager_bootstrap
     return manager_bootstrap.format_team_context(
         cwd=cwd,
