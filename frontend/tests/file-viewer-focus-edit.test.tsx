@@ -13,6 +13,7 @@ type Selection = {
 };
 
 type MockEditor = {
+  addAction: ReturnType<typeof vi.fn>;
   addCommand: ReturnType<typeof vi.fn>;
   createDecorationsCollection: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
@@ -48,6 +49,7 @@ function createMockEditor(valueRef: { current: string }): MockEditor {
   const dispose = vi.fn();
 
   return {
+    addAction: vi.fn(() => ({ dispose })),
     addCommand: vi.fn(),
     createDecorationsCollection: vi.fn(() => ({ clear: vi.fn() })),
     focus: vi.fn(),
@@ -238,5 +240,45 @@ describe("FileViewer focused editing", () => {
       endLineNumber: 3,
       endColumn: 6,
     });
+  });
+
+  it("registers a file discussion action in the Monaco context menu", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("/api/file/draft")
+        ? { exists: false }
+        : {
+            content: "one\ntwo\nthree",
+            language: "typescript",
+            path: "/tmp/project/app.ts",
+            mtime_ns: 1,
+            size: 13,
+          },
+    } as Response));
+    const onStartDiscussion = vi.fn(async () => {});
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/app.ts"
+        onClose={() => {}}
+        onStartDiscussion={onStartDiscussion}
+      />,
+    );
+
+    await screen.findByTestId("mock-editor");
+    await waitFor(() => {
+      expect(editorInstances.some((editor) => editor.addAction.mock.calls.length > 0)).toBe(true);
+    });
+    const editor = editorInstances.find((item) => item.addAction.mock.calls.length > 0)!;
+    const action = editor.addAction.mock.calls[0][0];
+    expect(action).toMatchObject({
+      id: "better-agent.start-file-discussion",
+      label: "Start discussion",
+      contextMenuGroupId: "navigation",
+    });
+
+    await action.run(editor);
+
+    expect(onStartDiscussion).toHaveBeenCalledWith("/tmp/project/app.ts", 1);
   });
 });
