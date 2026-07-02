@@ -187,6 +187,106 @@ def test_assistant_self_message_uses_update_source(monkeypatch):
     assert queued[0]["sender_session_id"] == assistant["id"]
 
 
+def test_submit_team_message_take_latest_collapse_keeps_one_waiting_message(monkeypatch):
+    assistant = session_manager.create(
+        name="Assistant",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    coordinator = Coordinator()
+    submitted: list[dict] = []
+
+    async def fake_submit_prompt_async(sid: str, params: dict) -> str:
+        q = coordinator._prompt_queues.setdefault(sid, asyncio.Queue())
+        q.put_nowait(dict(params))
+        coordinator._queued_ids.setdefault(sid, []).append(params["_queued_id"])
+        submitted.append(params)
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fake_submit_prompt_async)
+
+    first = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=assistant["id"],
+        target_session_id=assistant["id"],
+        message="wake count 16",
+        detach=True,
+        collapse_key="assistant-waker",
+        collapse_policy="take_latest",
+    ))
+    second = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=assistant["id"],
+        target_session_id=assistant["id"],
+        message="wake count 17",
+        detach=True,
+        collapse_key="assistant-waker",
+        collapse_policy="take_latest",
+    ))
+
+    assert first["queued_id"] == second["queued_id"]
+    assert second["collapsed"] is True
+    assert len(submitted) == 1
+    queued = session_manager.get(assistant["id"])["queued_prompts"]
+    assert len(queued) == 1
+    assert queued[0]["id"] == first["queued_id"]
+    assert queued[0]["content"] == "wake count 17"
+    assert queued[0]["collapse_key"] == "assistant-waker"
+    q = coordinator._prompt_queues[assistant["id"]]
+    pending = q.get_nowait()
+    assert pending["_queued_id"] == first["queued_id"]
+    assert pending["prompt"] == "wake count 17"
+    assert pending["team_message"]["message"] == "wake count 17"
+
+
+def test_submit_team_message_collapse_key_does_not_replace_active_turn(monkeypatch):
+    assistant = session_manager.create(
+        name="Assistant active",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    coordinator = Coordinator()
+    submitted: list[dict] = []
+
+    async def fake_submit_prompt_async(sid: str, params: dict) -> str:
+        q = coordinator._prompt_queues.setdefault(sid, asyncio.Queue())
+        q.put_nowait(dict(params))
+        coordinator._queued_ids.setdefault(sid, []).append(params["_queued_id"])
+        submitted.append(params)
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fake_submit_prompt_async)
+
+    first = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=assistant["id"],
+        target_session_id=assistant["id"],
+        message="wake count 16",
+        detach=True,
+        collapse_key="assistant-waker",
+        collapse_policy="take_latest",
+    ))
+    q = coordinator._prompt_queues[assistant["id"]]
+    active = q.get_nowait()
+    session_manager.remove_queued_prompt(assistant["id"], active["_queued_id"])
+
+    second = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=assistant["id"],
+        target_session_id=assistant["id"],
+        message="wake count 17",
+        detach=True,
+        collapse_key="assistant-waker",
+        collapse_policy="take_latest",
+    ))
+
+    assert first["queued_id"] != second["queued_id"]
+    assert "collapsed" not in second
+    assert len(submitted) == 2
+    queued = session_manager.get(assistant["id"])["queued_prompts"]
+    assert len(queued) == 1
+    assert queued[0]["id"] == second["queued_id"]
+    assert queued[0]["content"] == "wake count 17"
+
+
 def test_update_source_is_still_a_team_message_for_queue_recovery():
     assert team_messaging.UPDATE_SOURCE in team_messaging.MESSAGE_SOURCES
     assert team_messaging.SOURCE in team_messaging.MESSAGE_SOURCES

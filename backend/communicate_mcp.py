@@ -103,6 +103,8 @@ def _communication_payload(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    collapse_key: str = "",
+    collapse_policy: str = "",
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
@@ -123,6 +125,8 @@ def _communication_payload(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "collapse_key": (collapse_key or "").strip(),
+        "collapse_policy": (collapse_policy or "").strip(),
     }
 
 
@@ -135,6 +139,8 @@ def mssg_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    collapse_key: str = "",
+    collapse_policy: str = "",
 ) -> dict[str, Any]:
     payload = _communication_payload(
         target_session_id,
@@ -145,6 +151,8 @@ def mssg_response(
         provider_id,
         model,
         reasoning_effort,
+        collapse_key,
+        collapse_policy,
     )
     if payload.get("success") is False:
         return payload
@@ -434,6 +442,8 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            collapse_key: str = "",
+            collapse_policy: str = "",
         ) -> dict[str, Any]:
             return _safe_result(mssg_response)(
                 message,
@@ -444,6 +454,8 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                collapse_key,
+                collapse_policy,
             )
 
     if "delegate_task" not in disabled_tools:

@@ -999,6 +999,8 @@ class Client:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        collapse_key: str = "",
+        collapse_policy: str = "",
     ) -> dict[str, Any]:
         """Send a fire-and-forget message to one session, worker, or worker pool."""
         return self._post(
@@ -1013,6 +1015,8 @@ class Client:
                 "provider_id": provider_id,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
+                "collapse_key": collapse_key,
+                "collapse_policy": collapse_policy,
             },
             timeout=30.0,
         )

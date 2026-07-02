@@ -1204,6 +1204,8 @@ class Coordinator:
         model: str = "",
         reasoning_effort: str = "",
         model_task_key: str = "delegation_message",
+        collapse_key: str = "",
+        collapse_policy: str = "",
     ) -> dict:
         import uuid
         import team_messaging
@@ -1227,11 +1229,76 @@ class Coordinator:
             target_session_id=target_session_id,
         )
         if expect_mssg_response:
+            if collapse_key:
+                raise ValueError("collapse_key is not supported for response-waiting messages")
             metadata["expects_response"] = True
             metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
         message_source = team_messaging.source_for_message_route(sender, target)
+        collapse_key = str(collapse_key or "").strip()
+        collapse_policy = str(collapse_policy or "").strip()
+        if collapse_key:
+            if not collapse_policy:
+                collapse_policy = team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+            if collapse_policy not in team_messaging.COLLAPSE_POLICIES:
+                raise ValueError("collapse_policy must be 'take_latest'")
+        elif collapse_policy:
+            raise ValueError("collapse_key is required when collapse_policy is set")
         queue_item_id = str(uuid.uuid4())
         lifecycle_msg_id = str(uuid.uuid4())
+        queue_item = await asyncio.to_thread(
+            team_messaging.queue_payload,
+            queue_item_id=queue_item_id,
+            sender_session_id=sender_session_id,
+            message=message,
+            metadata=metadata,
+            lifecycle_msg_id=lifecycle_msg_id,
+            target_session_id=target_session_id,
+            source=message_source,
+            collapse_key=collapse_key,
+            collapse_policy=collapse_policy,
+        )
+        cli_prompt = await asyncio.to_thread(
+            team_messaging.format_team_message_prompt,
+            message,
+            metadata,
+            target_session_id=target_session_id,
+        )
+        prompt_params = {
+            "_queued_id": queue_item_id,
+            "app_session_id": target_session_id,
+            "prompt": message,
+            "cli_prompt": cli_prompt,
+            "provider_id": run_config.get("provider_id") or "",
+            "model": run_config.get("model") or "",
+            "reasoning_effort": run_config.get("reasoning_effort") or "",
+            "allow_model_override": True,
+            "cwd": target.get("cwd") or sender.get("cwd") or "",
+            "orchestration_mode": target.get("orchestration_mode") or "team",
+            "source": message_source,
+            "user_initiated": False,
+            "lifecycle_msg_id": lifecycle_msg_id,
+            "team_message": {
+                "message": message,
+                "metadata": metadata,
+            },
+            "collapse_key": collapse_key,
+            "collapse_policy": collapse_policy,
+        }
+        if collapse_key and collapse_policy == team_messaging.COLLAPSE_POLICY_TAKE_LATEST:
+            collapsed_id = await self._collapse_queued_prompt_take_latest(
+                target_session_id,
+                collapse_key,
+                queue_item,
+                prompt_params,
+            )
+            if collapsed_id:
+                return {
+                    "success": True,
+                    "queued_id": collapsed_id,
+                    "target_session_id": target_session_id,
+                    "expects_response": expect_mssg_response,
+                    "collapsed": True,
+                }
         panel = await self._start_team_message_panel(
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -1260,46 +1327,12 @@ class Coordinator:
                 target_session_id=target_session_id,
             )
         try:
-            queue_item = await asyncio.to_thread(
-                team_messaging.queue_payload,
-                queue_item_id=queue_item_id,
-                sender_session_id=sender_session_id,
-                message=message,
-                metadata=metadata,
-                lifecycle_msg_id=lifecycle_msg_id,
-                target_session_id=target_session_id,
-                source=message_source,
-            )
             await asyncio.to_thread(
                 session_manager.add_queued_prompt,
                 target_session_id,
                 queue_item,
             )
-            cli_prompt = await asyncio.to_thread(
-                team_messaging.format_team_message_prompt,
-                message,
-                metadata,
-                target_session_id=target_session_id,
-            )
-            await self.submit_prompt_async(target_session_id, {
-                "_queued_id": queue_item_id,
-                "app_session_id": target_session_id,
-                "prompt": message,
-                "cli_prompt": cli_prompt,
-                "provider_id": run_config.get("provider_id") or "",
-                "model": run_config.get("model") or "",
-                "reasoning_effort": run_config.get("reasoning_effort") or "",
-                "allow_model_override": True,
-                "cwd": target.get("cwd") or sender.get("cwd") or "",
-                "orchestration_mode": target.get("orchestration_mode") or "team",
-                "source": message_source,
-                "user_initiated": False,
-                "lifecycle_msg_id": lifecycle_msg_id,
-                "team_message": {
-                    "message": message,
-                    "metadata": metadata,
-                },
-            })
+            await self.submit_prompt_async(target_session_id, prompt_params)
         except Exception:
             await asyncio.to_thread(
                 session_manager.remove_queued_prompt,
@@ -1315,6 +1348,79 @@ class Coordinator:
             "target_session_id": target_session_id,
             "expects_response": expect_mssg_response,
         }
+
+    async def _collapse_queued_prompt_take_latest(
+        self,
+        app_session_id: str,
+        collapse_key: str,
+        queue_item: dict,
+        prompt_params: dict,
+    ) -> Optional[str]:
+        q = self._prompt_queues.get(app_session_id)
+        if not q or q.empty():
+            return None
+        items: list[object] = []
+        latest_idx: Optional[int] = None
+        expected_source = prompt_params.get("source")
+        expected_sender = (
+            (prompt_params.get("team_message") or {})
+            .get("metadata", {})
+            .get("sender_session_id")
+        )
+        while not q.empty():
+            item = await q.get()
+            item_sender = (
+                (item.get("team_message") or {})
+                .get("metadata", {})
+                .get("sender_session_id")
+                if isinstance(item, dict)
+                else None
+            )
+            if (
+                isinstance(item, dict)
+                and item.get("collapse_key") == collapse_key
+                and item.get("collapse_policy") == "take_latest"
+                and item.get("source") == expected_source
+                and item_sender == expected_sender
+            ):
+                latest_idx = len(items)
+            items.append(item)
+        queued_id = ""
+        updated_item: Optional[dict] = None
+        persisted_update: Optional[dict] = None
+        if latest_idx is not None:
+            existing = items[latest_idx]
+            if isinstance(existing, dict):
+                queued_id = str(existing.get("_queued_id") or "")
+                lifecycle_msg_id = str(existing.get("lifecycle_msg_id") or "")
+                updated_item = dict(existing)
+                updated_item.update(prompt_params)
+                updated_item["_queued_id"] = queued_id
+                if lifecycle_msg_id:
+                    updated_item["lifecycle_msg_id"] = lifecycle_msg_id
+                persisted_update = dict(queue_item)
+                persisted_update["id"] = queued_id
+                if lifecycle_msg_id:
+                    persisted_update["lifecycle_msg_id"] = lifecycle_msg_id
+        if not queued_id or updated_item is None or persisted_update is None:
+            for item in items:
+                await q.put(item)
+            return None
+        try:
+            await asyncio.to_thread(
+                session_manager.update_queued_prompt,
+                app_session_id,
+                queued_id,
+                persisted_update,
+            )
+        except Exception:
+            for item in items:
+                await q.put(item)
+            raise
+        items[latest_idx] = updated_item
+        for item in items:
+            await q.put(item)
+        return queued_id
 
     def _resolve_delegation_run_config(
         self,

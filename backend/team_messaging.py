@@ -15,6 +15,8 @@ ASK_SOURCE = "team_ask"
 UPDATE_SOURCE = "update"
 MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE)
 MSSG_RESPONSE_MODE = "mssg"
+COLLAPSE_POLICY_TAKE_LATEST = "take_latest"
+COLLAPSE_POLICIES = (COLLAPSE_POLICY_TAKE_LATEST,)
 
 
 def validate_message_route(
@@ -169,8 +171,10 @@ def queue_payload(
     lifecycle_msg_id: str,
     target_session_id: Optional[str] = None,
     source: str = SOURCE,
+    collapse_key: str = "",
+    collapse_policy: str = "",
 ) -> dict:
-    return {
+    payload = {
         "id": queue_item_id,
         "content": message,
         "cli_prompt": format_team_message_prompt(
@@ -183,3 +187,7 @@ def queue_payload(
         "created_at": datetime.now().isoformat(),
         "lifecycle_msg_id": lifecycle_msg_id,
     }
+    if collapse_key:
+        payload["collapse_key"] = collapse_key
+        payload["collapse_policy"] = collapse_policy or COLLAPSE_POLICY_TAKE_LATEST
+    return payload
