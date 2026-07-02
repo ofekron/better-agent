@@ -2137,9 +2137,10 @@ class TurnManager:
                                 if not _p.done():
                                     _p.cancel()
 
-                        if not done and provider.is_running(run_id):
-                            continue
-                        if not done and not provider.is_running(run_id):
+                        if not done:
+                            provider_running = await provider.is_running_off_loop(run_id)
+                            if provider_running:
+                                continue
                             logger.warning(
                                 "runner dead but no complete event for %s — "
                                 "synthesizing failure",
@@ -2264,7 +2265,7 @@ class TurnManager:
                                         queue.get(), timeout=min(_remaining, 1.0),
                                     )
                                 except asyncio.TimeoutError:
-                                    if not provider.is_running(run_id):
+                                    if not await provider.is_running_off_loop(run_id):
                                         break
                                     continue
                                 except Exception:
