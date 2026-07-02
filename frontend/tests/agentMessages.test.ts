@@ -229,3 +229,31 @@ describe("flattenClaudeMessages", () => {
     ])).toBe("Final answer");
   });
 });
+
+describe("fallback content block", () => {
+  it("maps a fallback block to a model_fallback event, not a diagnostic", () => {
+    const ev: WSEvent = {
+      type: "agent_message",
+      data: {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "fallback",
+            from: { model: "claude-fable-5" },
+            to: { model: "claude-opus-4-8" },
+          }],
+        },
+        uuid: "fallback-1",
+      },
+    };
+    const { flat } = flattenClaudeMessages([ev]);
+    expect(flat).toEqual([
+      {
+        type: "model_fallback",
+        data: { from_model: "claude-fable-5", to_model: "claude-opus-4-8" },
+        _ts: undefined,
+      },
+    ]);
+  });
+});

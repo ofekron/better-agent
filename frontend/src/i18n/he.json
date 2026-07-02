@@ -145,6 +145,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "מנסה שוב בעוד {{seconds}} שניות…",
   "message.autoContinuing": "ממשיך אוטומטית בסשן חדש…",
+  "message.modelFallback": "מעבר למודל חלופי",
+  "message.modelFallbackFromTo": "מ-{{from}} אל {{to}}",
   "setup.providersTitle": "ספקים",
   "setup.noProviders": "אין ספקים מוגדרים עדיין.",
   "setup.default": "ברירת מחדל",

@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "Reintentando en {{seconds}}s…",
   "message.autoContinuing": "Continuando automáticamente en una sesión nueva…",
+  "message.modelFallback": "Cambio a modelo de respaldo",
+  "message.modelFallbackFromTo": "de {{from}} a {{to}}",
   "setup.providersTitle": "Proveedores",
   "setup.noProviders": "Aún no hay proveedores configurados.",
   "setup.default": "predeterminado",

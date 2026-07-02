@@ -806,6 +806,23 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+function ModelFallbackEvent({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const fromModel = typeof data.from_model === "string" ? data.from_model : "";
+  const toModel = typeof data.to_model === "string" ? data.to_model : "";
+  if (!fromModel && !toModel) return null;
+  return (
+    <div className="event-model-switched">
+      <span>{t("message.modelFallback")}</span>
+      <span>
+        {fromModel && toModel
+          ? t("message.modelFallbackFromTo", { from: fromModel, to: toModel })
+          : fromModel || toModel}
+      </span>
+    </div>
+  );
+}
+
 /** Normalize text for dedup comparison (strip leading emoji/whitespace) */
 function normalizeForDedup(text: string): string {
   return text.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\u200D]+\s*/u, "").trim();
@@ -1136,6 +1153,8 @@ function renderSingleEvent(
       return <CompleteEvent key={idx} data={event.data} />;
     case "model_switched":
       return <ModelSwitchedEvent key={idx} data={event.data ?? {}} />;
+    case "model_fallback":
+      return <ModelFallbackEvent key={idx} data={event.data ?? {}} />;
     case "lifecycle_notice":
       return <LifecycleNotice key={idx} data={event.data ?? {}} />;
     case "pr_link":

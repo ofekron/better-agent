@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "إعادة المحاولة خلال {{seconds}} ث…",
   "message.autoContinuing": "متابعة تلقائية في جلسة جديدة…",
+  "message.modelFallback": "الرجوع إلى نموذج بديل",
+  "message.modelFallbackFromTo": "من {{from}} إلى {{to}}",
   "setup.providersTitle": "المزوّدون",
   "setup.noProviders": "لا مزوّدين مهيّأين بعد.",
   "setup.default": "افتراضي",
