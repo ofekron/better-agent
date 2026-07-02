@@ -683,7 +683,20 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     check(version >= 3, "processor spec version invalidates stale processor prompt and parser bases")
     check(run_mode == "fork", "processor uses fork mode for lookup isolation")
     check(ephemeral_forks is True, "processor uses ephemeral fork per lookup")
-    check("_GET_REQUIREMENTS_TIMEOUT = 105.0" in server, "MCP get-requirements timeout fits provider tool ceiling")
+    import re
+
+    from provisioning.manager import _sync_timeout_seconds
+
+    mcp_timeout = float(re.search(r"_GET_REQUIREMENTS_TIMEOUT = ([0-9.]+)", server).group(1))
+    saved_importable = rc._ensure_requirements_importable
+    rc._ensure_requirements_importable = lambda: PKG_ROOT
+    try:
+        run_sync_total = _sync_timeout_seconds(rc.GET_REQUIREMENTS_PROCESSOR_SPEC)
+    finally:
+        rc._ensure_requirements_importable = saved_importable
+    check(mcp_timeout > run_sync_total,
+          "MCP get-requirements timeout exceeds the processor run_sync budget")
+    check(run_sync_total >= 300.0, "processor run_sync budget is at least 5 minutes")
     check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
 
 
