@@ -501,7 +501,7 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
         return False
 
     original = main._decorate_local_sidebar_sessions
-    original_lookup = main._local_session_summaries_by_ids_for_sidebar
+    original_lookup = main._local_session_summaries_by_ids
 
     def fail_decorate(*_args, **_kwargs):
         raise AssertionError("identical summaries request should use response cache")
@@ -510,17 +510,45 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
         raise AssertionError("identical summaries request should skip summary lookup")
 
     main._decorate_local_sidebar_sessions = fail_decorate
-    main._local_session_summaries_by_ids_for_sidebar = fail_lookup
+    main._local_session_summaries_by_ids = fail_lookup
     try:
         second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
     finally:
         main._decorate_local_sidebar_sessions = original
-        main._local_session_summaries_by_ids_for_sidebar = original_lookup
+        main._local_session_summaries_by_ids = original_lookup
     if second.status_code != 200:
         print(f"{FAIL} /api/sessions/summaries cached status {second.status_code}")
         return False
     ok = first.json() == second.json()
     print(f"{PASS if ok else FAIL} /api/sessions/summaries repeated request uses cache")
+    return ok
+
+
+def test_session_summaries_include_sidebar_hidden_open_tabs(client: TestClient) -> bool:
+    _reset_home()
+    _write(_record_with(
+        "hidden-open",
+        "2026-06-20T00:00:00+00:00",
+        name="hidden open",
+        last_opened_at="2026-06-20T00:00:01+00:00",
+        working_mode="prompt_engineering",
+        working_mode_meta={"parent_session_id": "parent"},
+    ))
+    session_store.wait_for_summary_index(1.0, min_published=1)
+
+    summaries = client.get("/api/sessions/summaries?ids=hidden-open", headers=HEADERS)
+    if summaries.status_code != 200:
+        print(f"{FAIL} /api/sessions/summaries hidden status {summaries.status_code}")
+        return False
+    returned_ids = [s.get("id") for s in summaries.json().get("sessions", [])]
+
+    listing = client.get("/api/sessions", headers=HEADERS)
+    if listing.status_code != 200:
+        print(f"{FAIL} /api/sessions hidden status {listing.status_code}")
+        return False
+    listed_ids = [s.get("id") for s in listing.json().get("sessions", [])]
+    ok = returned_ids == ["hidden-open"] and "hidden-open" not in listed_ids
+    print(f"{PASS if ok else FAIL} /api/sessions/summaries includes sidebar-hidden open tab")
     return ok
 
 
@@ -1120,6 +1148,7 @@ def main_run() -> int:
         ok = test_simple_search_skips_generic_filter_sort(client) and ok
         ok = test_repeated_session_search_uses_response_cache(client) and ok
         ok = test_repeated_session_summaries_uses_response_cache(client) and ok
+        ok = test_session_summaries_include_sidebar_hidden_open_tabs(client) and ok
         ok = test_repeated_content_session_search_uses_response_cache(client) and ok
         ok = test_search_paginates_without_full_sort(client) and ok
         ok = test_search_index_cache_invalidates_on_write() and ok

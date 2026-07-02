@@ -14,6 +14,7 @@ import { API } from "../api";
 const PROJECT_PATH_KEY = "better-agent-selected-project";
 const PROJECT_NODE_KEY = "better-agent-selected-project-node";
 const REMEMBERED_KEY = "better-agent-remembered-session-by-project";
+const OPEN_SESSION_IDS_KEY = "better-agent-open-session-ids";
 
 // Nested by project path, then node id. JSON object keys are opaque strings,
 // so paths/node ids are stored verbatim with no escaping.
@@ -22,7 +23,20 @@ export type SelectedProject = { path: string; node_id: string } | null;
 export type UiSelectionSnapshot = {
   selected_project: SelectedProject;
   remembered_session_by_project: ProjectMap;
+  open_session_tab_ids?: string[];
 };
+
+function normalizeSessionIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of value) {
+    if (typeof id !== "string" || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
 
 function readRememberedLS(): ProjectMap {
   try {
@@ -39,10 +53,19 @@ function readSelectedLS(): SelectedProject {
   return { path, node_id: localStorage.getItem(PROJECT_NODE_KEY) || "primary" };
 }
 
+function readOpenSessionIdsLS(): string[] {
+  try {
+    return normalizeSessionIds(JSON.parse(localStorage.getItem(OPEN_SESSION_IDS_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
 // In-memory cache seeded synchronously from localStorage for instant first
 // paint, then reconciled by the backend snapshot on mount + WS push.
 let remembered: ProjectMap = readRememberedLS();
 let selectedProject: SelectedProject = readSelectedLS();
+let openSessionTabIds: string[] = readOpenSessionIdsLS();
 
 function writeRememberedLS(): void {
   try {
@@ -56,6 +79,14 @@ function writeSelectedLS(): void {
   try {
     localStorage.setItem(PROJECT_PATH_KEY, selectedProject?.path ?? "");
     localStorage.setItem(PROJECT_NODE_KEY, selectedProject?.node_id ?? "primary");
+  } catch {
+    // best-effort
+  }
+}
+
+function writeOpenSessionIdsLS(): void {
+  try {
+    localStorage.setItem(OPEN_SESSION_IDS_KEY, JSON.stringify(openSessionTabIds));
   } catch {
     // best-effort
   }
@@ -110,6 +141,42 @@ export function setRememberedSessionId(
   patch({ remembered_session: { path, node_id: nodeId, session_id: sessionId } });
 }
 
+export function getOpenSessionTabIds(): string[] {
+  const cached = readOpenSessionIdsLS();
+  if (
+    cached.length !== openSessionTabIds.length ||
+    cached.some((id, index) => id !== openSessionTabIds[index])
+  ) {
+    openSessionTabIds = cached;
+  }
+  return [...openSessionTabIds];
+}
+
+export function setOpenSessionTabIds(sessionIds: string[]): void {
+  const next = normalizeSessionIds(sessionIds);
+  if (
+    next.length === openSessionTabIds.length &&
+    next.every((id, index) => id === openSessionTabIds[index])
+  ) {
+    return;
+  }
+  openSessionTabIds = next;
+  writeOpenSessionIdsLS();
+  patch({ open_session_tab_ids: next });
+}
+
+export function cacheOpenSessionTabIds(sessionIds: string[]): void {
+  const next = normalizeSessionIds(sessionIds);
+  if (
+    next.length === openSessionTabIds.length &&
+    next.every((id, index) => id === openSessionTabIds[index])
+  ) {
+    return;
+  }
+  openSessionTabIds = next;
+  writeOpenSessionIdsLS();
+}
+
 // Reconcile the cache from a backend snapshot (mount GET or WS push). Backend
 // is authoritative; the union keeps any local-only entry the backend has not
 // received yet (in-flight write). Does NOT mutate React state or navigate —
@@ -125,6 +192,7 @@ export function applyBackendSnapshot(
     typeof snap.remembered_session_by_project === "object"
       ? snap.remembered_session_by_project
       : {};
+  const backendOpenIds = normalizeSessionIds(snap.open_session_tab_ids);
 
   const merged: ProjectMap = {};
   const paths = new Set([
@@ -147,6 +215,20 @@ export function applyBackendSnapshot(
 
   remembered = merged;
   writeRememberedLS();
+
+  if (seedUp && openSessionTabIds.length > 0) {
+    const mergedOpenIds = normalizeSessionIds([...backendOpenIds, ...openSessionTabIds]);
+    openSessionTabIds = mergedOpenIds;
+    if (
+      mergedOpenIds.length !== backendOpenIds.length ||
+      mergedOpenIds.some((id, index) => id !== backendOpenIds[index])
+    ) {
+      patch({ open_session_tab_ids: mergedOpenIds });
+    }
+  } else {
+    openSessionTabIds = backendOpenIds;
+  }
+  writeOpenSessionIdsLS();
 
   if (snap.selected_project) {
     selectedProject = snap.selected_project;

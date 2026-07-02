@@ -14,7 +14,8 @@ Shape:
     "selected_project": {"path": str, "node_id": str} | None,
     "remembered_session_by_project": {
         <project_path>: { <node_id>: <session_id> }
-    }
+    },
+    "open_session_tab_ids": [<session_id>, ...]
   }
 
 `node_id` is the multi-machine filesystem node the project lives on
@@ -101,6 +102,22 @@ def _remembered_sessions_from(data: dict) -> dict:
     return out
 
 
+def _open_session_tab_ids_from(data: dict) -> list[str]:
+    raw = data.get("open_session_tab_ids")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for sid in raw:
+        if not isinstance(sid, str) or not sid:
+            continue
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
 def get_remembered_sessions() -> dict:
     return _remembered_sessions_from(_load())
 
@@ -124,10 +141,22 @@ def set_remembered_session(path: str, node_id: str, session_id: str) -> dict:
     return _snapshot(data)
 
 
+def set_open_session_tab_ids(session_ids: list[str]) -> dict:
+    if not isinstance(session_ids, list):
+        raise ValueError("open_session_tab_ids must be a list")
+    data = _load()
+    data["open_session_tab_ids"] = _open_session_tab_ids_from({
+        "open_session_tab_ids": session_ids,
+    })
+    _save(data)
+    return _snapshot(data)
+
+
 def _snapshot(data: dict) -> dict:
     return {
         "selected_project": _selected_project_from(data),
         "remembered_session_by_project": _remembered_sessions_from(data),
+        "open_session_tab_ids": _open_session_tab_ids_from(data),
     }
 
 
