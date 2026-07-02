@@ -12302,6 +12302,20 @@ pre .inline-tag-highlight {
   display: flex;
   flex-direction: column;
 }
+/* @monaco-editor/react wraps the editor in a <section> > <div> tree.
+ * These wrappers aren't a direct child of .file-viewer / .eng-file-editor
+ * (see the .file-viewer > section rule below), so give the Monaco
+ * <section> the same flex + explicit height here too — without it the
+ * editor's <section> has no intrinsic height and collapses to ~0. */
+.eng-file-editor-md-edit > section,
+.file-viewer-md-edit > section {
+  flex: 1;
+  min-height: 0;
+}
+.eng-file-editor-md-edit > section > div,
+.file-viewer-md-edit > section > div {
+  height: 100%;
+}
 .eng-file-editor-md-formatted {
   overflow: auto;
 }
